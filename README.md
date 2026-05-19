@@ -31,6 +31,7 @@ Backend environment variables:
 - `ADMIN_SEED_EMAIL` (default: `admin@example.com`)
 - `ADMIN_SEED_PASSWORD` (default: `ChangeMe123!`)
 - `ADMIN_SEED_FULL_NAME` (default: `System Admin`)
+- `CORS_ORIGINS` (default: `http://localhost:3000`; comma-separated list)
 
 Frontend environment variables:
 
@@ -161,6 +162,13 @@ Passwords must be 8-128 chars and include:
 - `POST /api/auth/login` → access + refresh tokens
 - `POST /api/auth/refresh` → rotated access + refresh tokens
 - `GET /api/auth/me` → current authenticated user
+
+### CORS (local frontend ↔ backend)
+
+- Backend uses FastAPI `CORSMiddleware`.
+- Default allowed origin is `http://localhost:3000` (configurable via `CORS_ORIGINS`).
+- Allowed methods: `GET, POST, PUT, PATCH, DELETE, OPTIONS`.
+- Allowed headers: `Authorization, Content-Type`.
 
 ### Protected vs public routes
 
