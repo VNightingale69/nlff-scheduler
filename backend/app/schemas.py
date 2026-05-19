@@ -157,3 +157,13 @@ class ValidationMessage(BaseModel):
 class GameValidationResponse(BaseModel):
     hard_conflicts: list[ValidationMessage]
     soft_warnings: list[ValidationMessage]
+
+
+from pydantic.generics import GenericModel
+from typing import Generic, TypeVar
+T=TypeVar('T')
+class PagedResponse(GenericModel, Generic[T]):
+    items: list[T]
+    total: int
+    page: int
+    page_size: int
