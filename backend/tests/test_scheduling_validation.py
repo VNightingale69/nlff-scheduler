@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import Base
 from app.models import Division, Field, Game, GameStatus, HostLocation, HostingAvailability, Organization, Season, Team, Week
-from app.routes.api import create_game
+from app.routes.api import create_game, list_public_games
 from app.schemas import GameCreate
 from app.services.scheduling_validation import validate_game
 
@@ -77,6 +77,28 @@ class SchedulingValidationTest(unittest.TestCase):
         payload = self.base_payload().model_copy(update={'game_status_id': draft.id})
         result = create_game(payload, db=self.db)
         self.assertEqual(result.game.status_code, 'draft')
+
+    def test_public_games_excludes_drafts(self):
+        published = GameStatus(id=uuid.uuid4(), code='published', label='Published', is_active=True)
+        draft = GameStatus(id=uuid.uuid4(), code='draft', label='Draft', is_active=True)
+        self.db.add_all([published, draft])
+        self.db.commit()
+
+        draft_game = Game(
+            id=uuid.uuid4(), season_id=self.season.id, week_id=self.week.id, home_team_id=self.home.id, away_team_id=self.away.id,
+            field_id=self.field.id, game_status_id=draft.id, game_date=date(2026, 5, 3), kickoff_time=time(11, 0)
+        )
+        published_game = Game(
+            id=uuid.uuid4(), season_id=self.season.id, week_id=self.week.id, home_team_id=self.home.id, away_team_id=self.away.id,
+            field_id=self.field.id, game_status_id=published.id, game_date=date(2026, 5, 4), kickoff_time=time(11, 0)
+        )
+        self.db.add_all([draft_game, published_game])
+        self.db.commit()
+
+        result = list_public_games(db=self.db)
+        self.assertEqual(result.total, 1)
+        self.assertEqual(result.items[0].id, published_game.id)
+        self.assertEqual(result.items[0].game_status_code, 'published')
 
 
 if __name__ == '__main__':

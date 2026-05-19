@@ -8,7 +8,7 @@ from app.models import Division, Field, Game, GameStatus, HostLocation, HostingA
 from app.schemas import (
     DivisionCreate, DivisionRead, FieldCreate, FieldRead, GameCreate, GameRead, GameSaveResponse,
     HostLocationCreate, HostLocationRead, HostingAvailabilityCreate, HostingAvailabilityRead,
-    OrganizationCreate, OrganizationRead, TeamCreate, TeamRead, PagedResponse
+    OrganizationCreate, OrganizationRead, PublicGameRead, TeamCreate, TeamRead, PagedResponse
 )
 from app.services.scheduling_validation import validate_game
 
@@ -127,6 +127,86 @@ def list_games(division_id:uuid.UUID|None=None, week_id:uuid.UUID|None=None, tea
     if status_code: q=q.filter(GameStatus.code==status_code)
     total=q.count(); items=q.order_by(Game.game_date, Game.kickoff_time).offset((page-1)*page_size).limit(page_size).all()
     return PagedResponse(items=[_to_game_read(x) for x in items], total=total, page=page, page_size=page_size)
+
+
+@router.get('/public/games', response_model=PagedResponse[PublicGameRead])
+def list_public_games(
+    host_location_id: uuid.UUID | None = None,
+    organization_id: uuid.UUID | None = None,
+    division_id: uuid.UUID | None = None,
+    week_id: uuid.UUID | None = None,
+    team_id: uuid.UUID | None = None,
+    status_code: str | None = None,
+    page: int = 1,
+    page_size: int = 50,
+    db: Session = Depends(get_db),
+):
+    q = db.query(Game).join(Game.status).join(Game.field).join(Field.host_location).join(HostLocation.organization).join(Game.home_team).join(Game.away_team)
+    q = q.filter(GameStatus.code == 'published')
+    if host_location_id:
+        q = q.filter(Field.host_location_id == host_location_id)
+    if organization_id:
+        q = q.filter(HostLocation.organization_id == organization_id)
+    if division_id:
+        q = q.filter(Team.division_id == division_id)
+    if week_id:
+        q = q.filter(Game.week_id == week_id)
+    if team_id:
+        q = q.filter((Game.home_team_id == team_id) | (Game.away_team_id == team_id))
+    if status_code:
+        q = q.filter(GameStatus.code == status_code)
+
+    total = q.count()
+    items = q.order_by(Game.game_date, Game.kickoff_time).offset((page - 1) * page_size).limit(page_size).all()
+    return PagedResponse(
+        items=[
+            PublicGameRead(
+                id=g.id,
+                game_date=g.game_date,
+                kickoff_time=g.kickoff_time,
+                host_location_id=g.field.host_location.id,
+                host_location_name=g.field.host_location.name,
+                field_id=g.field.id,
+                field_name=g.field.name,
+                organization_id=g.field.host_location.organization.id,
+                organization_name=g.field.host_location.organization.name,
+                division_id=g.home_team.division_id,
+                division_name=g.home_team.division.name,
+                week_id=g.week_id,
+                week_number=g.week.week_number,
+                home_team_id=g.home_team_id,
+                home_team_name=g.home_team.name,
+                away_team_id=g.away_team_id,
+                away_team_name=g.away_team.name,
+                game_status_id=g.game_status_id,
+                game_status_code=g.status.code,
+                game_status_label=g.status.label,
+            )
+            for g in items
+        ],
+        total=total,
+        page=page,
+        page_size=page_size,
+    )
+
+
+@router.get('/public/schedule-filters')
+def list_public_schedule_filters(db: Session = Depends(get_db)):
+    games = db.query(Game).join(Game.status).join(Game.field).join(Field.host_location).join(HostLocation.organization).join(Game.home_team).filter(GameStatus.code == 'published').all()
+    host_locations = {(g.field.host_location.id, g.field.host_location.name) for g in games}
+    organizations = {(g.field.host_location.organization.id, g.field.host_location.organization.name) for g in games}
+    divisions = {(g.home_team.division.id, g.home_team.division.name) for g in games}
+    weeks = {(g.week.id, g.week.week_number) for g in games}
+    teams = {(g.home_team.id, g.home_team.name) for g in games} | {(g.away_team.id, g.away_team.name) for g in games}
+    statuses = {(g.status.code, g.status.label) for g in games}
+    return {
+        'host_locations': [{'id': item[0], 'name': item[1]} for item in sorted(host_locations, key=lambda x: x[1])],
+        'organizations': [{'id': item[0], 'name': item[1]} for item in sorted(organizations, key=lambda x: x[1])],
+        'divisions': [{'id': item[0], 'name': item[1]} for item in sorted(divisions, key=lambda x: x[1])],
+        'weeks': [{'id': item[0], 'week_number': item[1]} for item in sorted(weeks, key=lambda x: x[1])],
+        'teams': [{'id': item[0], 'name': item[1]} for item in sorted(teams, key=lambda x: x[1])],
+        'statuses': [{'code': item[0], 'label': item[1]} for item in sorted(statuses, key=lambda x: x[1])],
+    }
 
 @router.post('/games', response_model=GameSaveResponse, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def create_game(payload:GameCreate, db:Session=Depends(get_db)):
