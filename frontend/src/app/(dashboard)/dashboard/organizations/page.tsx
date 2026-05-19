@@ -1,2 +1,7 @@
 import CrudPage from '@/components/CrudPage';
-export default function Page(){return <CrudPage title='organizations' path='/organizations' fields={['name']} />}
+import { ENTITIES } from '@/config/entities';
+
+export default function Page(){
+  const config = ENTITIES['organizations'];
+  return <CrudPage title={config.title} path={config.path} fields={config.fields} />;
+}
