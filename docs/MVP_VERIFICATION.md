@@ -57,7 +57,7 @@ Seeding is currently automatic and split across startup + migrations:
 
 ### Default admin login (if env defaults are used)
 
-- Email: `admin@nlff.local`
+- Email: `admin@example.com`
 - Password: `ChangeMe123!`
 - Login page: http://localhost:3000/login
 
