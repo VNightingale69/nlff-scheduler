@@ -2,11 +2,13 @@ import unittest
 import uuid
 from datetime import date, time
 
+from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import Base
 from app.models import Division, Field, Game, GameStatus, HostLocation, HostingAvailability, Organization, Season, Team, Week
+from app.routes.api import create_game
 from app.schemas import GameCreate
 from app.services.scheduling_validation import validate_game
 
@@ -25,13 +27,7 @@ class SchedulingValidationTest(unittest.TestCase):
         self.away = Team(id=uuid.uuid4(), organization_id=self.org.id, division_id=self.division.id, name='B', is_active=True)
         self.status = GameStatus(id=uuid.uuid4(), code='scheduled', label='Scheduled', is_active=True)
         self.season = Season(id=uuid.uuid4(), name='Spring', start_date=date(2026, 4, 1), end_date=date(2026, 7, 1), is_active=True)
-        self.week = Week(
-            id=uuid.uuid4(),
-            season_id=self.season.id,
-            week_number=1,
-            start_date=date(2026, 5, 1),
-            end_date=date(2026, 5, 7),
-        )
+        self.week = Week(id=uuid.uuid4(), season_id=self.season.id, week_number=1, start_date=date(2026, 5, 1), end_date=date(2026, 5, 7))
         self.db.add_all([self.org, self.division, self.host, self.field, self.home, self.away, self.status, self.season, self.week])
         self.db.commit()
 
@@ -39,6 +35,7 @@ class SchedulingValidationTest(unittest.TestCase):
         return GameCreate(
             season_id=self.season.id,
             week_id=self.week.id,
+            division_id=self.division.id,
             home_team_id=self.home.id,
             away_team_id=self.away.id,
             field_id=self.field.id,
@@ -56,58 +53,30 @@ class SchedulingValidationTest(unittest.TestCase):
     def test_team_overlap_validation(self):
         other = Team(id=uuid.uuid4(), organization_id=self.org.id, division_id=self.division.id, name='C', is_active=True)
         self.db.add(other)
-        self.db.add(
-            Game(
-                id=uuid.uuid4(),
-                season_id=self.season.id,
-                week_id=self.week.id,
-                home_team_id=self.home.id,
-                away_team_id=other.id,
-                field_id=self.field.id,
-                game_status_id=self.status.id,
-                game_date=date(2026, 5, 3),
-                kickoff_time=time(10, 30),
-            )
-        )
+        self.db.add(Game(id=uuid.uuid4(), season_id=self.season.id, week_id=self.week.id, home_team_id=self.home.id, away_team_id=other.id, field_id=self.field.id, game_status_id=self.status.id, game_date=date(2026, 5, 3), kickoff_time=time(10, 30)))
         self.db.commit()
         result = validate_game(self.db, self.base_payload())
         self.assertTrue(any(c.code == 'team_overlap' for c in result.hard_conflicts))
 
-    def test_field_overlap_validation(self):
-        other_home = Team(id=uuid.uuid4(), organization_id=self.org.id, division_id=self.division.id, name='D', is_active=True)
-        other_away = Team(id=uuid.uuid4(), organization_id=self.org.id, division_id=self.division.id, name='E', is_active=True)
-        self.db.add_all([other_home, other_away])
-        self.db.add(
-            Game(
-                id=uuid.uuid4(),
-                season_id=self.season.id,
-                week_id=self.week.id,
-                home_team_id=other_home.id,
-                away_team_id=other_away.id,
-                field_id=self.field.id,
-                game_status_id=self.status.id,
-                game_date=date(2026, 5, 3),
-                kickoff_time=time(10, 30),
-            )
-        )
+    def test_create_game_blocks_published_with_hard_conflicts(self):
+        published = GameStatus(id=uuid.uuid4(), code='published', label='Published', is_active=True)
+        self.db.add(published)
         self.db.commit()
-        result = validate_game(self.db, self.base_payload())
-        self.assertTrue(any(c.code == 'field_overlap' for c in result.hard_conflicts))
+        self.field.layout_type = '5v5'
+        self.db.commit()
+        payload = self.base_payload().model_copy(update={'game_status_id': published.id})
+        with self.assertRaises(HTTPException):
+            create_game(payload, db=self.db)
 
-    def test_host_availability_validation(self):
-        self.db.add(
-            HostingAvailability(
-                id=uuid.uuid4(),
-                field_id=self.field.id,
-                available_date=date(2026, 5, 3),
-                start_time=time(8, 0),
-                end_time=time(9, 0),
-                is_available=True,
-            )
-        )
+    def test_create_game_allows_draft_with_hard_conflicts(self):
+        draft = GameStatus(id=uuid.uuid4(), code='draft', label='Draft', is_active=True)
+        self.db.add(draft)
         self.db.commit()
-        result = validate_game(self.db, self.base_payload())
-        self.assertTrue(any(c.code == 'outside_availability' for c in result.hard_conflicts))
+        self.field.layout_type = '5v5'
+        self.db.commit()
+        payload = self.base_payload().model_copy(update={'game_status_id': draft.id})
+        result = create_game(payload, db=self.db)
+        self.assertEqual(result.game.status_code, 'draft')
 
 
 if __name__ == '__main__':

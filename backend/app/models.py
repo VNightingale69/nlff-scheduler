@@ -138,3 +138,5 @@ class Game(Base, TimestampMixin):
     week = relationship('Week')
     field = relationship('Field')
     status = relationship('GameStatus')
+    home_team = relationship('Team', foreign_keys=[home_team_id])
+    away_team = relationship('Team', foreign_keys=[away_team_id])
