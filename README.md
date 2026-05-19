@@ -28,7 +28,7 @@ Backend environment variables:
 - `JWT_SECRET_KEY` (default: `change-me-in-production`)
 - `ACCESS_TOKEN_EXPIRE_MINUTES` (default: `30`)
 - `REFRESH_TOKEN_EXPIRE_MINUTES` (default: `10080`)
-- `ADMIN_SEED_EMAIL` (default: `admin@nlff.local`)
+- `ADMIN_SEED_EMAIL` (default: `admin@example.com`)
 - `ADMIN_SEED_PASSWORD` (default: `ChangeMe123!`)
 - `ADMIN_SEED_FULL_NAME` (default: `System Admin`)
 
@@ -89,7 +89,7 @@ No separate seed CLI exists today; run migrations first, then start backend so s
 
 If defaults are unchanged:
 
-- Email: `admin@nlff.local`
+- Email: `admin@example.com`
 - Password: `ChangeMe123!`
 
 Login page: http://localhost:3000/login
