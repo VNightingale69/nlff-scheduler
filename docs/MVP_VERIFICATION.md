@@ -115,10 +115,10 @@ Use this section as a test script. Record pass/fail for each step.
 
 ## 4. Create field
 
-- [ ] Go to **Dashboard → Fields**.
-- [ ] Create field tied to the host location from step 3.
-- [ ] Use a layout type compatible with your test division (e.g., `standard`).
-- [ ] Confirm field appears in the table.
+Use a layout type compatible with your test division:
+- Small for Coed K-1, Coed 2-3, Girls K-2, Girls 3-5
+- Large for Coed 4-5, Coed 6-7, Coed 8, Girls 6-8
+- Both if the field can support either layout
 
 ## 5. Create team
 
