@@ -168,6 +168,29 @@ class GameValidationResponse(BaseModel):
     soft_warnings: list[ValidationMessage]
 
 
+class PublicGameRead(BaseModel):
+    id: uuid.UUID
+    game_date: date
+    kickoff_time: time
+    host_location_id: uuid.UUID
+    host_location_name: str
+    field_id: uuid.UUID
+    field_name: str
+    organization_id: uuid.UUID
+    organization_name: str
+    division_id: uuid.UUID
+    division_name: str
+    week_id: uuid.UUID
+    week_number: int
+    home_team_id: uuid.UUID
+    home_team_name: str
+    away_team_id: uuid.UUID
+    away_team_name: str
+    game_status_id: uuid.UUID
+    game_status_code: str
+    game_status_label: str
+
+
 from pydantic.generics import GenericModel
 from typing import Generic, TypeVar
 T=TypeVar('T')
