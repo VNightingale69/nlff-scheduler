@@ -1,7 +1,7 @@
 import uuid
 from datetime import date, datetime, time
 
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr
 
 
 class BaseSchema(BaseModel):
@@ -11,16 +11,6 @@ class BaseSchema(BaseModel):
 
     class Config:
         from_attributes = True
-
-
-class UserCreate(BaseModel):
-    email: str
-    full_name: str
-    is_active: bool = True
-
-
-class UserRead(BaseSchema, UserCreate):
-    pass
 
 
 class RoleCreate(BaseModel):
@@ -33,14 +23,44 @@ class RoleRead(BaseSchema, RoleCreate):
     pass
 
 
+class UserCreate(BaseModel):
+    email: EmailStr
+    full_name: str
+    password: str
+    role_name: str
+    organization_id: uuid.UUID | None = None
+    is_active: bool = True
+
+
+class UserRead(BaseSchema):
+    email: EmailStr
+    full_name: str
+    role_name: str
+    organization_id: uuid.UUID | None
+    is_active: bool
+
+
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    refresh_token: str
+    token_type: str = 'bearer'
+
+
 class OrganizationCreate(BaseModel):
     name: str
     is_active: bool = True
 
-
 class OrganizationRead(BaseSchema, OrganizationCreate):
     pass
-
 
 class DivisionCreate(BaseModel):
     name: str
@@ -49,10 +69,8 @@ class DivisionCreate(BaseModel):
     max_age: int | None = None
     is_active: bool = True
 
-
 class DivisionRead(BaseSchema, DivisionCreate):
     pass
-
 
 class HostLocationCreate(BaseModel):
     organization_id: uuid.UUID
@@ -60,10 +78,8 @@ class HostLocationCreate(BaseModel):
     address: str | None = None
     is_active: bool = True
 
-
 class HostLocationRead(BaseSchema, HostLocationCreate):
     pass
-
 
 class FieldCreate(BaseModel):
     host_location_id: uuid.UUID
@@ -71,10 +87,8 @@ class FieldCreate(BaseModel):
     layout_type: str
     is_active: bool = True
 
-
 class FieldRead(BaseSchema, FieldCreate):
     pass
-
 
 class TeamCreate(BaseModel):
     organization_id: uuid.UUID
@@ -82,10 +96,8 @@ class TeamCreate(BaseModel):
     name: str
     is_active: bool = True
 
-
 class TeamRead(BaseSchema, TeamCreate):
     pass
-
 
 class SeasonCreate(BaseModel):
     name: str
@@ -93,10 +105,8 @@ class SeasonCreate(BaseModel):
     end_date: date
     is_active: bool = True
 
-
 class SeasonRead(BaseSchema, SeasonCreate):
     pass
-
 
 class WeekCreate(BaseModel):
     season_id: uuid.UUID
@@ -104,10 +114,8 @@ class WeekCreate(BaseModel):
     start_date: date
     end_date: date
 
-
 class WeekRead(BaseSchema, WeekCreate):
     pass
-
 
 class HostingAvailabilityCreate(BaseModel):
     field_id: uuid.UUID
@@ -116,20 +124,16 @@ class HostingAvailabilityCreate(BaseModel):
     end_time: time
     is_available: bool = True
 
-
 class HostingAvailabilityRead(BaseSchema, HostingAvailabilityCreate):
     pass
-
 
 class GameStatusCreate(BaseModel):
     code: str
     label: str
     is_active: bool = True
 
-
 class GameStatusRead(BaseSchema, GameStatusCreate):
     pass
-
 
 class GameCreate(BaseModel):
     season_id: uuid.UUID
@@ -140,7 +144,6 @@ class GameCreate(BaseModel):
     game_status_id: uuid.UUID
     game_date: date
     kickoff_time: time
-
 
 class GameRead(BaseSchema, GameCreate):
     pass
