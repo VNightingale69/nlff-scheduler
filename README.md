@@ -1,6 +1,6 @@
 # Northern Lakes Flag Football Scheduler
 
-Initial project foundation for the Northern Lakes Flag Football scheduling system.
+Northern Lakes Flag Football (NLFF) scheduling MVP with a FastAPI backend, Next.js frontend, and PostgreSQL database.
 
 ## Tech Stack
 
@@ -13,11 +13,36 @@ Initial project foundation for the Northern Lakes Flag Football scheduling syste
 
 ## Project Structure
 
-- `frontend/` - Next.js + TypeScript + Tailwind base app
-- `backend/` - FastAPI base app with SQLAlchemy and Alembic setup
+- `frontend/` - Next.js admin and public schedule UI
+- `backend/` - FastAPI API, auth, migrations, and tests
+- `docs/MVP_VERIFICATION.md` - MVP verification checklist + tester runbook
 - `docker-compose.yml` - local multi-service environment
 
-## Quick Start
+## Local Development Runbook (MVP)
+
+### 1) Required environment variables
+
+Backend environment variables:
+
+- `DATABASE_URL` (default: `postgresql+psycopg://nlff:nlff_password@db:5432/nlff`)
+- `JWT_SECRET_KEY` (default: `change-me-in-production`)
+- `ACCESS_TOKEN_EXPIRE_MINUTES` (default: `30`)
+- `REFRESH_TOKEN_EXPIRE_MINUTES` (default: `10080`)
+- `ADMIN_SEED_EMAIL` (default: `admin@nlff.local`)
+- `ADMIN_SEED_PASSWORD` (default: `ChangeMe123!`)
+- `ADMIN_SEED_FULL_NAME` (default: `System Admin`)
+
+Frontend environment variables:
+
+- `NEXT_PUBLIC_API_URL` (default in code: `http://localhost:8000/api`)
+
+> In Docker Compose, only `DATABASE_URL` is currently set explicitly. The remaining values use backend defaults unless you override them.
+
+---
+
+### 2) Start database, backend, and frontend (Docker)
+
+From repo root:
 
 ```bash
 docker compose up --build
@@ -26,54 +51,127 @@ docker compose up --build
 Services:
 
 - Frontend: http://localhost:3000
-- Backend: http://localhost:8000
-- Backend health endpoint: http://localhost:8000/health
+- Backend API: http://localhost:8000/api
+- Backend health: http://localhost:8000/health
+- Public schedule page: http://localhost:3000/schedule
 
-## Notes
+---
 
-This repository currently contains only the foundation setup. It intentionally does **not** include:
+### 3) Run migrations
 
-- scheduling logic
-- playoff logic
-- automated schedule generation
+If services are already up:
+
+```bash
+docker compose exec backend alembic upgrade head
+```
+
+Or as a one-off:
+
+```bash
+docker compose run --rm backend alembic upgrade head
+```
+
+---
+
+### 4) Seed data
+
+Current seed behavior:
+
+- On backend startup, roles are seeded (`league_admin`, `community_scheduler`).
+- On backend startup, an admin user is created from `ADMIN_SEED_*` values (if not already present).
+- Initial divisions are inserted by the initial Alembic migration.
+
+No separate seed CLI exists today; seeding happens via migrations + backend startup.
+
+---
+
+### 5) Default admin login credentials
+
+If defaults are unchanged:
+
+- Email: `admin@nlff.local`
+- Password: `ChangeMe123!`
+
+Login page: http://localhost:3000/login
+
+---
+
+### 6) Run backend tests
+
+From repo root:
+
+```bash
+docker compose exec backend python -m unittest backend/tests/test_scheduling_validation.py
+```
+
+This test suite validates conflict rules and confirms public schedule only includes published games.
+
+---
+
+### 7) Run frontend checks
+
+From repo root:
+
+```bash
+docker compose exec frontend npm run lint
+```
+
+---
+
+### 8) Manual MVP verification
+
+Use the full step-by-step checklist in:
+
+- [`docs/MVP_VERIFICATION.md`](docs/MVP_VERIFICATION.md)
+
+That guide covers:
+
+- Admin login
+- Create organization
+- Create host location
+- Create field
+- Create team
+- Create hosting availability
+- Create draft game
+- Publish game
+- Confirm public schedule shows published game
+- Confirm public schedule does not show draft game
+- Confirm conflict validation blocks invalid games
 
 ## Authentication & Authorization
 
-Backend API now supports JWT-based auth with role-based access control.
+Backend API supports JWT auth with role-based access control.
 
 ### Roles
+
 - `league_admin`: Full access across all organizations.
-- `community_scheduler`: Access restricted to their assigned organization.
+- `community_scheduler`: Access restricted to assigned organization scope.
 
-### Environment Variables
-Set these for secure deployments:
-- `JWT_SECRET_KEY`
-- `ACCESS_TOKEN_EXPIRE_MINUTES` (default: `30`)
-- `REFRESH_TOKEN_EXPIRE_MINUTES` (default: `10080`)
-- `ADMIN_SEED_EMAIL`
-- `ADMIN_SEED_PASSWORD`
-- `ADMIN_SEED_FULL_NAME`
+### Password rules
 
-### Password Rules
 Passwords must be 8-128 chars and include:
+
 - uppercase letter
 - lowercase letter
 - number
 - special character
 
-### Auth Endpoints
-- `POST /api/auth/login` → returns access + refresh token
-- `POST /api/auth/refresh` → returns rotated access + refresh token
+### Auth endpoints
 
-### Protected Routes
-Most `/api/*` routes require a valid bearer access token. Public schedule endpoints are intentionally unauthenticated: `/api/public/games` and `/api/public/schedule-filters`.
-User creation is admin-only (`POST /api/users`).
+- `POST /api/auth/login` → access + refresh tokens
+- `POST /api/auth/refresh` → rotated access + refresh tokens
+- `GET /api/auth/me` → current authenticated user
 
-### Organization Scope
-- League Admin users can access all organizations and all organization-scoped entities.
-- Community Scheduler users are restricted to records tied to their own `organization_id`.
+### Protected vs public routes
 
-### Seeding
-On backend startup:
-- roles are seeded (`league_admin`, `community_scheduler`)
-- admin user is seeded using `ADMIN_SEED_*` env vars
+- Most `/api/*` endpoints require bearer access token.
+- Public schedule endpoints are intentionally unauthenticated:
+  - `/api/public/games`
+  - `/api/public/schedule-filters`
+
+## Current MVP Limitations
+
+- Game management UI is raw-ID driven for related entities (UUID selection/entry), so setup order matters.
+- Conflict validation is enforced for publishing games; draft games can still be saved with hard conflicts for planning.
+- No automated schedule generation or playoff logic in this MVP.
+- No dedicated seed script for full demo dataset; testers create most records manually.
