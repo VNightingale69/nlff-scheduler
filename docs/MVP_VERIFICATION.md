@@ -34,6 +34,7 @@ Backend:
 - `ADMIN_SEED_EMAIL`
 - `ADMIN_SEED_PASSWORD`
 - `ADMIN_SEED_FULL_NAME`
+- `CORS_ORIGINS` (defaults to `http://localhost:3000`)
 
 Frontend:
 
@@ -100,6 +101,30 @@ Use this section as a test script. Record pass/fail for each step.
 - [ ] Navigate to `http://localhost:3000/login`.
 - [ ] Sign in with admin credentials.
 - [ ] Confirm dashboard loads and organization management is available.
+
+### 1a. CORS preflight + login API checks
+
+- [ ] Verify preflight succeeds:
+
+```bash
+curl -i -X OPTIONS http://localhost:8000/api/auth/login \
+  -H "Origin: http://localhost:3000" \
+  -H "Access-Control-Request-Method: POST" \
+  -H "Access-Control-Request-Headers: Authorization, Content-Type"
+```
+
+- [ ] Confirm response includes:
+  - `access-control-allow-origin: http://localhost:3000`
+  - `access-control-allow-methods` including `POST`
+  - `access-control-allow-headers` including `Authorization` and `Content-Type`
+
+- [ ] Verify direct login endpoint still responds:
+
+```bash
+curl -i -X POST http://localhost:8000/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"admin@example.com","password":"ChangeMe123!"}'
+```
 
 ## 2. Create organization
 

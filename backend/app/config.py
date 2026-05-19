@@ -7,3 +7,4 @@ JWT_ALGORITHM = 'HS256'
 ADMIN_SEED_EMAIL = os.getenv('ADMIN_SEED_EMAIL', 'admin@example.com')
 ADMIN_SEED_PASSWORD = os.getenv('ADMIN_SEED_PASSWORD', 'ChangeMe123!')
 ADMIN_SEED_FULL_NAME = os.getenv('ADMIN_SEED_FULL_NAME', 'System Admin')
+CORS_ORIGINS = [origin.strip() for origin in os.getenv('CORS_ORIGINS', 'http://localhost:3000').split(',') if origin.strip()]
