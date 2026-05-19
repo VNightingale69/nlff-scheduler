@@ -36,3 +36,44 @@ This repository currently contains only the foundation setup. It intentionally d
 - scheduling logic
 - playoff logic
 - automated schedule generation
+
+## Authentication & Authorization
+
+Backend API now supports JWT-based auth with role-based access control.
+
+### Roles
+- `league_admin`: Full access across all organizations.
+- `community_scheduler`: Access restricted to their assigned organization.
+
+### Environment Variables
+Set these for secure deployments:
+- `JWT_SECRET_KEY`
+- `ACCESS_TOKEN_EXPIRE_MINUTES` (default: `30`)
+- `REFRESH_TOKEN_EXPIRE_MINUTES` (default: `10080`)
+- `ADMIN_SEED_EMAIL`
+- `ADMIN_SEED_PASSWORD`
+- `ADMIN_SEED_FULL_NAME`
+
+### Password Rules
+Passwords must be 8-128 chars and include:
+- uppercase letter
+- lowercase letter
+- number
+- special character
+
+### Auth Endpoints
+- `POST /api/auth/login` → returns access + refresh token
+- `POST /api/auth/refresh` → returns rotated access + refresh token
+
+### Protected Routes
+All `/api/*` routes (except health check) require a valid bearer access token.
+User creation is admin-only.
+
+### Organization Scope
+- League Admin users can access all organizations and all organization-scoped entities.
+- Community Scheduler users are restricted to records tied to their own `organization_id`.
+
+### Seeding
+On backend startup:
+- roles are seeded (`league_admin`, `community_scheduler`)
+- admin user is seeded using `ADMIN_SEED_*` env vars
