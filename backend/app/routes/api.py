@@ -13,8 +13,9 @@ from app.auth import (
 )
 from app.database import get_db
 from app.models import Division, Field, Game, GameStatus, HostLocation, HostingAvailability, Organization, Role, Season, Team, User, Week
-from app.schemas import (DivisionCreate, DivisionRead, FieldCreate, FieldRead, GameCreate, GameRead, GameStatusCreate, GameStatusRead, HostLocationCreate, HostLocationRead, HostingAvailabilityCreate, HostingAvailabilityRead, LoginRequest, OrganizationCreate, OrganizationRead, RefreshRequest, RoleCreate, RoleRead, SeasonCreate, SeasonRead, TeamCreate, TeamRead, TokenResponse, UserCreate, UserRead, WeekCreate, WeekRead)
+from app.schemas import (DivisionCreate, DivisionRead, FieldCreate, FieldRead, GameCreate, GameRead, GameStatusCreate, GameStatusRead, GameValidationResponse, HostLocationCreate, HostLocationRead, HostingAvailabilityCreate, HostingAvailabilityRead, LoginRequest, OrganizationCreate, OrganizationRead, RefreshRequest, RoleCreate, RoleRead, SeasonCreate, SeasonRead, TeamCreate, TeamRead, TokenResponse, UserCreate, UserRead, WeekCreate, WeekRead)
 from app.security import create_access_token, create_refresh_token, decode_token, hash_password, validate_password_strength, verify_password
+from app.services.scheduling_validation import validate_game
 
 router = APIRouter(prefix='/api')
 
@@ -151,6 +152,28 @@ def create_game_status(payload: GameStatusCreate, db: Session = Depends(get_db))
 @router.get('/game-statuses', response_model=list[GameStatusRead], dependencies=[Depends(get_current_user)])
 def list_game_statuses(db: Session = Depends(get_db)): return db.query(GameStatus).all()
 @router.post('/games', response_model=GameRead, dependencies=[Depends(get_current_user)])
-def create_game(payload: GameCreate, db: Session = Depends(get_db)): return _create(db, Game, payload)
+def create_game(payload: GameCreate, db: Session = Depends(get_db)):
+    result = validate_game(db, payload)
+    if result.hard_conflicts:
+        raise HTTPException(status_code=422, detail=result.model_dump())
+    return _create(db, Game, payload)
+
+@router.post('/games/validate', response_model=GameValidationResponse, dependencies=[Depends(get_current_user)])
+def validate_proposed_game(payload: GameCreate, db: Session = Depends(get_db)):
+    return validate_game(db, payload)
+
+@router.put('/games/{game_id}', response_model=GameRead, dependencies=[Depends(get_current_user)])
+def update_game(game_id: uuid.UUID, payload: GameCreate, db: Session = Depends(get_db)):
+    game = db.query(Game).filter(Game.id == game_id).first()
+    if not game:
+        raise HTTPException(status_code=404, detail='Game not found')
+    result = validate_game(db, payload, game_id=game_id)
+    if result.hard_conflicts:
+        raise HTTPException(status_code=422, detail=result.model_dump())
+    for key, value in payload.model_dump().items():
+        setattr(game, key, value)
+    db.commit()
+    db.refresh(game)
+    return game
 @router.get('/games', response_model=list[GameRead], dependencies=[Depends(get_current_user)])
 def list_games(db: Session = Depends(get_db)): return db.query(Game).all()
