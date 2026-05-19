@@ -11,7 +11,9 @@ if config.config_file_name is not None:
 
 config.set_main_option('sqlalchemy.url', os.getenv('DATABASE_URL', config.get_main_option('sqlalchemy.url')))
 
-target_metadata = None
+from app.models import Base
+
+target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:
