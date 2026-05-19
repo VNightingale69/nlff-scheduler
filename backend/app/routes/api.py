@@ -1,7 +1,7 @@
 import uuid
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 from app.auth import ROLE_COMMUNITY_SCHEDULER, ROLE_LEAGUE_ADMIN, enforce_organization_scope, get_current_user, require_roles
 from app.database import get_db
 from app.models import Division, Field, Game, GameStatus, HostLocation, HostingAvailability, Organization, Season, Team, User, Week
@@ -141,14 +141,24 @@ def list_public_games(
     page_size: int = 50,
     db: Session = Depends(get_db),
 ):
-    q = db.query(Game).join(Game.status).join(Game.field).join(Field.host_location).join(HostLocation.organization).join(Game.home_team).join(Game.away_team)
+    home_team = aliased(Team)
+    away_team = aliased(Team)
+    q = (
+        db.query(Game)
+        .join(Game.status)
+        .join(Game.field)
+        .join(Field.host_location)
+        .join(HostLocation.organization)
+        .join(home_team, Game.home_team)
+        .join(away_team, Game.away_team)
+    )
     q = q.filter(GameStatus.code == 'published')
     if host_location_id:
         q = q.filter(Field.host_location_id == host_location_id)
     if organization_id:
         q = q.filter(HostLocation.organization_id == organization_id)
     if division_id:
-        q = q.filter(Team.division_id == division_id)
+        q = q.filter(home_team.division_id == division_id)
     if week_id:
         q = q.filter(Game.week_id == week_id)
     if team_id:
