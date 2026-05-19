@@ -44,7 +44,7 @@ Frontend:
 ### Migrations
 
 ```bash
-docker compose exec backend alembic upgrade head
+docker compose run --rm backend alembic upgrade head
 ```
 
 ### Seeding
@@ -52,8 +52,8 @@ docker compose exec backend alembic upgrade head
 Seeding is currently automatic and split across startup + migrations:
 
 - Migration seeds baseline divisions.
-- Migration/startup ensure role records exist.
-- Backend startup seeds admin user from `ADMIN_SEED_*` values.
+- Backend startup seeds roles/admin only after required tables exist.
+- Backend startup seeds admin user from `ADMIN_SEED_*` values when missing.
 
 ### Default admin login (if env defaults are used)
 

@@ -1,5 +1,6 @@
 from fastapi import Depends, FastAPI
-from sqlalchemy import text
+from sqlalchemy import inspect, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.auth import ROLE_COMMUNITY_SCHEDULER, ROLE_LEAGUE_ADMIN
@@ -12,34 +13,46 @@ from app.security import hash_password, validate_password_strength
 app = FastAPI(title='Northern Lakes Flag Football Scheduler API')
 
 
-@app.on_event('startup')
-def seed_auth_data():
-    db = next(get_db())
-    for role_name, description in [
-        (ROLE_LEAGUE_ADMIN, 'Global administrative access across all organizations'),
-        (ROLE_COMMUNITY_SCHEDULER, 'Organization-scoped scheduling access'),
-    ]:
-        role = db.query(Role).filter(Role.name == role_name).first()
-        if not role:
-            db.add(Role(name=role_name, description=description, is_active=True))
-    db.commit()
+def _auth_tables_ready(db: Session) -> bool:
+    inspector = inspect(db.bind)
+    return inspector.has_table('roles') and inspector.has_table('users')
 
-    admin_role = db.query(Role).filter(Role.name == ROLE_LEAGUE_ADMIN).first()
-    existing_admin = db.query(User).filter(User.email == ADMIN_SEED_EMAIL).first()
-    if not existing_admin:
-        validate_password_strength(ADMIN_SEED_PASSWORD)
-        db.add(
-            User(
-                email=ADMIN_SEED_EMAIL,
-                full_name=ADMIN_SEED_FULL_NAME,
-                password_hash=hash_password(ADMIN_SEED_PASSWORD),
-                role_id=admin_role.id,
-                organization_id=None,
-                is_active=True,
-            )
-        )
+
+@app.on_event('startup')
+def seed_auth_data() -> None:
+    db = next(get_db())
+    try:
+        if not _auth_tables_ready(db):
+            return
+
+        for role_name, description in [
+            (ROLE_LEAGUE_ADMIN, 'Global administrative access across all organizations'),
+            (ROLE_COMMUNITY_SCHEDULER, 'Organization-scoped scheduling access'),
+        ]:
+            role = db.query(Role).filter(Role.name == role_name).first()
+            if not role:
+                db.add(Role(name=role_name, description=description, is_active=True))
         db.commit()
-    db.close()
+
+        admin_role = db.query(Role).filter(Role.name == ROLE_LEAGUE_ADMIN).first()
+        existing_admin = db.query(User).filter(User.email == ADMIN_SEED_EMAIL).first()
+        if not existing_admin and admin_role:
+            validate_password_strength(ADMIN_SEED_PASSWORD)
+            db.add(
+                User(
+                    email=ADMIN_SEED_EMAIL,
+                    full_name=ADMIN_SEED_FULL_NAME,
+                    password_hash=hash_password(ADMIN_SEED_PASSWORD),
+                    role_id=admin_role.id,
+                    organization_id=None,
+                    is_active=True,
+                )
+            )
+            db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+    finally:
+        db.close()
 
 
 @app.get('/health')

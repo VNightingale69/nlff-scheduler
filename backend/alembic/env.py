@@ -1,10 +1,18 @@
 from logging.config import fileConfig
 import os
+import sys
+from pathlib import Path
 
 from sqlalchemy import engine_from_config, pool
 from alembic import context
 
+
 config = context.config
+
+# Ensure backend project root is importable inside containers and CI jobs.
+project_root = Path(__file__).resolve().parents[1]
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
