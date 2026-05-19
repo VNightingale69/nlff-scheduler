@@ -100,7 +100,8 @@ Use this section as a test script. Record pass/fail for each step.
 
 - [ ] Navigate to `http://localhost:3000/login`.
 - [ ] Sign in with admin credentials.
-- [ ] Confirm dashboard loads and organization management is available.
+- [ ] Confirm dashboard loads.
+- [ ] Confirm sidebar navigation includes **Organizations** and the link opens `Dashboard → Organizations`.
 
 ### 1a. CORS preflight + login API checks
 
