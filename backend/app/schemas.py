@@ -147,3 +147,13 @@ class GameCreate(BaseModel):
 
 class GameRead(BaseSchema, GameCreate):
     pass
+
+
+class ValidationMessage(BaseModel):
+    code: str
+    message: str
+
+
+class GameValidationResponse(BaseModel):
+    hard_conflicts: list[ValidationMessage]
+    soft_warnings: list[ValidationMessage]
