@@ -101,7 +101,7 @@ Use this section as a test script. Record pass/fail for each step.
 - [ ] Navigate to `http://localhost:3000/login`.
 - [ ] Sign in with admin credentials.
 - [ ] Confirm dashboard loads.
-- [ ] Confirm sidebar navigation includes **Organizations** and the link opens `Dashboard → Organizations`.
+- [ ] Confirm sidebar navigation includes **Organizations** and the link opens `Admin → Organizations`.
 
 ### 1a. CORS preflight + login API checks
 
@@ -129,13 +129,13 @@ curl -i -X POST http://localhost:8000/api/auth/login \
 
 ## 2. Create organization
 
-- [ ] Go to **Dashboard → Organizations**.
+- [ ] Go to **Admin → Organizations**.
 - [ ] Create organization (example name: `Northern Lakes - Community A`).
 - [ ] Confirm it appears in the organizations table.
 
 ## 3. Create host location
 
-- [ ] Go to **Dashboard → Host Locations**.
+- [ ] Go to **Admin → Host Locations**.
 - [ ] Create host location tied to the organization from step 2.
 - [ ] Confirm location appears in the table.
 
@@ -148,19 +148,19 @@ Use a layout type compatible with your test division:
 
 ## 5. Create team
 
-- [ ] Go to **Dashboard → Teams**.
+- [ ] Go to **Admin → Teams**.
 - [ ] Create Team A and Team B under the same division + organization.
 - [ ] Confirm both teams appear in the table.
 
 ## 6. Create hosting availability
 
-- [ ] Go to **Dashboard → Hosting Availability**.
+- [ ] Go to **Admin → Hosting Availability**.
 - [ ] Add an availability window for the field/date you will use for games.
 - [ ] Confirm row appears in the table.
 
 ## 7. Create draft game
 
-- [ ] Go to **Dashboard → Games**.
+- [ ] Go to **Admin → Games**.
 - [ ] Create a game using:
   - season
   - week
