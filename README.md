@@ -62,7 +62,7 @@ Services:
 If services are already up:
 
 ```bash
-docker compose exec backend alembic upgrade head
+docker compose run --rm backend alembic upgrade head
 ```
 
 Or as a one-off:
@@ -81,7 +81,7 @@ Current seed behavior:
 - On backend startup, an admin user is created from `ADMIN_SEED_*` values (if not already present).
 - Initial divisions are inserted by the initial Alembic migration.
 
-No separate seed CLI exists today; seeding happens via migrations + backend startup.
+No separate seed CLI exists today; run migrations first, then start backend so startup seeding can run against existing tables.
 
 ---
 
