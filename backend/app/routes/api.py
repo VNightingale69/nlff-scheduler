@@ -1,97 +1,230 @@
 import uuid
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func
 from sqlalchemy.orm import Session, aliased
+
 from app.auth import ROLE_COMMUNITY_SCHEDULER, ROLE_LEAGUE_ADMIN, enforce_organization_scope, get_current_user, require_roles
 from app.database import get_db
-from app.models import Division, Field, Game, GameStatus, HostLocation, HostingAvailability, Organization, Season, Team, User, Week
+from app.models import Division, Field, Game, GameStatus, HostLocation, HostingAvailability, Organization, Role, Season, Team, User, Week
 from app.schemas import (
     DivisionCreate, DivisionRead, FieldCreate, FieldRead, GameCreate, GameRead, GameSaveResponse,
     HostLocationCreate, HostLocationRead, HostingAvailabilityCreate, HostingAvailabilityRead,
-    OrganizationCreate, OrganizationRead, PublicGameRead, TeamCreate, TeamRead, PagedResponse
+    LoginRequest, OrganizationCreate, OrganizationRead, PagedResponse, PublicGameRead, RefreshRequest,
+    TeamCreate, TeamRead, TokenResponse, UserCreate, UserRead
 )
+from app.security import create_access_token, create_refresh_token, hash_password, validate_password_strength, verify_password, decode_token
 from app.services.scheduling_validation import validate_game
 
 router = APIRouter(prefix='/api')
 
-def paginate(query, page:int, page_size:int):
-    total=query.count(); items=query.offset((page-1)*page_size).limit(page_size).all();
-    return PagedResponse(items=items,total=total,page=page,page_size=page_size)
+def paginate(query, page: int, page_size: int):
+    total = query.count(); items = query.offset((page - 1) * page_size).limit(page_size).all()
+    return PagedResponse(items=items, total=total, page=page, page_size=page_size)
+
+def _user_payload(user: User) -> dict:
+    return {
+        'id': user.id, 'email': user.email, 'full_name': user.full_name,
+        'role_name': user.role.name, 'organization_id': user.organization_id,
+    }
+
+@router.post('/auth/login', response_model=TokenResponse)
+def login(payload: LoginRequest, db: Session = Depends(get_db)):
+    user = db.query(User).join(User.role).filter(User.email == payload.email, User.is_active.is_(True), Role.is_active.is_(True)).first()
+    if not user or not verify_password(payload.password, user.password_hash):
+        raise HTTPException(status_code=401, detail='Invalid credentials')
+    return TokenResponse(access_token=create_access_token(str(user.id)), refresh_token=create_refresh_token(str(user.id)), token_type='bearer').model_dump() | {'user': _user_payload(user)}
+
+@router.post('/auth/refresh', response_model=TokenResponse)
+def refresh(payload: RefreshRequest, db: Session = Depends(get_db)):
+    token_data = decode_token(payload.refresh_token, 'refresh')
+    user = db.query(User).join(User.role).filter(User.id == uuid.UUID(token_data['sub']), User.is_active.is_(True), Role.is_active.is_(True)).first()
+    if not user:
+        raise HTTPException(status_code=401, detail='Invalid refresh token')
+    return TokenResponse(access_token=create_access_token(str(user.id)), refresh_token=create_refresh_token(str(user.id)), token_type='bearer').model_dump() | {'user': _user_payload(user)}
+
+@router.get('/auth/me')
+def me(current_user: User = Depends(get_current_user)):
+    return {'user': _user_payload(current_user)}
+
+@router.post('/users', response_model=UserRead, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+def create_user(payload: UserCreate, db: Session = Depends(get_db)):
+    role = db.query(Role).filter(Role.name == payload.role_name, Role.is_active.is_(True)).first()
+    if not role: raise HTTPException(400, 'Invalid role')
+    if payload.role_name == ROLE_COMMUNITY_SCHEDULER and not payload.organization_id: raise HTTPException(400, 'Community scheduler requires organization_id')
+    validate_password_strength(payload.password)
+    obj = User(email=payload.email, full_name=payload.full_name, password_hash=hash_password(payload.password), role_id=role.id, organization_id=payload.organization_id, is_active=payload.is_active)
+    db.add(obj); db.commit(); db.refresh(obj)
+    return UserRead(id=obj.id, created_at=obj.created_at, updated_at=obj.updated_at, email=obj.email, full_name=obj.full_name, role_name=obj.role.name, organization_id=obj.organization_id, is_active=obj.is_active)
 
 @router.post('/organizations', response_model=OrganizationRead, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def create_organization(payload: OrganizationCreate, db: Session = Depends(get_db)):
-    obj=Organization(**payload.model_dump()); db.add(obj); db.commit(); db.refresh(obj); return obj
+    obj = Organization(**payload.model_dump()); db.add(obj); db.commit(); db.refresh(obj); return obj
 
 @router.get('/organizations', response_model=PagedResponse[OrganizationRead], dependencies=[Depends(get_current_user)])
-def list_organizations(search:str|None=None, is_active:bool|None=None, page:int=1, page_size:int=20, current_user:User=Depends(get_current_user), db:Session=Depends(get_db)):
-    q=db.query(Organization)
-    if current_user.role.name==ROLE_COMMUNITY_SCHEDULER: q=q.filter(Organization.id==current_user.organization_id)
-    if search: q=q.filter(func.lower(Organization.name).like(f"%{search.lower()}%"))
-    if is_active is not None: q=q.filter(Organization.is_active==is_active)
-    return paginate(q.order_by(Organization.name),page,page_size)
+def list_organizations(search: str | None = None, is_active: bool | None = None, page: int = 1, page_size: int = 20, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    q = db.query(Organization)
+    if current_user.role.name == ROLE_COMMUNITY_SCHEDULER: q = q.filter(Organization.id == current_user.organization_id)
+    if search: q = q.filter(func.lower(Organization.name).like(f"%{search.lower()}%"))
+    if is_active is not None: q = q.filter(Organization.is_active == is_active)
+    return paginate(q.order_by(Organization.name), page, page_size)
 
 @router.put('/organizations/{org_id}', response_model=OrganizationRead, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
-def update_organization(org_id:uuid.UUID,payload:OrganizationCreate,db:Session=Depends(get_db)):
-    o=db.query(Organization).filter(Organization.id==org_id).first();
-    if not o: raise HTTPException(404,'Organization not found')
-    for k,v in payload.model_dump().items(): setattr(o,k,v)
+def update_organization(org_id: uuid.UUID, payload: OrganizationCreate, db: Session = Depends(get_db)):
+    o = db.query(Organization).filter(Organization.id == org_id).first()
+    if not o: raise HTTPException(404, 'Organization not found')
+    for k, v in payload.model_dump().items(): setattr(o, k, v)
     db.commit(); db.refresh(o); return o
 
 @router.delete('/organizations/{org_id}', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
-def delete_organization(org_id:uuid.UUID,db:Session=Depends(get_db)):
-    o=db.query(Organization).filter(Organization.id==org_id).first();
-    if not o: raise HTTPException(404,'Organization not found')
-    db.delete(o); db.commit(); return {'ok':True}
+def delete_organization(org_id: uuid.UUID, db: Session = Depends(get_db)):
+    o = db.query(Organization).filter(Organization.id == org_id).first()
+    if not o: raise HTTPException(404, 'Organization not found')
+    db.delete(o); db.commit(); return {'ok': True}
 
-# similar basic CRUD
 @router.post('/divisions', response_model=DivisionRead, dependencies=[Depends(get_current_user)])
-def create_division(payload:DivisionCreate, db:Session=Depends(get_db)):
-    d=Division(**payload.model_dump()); db.add(d); db.commit(); db.refresh(d); return d
+def create_division(payload: DivisionCreate, db: Session = Depends(get_db)):
+    d = Division(**payload.model_dump()); db.add(d); db.commit(); db.refresh(d); return d
 
 @router.get('/divisions', response_model=PagedResponse[DivisionRead], dependencies=[Depends(get_current_user)])
-def list_divisions(search:str|None=None, page:int=1,page_size:int=20, db:Session=Depends(get_db)):
-    q=db.query(Division)
-    if search: q=q.filter(func.lower(Division.name).like(f"%{search.lower()}%"))
-    return paginate(q.order_by(Division.name),page,page_size)
+def list_divisions(search: str | None = None, page: int = 1, page_size: int = 20, db: Session = Depends(get_db)):
+    q = db.query(Division)
+    if search: q = q.filter(func.lower(Division.name).like(f"%{search.lower()}%"))
+    return paginate(q.order_by(Division.name), page, page_size)
 
 @router.put('/divisions/{item_id}', response_model=DivisionRead, dependencies=[Depends(get_current_user)])
-def upd_div(item_id:uuid.UUID,payload:DivisionCreate,db:Session=Depends(get_db)):
-    x=db.query(Division).filter(Division.id==item_id).first();
-    if not x: raise HTTPException(404,'Division not found')
-    for k,v in payload.model_dump().items(): setattr(x,k,v)
+def upd_div(item_id: uuid.UUID, payload: DivisionCreate, db: Session = Depends(get_db)):
+    x = db.query(Division).filter(Division.id == item_id).first()
+    if not x: raise HTTPException(404, 'Division not found')
+    for k, v in payload.model_dump().items(): setattr(x, k, v)
     db.commit(); db.refresh(x); return x
 
 @router.delete('/divisions/{item_id}', dependencies=[Depends(get_current_user)])
-def del_div(item_id:uuid.UUID,db:Session=Depends(get_db)):
-    x=db.query(Division).filter(Division.id==item_id).first();
-    if not x: raise HTTPException(404,'Division not found')
-    db.delete(x); db.commit(); return {'ok':True}
+def del_div(item_id: uuid.UUID, db: Session = Depends(get_db)):
+    x = db.query(Division).filter(Division.id == item_id).first()
+    if not x: raise HTTPException(404, 'Division not found')
+    db.delete(x); db.commit(); return {'ok': True}
+
+@router.post('/host-locations', response_model=HostLocationRead, dependencies=[Depends(get_current_user)])
+def create_host_location(payload: HostLocationCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    enforce_organization_scope(payload.organization_id, current_user)
+    x = HostLocation(**payload.model_dump()); db.add(x); db.commit(); db.refresh(x); return x
+
+@router.get('/host-locations', response_model=PagedResponse[HostLocationRead], dependencies=[Depends(get_current_user)])
+def list_host_locations(search: str | None = None, organization_id: uuid.UUID | None = None, page: int = 1, page_size: int = 20, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    q = db.query(HostLocation)
+    if current_user.role.name == ROLE_COMMUNITY_SCHEDULER: q = q.filter(HostLocation.organization_id == current_user.organization_id)
+    elif organization_id: q = q.filter(HostLocation.organization_id == organization_id)
+    if search: q = q.filter(func.lower(HostLocation.name).like(f"%{search.lower()}%"))
+    return paginate(q.order_by(HostLocation.name), page, page_size)
+
+@router.put('/host-locations/{item_id}', response_model=HostLocationRead, dependencies=[Depends(get_current_user)])
+def upd_host_location(item_id: uuid.UUID, payload: HostLocationCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    x = db.query(HostLocation).filter(HostLocation.id == item_id).first()
+    if not x: raise HTTPException(404, 'Host location not found')
+    enforce_organization_scope(payload.organization_id, current_user)
+    for k, v in payload.model_dump().items(): setattr(x, k, v)
+    db.commit(); db.refresh(x); return x
+
+@router.delete('/host-locations/{item_id}', dependencies=[Depends(get_current_user)])
+def del_host_location(item_id: uuid.UUID, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    x = db.query(HostLocation).filter(HostLocation.id == item_id).first()
+    if not x: raise HTTPException(404, 'Host location not found')
+    enforce_organization_scope(x.organization_id, current_user)
+    db.delete(x); db.commit(); return {'ok': True}
+
+@router.post('/fields', response_model=FieldRead, dependencies=[Depends(get_current_user)])
+def create_field(payload: FieldCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    host_location = db.query(HostLocation).filter(HostLocation.id == payload.host_location_id).first()
+    if not host_location: raise HTTPException(400, 'Invalid host location')
+    enforce_organization_scope(host_location.organization_id, current_user)
+    x = Field(**payload.model_dump()); db.add(x); db.commit(); db.refresh(x); return x
+
+@router.get('/fields', response_model=PagedResponse[FieldRead], dependencies=[Depends(get_current_user)])
+def list_fields(search: str | None = None, host_location_id: uuid.UUID | None = None, page: int = 1, page_size: int = 20, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    q = db.query(Field).join(Field.host_location)
+    if current_user.role.name == ROLE_COMMUNITY_SCHEDULER: q = q.filter(HostLocation.organization_id == current_user.organization_id)
+    if host_location_id: q = q.filter(Field.host_location_id == host_location_id)
+    if search: q = q.filter(func.lower(Field.name).like(f"%{search.lower()}%"))
+    return paginate(q.order_by(Field.name), page, page_size)
+
+@router.put('/fields/{item_id}', response_model=FieldRead, dependencies=[Depends(get_current_user)])
+def upd_field(item_id: uuid.UUID, payload: FieldCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    x = db.query(Field).filter(Field.id == item_id).first()
+    if not x: raise HTTPException(404, 'Field not found')
+    host_location = db.query(HostLocation).filter(HostLocation.id == payload.host_location_id).first()
+    if not host_location: raise HTTPException(400, 'Invalid host location')
+    enforce_organization_scope(host_location.organization_id, current_user)
+    for k, v in payload.model_dump().items(): setattr(x, k, v)
+    db.commit(); db.refresh(x); return x
+
+@router.delete('/fields/{item_id}', dependencies=[Depends(get_current_user)])
+def del_field(item_id: uuid.UUID, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    x = db.query(Field).filter(Field.id == item_id).first()
+    if not x: raise HTTPException(404, 'Field not found')
+    enforce_organization_scope(x.host_location.organization_id, current_user)
+    db.delete(x); db.commit(); return {'ok': True}
+
+@router.post('/hosting-availabilities', response_model=HostingAvailabilityRead, dependencies=[Depends(get_current_user)])
+def create_hosting_availability(payload: HostingAvailabilityCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    field = db.query(Field).join(Field.host_location).filter(Field.id == payload.field_id).first()
+    if not field: raise HTTPException(400, 'Invalid field')
+    enforce_organization_scope(field.host_location.organization_id, current_user)
+    x = HostingAvailability(**payload.model_dump()); db.add(x); db.commit(); db.refresh(x); return x
+
+@router.get('/hosting-availabilities', response_model=PagedResponse[HostingAvailabilityRead], dependencies=[Depends(get_current_user)])
+def list_hosting_availabilities(field_id: uuid.UUID | None = None, available_date: str | None = None, page: int = 1, page_size: int = 20, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    q = db.query(HostingAvailability).join(HostingAvailability.field).join(Field.host_location)
+    if current_user.role.name == ROLE_COMMUNITY_SCHEDULER: q = q.filter(HostLocation.organization_id == current_user.organization_id)
+    if field_id: q = q.filter(HostingAvailability.field_id == field_id)
+    if available_date: q = q.filter(func.cast(HostingAvailability.available_date, str) == available_date)
+    return paginate(q.order_by(HostingAvailability.available_date, HostingAvailability.start_time), page, page_size)
+
+@router.put('/hosting-availabilities/{item_id}', response_model=HostingAvailabilityRead, dependencies=[Depends(get_current_user)])
+def upd_hosting_availability(item_id: uuid.UUID, payload: HostingAvailabilityCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    x = db.query(HostingAvailability).filter(HostingAvailability.id == item_id).first()
+    if not x: raise HTTPException(404, 'Hosting availability not found')
+    field = db.query(Field).join(Field.host_location).filter(Field.id == payload.field_id).first()
+    if not field: raise HTTPException(400, 'Invalid field')
+    enforce_organization_scope(field.host_location.organization_id, current_user)
+    for k, v in payload.model_dump().items(): setattr(x, k, v)
+    db.commit(); db.refresh(x); return x
+
+@router.delete('/hosting-availabilities/{item_id}', dependencies=[Depends(get_current_user)])
+def del_hosting_availability(item_id: uuid.UUID, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    x = db.query(HostingAvailability).filter(HostingAvailability.id == item_id).first()
+    if not x: raise HTTPException(404, 'Hosting availability not found')
+    enforce_organization_scope(x.field.host_location.organization_id, current_user)
+    db.delete(x); db.commit(); return {'ok': True}
 
 @router.post('/teams', response_model=TeamRead, dependencies=[Depends(get_current_user)])
-def create_team(payload:TeamCreate,current_user:User=Depends(get_current_user),db:Session=Depends(get_db)):
-    enforce_organization_scope(payload.organization_id,current_user)
-    x=Team(**payload.model_dump()); db.add(x); db.commit(); db.refresh(x); return x
-@router.get('/teams', response_model=PagedResponse[TeamRead], dependencies=[Depends(get_current_user)])
-def list_teams(search:str|None=None, organization_id:uuid.UUID|None=None, division_id:uuid.UUID|None=None, page:int=1,page_size:int=20,current_user:User=Depends(get_current_user),db:Session=Depends(get_db)):
-    q=db.query(Team)
-    if current_user.role.name==ROLE_COMMUNITY_SCHEDULER: q=q.filter(Team.organization_id==current_user.organization_id)
-    elif organization_id: q=q.filter(Team.organization_id==organization_id)
-    if division_id: q=q.filter(Team.division_id==division_id)
-    if search: q=q.filter(func.lower(Team.name).like(f"%{search.lower()}%"))
-    return paginate(q.order_by(Team.name),page,page_size)
-@router.put('/teams/{item_id}', response_model=TeamRead, dependencies=[Depends(get_current_user)])
-def upd_team(item_id:uuid.UUID,payload:TeamCreate,current_user:User=Depends(get_current_user),db:Session=Depends(get_db)):
-    x=db.query(Team).filter(Team.id==item_id).first();
-    if not x: raise HTTPException(404,'Team not found')
-    enforce_organization_scope(payload.organization_id,current_user)
-    for k,v in payload.model_dump().items(): setattr(x,k,v)
-    db.commit(); db.refresh(x); return x
-@router.delete('/teams/{item_id}', dependencies=[Depends(get_current_user)])
-def del_team(item_id:uuid.UUID,current_user:User=Depends(get_current_user),db:Session=Depends(get_db)):
-    x=db.query(Team).filter(Team.id==item_id).first();
-    if not x: raise HTTPException(404,'Team not found')
-    enforce_organization_scope(x.organization_id,current_user); db.delete(x); db.commit(); return {'ok':True}
+def create_team(payload: TeamCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    enforce_organization_scope(payload.organization_id, current_user)
+    x = Team(**payload.model_dump()); db.add(x); db.commit(); db.refresh(x); return x
 
+@router.get('/teams', response_model=PagedResponse[TeamRead], dependencies=[Depends(get_current_user)])
+def list_teams(search: str | None = None, organization_id: uuid.UUID | None = None, division_id: uuid.UUID | None = None, page: int = 1, page_size: int = 20, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    q = db.query(Team)
+    if current_user.role.name == ROLE_COMMUNITY_SCHEDULER: q = q.filter(Team.organization_id == current_user.organization_id)
+    elif organization_id: q = q.filter(Team.organization_id == organization_id)
+    if division_id: q = q.filter(Team.division_id == division_id)
+    if search: q = q.filter(func.lower(Team.name).like(f"%{search.lower()}%"))
+    return paginate(q.order_by(Team.name), page, page_size)
+
+@router.put('/teams/{item_id}', response_model=TeamRead, dependencies=[Depends(get_current_user)])
+def upd_team(item_id: uuid.UUID, payload: TeamCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    x = db.query(Team).filter(Team.id == item_id).first()
+    if not x: raise HTTPException(404, 'Team not found')
+    enforce_organization_scope(payload.organization_id, current_user)
+    for k, v in payload.model_dump().items(): setattr(x, k, v)
+    db.commit(); db.refresh(x); return x
+
+@router.delete('/teams/{item_id}', dependencies=[Depends(get_current_user)])
+def del_team(item_id: uuid.UUID, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    x = db.query(Team).filter(Team.id == item_id).first()
+    if not x: raise HTTPException(404, 'Team not found')
+    enforce_organization_scope(x.organization_id, current_user); db.delete(x); db.commit(); return {'ok': True}
+
+# keep existing game/public routes omitted for brevity
 
 @router.get('/game-statuses', response_model=PagedResponse[dict], dependencies=[Depends(get_current_user)])
 def list_game_statuses(page:int=1,page_size:int=50, db:Session=Depends(get_db)):
@@ -111,11 +244,7 @@ def list_weeks(season_id:uuid.UUID|None=None, page:int=1,page_size:int=100, db:S
     return PagedResponse(items=[{"id":x.id,"season_id":x.season_id,"week_number":x.week_number} for x in q.offset((page-1)*page_size).limit(page_size).all()], total=q.count(), page=page, page_size=page_size)
 
 def _to_game_read(g: Game) -> GameRead:
-    return GameRead(
-        id=g.id,created_at=g.created_at,updated_at=g.updated_at,season_id=g.season_id,week_id=g.week_id,
-        division_id=g.home_team.division_id,home_team_id=g.home_team_id,away_team_id=g.away_team_id,field_id=g.field_id,
-        game_status_id=g.game_status_id,game_date=g.game_date,kickoff_time=g.kickoff_time,status_code=g.status.code
-    )
+    return GameRead(id=g.id,created_at=g.created_at,updated_at=g.updated_at,season_id=g.season_id,week_id=g.week_id,division_id=g.home_team.division_id,home_team_id=g.home_team_id,away_team_id=g.away_team_id,field_id=g.field_id,game_status_id=g.game_status_id,game_date=g.game_date,kickoff_time=g.kickoff_time,status_code=g.status.code)
 
 @router.get('/games', response_model=PagedResponse[GameRead], dependencies=[Depends(get_current_user)])
 def list_games(division_id:uuid.UUID|None=None, week_id:uuid.UUID|None=None, team_id:uuid.UUID|None=None, host_location_id:uuid.UUID|None=None, status_code:str|None=None, page:int=1,page_size:int=50, db:Session=Depends(get_db)):
@@ -128,103 +257,31 @@ def list_games(division_id:uuid.UUID|None=None, week_id:uuid.UUID|None=None, tea
     total=q.count(); items=q.order_by(Game.game_date, Game.kickoff_time).offset((page-1)*page_size).limit(page_size).all()
     return PagedResponse(items=[_to_game_read(x) for x in items], total=total, page=page, page_size=page_size)
 
-
 @router.get('/public/games', response_model=PagedResponse[PublicGameRead])
-def list_public_games(
-    host_location_id: uuid.UUID | None = None,
-    organization_id: uuid.UUID | None = None,
-    division_id: uuid.UUID | None = None,
-    week_id: uuid.UUID | None = None,
-    team_id: uuid.UUID | None = None,
-    status_code: str | None = None,
-    page: int = 1,
-    page_size: int = 50,
-    db: Session = Depends(get_db),
-):
-    home_team = aliased(Team)
-    away_team = aliased(Team)
-    q = (
-        db.query(Game)
-        .join(Game.status)
-        .join(Game.field)
-        .join(Field.host_location)
-        .join(HostLocation.organization)
-        .join(home_team, Game.home_team)
-        .join(away_team, Game.away_team)
-    )
+def list_public_games(host_location_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, division_id: uuid.UUID | None = None, week_id: uuid.UUID | None = None, team_id: uuid.UUID | None = None, status_code: str | None = None, page: int = 1, page_size: int = 50, db: Session = Depends(get_db)):
+    home_team = aliased(Team); away_team = aliased(Team)
+    q = db.query(Game).join(Game.status).join(Game.field).join(Field.host_location).join(HostLocation.organization).join(home_team, Game.home_team).join(away_team, Game.away_team)
     q = q.filter(GameStatus.code == 'published')
-    if host_location_id:
-        q = q.filter(Field.host_location_id == host_location_id)
-    if organization_id:
-        q = q.filter(HostLocation.organization_id == organization_id)
-    if division_id:
-        q = q.filter(home_team.division_id == division_id)
-    if week_id:
-        q = q.filter(Game.week_id == week_id)
-    if team_id:
-        q = q.filter((Game.home_team_id == team_id) | (Game.away_team_id == team_id))
-    if status_code:
-        q = q.filter(GameStatus.code == status_code)
-
-    total = q.count()
-    items = q.order_by(Game.game_date, Game.kickoff_time).offset((page - 1) * page_size).limit(page_size).all()
-    return PagedResponse(
-        items=[
-            PublicGameRead(
-                id=g.id,
-                game_date=g.game_date,
-                kickoff_time=g.kickoff_time,
-                host_location_id=g.field.host_location.id,
-                host_location_name=g.field.host_location.name,
-                field_id=g.field.id,
-                field_name=g.field.name,
-                organization_id=g.field.host_location.organization.id,
-                organization_name=g.field.host_location.organization.name,
-                division_id=g.home_team.division_id,
-                division_name=g.home_team.division.name,
-                week_id=g.week_id,
-                week_number=g.week.week_number,
-                home_team_id=g.home_team_id,
-                home_team_name=g.home_team.name,
-                away_team_id=g.away_team_id,
-                away_team_name=g.away_team.name,
-                game_status_id=g.game_status_id,
-                game_status_code=g.status.code,
-                game_status_label=g.status.label,
-            )
-            for g in items
-        ],
-        total=total,
-        page=page,
-        page_size=page_size,
-    )
-
+    if host_location_id: q = q.filter(Field.host_location_id == host_location_id)
+    if organization_id: q = q.filter(HostLocation.organization_id == organization_id)
+    if division_id: q = q.filter(home_team.division_id == division_id)
+    if week_id: q = q.filter(Game.week_id == week_id)
+    if team_id: q = q.filter((Game.home_team_id == team_id) | (Game.away_team_id == team_id))
+    if status_code: q = q.filter(GameStatus.code == status_code)
+    total = q.count(); items = q.order_by(Game.game_date, Game.kickoff_time).offset((page - 1) * page_size).limit(page_size).all()
+    return PagedResponse(items=[PublicGameRead(id=g.id,game_date=g.game_date,kickoff_time=g.kickoff_time,host_location_id=g.field.host_location.id,host_location_name=g.field.host_location.name,field_id=g.field.id,field_name=g.field.name,organization_id=g.field.host_location.organization.id,organization_name=g.field.host_location.organization.name,division_id=g.home_team.division_id,division_name=g.home_team.division.name,week_id=g.week_id,week_number=g.week.week_number,home_team_id=g.home_team_id,home_team_name=g.home_team.name,away_team_id=g.away_team_id,away_team_name=g.away_team.name,game_status_id=g.game_status_id,game_status_code=g.status.code,game_status_label=g.status.label) for g in items], total=total, page=page, page_size=page_size)
 
 @router.get('/public/schedule-filters')
 def list_public_schedule_filters(db: Session = Depends(get_db)):
     games = db.query(Game).join(Game.status).join(Game.field).join(Field.host_location).join(HostLocation.organization).join(Game.home_team).filter(GameStatus.code == 'published').all()
-    host_locations = {(g.field.host_location.id, g.field.host_location.name) for g in games}
-    organizations = {(g.field.host_location.organization.id, g.field.host_location.organization.name) for g in games}
-    divisions = {(g.home_team.division.id, g.home_team.division.name) for g in games}
-    weeks = {(g.week.id, g.week.week_number) for g in games}
-    teams = {(g.home_team.id, g.home_team.name) for g in games} | {(g.away_team.id, g.away_team.name) for g in games}
-    statuses = {(g.status.code, g.status.label) for g in games}
-    return {
-        'host_locations': [{'id': item[0], 'name': item[1]} for item in sorted(host_locations, key=lambda x: x[1])],
-        'organizations': [{'id': item[0], 'name': item[1]} for item in sorted(organizations, key=lambda x: x[1])],
-        'divisions': [{'id': item[0], 'name': item[1]} for item in sorted(divisions, key=lambda x: x[1])],
-        'weeks': [{'id': item[0], 'week_number': item[1]} for item in sorted(weeks, key=lambda x: x[1])],
-        'teams': [{'id': item[0], 'name': item[1]} for item in sorted(teams, key=lambda x: x[1])],
-        'statuses': [{'code': item[0], 'label': item[1]} for item in sorted(statuses, key=lambda x: x[1])],
-    }
+    host_locations = {(g.field.host_location.id, g.field.host_location.name) for g in games}; organizations = {(g.field.host_location.organization.id, g.field.host_location.organization.name) for g in games}; divisions = {(g.home_team.division.id, g.home_team.division.name) for g in games}; weeks = {(g.week.id, g.week.week_number) for g in games}; teams = {(g.home_team.id, g.home_team.name) for g in games} | {(g.away_team.id, g.away_team.name) for g in games}; statuses = {(g.status.code, g.status.label) for g in games}
+    return {'host_locations': [{'id': item[0], 'name': item[1]} for item in sorted(host_locations, key=lambda x: x[1])], 'organizations': [{'id': item[0], 'name': item[1]} for item in sorted(organizations, key=lambda x: x[1])], 'divisions': [{'id': item[0], 'name': item[1]} for item in sorted(divisions, key=lambda x: x[1])], 'weeks': [{'id': item[0], 'week_number': item[1]} for item in sorted(weeks, key=lambda x: x[1])], 'teams': [{'id': item[0], 'name': item[1]} for item in sorted(teams, key=lambda x: x[1])], 'statuses': [{'code': item[0], 'label': item[1]} for item in sorted(statuses, key=lambda x: x[1])]}
 
 @router.post('/games', response_model=GameSaveResponse, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def create_game(payload:GameCreate, db:Session=Depends(get_db)):
-    validation=validate_game(db,payload)
-    status=db.query(GameStatus).filter(GameStatus.id==payload.game_status_id).first()
+    validation=validate_game(db,payload); status=db.query(GameStatus).filter(GameStatus.id==payload.game_status_id).first()
     if not status: raise HTTPException(400,'Invalid game status')
-    if status.code=='published' and validation.hard_conflicts:
-        raise HTTPException(status_code=400, detail={'error':'hard_conflicts','validation':validation.model_dump()})
+    if status.code=='published' and validation.hard_conflicts: raise HTTPException(status_code=400, detail={'error':'hard_conflicts','validation':validation.model_dump()})
     obj=Game(**payload.model_dump(exclude={'division_id'})); db.add(obj); db.commit(); db.refresh(obj)
     return GameSaveResponse(game=_to_game_read(obj), validation=validation)
 
@@ -232,11 +289,9 @@ def create_game(payload:GameCreate, db:Session=Depends(get_db)):
 def update_game(game_id:uuid.UUID,payload:GameCreate, db:Session=Depends(get_db)):
     obj=db.query(Game).filter(Game.id==game_id).first()
     if not obj: raise HTTPException(404,'Game not found')
-    validation=validate_game(db,payload,game_id=game_id)
-    status=db.query(GameStatus).filter(GameStatus.id==payload.game_status_id).first()
+    validation=validate_game(db,payload,game_id=game_id); status=db.query(GameStatus).filter(GameStatus.id==payload.game_status_id).first()
     if not status: raise HTTPException(400,'Invalid game status')
-    if status.code=='published' and validation.hard_conflicts:
-        raise HTTPException(status_code=400, detail={'error':'hard_conflicts','validation':validation.model_dump()})
+    if status.code=='published' and validation.hard_conflicts: raise HTTPException(status_code=400, detail={'error':'hard_conflicts','validation':validation.model_dump()})
     for k,v in payload.model_dump(exclude={'division_id'}).items(): setattr(obj,k,v)
     db.commit(); db.refresh(obj)
     return GameSaveResponse(game=_to_game_read(obj), validation=validation)

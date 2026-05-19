@@ -66,8 +66,8 @@ Passwords must be 8-128 chars and include:
 - `POST /api/auth/refresh` → returns rotated access + refresh token
 
 ### Protected Routes
-All `/api/*` routes (except health check) require a valid bearer access token.
-User creation is admin-only.
+Most `/api/*` routes require a valid bearer access token. Public schedule endpoints are intentionally unauthenticated: `/api/public/games` and `/api/public/schedule-filters`.
+User creation is admin-only (`POST /api/users`).
 
 ### Organization Scope
 - League Admin users can access all organizations and all organization-scoped entities.
