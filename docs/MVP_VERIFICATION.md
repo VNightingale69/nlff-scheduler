@@ -39,7 +39,7 @@ Frontend:
 
 - `NEXT_PUBLIC_API_URL`
 
-> Defaults exist in code for all values above. Override for non-local use.
+> Defaults exist in code for all values above. `NEXT_PUBLIC_API_URL` can be either `http://localhost:8000` or `http://localhost:8000/api`.
 
 ### Migrations
 

@@ -34,7 +34,7 @@ Backend environment variables:
 
 Frontend environment variables:
 
-- `NEXT_PUBLIC_API_URL` (default in code: `http://localhost:8000/api`)
+- `NEXT_PUBLIC_API_URL` (default in code: `http://localhost:8000`; `/api` is appended automatically if omitted)
 
 > In Docker Compose, only `DATABASE_URL` is currently set explicitly. The remaining values use backend defaults unless you override them.
 
