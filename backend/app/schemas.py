@@ -138,6 +138,7 @@ class GameStatusRead(BaseSchema, GameStatusCreate):
 class GameCreate(BaseModel):
     season_id: uuid.UUID
     week_id: uuid.UUID
+    division_id: uuid.UUID
     home_team_id: uuid.UUID
     away_team_id: uuid.UUID
     field_id: uuid.UUID
@@ -145,8 +146,16 @@ class GameCreate(BaseModel):
     game_date: date
     kickoff_time: time
 
-class GameRead(BaseSchema, GameCreate):
+class GameUpdate(GameCreate):
     pass
+
+class GameRead(BaseSchema, GameCreate):
+    status_code: str
+
+
+class GameSaveResponse(BaseModel):
+    game: GameRead
+    validation: "GameValidationResponse"
 
 
 class ValidationMessage(BaseModel):
