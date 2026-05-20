@@ -125,6 +125,24 @@ class HostingAvailabilityCreate(BaseModel):
 class HostingAvailabilityRead(BaseSchema, HostingAvailabilityCreate):
     pass
 
+
+class HostingAvailabilityBulkSlot(BaseModel):
+    field_id: uuid.UUID
+    available_date: date
+    start_time: time
+    end_time: time
+    is_available: bool = True
+
+
+class HostingAvailabilityBulkUpsertRequest(BaseModel):
+    slots: list[HostingAvailabilityBulkSlot]
+
+
+class HostingAvailabilityBulkUpsertResponse(BaseModel):
+    created: int
+    updated: int
+
+
 class GameStatusCreate(BaseModel):
     code: str
     label: str

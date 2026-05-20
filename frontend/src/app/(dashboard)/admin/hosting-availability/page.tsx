@@ -1,7 +1,3 @@
-import CrudPage from '@/components/CrudPage';
-import { ENTITIES } from '@/config/entities';
+import HostingAvailabilityManager from '@/components/HostingAvailabilityManager';
 
-export default function Page() {
-  const config = ENTITIES['hosting-availability'];
-  return <CrudPage title={config.title} path={config.path} fields={config.fields} />;
-}
+export default function Page(){ return <HostingAvailabilityManager />; }
