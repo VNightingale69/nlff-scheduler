@@ -26,6 +26,11 @@ type DeleteCheck = {
   dependencies: Array<{ label: string; count: number }>;
 };
 
+type DeleteResponse = {
+  ok: boolean;
+  deleted?: Record<string, number>;
+};
+
 export default function HostLocationsAdminPage() {
   const [items, setItems] = useState<HostLocation[]>([]);
   const [organizations, setOrganizations] = useState<Organization[]>([]);
@@ -39,6 +44,7 @@ export default function HostLocationsAdminPage() {
   const [deleteTarget, setDeleteTarget] = useState<HostLocation | null>(null);
   const [deleteCheck, setDeleteCheck] = useState<DeleteCheck | null>(null);
   const [checkingDelete, setCheckingDelete] = useState(false);
+  const [cascadeConfirmed, setCascadeConfirmed] = useState(false);
 
   const orgNameById = useMemo(() => Object.fromEntries(organizations.map((x) => [x.id, x.name])), [organizations]);
 
@@ -121,6 +127,7 @@ export default function HostLocationsAdminPage() {
     setDeleteTarget(item);
     setDeleteCheck(null);
     setCheckingDelete(true);
+    setCascadeConfirmed(false);
     try {
       const summary = await apiFetch(`/host-locations/${item.id}/delete-check`, {}, getToken());
       setDeleteCheck(summary);
@@ -141,8 +148,18 @@ export default function HostLocationsAdminPage() {
   const confirmDelete = async () => {
     if (!deleteTarget) return;
     try {
-      await apiFetch(`/host-locations/${deleteTarget.id}`, { method: 'DELETE' }, getToken());
-      setMessage('Deleted successfully');
+      const hasDependencies = !!deleteCheck && !deleteCheck.can_delete;
+      const endpoint = hasDependencies ? `/host-locations/${deleteTarget.id}?force=true` : `/host-locations/${deleteTarget.id}`;
+      const response = (await apiFetch(endpoint, { method: 'DELETE' }, getToken())) as DeleteResponse;
+      if (response?.deleted) {
+        const summary = Object.entries(response.deleted)
+          .filter(([, count]) => count > 0)
+          .map(([key, count]) => `${count} ${key.replaceAll('_', ' ')}`)
+          .join(', ');
+        setMessage(summary ? `Deleted successfully: ${summary}` : 'Deleted successfully');
+      } else {
+        setMessage('Deleted successfully');
+      }
       setType('ok');
       closeDeleteModal();
       load();
@@ -225,16 +242,30 @@ export default function HostLocationsAdminPage() {
             {checkingDelete && <p className='mt-3 text-sm text-slate-500'>Checking dependencies...</p>}
             {!checkingDelete && deleteCheck && (
               <div className='mt-3 rounded border p-3 text-sm'>
-                <p className='font-medium'>{deleteCheck.can_delete ? 'No blocking dependencies found.' : `${deleteCheck.host_location_name} cannot be deleted because:`}</p>
+                <p className='font-medium'>{deleteCheck.can_delete ? 'No blocking dependencies found.' : `${deleteCheck.host_location_name} has related records:`}</p>
                 <ul className='mt-2 list-disc pl-6'>
                   {deleteCheck.dependencies.filter((d) => d.count > 0).map((d) => <li key={d.label}>{d.count} {d.label}</li>)}
                 </ul>
+                {!deleteCheck.can_delete && (
+                  <>
+                    <p className='mt-3 font-semibold text-rose-700'>This will permanently delete this Host Location and all related records. This action cannot be undone.</p>
+                    <label className='mt-3 flex items-start gap-2'>
+                      <input
+                        type='checkbox'
+                        className='mt-1'
+                        checked={cascadeConfirmed}
+                        onChange={(e) => setCascadeConfirmed(e.target.checked)}
+                      />
+                      <span>I understand this will permanently delete the host location and all related records.</span>
+                    </label>
+                  </>
+                )}
               </div>
             )}
             <div className='mt-4 flex flex-wrap justify-end gap-2'>
               <button className='rounded border px-3 py-2' onClick={closeDeleteModal}>Cancel</button>
               <button className='rounded border border-amber-500 px-3 py-2 text-amber-700' onClick={deactivateHost}>Mark Inactive</button>
-              <button className='rounded bg-rose-700 px-3 py-2 text-white disabled:opacity-50' disabled={!!deleteCheck && !deleteCheck.can_delete} onClick={confirmDelete}>Confirm Delete</button>
+              <button className='rounded bg-rose-700 px-3 py-2 text-white disabled:opacity-50' disabled={!!deleteCheck && !deleteCheck.can_delete && !cascadeConfirmed} onClick={confirmDelete}>Confirm Delete</button>
             </div>
           </div>
         </div>
