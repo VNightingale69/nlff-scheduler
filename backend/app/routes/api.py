@@ -137,6 +137,7 @@ def create_physical_field_area(payload: PhysicalFieldAreaCreate, current_user: U
     host_location = db.query(HostLocation).filter(HostLocation.id == payload.host_location_id).first()
     if not host_location: raise HTTPException(400, 'Invalid host location')
     enforce_organization_scope(host_location.organization_id, current_user)
+    if payload.field_space_type not in ALLOWED_FIELD_SPACE_TYPES: raise HTTPException(400, 'Invalid field space type')
     x = PhysicalFieldArea(**payload.model_dump()); db.add(x); db.commit(); db.refresh(x); return x
 
 @router.get('/physical-field-areas', response_model=PagedResponse[PhysicalFieldAreaRead], dependencies=[Depends(get_current_user)])
@@ -151,6 +152,8 @@ def create_field_configuration_option(payload: FieldConfigurationOptionCreate, c
     area = db.query(PhysicalFieldArea).join(PhysicalFieldArea.host_location).filter(PhysicalFieldArea.id == payload.physical_field_area_id).first()
     if not area: raise HTTPException(400, 'Invalid physical field area')
     enforce_organization_scope(area.host_location.organization_id, current_user)
+    if payload.thirty_yard_capacity < 0 or payload.fifty_three_yard_capacity < 0:
+        raise HTTPException(400, 'Capacities must be non-negative')
     x = FieldConfigurationOption(**payload.model_dump()); db.add(x); db.commit(); db.refresh(x); return x
 
 @router.get('/field-configuration-options', response_model=PagedResponse[FieldConfigurationOptionRead], dependencies=[Depends(get_current_user)])
@@ -209,6 +212,7 @@ def create_hosting_availability(payload: HostingAvailabilityCreate, current_user
         enforce_organization_scope(area.host_location.organization_id, current_user)
     else:
         raise HTTPException(400, 'field_id or physical_field_area_id is required')
+    validate_hour_block(payload.start_time, payload.end_time)
     x = HostingAvailability(**payload.model_dump()); db.add(x); db.commit(); db.refresh(x); return x
 
 @router.get('/hosting-availabilities', response_model=PagedResponse[HostingAvailabilityRead], dependencies=[Depends(get_current_user)])
@@ -264,6 +268,7 @@ def bulk_upsert_hosting_availabilities(payload: HostingAvailabilityBulkUpsertReq
             if not option: raise HTTPException(400, f'Invalid field configuration option: {slot.field_configuration_option_id}')
         else:
             raise HTTPException(400, 'Each slot must include field_id or physical_field_area_id')
+        validate_hour_block(slot.start_time, slot.end_time)
         existing = db.query(HostingAvailability).filter(
             HostingAvailability.field_id == slot.field_id,
             HostingAvailability.physical_field_area_id == slot.physical_field_area_id,
