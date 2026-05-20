@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import inspect, text
@@ -12,6 +14,7 @@ from app.routes.api import router as api_router
 from app.security import hash_password, validate_password_strength
 
 app = FastAPI(title='Northern Lakes Flag Football Scheduler API')
+logger = logging.getLogger(__name__)
 
 app.add_middleware(
     CORSMiddleware,
@@ -32,8 +35,10 @@ def seed_auth_data() -> None:
     db = next(get_db())
     try:
         if not _auth_tables_ready(db):
+            logger.info('Auth seed skipped: roles/users tables are not ready yet.')
             return
 
+        created_roles: list[str] = []
         for role_name, description in [
             (ROLE_LEAGUE_ADMIN, 'Global administrative access across all organizations'),
             (ROLE_COMMUNITY_SCHEDULER, 'Organization-scoped scheduling access'),
@@ -41,11 +46,16 @@ def seed_auth_data() -> None:
             role = db.query(Role).filter(Role.name == role_name).first()
             if not role:
                 db.add(Role(name=role_name, description=description, is_active=True))
+                created_roles.append(role_name)
         db.commit()
 
         admin_role = db.query(Role).filter(Role.name == ROLE_LEAGUE_ADMIN).first()
+        if not admin_role:
+            logger.warning('Auth seed failed: %s role missing after seed attempt.', ROLE_LEAGUE_ADMIN)
+            return
+
         existing_admin = db.query(User).filter(User.email == ADMIN_SEED_EMAIL).first()
-        if not existing_admin and admin_role:
+        if not existing_admin:
             validate_password_strength(ADMIN_SEED_PASSWORD)
             db.add(
                 User(
@@ -58,8 +68,30 @@ def seed_auth_data() -> None:
                 )
             )
             db.commit()
+            if created_roles:
+                logger.info(
+                    'Auth seed complete: created roles=%s and admin user=%s.',
+                    ','.join(created_roles),
+                    ADMIN_SEED_EMAIL,
+                )
+            else:
+                logger.info('Auth seed complete: admin user=%s created; roles already existed.', ADMIN_SEED_EMAIL)
+            return
+
+        if created_roles:
+            logger.info(
+                'Auth seed complete: created missing roles=%s; admin user=%s already exists.',
+                ','.join(created_roles),
+                ADMIN_SEED_EMAIL,
+            )
+        else:
+            logger.info(
+                'Auth seed noop: roles/admin already exist (admin=%s).',
+                ADMIN_SEED_EMAIL,
+            )
     except SQLAlchemyError:
         db.rollback()
+        logger.exception('Auth seed failed due to database error.')
     finally:
         db.close()
 

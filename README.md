@@ -30,7 +30,7 @@ Backend environment variables:
 - `REFRESH_TOKEN_EXPIRE_MINUTES` (default: `10080`)
 - `ADMIN_SEED_EMAIL` (default: `admin@example.com`)
 - `ADMIN_SEED_PASSWORD` (default: `ChangeMe123!`)
-- `ADMIN_SEED_FULL_NAME` (default: `System Admin`)
+- `ADMIN_SEED_FULL_NAME` (default: `League Admin`)
 - `CORS_ORIGINS` (default: `http://localhost:3000`; comma-separated list)
 
 Frontend environment variables:
@@ -78,8 +78,9 @@ docker compose run --rm backend alembic upgrade head
 
 Current seed behavior:
 
-- On backend startup, roles are seeded (`league_admin`, `community_scheduler`).
-- On backend startup, an admin user is created from `ADMIN_SEED_*` values (if not already present).
+- On backend startup, roles are seeded first (`league_admin`, `community_scheduler`) when missing.
+- On backend startup, an admin user is created from `ADMIN_SEED_*` values when missing.
+- Startup logs clearly indicate whether roles/admin were created or already existed.
 - Initial divisions are inserted by the initial Alembic migration.
 
 No separate seed CLI exists today; run migrations first, then start backend so startup seeding can run against existing tables.
