@@ -15,6 +15,7 @@ export default function CrudPage({ title, path, fields }: { title: string; path:
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState('');
   const [type, setType] = useState<'ok' | 'err'>('ok');
+  const [refOptions, setRefOptions] = useState<Record<string, { value: string; label: string }[]>>({});
 
   const load = async () => {
     setLoading(true);
@@ -26,7 +27,7 @@ export default function CrudPage({ title, path, fields }: { title: string; path:
     } finally { setLoading(false); }
   };
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); (async()=>{ try { const token=getToken(); const [orgs,divs,hosts]=await Promise.all([apiFetch('/organizations?page_size=500',{},token),apiFetch('/divisions?page_size=500',{},token),apiFetch('/host-locations?page_size=500',{},token)]); setRefOptions({organization_id:(orgs.items||[]).map((o:any)=>({value:o.id,label:o.name})),division_id:(divs.items||[]).map((o:any)=>({value:o.id,label:o.name})),host_location_id:(hosts.items||[]).map((o:any)=>({value:o.id,label:o.name})),required_field_layout_type:[{value:'THIRTY_YARD_WIDTH',label:'THIRTY_YARD_WIDTH'},{value:'FIFTY_THREE_YARD_WIDTH',label:'FIFTY_THREE_YARD_WIDTH'}],layout_type:[{value:'THIRTY_YARD_WIDTH',label:'THIRTY_YARD_WIDTH'},{value:'FIFTY_THREE_YARD_WIDTH',label:'FIFTY_THREE_YARD_WIDTH'}]}); } catch {} })(); }, []);
 
   const missingRequired = useMemo(
     () =>
@@ -69,5 +70,5 @@ export default function CrudPage({ title, path, fields }: { title: string; path:
     catch { setMessage('Delete failed'); setType('err'); }
   };
 
-  return <div className='space-y-4'><Toast message={message} type={type} /><h1 className='text-2xl font-bold'>{title}</h1><div className='flex gap-2'><input className='w-full max-w-sm rounded border p-2' value={query} onChange={(e) => setQuery(e.target.value)} placeholder='Search...' /><button className='rounded bg-slate-700 px-3 py-2 text-white' onClick={load}>Filter</button></div><div className='grid gap-3 rounded border p-4 md:grid-cols-2'>{fields.map((f) => <FormField key={f.key} label={f.label} type={f.type} value={form[f.key] ?? (f.type === 'checkbox' ? true : '')} onChange={(value) => setForm({ ...form, [f.key]: value })} />)}<div className='md:col-span-2 flex gap-2'><button className='rounded bg-emerald-700 px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-50' onClick={save} disabled={saving}>{saving ? 'Saving…' : editingId ? 'Update' : 'Create'}</button>{editingId && <button className='rounded border px-4 py-2 disabled:cursor-not-allowed disabled:opacity-50' onClick={() => { setForm({}); setEditingId(null); }} disabled={saving}>Cancel</button>}</div></div>{loading ? <p>Loading records...</p> : items.length === 0 ? <div className='rounded border border-dashed p-6 text-center text-slate-500'>No records yet.</div> : <DataTable items={items} columns={fields.map((f) => f.key)} onEdit={edit} onDelete={del} />}</div>;
+  return <div className='space-y-4'><Toast message={message} type={type} /><h1 className='text-2xl font-bold'>{title}</h1><div className='flex gap-2'><input className='w-full max-w-sm rounded border p-2' value={query} onChange={(e) => setQuery(e.target.value)} placeholder='Search...' /><button className='rounded bg-slate-700 px-3 py-2 text-white' onClick={load}>Filter</button></div><div className='grid gap-3 rounded border p-4 md:grid-cols-2'>{fields.map((f) => <FormField key={f.key} label={f.label} type={f.type} options={refOptions[f.key]} value={form[f.key] ?? (f.type === 'checkbox' ? true : '')} onChange={(value) => setForm({ ...form, [f.key]: value })} />)}<div className='md:col-span-2 flex gap-2'><button className='rounded bg-emerald-700 px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-50' onClick={save} disabled={saving}>{saving ? 'Saving…' : editingId ? 'Update' : 'Create'}</button>{editingId && <button className='rounded border px-4 py-2 disabled:cursor-not-allowed disabled:opacity-50' onClick={() => { setForm({}); setEditingId(null); }} disabled={saving}>Cancel</button>}</div></div>{loading ? <p>Loading records...</p> : items.length === 0 ? <div className='rounded border border-dashed p-6 text-center text-slate-500'>No records yet.</div> : <DataTable items={items} columns={fields.map((f) => f.key)} onEdit={edit} onDelete={del} />}</div>;
 }

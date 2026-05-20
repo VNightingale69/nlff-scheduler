@@ -65,8 +65,6 @@ class OrganizationRead(BaseSchema, OrganizationCreate):
 class DivisionCreate(BaseModel):
     name: str
     required_field_layout_type: str
-    min_age: int | None = None
-    max_age: int | None = None
     is_active: bool = True
 
 class DivisionRead(BaseSchema, DivisionCreate):

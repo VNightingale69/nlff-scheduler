@@ -20,9 +20,9 @@ class SchedulingValidationTest(unittest.TestCase):
         self.db: Session = sessionmaker(bind=engine)()
 
         self.org = Organization(id=uuid.uuid4(), name='Org', is_active=True)
-        self.division = Division(id=uuid.uuid4(), name='U10', required_field_layout_type='7v7', is_active=True)
+        self.division = Division(id=uuid.uuid4(), name='3rd Grade', required_field_layout_type='THIRTY_YARD_WIDTH', is_active=True)
         self.host = HostLocation(id=uuid.uuid4(), organization_id=self.org.id, name='Park', is_active=True)
-        self.field = Field(id=uuid.uuid4(), host_location_id=self.host.id, name='Field A', layout_type='7v7', is_active=True)
+        self.field = Field(id=uuid.uuid4(), host_location_id=self.host.id, name='Field A', layout_type='THIRTY_YARD_WIDTH', is_active=True)
         self.home = Team(id=uuid.uuid4(), organization_id=self.org.id, division_id=self.division.id, name='A', is_active=True)
         self.away = Team(id=uuid.uuid4(), organization_id=self.org.id, division_id=self.division.id, name='B', is_active=True)
         self.status = GameStatus(id=uuid.uuid4(), code='scheduled', label='Scheduled', is_active=True)
@@ -45,7 +45,7 @@ class SchedulingValidationTest(unittest.TestCase):
         )
 
     def test_field_layout_validation(self):
-        self.field.layout_type = '5v5'
+        self.field.layout_type = 'FIFTY_THREE_YARD_WIDTH'
         self.db.commit()
         result = validate_game(self.db, self.base_payload())
         self.assertTrue(any(c.code == 'layout_mismatch' for c in result.hard_conflicts))
@@ -62,7 +62,7 @@ class SchedulingValidationTest(unittest.TestCase):
         published = GameStatus(id=uuid.uuid4(), code='published', label='Published', is_active=True)
         self.db.add(published)
         self.db.commit()
-        self.field.layout_type = '5v5'
+        self.field.layout_type = 'FIFTY_THREE_YARD_WIDTH'
         self.db.commit()
         payload = self.base_payload().model_copy(update={'game_status_id': published.id})
         with self.assertRaises(HTTPException):
@@ -72,7 +72,7 @@ class SchedulingValidationTest(unittest.TestCase):
         draft = GameStatus(id=uuid.uuid4(), code='draft', label='Draft', is_active=True)
         self.db.add(draft)
         self.db.commit()
-        self.field.layout_type = '5v5'
+        self.field.layout_type = 'FIFTY_THREE_YARD_WIDTH'
         self.db.commit()
         payload = self.base_payload().model_copy(update={'game_status_id': draft.id})
         result = create_game(payload, db=self.db)

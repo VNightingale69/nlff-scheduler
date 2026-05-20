@@ -142,9 +142,9 @@ curl -i -X POST http://localhost:8000/api/auth/login \
 ## 4. Create field
 
 Use a layout type compatible with your test division:
-- [ ] Small: Coed K-1, Coed 2-3, Girls K-2, Girls 3-5
-- [ ] Large: Coed 4-5, Coed 6-7, Coed 8, Girls 6-8
-- [ ] Both: field supports either layout
+- [ ] THIRTY_YARD_WIDTH: Kindergarten, 1st Grade, 2nd Grade, 3rd Grade
+- [ ] FIFTY_THREE_YARD_WIDTH: 4th Grade, 5th Grade, 6th Grade, 7th Grade, 8th Grade
+- [ ] Field layout selection is one of the two supported layout types
 
 ## 5. Create team
 
