@@ -1,5 +1,5 @@
 import uuid
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from datetime import date
 
 from sqlalchemy import func
@@ -27,12 +27,15 @@ def paginate(query, page: int, page_size: int):
 
 def _host_location_dependency_summary(db: Session, host_location_id: uuid.UUID) -> list[tuple[str, int]]:
     field_ids_subquery = db.query(Field.id).filter(Field.host_location_id == host_location_id).subquery()
+    area_ids_subquery = db.query(PhysicalFieldArea.id).filter(PhysicalFieldArea.host_location_id == host_location_id).subquery()
     today = date.today()
     return [
-        ('Fields exist', db.query(Field).filter(Field.host_location_id == host_location_id).count()),
-        ('Physical Field Areas exist', db.query(PhysicalFieldArea).filter(PhysicalFieldArea.host_location_id == host_location_id).count()),
-        ('Hosting Availability records exist', db.query(HostingAvailability).filter(HostingAvailability.field_id.in_(field_ids_subquery)).count()),
-        ('Scheduled games exist', db.query(Game).join(Game.field).filter(Field.host_location_id == host_location_id, Game.game_date >= today).count()),
+        ('Fields', db.query(Field).filter(Field.host_location_id == host_location_id).count()),
+        ('Physical Field Areas', db.query(PhysicalFieldArea).filter(PhysicalFieldArea.host_location_id == host_location_id).count()),
+        ('Hosting Availability', db.query(HostingAvailability).filter((HostingAvailability.field_id.in_(field_ids_subquery)) | (HostingAvailability.physical_field_area_id.in_(area_ids_subquery))).count()),
+        ('Field Configuration Options', db.query(FieldConfigurationOption).filter(FieldConfigurationOption.physical_field_area_id.in_(area_ids_subquery)).count()),
+        ('Scheduled Games', db.query(Game).join(Game.field).filter(Field.host_location_id == host_location_id, Game.game_date >= today).count()),
+        ('Published Games', db.query(Game).join(Game.status).join(Game.field).filter(Field.host_location_id == host_location_id, GameStatus.code == 'published').count()),
     ]
 
 
@@ -161,15 +164,47 @@ def get_host_location_delete_check(item_id: uuid.UUID, current_user: User = Depe
 
 
 @router.delete('/host-locations/{item_id}', dependencies=[Depends(get_current_user)])
-def del_host_location(item_id: uuid.UUID, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def del_host_location(item_id: uuid.UUID, force: bool = Query(False), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     x = db.query(HostLocation).filter(HostLocation.id == item_id).first()
     if not x: raise HTTPException(404, 'Host location not found')
     enforce_organization_scope(x.organization_id, current_user)
     dependencies = _host_location_dependency_summary(db, item_id)
-    detail = _format_delete_blockers(x.name, dependencies)
-    if detail:
-        raise HTTPException(400, detail)
-    db.delete(x); db.commit(); return {'ok': True}
+    dependency_map = {label: count for label, count in dependencies}
+
+    if not force:
+        detail = _format_delete_blockers(x.name, dependencies)
+        if detail:
+            raise HTTPException(400, detail)
+        db.delete(x); db.commit(); return {'ok': True, 'deleted': {'host_locations': 1}}
+
+    require_roles(ROLE_LEAGUE_ADMIN)(current_user)
+    if dependency_map.get('Published Games', 0) > 0:
+        raise HTTPException(400, "Cannot force delete host location with published games.")
+
+    field_ids = [field_id for (field_id,) in db.query(Field.id).filter(Field.host_location_id == item_id).all()]
+    area_ids = [area_id for (area_id,) in db.query(PhysicalFieldArea.id).filter(PhysicalFieldArea.host_location_id == item_id).all()]
+
+    deleted_games = db.query(Game).filter(Game.field_id.in_(field_ids)).delete(synchronize_session=False) if field_ids else 0
+    deleted_hosting_availability = db.query(HostingAvailability).filter(
+        (HostingAvailability.field_id.in_(field_ids)) | (HostingAvailability.physical_field_area_id.in_(area_ids))
+    ).delete(synchronize_session=False) if (field_ids or area_ids) else 0
+    deleted_field_configuration_options = db.query(FieldConfigurationOption).filter(FieldConfigurationOption.physical_field_area_id.in_(area_ids)).delete(synchronize_session=False) if area_ids else 0
+    deleted_fields = db.query(Field).filter(Field.id.in_(field_ids)).delete(synchronize_session=False) if field_ids else 0
+    deleted_physical_field_areas = db.query(PhysicalFieldArea).filter(PhysicalFieldArea.id.in_(area_ids)).delete(synchronize_session=False) if area_ids else 0
+    db.delete(x)
+    db.commit()
+
+    return {
+        'ok': True,
+        'deleted': {
+            'host_locations': 1,
+            'fields': deleted_fields,
+            'physical_field_areas': deleted_physical_field_areas,
+            'hosting_availability': deleted_hosting_availability,
+            'field_configuration_options': deleted_field_configuration_options,
+            'games': deleted_games,
+        }
+    }
 
 @router.post('/physical-field-areas', response_model=PhysicalFieldAreaRead, dependencies=[Depends(get_current_user)])
 def create_physical_field_area(payload: PhysicalFieldAreaCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
