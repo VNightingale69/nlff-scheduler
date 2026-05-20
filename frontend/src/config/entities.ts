@@ -1,7 +1,7 @@
 export type EntityConfig = {
   title: string;
   path: string;
-  fields: { key: string; label: string; type?: 'text' | 'number' | 'date' | 'time' | 'checkbox' }[];
+  fields: { key: string; label: string; type?: 'text' | 'number' | 'date' | 'time' | 'checkbox' | 'select' }[];
   nav: boolean;
   roles?: ('league_admin' | 'community_scheduler')[];
 };
