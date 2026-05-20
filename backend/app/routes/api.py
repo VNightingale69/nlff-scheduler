@@ -8,7 +8,7 @@ from app.database import get_db
 from app.models import Division, Field, Game, GameStatus, HostLocation, HostingAvailability, Organization, Role, Season, Team, User, Week
 from app.schemas import (
     DivisionCreate, DivisionRead, FieldCreate, FieldRead, GameCreate, GameRead, GameSaveResponse,
-    HostLocationCreate, HostLocationRead, HostingAvailabilityCreate, HostingAvailabilityRead,
+    HostLocationCreate, HostLocationRead, HostingAvailabilityCreate, HostingAvailabilityRead, HostingAvailabilityBulkUpsertRequest, HostingAvailabilityBulkUpsertResponse,
     LoginRequest, OrganizationCreate, OrganizationRead, PagedResponse, PublicGameRead, RefreshRequest,
     TeamCreate, TeamRead, TokenResponse, UserCreate, UserRead
 )
@@ -172,11 +172,18 @@ def create_hosting_availability(payload: HostingAvailabilityCreate, current_user
     x = HostingAvailability(**payload.model_dump()); db.add(x); db.commit(); db.refresh(x); return x
 
 @router.get('/hosting-availabilities', response_model=PagedResponse[HostingAvailabilityRead], dependencies=[Depends(get_current_user)])
-def list_hosting_availabilities(field_id: uuid.UUID | None = None, available_date: str | None = None, page: int = 1, page_size: int = 20, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def list_hosting_availabilities(field_id: uuid.UUID | None = None, field_ids: str | None = None, host_location_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, available_date: str | None = None, available_dates: str | None = None, page: int = 1, page_size: int = 20, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     q = db.query(HostingAvailability).join(HostingAvailability.field).join(Field.host_location)
     if current_user.role.name == ROLE_COMMUNITY_SCHEDULER: q = q.filter(HostLocation.organization_id == current_user.organization_id)
+    elif organization_id: q = q.filter(HostLocation.organization_id == organization_id)
+    if host_location_id: q = q.filter(Field.host_location_id == host_location_id)
     if field_id: q = q.filter(HostingAvailability.field_id == field_id)
+    if field_ids:
+        parsed = [uuid.UUID(x.strip()) for x in field_ids.split(',') if x.strip()]
+        if parsed: q = q.filter(HostingAvailability.field_id.in_(parsed))
     if available_date: q = q.filter(func.cast(HostingAvailability.available_date, str) == available_date)
+    if available_dates:
+        q = q.filter(func.cast(HostingAvailability.available_date, str).in_([x.strip() for x in available_dates.split(',') if x.strip()]))
     return paginate(q.order_by(HostingAvailability.available_date, HostingAvailability.start_time), page, page_size)
 
 @router.put('/hosting-availabilities/{item_id}', response_model=HostingAvailabilityRead, dependencies=[Depends(get_current_user)])
@@ -196,6 +203,30 @@ def del_hosting_availability(item_id: uuid.UUID, current_user: User = Depends(ge
     enforce_organization_scope(x.field.host_location.organization_id, current_user)
     db.delete(x); db.commit(); return {'ok': True}
 
+
+
+@router.post('/hosting-availabilities/bulk-upsert', response_model=HostingAvailabilityBulkUpsertResponse, dependencies=[Depends(get_current_user)])
+def bulk_upsert_hosting_availabilities(payload: HostingAvailabilityBulkUpsertRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    created = 0
+    updated = 0
+    for slot in payload.slots:
+        field = db.query(Field).join(Field.host_location).filter(Field.id == slot.field_id).first()
+        if not field: raise HTTPException(400, f'Invalid field: {slot.field_id}')
+        enforce_organization_scope(field.host_location.organization_id, current_user)
+        existing = db.query(HostingAvailability).filter(
+            HostingAvailability.field_id == slot.field_id,
+            HostingAvailability.available_date == slot.available_date,
+            HostingAvailability.start_time == slot.start_time,
+            HostingAvailability.end_time == slot.end_time,
+        ).first()
+        if existing:
+            existing.is_available = slot.is_available
+            updated += 1
+        else:
+            db.add(HostingAvailability(**slot.model_dump()))
+            created += 1
+    db.commit()
+    return HostingAvailabilityBulkUpsertResponse(created=created, updated=updated)
 @router.post('/teams', response_model=TeamRead, dependencies=[Depends(get_current_user)])
 def create_team(payload: TeamCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     enforce_organization_scope(payload.organization_id, current_user)
