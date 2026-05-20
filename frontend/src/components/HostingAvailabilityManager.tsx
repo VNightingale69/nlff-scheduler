@@ -19,7 +19,7 @@ export default function HostingAvailabilityManager(){
   const [loading,setLoading]=useState(true); const [saving,setSaving]=useState(false);
   const user=getAuthUser(); const token=getToken();
 
-  useEffect(()=>{(async()=>{setLoading(true);try{const [o,h,a,c]=await Promise.all([apiFetch('/organizations?page_size=500',{},token),apiFetch('/host-locations?page_size=500',{},token),apiFetch('/physical-field-areas?page_size=1000',{},token),apiFetch('/field-configuration-options?page_size=2000',{},token)]); setOrgs(o.items||[]); setHosts(h.items||[]); setAreas(a.items||[]); setConfigs(c.items||[]); if(user?.role_name==='community_scheduler') setOrgId(user.organization_id||'');}catch(e:any){setMessage(e.message||'Failed to load');setType('err');}finally{setLoading(false);}})();},[]);
+  useEffect(()=>{(async()=>{setLoading(true);try{const [o,h,a,c]=await Promise.all([apiFetch('/organizations?page_size=500',{},token),apiFetch('/host-locations?page_size=500&is_active=true',{},token),apiFetch('/physical-field-areas?page_size=1000',{},token),apiFetch('/field-configuration-options?page_size=2000',{},token)]); setOrgs(o.items||[]); setHosts(h.items||[]); setAreas(a.items||[]); setConfigs(c.items||[]); if(user?.role_name==='community_scheduler') setOrgId(user.organization_id||'');}catch(e:any){setMessage(e.message||'Failed to load');setType('err');}finally{setLoading(false);}})();},[]);
 
   const hostOptions = useMemo(()=>hosts.filter((h:any)=>!orgId||h.organization_id===orgId),[hosts,orgId]);
   const visibleAreas = useMemo(()=>areas.filter((a:any)=>!hostId||a.host_location_id===hostId),[areas,hostId]);

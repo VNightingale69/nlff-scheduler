@@ -1,5 +1,7 @@
 import uuid
 from fastapi import APIRouter, Depends, HTTPException
+from datetime import date
+
 from sqlalchemy import func
 from sqlalchemy.orm import Session, aliased
 
@@ -21,6 +23,24 @@ def paginate(query, page: int, page_size: int):
     total = query.count(); items = query.offset((page - 1) * page_size).limit(page_size).all()
     return PagedResponse(items=items, total=total, page=page, page_size=page_size)
 
+
+
+def _host_location_dependency_summary(db: Session, host_location_id: uuid.UUID) -> list[tuple[str, int]]:
+    field_ids_subquery = db.query(Field.id).filter(Field.host_location_id == host_location_id).subquery()
+    today = date.today()
+    return [
+        ('Fields exist', db.query(Field).filter(Field.host_location_id == host_location_id).count()),
+        ('Physical Field Areas exist', db.query(PhysicalFieldArea).filter(PhysicalFieldArea.host_location_id == host_location_id).count()),
+        ('Hosting Availability records exist', db.query(HostingAvailability).filter(HostingAvailability.field_id.in_(field_ids_subquery)).count()),
+        ('Scheduled games exist', db.query(Game).join(Game.field).filter(Field.host_location_id == host_location_id, Game.game_date >= today).count()),
+    ]
+
+
+def _format_delete_blockers(host_location_name: str, dependencies: list[tuple[str, int]]) -> str:
+    blockers = [f"{count} {label}" for label, count in dependencies if count > 0]
+    if not blockers:
+        return ''
+    return f"Cannot delete Host Location '{host_location_name}' because " + '; '.join(blockers) + '.'
 def _user_payload(user: User) -> dict:
     return {
         'id': user.id, 'email': user.email, 'full_name': user.full_name,
@@ -110,11 +130,12 @@ def create_host_location(payload: HostLocationCreate, current_user: User = Depen
     x = HostLocation(**payload.model_dump()); db.add(x); db.commit(); db.refresh(x); return x
 
 @router.get('/host-locations', response_model=PagedResponse[HostLocationRead], dependencies=[Depends(get_current_user)])
-def list_host_locations(search: str | None = None, organization_id: uuid.UUID | None = None, page: int = 1, page_size: int = 20, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def list_host_locations(search: str | None = None, organization_id: uuid.UUID | None = None, is_active: bool | None = None, page: int = 1, page_size: int = 20, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     q = db.query(HostLocation)
     if current_user.role.name == ROLE_COMMUNITY_SCHEDULER: q = q.filter(HostLocation.organization_id == current_user.organization_id)
     elif organization_id: q = q.filter(HostLocation.organization_id == organization_id)
     if search: q = q.filter(func.lower(HostLocation.name).like(f"%{search.lower()}%"))
+    if is_active is not None: q = q.filter(HostLocation.is_active == is_active)
     return paginate(q.order_by(HostLocation.name), page, page_size)
 
 @router.put('/host-locations/{item_id}', response_model=HostLocationRead, dependencies=[Depends(get_current_user)])
@@ -125,11 +146,29 @@ def upd_host_location(item_id: uuid.UUID, payload: HostLocationCreate, current_u
     for k, v in payload.model_dump().items(): setattr(x, k, v)
     db.commit(); db.refresh(x); return x
 
+@router.get('/host-locations/{item_id}/delete-check', dependencies=[Depends(get_current_user)])
+def get_host_location_delete_check(item_id: uuid.UUID, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    x = db.query(HostLocation).filter(HostLocation.id == item_id).first()
+    if not x: raise HTTPException(404, 'Host location not found')
+    enforce_organization_scope(x.organization_id, current_user)
+    dependencies = _host_location_dependency_summary(db, item_id)
+    return {
+        'host_location_id': str(x.id),
+        'host_location_name': x.name,
+        'can_delete': all(count == 0 for _, count in dependencies),
+        'dependencies': [{'label': label, 'count': count} for label, count in dependencies],
+    }
+
+
 @router.delete('/host-locations/{item_id}', dependencies=[Depends(get_current_user)])
 def del_host_location(item_id: uuid.UUID, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     x = db.query(HostLocation).filter(HostLocation.id == item_id).first()
     if not x: raise HTTPException(404, 'Host location not found')
     enforce_organization_scope(x.organization_id, current_user)
+    dependencies = _host_location_dependency_summary(db, item_id)
+    detail = _format_delete_blockers(x.name, dependencies)
+    if detail:
+        raise HTTPException(400, detail)
     db.delete(x); db.commit(); return {'ok': True}
 
 @router.post('/physical-field-areas', response_model=PhysicalFieldAreaRead, dependencies=[Depends(get_current_user)])
