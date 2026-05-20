@@ -51,7 +51,7 @@ def upgrade() -> None:
         ]
         op.create_table(name, *columns, sa.UniqueConstraint('name'))
 
-    op.create_table('divisions', sa.Column('id', _uuid_col(), primary_key=True), sa.Column('name', sa.String(120), nullable=False), sa.Column('required_field_layout_type', sa.String(100), nullable=False), sa.Column('min_age', sa.Integer()), sa.Column('max_age', sa.Integer()), sa.Column('is_active', sa.Boolean(), nullable=False, server_default=sa.text('true')), sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False), sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False), sa.UniqueConstraint('name'))
+    op.create_table('divisions', sa.Column('id', _uuid_col(), primary_key=True), sa.Column('name', sa.String(120), nullable=False), sa.Column('required_field_layout_type', sa.String(100), nullable=False), sa.Column('is_active', sa.Boolean(), nullable=False, server_default=sa.text('true')), sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False), sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False), sa.UniqueConstraint('name'))
 
     op.create_table('host_locations', sa.Column('id', _uuid_col(), primary_key=True), sa.Column('organization_id', _uuid_col(), sa.ForeignKey('organizations.id'), nullable=False), sa.Column('name', sa.String(255), nullable=False), sa.Column('address', sa.String(255)), sa.Column('is_active', sa.Boolean(), nullable=False, server_default=sa.text('true')), sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False), sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False), sa.UniqueConstraint('organization_id', 'name', name='uq_host_location_org_name'))
     op.create_table('fields', sa.Column('id', _uuid_col(), primary_key=True), sa.Column('host_location_id', _uuid_col(), sa.ForeignKey('host_locations.id'), nullable=False), sa.Column('name', sa.String(120), nullable=False), sa.Column('layout_type', sa.String(100), nullable=False), sa.Column('is_active', sa.Boolean(), nullable=False, server_default=sa.text('true')), sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False), sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False), sa.UniqueConstraint('host_location_id', 'name', name='uq_field_location_name'))
@@ -63,12 +63,17 @@ def upgrade() -> None:
     op.create_table('games', sa.Column('id', _uuid_col(), primary_key=True), sa.Column('season_id', _uuid_col(), sa.ForeignKey('seasons.id'), nullable=False), sa.Column('week_id', _uuid_col(), sa.ForeignKey('weeks.id'), nullable=False), sa.Column('home_team_id', _uuid_col(), sa.ForeignKey('teams.id'), nullable=False), sa.Column('away_team_id', _uuid_col(), sa.ForeignKey('teams.id'), nullable=False), sa.Column('field_id', _uuid_col(), sa.ForeignKey('fields.id'), nullable=False), sa.Column('game_status_id', _uuid_col(), sa.ForeignKey('game_statuses.id'), nullable=False), sa.Column('game_date', sa.Date(), nullable=False), sa.Column('kickoff_time', sa.Time(), nullable=False), sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False), sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False))
 
     op.execute("""
-        INSERT INTO divisions (id, name, required_field_layout_type, min_age, max_age, is_active)
+        INSERT INTO divisions (id, name, required_field_layout_type, is_active)
         VALUES
-          (gen_random_uuid(), 'K-1', 'small-sided', 5, 7, true),
-          (gen_random_uuid(), '2-3', 'mid-sided', 7, 9, true),
-          (gen_random_uuid(), '4-5', 'standard', 9, 11, true),
-          (gen_random_uuid(), '6-8', 'full', 11, 14, true)
+          (gen_random_uuid(), 'Kindergarten', 'THIRTY_YARD_WIDTH', true),
+          (gen_random_uuid(), '1st Grade', 'THIRTY_YARD_WIDTH', true),
+          (gen_random_uuid(), '2nd Grade', 'THIRTY_YARD_WIDTH', true),
+          (gen_random_uuid(), '3rd Grade', 'THIRTY_YARD_WIDTH', true),
+          (gen_random_uuid(), '4th Grade', 'FIFTY_THREE_YARD_WIDTH', true),
+          (gen_random_uuid(), '5th Grade', 'FIFTY_THREE_YARD_WIDTH', true),
+          (gen_random_uuid(), '6th Grade', 'FIFTY_THREE_YARD_WIDTH', true),
+          (gen_random_uuid(), '7th Grade', 'FIFTY_THREE_YARD_WIDTH', true),
+          (gen_random_uuid(), '8th Grade', 'FIFTY_THREE_YARD_WIDTH', true)
     """)
 
 

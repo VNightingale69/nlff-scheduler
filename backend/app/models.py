@@ -52,8 +52,6 @@ class Division(Base, TimestampMixin):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
     required_field_layout_type: Mapped[str] = mapped_column(String(100), nullable=False)
-    min_age: Mapped[int | None] = mapped_column(Integer)
-    max_age: Mapped[int | None] = mapped_column(Integer)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
 class HostLocation(Base, TimestampMixin):
