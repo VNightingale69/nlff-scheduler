@@ -27,12 +27,49 @@ export default function CrudPage({ title, path, fields }: { title: string; path:
     try {
       const d = await apiFetch(`${path}?search=${encodeURIComponent(query)}`, {}, getToken());
       setItems(d.items || []);
-    } catch {
+    } catch (error) {
+      console.error(`[CrudPage] Failed to load records for ${path}`, error);
       setMessage('Failed to load records'); setType('err');
     } finally { setLoading(false); }
   };
 
-  useEffect(() => { load(); (async()=>{ try { const token=getToken(); const [orgs,divs,hosts,fieldsResp]=await Promise.all([apiFetch('/organizations?page_size=500',{},token),apiFetch('/divisions?page_size=500',{},token),apiFetch('/host-locations?page_size=500',{},token),apiFetch('/fields?page_size=500',{},token)]); const hostsById = Object.fromEntries((hosts.items||[]).map((h:any)=>[h.id,h.name])); setRefOptions({organization_id:(orgs.items||[]).map((o:any)=>({value:o.id,label:o.name})),division_id:(divs.items||[]).map((o:any)=>({value:o.id,label:o.name})),host_location_id:(hosts.items||[]).map((o:any)=>({value:o.id,label:o.name})),field_id:(fieldsResp.items||[]).map((f:any)=>({value:f.id,label:`${hostsById[f.host_location_id] || 'Unknown host'} / ${f.name}`})),required_field_layout_type:[{value:'THIRTY_YARD_WIDTH',label:'THIRTY_YARD_WIDTH'},{value:'FIFTY_THREE_YARD_WIDTH',label:'FIFTY_THREE_YARD_WIDTH'}],layout_type:[{value:'THIRTY_YARD_WIDTH',label:'THIRTY_YARD_WIDTH'},{value:'FIFTY_THREE_YARD_WIDTH',label:'FIFTY_THREE_YARD_WIDTH'}]}); } catch {} })(); }, []);
+  useEffect(() => {
+    load();
+    (async () => {
+      const token = getToken();
+      const [orgsResult, divsResult, hostsResult, fieldsResult] = await Promise.allSettled([
+        apiFetch('/organizations?page_size=500', {}, token),
+        apiFetch('/divisions?page_size=500', {}, token),
+        apiFetch('/host-locations?page_size=500&is_active=true', {}, token),
+        apiFetch('/fields?page_size=500', {}, token),
+      ]);
+
+      if (orgsResult.status === 'rejected') console.error('[CrudPage] Failed to load organizations', orgsResult.reason);
+      if (divsResult.status === 'rejected') console.error('[CrudPage] Failed to load divisions', divsResult.reason);
+      if (hostsResult.status === 'rejected') console.error('[CrudPage] Failed to load host locations', hostsResult.reason);
+      if (fieldsResult.status === 'rejected') console.error('[CrudPage] Failed to load fields reference list', fieldsResult.reason);
+
+      const orgs = orgsResult.status === 'fulfilled' ? orgsResult.value : { items: [] };
+      const divs = divsResult.status === 'fulfilled' ? divsResult.value : { items: [] };
+      const hosts = hostsResult.status === 'fulfilled' ? hostsResult.value : { items: [] };
+      const fieldsResp = fieldsResult.status === 'fulfilled' ? fieldsResult.value : { items: [] };
+
+      const orgsById = Object.fromEntries((orgs.items || []).map((o: any) => [o.id, o.name]));
+      const hostsById = Object.fromEntries((hosts.items || []).map((h: any) => [h.id, h.name]));
+
+      setRefOptions({
+        organization_id: (orgs.items || []).map((o: any) => ({ value: o.id, label: o.name })),
+        division_id: (divs.items || []).map((o: any) => ({ value: o.id, label: o.name })),
+        host_location_id: (hosts.items || []).map((host: any) => ({
+          value: host.id,
+          label: host.organization_id && orgsById[host.organization_id] ? `${host.name} (${orgsById[host.organization_id]})` : host.name,
+        })),
+        field_id: (fieldsResp.items || []).map((f: any) => ({ value: f.id, label: `${hostsById[f.host_location_id] || 'Unknown host'} / ${f.name}` })),
+        required_field_layout_type: [{ value: 'THIRTY_YARD_WIDTH', label: 'THIRTY_YARD_WIDTH' }, { value: 'FIFTY_THREE_YARD_WIDTH', label: 'FIFTY_THREE_YARD_WIDTH' }],
+        layout_type: [{ value: 'THIRTY_YARD_WIDTH', label: 'THIRTY_YARD_WIDTH' }, { value: 'FIFTY_THREE_YARD_WIDTH', label: 'FIFTY_THREE_YARD_WIDTH' }],
+      });
+    })();
+  }, []);
 
   const missingRequired = useMemo(
     () =>
