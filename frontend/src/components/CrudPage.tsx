@@ -17,6 +17,11 @@ export default function CrudPage({ title, path, fields }: { title: string; path:
   const [type, setType] = useState<'ok' | 'err'>('ok');
   const [refOptions, setRefOptions] = useState<Record<string, { value: string; label: string }[]>>({});
 
+  const valueLabels = useMemo(() => Object.fromEntries(
+    Object.entries(refOptions).map(([field, options]) => [field, Object.fromEntries(options.map((option) => [option.value, option.label]))])
+  ), [refOptions]);
+
+
   const load = async () => {
     setLoading(true);
     try {
@@ -70,5 +75,5 @@ export default function CrudPage({ title, path, fields }: { title: string; path:
     catch { setMessage('Delete failed'); setType('err'); }
   };
 
-  return <div className='space-y-4'><Toast message={message} type={type} /><h1 className='text-2xl font-bold'>{title}</h1><div className='flex gap-2'><input className='w-full max-w-sm rounded border p-2' value={query} onChange={(e) => setQuery(e.target.value)} placeholder='Search...' /><button className='rounded bg-slate-700 px-3 py-2 text-white' onClick={load}>Filter</button></div><div className='grid gap-3 rounded border p-4 md:grid-cols-2'>{fields.map((f) => <FormField key={f.key} label={f.label} type={f.type} options={refOptions[f.key]} value={form[f.key] ?? (f.type === 'checkbox' ? true : '')} onChange={(value) => setForm({ ...form, [f.key]: value })} />)}<div className='md:col-span-2 flex gap-2'><button className='rounded bg-emerald-700 px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-50' onClick={save} disabled={saving}>{saving ? 'Saving…' : editingId ? 'Update' : 'Create'}</button>{editingId && <button className='rounded border px-4 py-2 disabled:cursor-not-allowed disabled:opacity-50' onClick={() => { setForm({}); setEditingId(null); }} disabled={saving}>Cancel</button>}</div></div>{loading ? <p>Loading records...</p> : items.length === 0 ? <div className='rounded border border-dashed p-6 text-center text-slate-500'>No records yet.</div> : <DataTable items={items} columns={fields.map((f) => f.key)} onEdit={edit} onDelete={del} />}</div>;
+  return <div className='space-y-4'><Toast message={message} type={type} /><h1 className='text-2xl font-bold'>{title}</h1><div className='flex gap-2'><input className='w-full max-w-sm rounded border p-2' value={query} onChange={(e) => setQuery(e.target.value)} placeholder='Search...' /><button className='rounded bg-slate-700 px-3 py-2 text-white' onClick={load}>Filter</button></div><div className='grid gap-3 rounded border p-4 md:grid-cols-2'>{fields.map((f) => <FormField key={f.key} label={f.label} type={f.type} options={refOptions[f.key]} value={form[f.key] ?? (f.type === 'checkbox' ? true : '')} onChange={(value) => setForm({ ...form, [f.key]: value })} />)}<div className='md:col-span-2 flex gap-2'><button className='rounded bg-emerald-700 px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-50' onClick={save} disabled={saving}>{saving ? 'Saving…' : editingId ? 'Update' : 'Create'}</button>{editingId && <button className='rounded border px-4 py-2 disabled:cursor-not-allowed disabled:opacity-50' onClick={() => { setForm({}); setEditingId(null); }} disabled={saving}>Cancel</button>}</div></div>{loading ? <p>Loading records...</p> : items.length === 0 ? <div className='rounded border border-dashed p-6 text-center text-slate-500'>No records yet.</div> : <DataTable items={items} columns={fields.map((f) => f.key)} onEdit={edit} onDelete={del} valueLabels={valueLabels} />}</div>;
 }
