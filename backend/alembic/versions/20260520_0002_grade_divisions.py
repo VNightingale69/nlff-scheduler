@@ -10,7 +10,7 @@ import sqlalchemy as sa
 
 
 revision = '20260520_0002'
-down_revision = '20260518_0001'
+down_revision = '20260519_0002'
 branch_labels = None
 depends_on = None
 
@@ -30,8 +30,14 @@ def upgrade() -> None:
           (gen_random_uuid(), '7th Grade', 'FIFTY_THREE_YARD_WIDTH', true),
           (gen_random_uuid(), '8th Grade', 'FIFTY_THREE_YARD_WIDTH', true)
     """)
-    op.drop_column('divisions', 'min_age')
-    op.drop_column('divisions', 'max_age')
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    division_columns = {column['name'] for column in inspector.get_columns('divisions')}
+
+    if 'min_age' in division_columns:
+        op.drop_column('divisions', 'min_age')
+    if 'max_age' in division_columns:
+        op.drop_column('divisions', 'max_age')
 
 
 def downgrade() -> None:
