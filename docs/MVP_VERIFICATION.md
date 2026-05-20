@@ -55,6 +55,7 @@ Seeding is currently automatic and split across startup + migrations:
 - Migration seeds baseline divisions.
 - Backend startup seeds roles/admin only after required tables exist.
 - Backend startup seeds admin user from `ADMIN_SEED_*` values when missing.
+- Startup logs show whether roles/admin were seeded or already present.
 
 ### Default admin login (if env defaults are used)
 
