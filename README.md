@@ -169,7 +169,25 @@ Passwords must be 8-128 chars and include:
 - Backend uses FastAPI `CORSMiddleware`.
 - Default allowed origin is `http://localhost:3000` (configurable via `CORS_ORIGINS`).
 - Allowed methods: `GET, POST, PUT, PATCH, DELETE, OPTIONS`.
-- Allowed headers: `Authorization, Content-Type`.
+- Allowed headers: `*` (covers `Authorization`, `Content-Type`, and preflight-requested custom headers).
+- Middleware is attached at the top-level FastAPI app, so it applies to all `/api/*` routes (including `/api/fields` and `/api/host-locations`) and error responses.
+
+
+
+#### CORS preflight validation example
+
+```bash
+curl -i -X OPTIONS http://localhost:8000/api/fields \
+  -H "Origin: http://localhost:3000" \
+  -H "Access-Control-Request-Method: POST" \
+  -H "Access-Control-Request-Headers: content-type,authorization"
+```
+
+Expected response headers include:
+
+- `access-control-allow-origin: http://localhost:3000`
+- `access-control-allow-credentials: true`
+- `access-control-allow-methods` containing `GET, POST, PUT, PATCH, DELETE, OPTIONS`
 
 ### Protected vs public routes
 
