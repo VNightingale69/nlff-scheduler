@@ -95,6 +95,44 @@ def validate_game(db: Session, payload: GameCreate, game_id: uuid.UUID | None = 
             hard_conflicts.append(
                 ValidationMessage(code='outside_availability', message='Game must be within host location and field availability.')
             )
+        if field.physical_field_area_id:
+            area_slots = (
+                db.query(HostingAvailability)
+                .filter(
+                    HostingAvailability.physical_field_area_id == field.physical_field_area_id,
+                    HostingAvailability.available_date == payload.game_date,
+                    HostingAvailability.is_available.is_(True),
+                )
+                .all()
+            )
+            matching_area_slots = []
+            for slot in area_slots:
+                slot_start = datetime.combine(slot.available_date, slot.start_time)
+                slot_end = datetime.combine(slot.available_date, slot.end_time)
+                if game_start >= slot_start and game_end <= slot_end:
+                    matching_area_slots.append(slot)
+            division = db.query(Division).filter(Division.id == home_team.division_id).first() if home_team else None
+            needed_layout = division.required_field_layout_type if division else None
+            if needed_layout:
+                supported_count = len([s for s in matching_area_slots if s.layout_type == needed_layout])
+                if supported_count == 0:
+                    hard_conflicts.append(ValidationMessage(code='area_layout_unavailable', message='No compatible field layout slot is available in selected physical field area for this time block.'))
+                overlapping_games = db.query(Game).join(Game.field).filter(
+                    Game.game_date == payload.game_date,
+                    Field.physical_field_area_id == field.physical_field_area_id,
+                ).all()
+                used = 0
+                for existing in overlapping_games:
+                    if game_id and existing.id == game_id:
+                        continue
+                    existing_start = datetime.combine(existing.game_date, existing.kickoff_time)
+                    existing_end = existing_start + timedelta(minutes=GAME_DURATION_MINUTES)
+                    if _windows_overlap(game_start, game_end, existing_start, existing_end):
+                        existing_division = db.query(Division).filter(Division.id == existing.home_team.division_id).first()
+                        if existing_division and existing_division.required_field_layout_type == needed_layout:
+                            used += 1
+                if used >= supported_count:
+                    hard_conflicts.append(ValidationMessage(code='physical_field_area_capacity_exceeded', message='Selected physical field area capacity is exceeded for this layout and time block.'))
 
     game_filters = [Game.game_date == payload.game_date]
     if game_id:

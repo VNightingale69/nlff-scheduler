@@ -79,11 +79,34 @@ class HostLocationCreate(BaseModel):
 class HostLocationRead(BaseSchema, HostLocationCreate):
     pass
 
+class PhysicalFieldAreaCreate(BaseModel):
+    host_location_id: uuid.UUID
+    name: str
+    field_space_type: str
+    supports_dynamic_configuration: bool = False
+    notes: str | None = None
+    is_active: bool = True
+
+class PhysicalFieldAreaRead(BaseSchema, PhysicalFieldAreaCreate):
+    pass
+
+class FieldConfigurationOptionCreate(BaseModel):
+    physical_field_area_id: uuid.UUID
+    name: str
+    thirty_yard_capacity: int
+    fifty_three_yard_capacity: int
+    is_active: bool = True
+
+class FieldConfigurationOptionRead(BaseSchema, FieldConfigurationOptionCreate):
+    pass
+
 class FieldCreate(BaseModel):
     host_location_id: uuid.UUID
+    physical_field_area_id: uuid.UUID | None = None
     name: str
     layout_type: str
     is_active: bool = True
+    notes: str | None = None
 
 class FieldRead(BaseSchema, FieldCreate):
     pass
@@ -116,7 +139,11 @@ class WeekRead(BaseSchema, WeekCreate):
     pass
 
 class HostingAvailabilityCreate(BaseModel):
-    field_id: uuid.UUID
+    field_id: uuid.UUID | None = None
+    physical_field_area_id: uuid.UUID | None = None
+    field_configuration_option_id: uuid.UUID | None = None
+    layout_type: str | None = None
+    slot_index: int | None = None
     available_date: date
     start_time: time
     end_time: time
@@ -127,7 +154,11 @@ class HostingAvailabilityRead(BaseSchema, HostingAvailabilityCreate):
 
 
 class HostingAvailabilityBulkSlot(BaseModel):
-    field_id: uuid.UUID
+    field_id: uuid.UUID | None = None
+    physical_field_area_id: uuid.UUID | None = None
+    field_configuration_option_id: uuid.UUID | None = None
+    layout_type: str | None = None
+    slot_index: int | None = None
     available_date: date
     start_time: time
     end_time: time
