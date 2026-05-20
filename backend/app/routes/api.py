@@ -5,10 +5,10 @@ from sqlalchemy.orm import Session, aliased
 
 from app.auth import ROLE_COMMUNITY_SCHEDULER, ROLE_LEAGUE_ADMIN, enforce_organization_scope, get_current_user, require_roles
 from app.database import get_db
-from app.models import Division, Field, Game, GameStatus, HostLocation, HostingAvailability, Organization, Role, Season, Team, User, Week
+from app.models import Division, Field, FieldConfigurationOption, Game, GameStatus, HostLocation, HostingAvailability, Organization, PhysicalFieldArea, Role, Season, Team, User, Week
 from app.schemas import (
-    DivisionCreate, DivisionRead, FieldCreate, FieldRead, GameCreate, GameRead, GameSaveResponse,
-    HostLocationCreate, HostLocationRead, HostingAvailabilityCreate, HostingAvailabilityRead, HostingAvailabilityBulkUpsertRequest, HostingAvailabilityBulkUpsertResponse,
+    DivisionCreate, DivisionRead, FieldConfigurationOptionCreate, FieldConfigurationOptionRead, FieldCreate, FieldRead, GameCreate, GameRead, GameSaveResponse,
+    HostLocationCreate, HostLocationRead, HostingAvailabilityCreate, HostingAvailabilityRead, HostingAvailabilityBulkUpsertRequest, HostingAvailabilityBulkUpsertResponse, PhysicalFieldAreaCreate, PhysicalFieldAreaRead,
     LoginRequest, OrganizationCreate, OrganizationRead, PagedResponse, PublicGameRead, RefreshRequest,
     TeamCreate, TeamRead, TokenResponse, UserCreate, UserRead
 )
@@ -132,11 +132,42 @@ def del_host_location(item_id: uuid.UUID, current_user: User = Depends(get_curre
     enforce_organization_scope(x.organization_id, current_user)
     db.delete(x); db.commit(); return {'ok': True}
 
+@router.post('/physical-field-areas', response_model=PhysicalFieldAreaRead, dependencies=[Depends(get_current_user)])
+def create_physical_field_area(payload: PhysicalFieldAreaCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    host_location = db.query(HostLocation).filter(HostLocation.id == payload.host_location_id).first()
+    if not host_location: raise HTTPException(400, 'Invalid host location')
+    enforce_organization_scope(host_location.organization_id, current_user)
+    x = PhysicalFieldArea(**payload.model_dump()); db.add(x); db.commit(); db.refresh(x); return x
+
+@router.get('/physical-field-areas', response_model=PagedResponse[PhysicalFieldAreaRead], dependencies=[Depends(get_current_user)])
+def list_physical_field_areas(host_location_id: uuid.UUID | None = None, page: int = 1, page_size: int = 50, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    q = db.query(PhysicalFieldArea).join(PhysicalFieldArea.host_location)
+    if current_user.role.name == ROLE_COMMUNITY_SCHEDULER: q = q.filter(HostLocation.organization_id == current_user.organization_id)
+    if host_location_id: q = q.filter(PhysicalFieldArea.host_location_id == host_location_id)
+    return paginate(q.order_by(PhysicalFieldArea.name), page, page_size)
+
+@router.post('/field-configuration-options', response_model=FieldConfigurationOptionRead, dependencies=[Depends(get_current_user)])
+def create_field_configuration_option(payload: FieldConfigurationOptionCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    area = db.query(PhysicalFieldArea).join(PhysicalFieldArea.host_location).filter(PhysicalFieldArea.id == payload.physical_field_area_id).first()
+    if not area: raise HTTPException(400, 'Invalid physical field area')
+    enforce_organization_scope(area.host_location.organization_id, current_user)
+    x = FieldConfigurationOption(**payload.model_dump()); db.add(x); db.commit(); db.refresh(x); return x
+
+@router.get('/field-configuration-options', response_model=PagedResponse[FieldConfigurationOptionRead], dependencies=[Depends(get_current_user)])
+def list_field_configuration_options(physical_field_area_id: uuid.UUID | None = None, page: int = 1, page_size: int = 50, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    q = db.query(FieldConfigurationOption).join(FieldConfigurationOption.physical_field_area).join(PhysicalFieldArea.host_location)
+    if current_user.role.name == ROLE_COMMUNITY_SCHEDULER: q = q.filter(HostLocation.organization_id == current_user.organization_id)
+    if physical_field_area_id: q = q.filter(FieldConfigurationOption.physical_field_area_id == physical_field_area_id)
+    return paginate(q.order_by(FieldConfigurationOption.name), page, page_size)
+
 @router.post('/fields', response_model=FieldRead, dependencies=[Depends(get_current_user)])
 def create_field(payload: FieldCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     host_location = db.query(HostLocation).filter(HostLocation.id == payload.host_location_id).first()
     if not host_location: raise HTTPException(400, 'Invalid host location')
     enforce_organization_scope(host_location.organization_id, current_user)
+    if payload.physical_field_area_id:
+        area = db.query(PhysicalFieldArea).filter(PhysicalFieldArea.id == payload.physical_field_area_id, PhysicalFieldArea.host_location_id == payload.host_location_id).first()
+        if not area: raise HTTPException(400, 'Invalid physical field area for host location')
     x = Field(**payload.model_dump()); db.add(x); db.commit(); db.refresh(x); return x
 
 @router.get('/fields', response_model=PagedResponse[FieldRead], dependencies=[Depends(get_current_user)])
@@ -166,9 +197,18 @@ def del_field(item_id: uuid.UUID, current_user: User = Depends(get_current_user)
 
 @router.post('/hosting-availabilities', response_model=HostingAvailabilityRead, dependencies=[Depends(get_current_user)])
 def create_hosting_availability(payload: HostingAvailabilityCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    field = db.query(Field).join(Field.host_location).filter(Field.id == payload.field_id).first()
-    if not field: raise HTTPException(400, 'Invalid field')
-    enforce_organization_scope(field.host_location.organization_id, current_user)
+    field = None
+    area = None
+    if payload.field_id:
+        field = db.query(Field).join(Field.host_location).filter(Field.id == payload.field_id).first()
+        if not field: raise HTTPException(400, 'Invalid field')
+        enforce_organization_scope(field.host_location.organization_id, current_user)
+    elif payload.physical_field_area_id:
+        area = db.query(PhysicalFieldArea).join(PhysicalFieldArea.host_location).filter(PhysicalFieldArea.id == payload.physical_field_area_id).first()
+        if not area: raise HTTPException(400, 'Invalid physical field area')
+        enforce_organization_scope(area.host_location.organization_id, current_user)
+    else:
+        raise HTTPException(400, 'field_id or physical_field_area_id is required')
     x = HostingAvailability(**payload.model_dump()); db.add(x); db.commit(); db.refresh(x); return x
 
 @router.get('/hosting-availabilities', response_model=PagedResponse[HostingAvailabilityRead], dependencies=[Depends(get_current_user)])
@@ -210,14 +250,28 @@ def bulk_upsert_hosting_availabilities(payload: HostingAvailabilityBulkUpsertReq
     created = 0
     updated = 0
     for slot in payload.slots:
-        field = db.query(Field).join(Field.host_location).filter(Field.id == slot.field_id).first()
-        if not field: raise HTTPException(400, f'Invalid field: {slot.field_id}')
-        enforce_organization_scope(field.host_location.organization_id, current_user)
+        if slot.field_id:
+            field = db.query(Field).join(Field.host_location).filter(Field.id == slot.field_id).first()
+            if not field: raise HTTPException(400, f'Invalid field: {slot.field_id}')
+            enforce_organization_scope(field.host_location.organization_id, current_user)
+        elif slot.physical_field_area_id:
+            area = db.query(PhysicalFieldArea).join(PhysicalFieldArea.host_location).filter(PhysicalFieldArea.id == slot.physical_field_area_id).first()
+            if not area: raise HTTPException(400, f'Invalid physical field area: {slot.physical_field_area_id}')
+            enforce_organization_scope(area.host_location.organization_id, current_user)
+            if not slot.field_configuration_option_id:
+                raise HTTPException(400, 'field_configuration_option_id is required for physical field area slots')
+            option = db.query(FieldConfigurationOption).filter(FieldConfigurationOption.id == slot.field_configuration_option_id, FieldConfigurationOption.physical_field_area_id == slot.physical_field_area_id).first()
+            if not option: raise HTTPException(400, f'Invalid field configuration option: {slot.field_configuration_option_id}')
+        else:
+            raise HTTPException(400, 'Each slot must include field_id or physical_field_area_id')
         existing = db.query(HostingAvailability).filter(
             HostingAvailability.field_id == slot.field_id,
+            HostingAvailability.physical_field_area_id == slot.physical_field_area_id,
             HostingAvailability.available_date == slot.available_date,
             HostingAvailability.start_time == slot.start_time,
             HostingAvailability.end_time == slot.end_time,
+            HostingAvailability.layout_type == slot.layout_type,
+            HostingAvailability.slot_index == slot.slot_index,
         ).first()
         if existing:
             existing.is_available = slot.is_available

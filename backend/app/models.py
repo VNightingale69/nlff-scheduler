@@ -68,11 +68,39 @@ class Field(Base, TimestampMixin):
     __tablename__ = 'fields'
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     host_location_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('host_locations.id'), nullable=False)
+    physical_field_area_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('physical_field_areas.id'))
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     layout_type: Mapped[str] = mapped_column(String(100), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    notes: Mapped[str | None] = mapped_column(Text)
     host_location = relationship('HostLocation')
+    physical_field_area = relationship('PhysicalFieldArea')
     __table_args__ = (UniqueConstraint('host_location_id', 'name', name='uq_field_location_name'),)
+
+
+class PhysicalFieldArea(Base, TimestampMixin):
+    __tablename__ = 'physical_field_areas'
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    host_location_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('host_locations.id'), nullable=False)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    field_space_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    supports_dynamic_configuration: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    notes: Mapped[str | None] = mapped_column(Text)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    host_location = relationship('HostLocation')
+    __table_args__ = (UniqueConstraint('host_location_id', 'name', name='uq_field_area_location_name'),)
+
+
+class FieldConfigurationOption(Base, TimestampMixin):
+    __tablename__ = 'field_configuration_options'
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    physical_field_area_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('physical_field_areas.id'), nullable=False)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    thirty_yard_capacity: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    fifty_three_yard_capacity: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    physical_field_area = relationship('PhysicalFieldArea')
+    __table_args__ = (UniqueConstraint('physical_field_area_id', 'name', name='uq_field_config_option_area_name'),)
 
 class Team(Base, TimestampMixin):
     __tablename__ = 'teams'
@@ -106,13 +134,19 @@ class Week(Base, TimestampMixin):
 class HostingAvailability(Base, TimestampMixin):
     __tablename__ = 'hosting_availabilities'
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    field_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('fields.id'), nullable=False)
+    field_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('fields.id'))
+    physical_field_area_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('physical_field_areas.id'))
+    field_configuration_option_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('field_configuration_options.id'))
+    layout_type: Mapped[str | None] = mapped_column(String(100))
+    slot_index: Mapped[int | None] = mapped_column(Integer)
     available_date: Mapped[Date] = mapped_column(Date, nullable=False)
     start_time: Mapped[Time] = mapped_column(Time, nullable=False)
     end_time: Mapped[Time] = mapped_column(Time, nullable=False)
     is_available: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     field = relationship('Field')
-    __table_args__ = (UniqueConstraint('field_id', 'available_date', 'start_time', 'end_time', name='uq_field_availability_slot'),)
+    physical_field_area = relationship('PhysicalFieldArea')
+    field_configuration_option = relationship('FieldConfigurationOption')
+    __table_args__ = (UniqueConstraint('field_id', 'physical_field_area_id', 'available_date', 'start_time', 'end_time', 'layout_type', 'slot_index', name='uq_field_availability_slot'),)
 
 class GameStatus(Base, TimestampMixin):
     __tablename__ = 'game_statuses'
