@@ -74,6 +74,11 @@ class HostLocationCreate(BaseModel):
     organization_id: uuid.UUID
     name: str
     address: str | None = None
+    address_line1: str | None = None
+    address_line2: str | None = None
+    city: str | None = None
+    state: str | None = None
+    zip_code: str | None = None
     is_active: bool = True
 
 class HostLocationRead(BaseSchema, HostLocationCreate):
