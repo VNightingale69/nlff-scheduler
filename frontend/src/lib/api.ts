@@ -16,14 +16,19 @@ export class ApiError extends Error {
 }
 
 export async function apiFetch(path: string, opts: RequestInit = {}, token?: string) {
-  const res = await fetch(`${API_URL}${path}`, {
-    ...opts,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...(opts.headers || {}),
-    },
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${API_URL}${path}`, {
+      ...opts,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(opts.headers || {}),
+      },
+    });
+  } catch {
+    throw new ApiError('Unable to connect to server.', 0, null);
+  }
 
   if (!res.ok) {
     const raw = await res.text();
@@ -47,5 +52,10 @@ export async function apiFetch(path: string, opts: RequestInit = {}, token?: str
     throw new ApiError(message, res.status, parsed);
   }
 
-  return res.status === 204 ? null : res.json();
+  const data = res.status === 204 ? null : await res.json();
+  if (data && typeof data === 'object' && 'success' in data && (data as { success: unknown }).success === false) {
+    const message = typeof (data as { message?: unknown }).message === 'string' ? (data as { message: string }).message : 'Request failed';
+    throw new ApiError(message, res.status, data);
+  }
+  return data;
 }

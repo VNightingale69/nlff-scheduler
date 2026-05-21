@@ -8,6 +8,7 @@ import FormField from '@/components/ui/FormField';
 
 type Organization = { id: string; name: string; is_active: boolean };
 type DeleteCheck = { organization_name: string; can_delete: boolean; dependencies: Array<{ label: string; count: number }> };
+type DeleteDependencyResponse = { success: false; message: string; dependencies?: Record<string, number> };
 
 export default function OrganizationsAdminPage() {
   const [items, setItems] = useState<Organization[]>([]);
@@ -77,7 +78,23 @@ export default function OrganizationsAdminPage() {
       const endpoint = hasDependencies && isLeagueAdmin ? `/organizations/${deleteTarget.id}?force=true` : `/organizations/${deleteTarget.id}`;
       await apiFetch(endpoint, { method: 'DELETE' }, getToken());
       setMessage('Deleted successfully'); setType('ok'); closeDeleteModal(); load();
-    } catch (e: any) { setMessage(e?.message || 'Delete failed'); setType('err'); }
+    } catch (e: any) {
+      const details = e?.details as DeleteDependencyResponse | undefined;
+      if (details?.dependencies) {
+        const mappings: Record<string, string> = {
+          host_locations: 'Host Locations',
+          hosting_site_setups: 'Hosting Site Field Setups',
+          hosting_availability: 'Hosting Availability',
+          teams: 'Teams',
+          division_participation: 'Community Division Participation',
+          future_games: 'Future Games',
+        };
+        const dependencies = Object.entries(details.dependencies).map(([key, count]) => ({ label: mappings[key] || key, count }));
+        setDeleteCheck({ organization_name: deleteTarget.name, can_delete: false, dependencies });
+      }
+      setMessage(e?.message || 'Delete failed');
+      setType('err');
+    }
   };
 
   return <div className='space-y-4'>
