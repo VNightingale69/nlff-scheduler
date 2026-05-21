@@ -1,9 +1,10 @@
 import logging
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import inspect, text
 from sqlalchemy.exc import SQLAlchemyError
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from app.auth import ROLE_COMMUNITY_SCHEDULER, ROLE_LEAGUE_ADMIN
@@ -15,6 +16,45 @@ from app.security import hash_password, validate_password_strength
 
 app = FastAPI(title='Northern Lakes Flag Football Scheduler API')
 logger = logging.getLogger(__name__)
+
+
+REQUIRED_TABLES = (
+    'organizations',
+    'divisions',
+    'organization_division_participations',
+    'teams',
+    'host_locations',
+    'fields',
+    'physical_field_areas',
+    'field_configuration_options',
+    'hosting_availabilities',
+    'games',
+)
+
+
+
+@app.exception_handler(SQLAlchemyError)
+def handle_sqlalchemy_error(_: Request, exc: SQLAlchemyError):
+    logger.exception('Database request failed.', exc_info=exc)
+    return JSONResponse(
+        status_code=500,
+        content={
+            'error': 'database_error',
+            'message': 'A database error occurred while processing the request.',
+        },
+    )
+
+
+@app.exception_handler(Exception)
+def handle_unexpected_error(_: Request, exc: Exception):
+    logger.exception('Unhandled server error.', exc_info=exc)
+    return JSONResponse(
+        status_code=500,
+        content={
+            'error': 'internal_server_error',
+            'message': 'An unexpected server error occurred.',
+        },
+    )
 
 app.add_middleware(
     CORSMiddleware,
@@ -29,6 +69,26 @@ def _auth_tables_ready(db: Session) -> bool:
     inspector = inspect(db.bind)
     return inspector.has_table('roles') and inspector.has_table('users')
 
+
+
+
+@app.on_event('startup')
+def validate_required_tables() -> None:
+    db = next(get_db())
+    try:
+        inspector = inspect(db.bind)
+        missing_tables = [table for table in REQUIRED_TABLES if not inspector.has_table(table)]
+        if missing_tables:
+            logger.error(
+                'Database schema validation failed. Missing required tables: %s. Run: alembic upgrade head',
+                ', '.join(missing_tables),
+            )
+        else:
+            logger.info('Database schema validation passed. Required tables are present.')
+    except SQLAlchemyError:
+        logger.exception('Database schema validation failed due to database error.')
+    finally:
+        db.close()
 
 @app.on_event('startup')
 def seed_auth_data() -> None:

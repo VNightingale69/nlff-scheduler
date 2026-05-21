@@ -214,14 +214,16 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
         return {'ok': True, 'deleted': {'games': deleted_games, 'hosting_availability': deleted_availability, 'field_configuration_options': deleted_field_config, 'fields': deleted_fields, 'physical_field_areas': deleted_areas, 'host_locations': deleted_hosts, 'organization_division_participation': deleted_participation, 'teams': deleted_teams, 'organizations': 1}}
     except HTTPException:
         raise
-    except Exception as exc:
+    except Exception:
         db.rollback()
         logger.exception('Organization delete failed for org_id=%s force=%s', org_id, force)
-        return {
-            'success': False,
-            'message': 'Unable to delete organization due to a server error.',
-            'error': str(exc),
-        }
+        raise HTTPException(
+            status_code=500,
+            detail={
+                'error': 'organization_delete_failed',
+                'message': 'Unable to delete organization due to a server error.',
+            },
+        )
 
 @router.post('/divisions', response_model=DivisionRead, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def create_division(payload: DivisionCreate, db: Session = Depends(get_db)):
