@@ -20,6 +20,7 @@ from app.security import create_access_token, create_refresh_token, hash_passwor
 from app.services.scheduling_validation import validate_game
 
 router = APIRouter(prefix='/api')
+logger = logging.getLogger(__name__)
 ALLOWED_FIELD_SPACE_TYPES = {
     'STADIUM_SITE',
     'GRASS_PARK_SITE',
@@ -71,32 +72,40 @@ def _format_delete_blockers(host_location_name: str, dependencies: list[tuple[st
     return f"Cannot delete Host Location '{host_location_name}' because " + '; '.join(blockers) + '.'
 
 
-def _organization_dependency_summary(db: Session, organization_id: uuid.UUID) -> list[tuple[str, int]]:
+def _safe_dependency_count(label: str, counter):
+    try:
+        return label, counter()
+    except Exception as exc:
+        logger.warning("Dependency count unavailable for %s: %s", label, exc)
+        return label, "Unavailable"
+
+
+def _organization_dependency_summary(db: Session, organization_id: uuid.UUID) -> list[tuple[str, int | str]]:
     team_ids_subquery = db.query(Team.id).filter(Team.organization_id == organization_id).subquery()
     host_location_ids_subquery = db.query(HostLocation.id).filter(HostLocation.organization_id == organization_id).subquery()
     field_ids_subquery = db.query(Field.id).filter(Field.host_location_id.in_(host_location_ids_subquery)).subquery()
     area_ids_subquery = db.query(PhysicalFieldArea.id).filter(PhysicalFieldArea.host_location_id.in_(host_location_ids_subquery)).subquery()
     today = date.today()
     return [
-        ('Host Locations', db.query(HostLocation).filter(HostLocation.organization_id == organization_id).count()),
-        ('Hosting Site Field Setups', db.query(PhysicalFieldArea).filter(PhysicalFieldArea.host_location_id.in_(host_location_ids_subquery)).count()),
-        ('Field Configuration Options', db.query(FieldConfigurationOption).filter(FieldConfigurationOption.physical_field_area_id.in_(area_ids_subquery)).count()),
-        ('Hosting Availability', db.query(HostingAvailability).filter((HostingAvailability.field_id.in_(field_ids_subquery)) | (HostingAvailability.physical_field_area_id.in_(area_ids_subquery))).count()),
-        ('Organization Division Participation', db.query(OrganizationDivisionParticipation).filter(OrganizationDivisionParticipation.organization_id == organization_id).count()),
-        ('Teams', db.query(Team).filter(Team.organization_id == organization_id).count()),
-        ('Future Games', db.query(Game).filter(and_(Game.game_date >= today, (Game.home_team_id.in_(team_ids_subquery) | Game.away_team_id.in_(team_ids_subquery)))).count()),
-        ('Published Games', db.query(Game).join(Game.status).filter(and_(GameStatus.code == 'published', (Game.home_team_id.in_(team_ids_subquery) | Game.away_team_id.in_(team_ids_subquery)))).count()),
+        _safe_dependency_count('Host Locations', lambda: db.query(HostLocation).filter(HostLocation.organization_id == organization_id).count()),
+        _safe_dependency_count('Hosting Site Field Setups', lambda: db.query(PhysicalFieldArea).filter(PhysicalFieldArea.host_location_id.in_(host_location_ids_subquery)).count()),
+        _safe_dependency_count('Field Configuration Options', lambda: db.query(FieldConfigurationOption).filter(FieldConfigurationOption.physical_field_area_id.in_(area_ids_subquery)).count()),
+        _safe_dependency_count('Hosting Availability', lambda: db.query(HostingAvailability).filter((HostingAvailability.field_id.in_(field_ids_subquery)) | (HostingAvailability.physical_field_area_id.in_(area_ids_subquery))).count()),
+        _safe_dependency_count('Organization Division Participation', lambda: db.query(OrganizationDivisionParticipation).filter(OrganizationDivisionParticipation.organization_id == organization_id).count()),
+        _safe_dependency_count('Teams', lambda: db.query(Team).filter(Team.organization_id == organization_id).count()),
+        _safe_dependency_count('Future Games', lambda: db.query(Game).filter(and_(Game.game_date >= today, (Game.home_team_id.in_(team_ids_subquery) | Game.away_team_id.in_(team_ids_subquery)))).count()),
+        _safe_dependency_count('Published Games', lambda: db.query(Game).join(Game.status).filter(and_(GameStatus.code == 'published', (Game.home_team_id.in_(team_ids_subquery) | Game.away_team_id.in_(team_ids_subquery)))).count()),
     ]
 
 
-def _format_organization_blockers(org_name: str, dependencies: list[tuple[str, int]]) -> str:
-    blockers = [f"- {count} {label} record{'s' if count != 1 else ''}" for label, count in dependencies if count > 0]
+def _format_organization_blockers(org_name: str, dependencies: list[tuple[str, int | str]]) -> str:
+    blockers = [f"- {count} {label} record{'s' if count != 1 else ''}" for label, count in dependencies if isinstance(count, int) and count > 0]
     if not blockers:
         return ''
     return f"{org_name} cannot be deleted because:\n" + '\n'.join(blockers)
 
 
-def _organization_dependencies_payload(dependencies: list[tuple[str, int]]) -> dict[str, int]:
+def _organization_dependencies_payload(dependencies: list[tuple[str, int | str]]) -> dict[str, int | str]:
     key_map = {
         'Host Locations': 'host_locations',
         'Hosting Site Field Setups': 'hosting_site_setups',
@@ -169,7 +178,7 @@ def get_organization_delete_check(org_id: uuid.UUID, db: Session = Depends(get_d
     return {
         'organization_id': str(o.id),
         'organization_name': o.name,
-        'can_delete': all(count == 0 for _, count in dependencies),
+        'can_delete': all((isinstance(count, int) and count == 0) for _, count in dependencies),
         'dependencies': [{'label': label, 'count': count} for label, count in dependencies],
     }
 
@@ -182,7 +191,23 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
         dependencies = _organization_dependency_summary(db, org_id)
         dependency_map = {label: count for label, count in dependencies}
         dependency_payload = _organization_dependencies_payload(dependencies)
-        has_dependencies = any(count > 0 for count in dependency_payload.values())
+        unavailable = [label for label, count in dependencies if count == "Unavailable"]
+        if unavailable:
+            unavailable_map = {
+                'Organization Division Participation': 'organization_division_participations table missing',
+                'Hosting Site Field Setups': 'hosting_site_setups table missing',
+                'Hosting Availability': 'hosting_availability table missing',
+                'Teams': 'teams table missing',
+                'Host Locations': 'host_locations table missing',
+            }
+            return {
+                'success': False,
+                'message': 'Dependency validation failed',
+                'details': unavailable_map.get(unavailable[0], f'{unavailable[0]} dependency unavailable'),
+                'dependencies': dependency_payload,
+            }
+
+        has_dependencies = any(isinstance(count, int) and count > 0 for count in dependency_payload.values())
 
         if not force:
             if has_dependencies:
@@ -193,7 +218,7 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
                 }
             db.delete(o); db.commit(); return {'ok': True, 'deleted': {'organizations': 1}}
 
-        if dependency_map.get('Published Games', 0) > 0:
+        if isinstance(dependency_map.get('Published Games', 0), int) and dependency_map.get('Published Games', 0) > 0:
             raise HTTPException(400, 'Cannot force delete organization with published games.')
 
         host_location_ids = [host_id for (host_id,) in db.query(HostLocation.id).filter(HostLocation.organization_id == org_id).all()]
