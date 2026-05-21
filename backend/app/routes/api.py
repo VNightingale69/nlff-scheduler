@@ -68,6 +68,32 @@ def _format_delete_blockers(host_location_name: str, dependencies: list[tuple[st
     if not blockers:
         return ''
     return f"Cannot delete Host Location '{host_location_name}' because " + '; '.join(blockers) + '.'
+
+
+def _organization_dependency_summary(db: Session, organization_id: uuid.UUID) -> list[tuple[str, int]]:
+    team_ids_subquery = db.query(Team.id).filter(Team.organization_id == organization_id).subquery()
+    host_location_ids_subquery = db.query(HostLocation.id).filter(HostLocation.organization_id == organization_id).subquery()
+    field_ids_subquery = db.query(Field.id).filter(Field.host_location_id.in_(host_location_ids_subquery)).subquery()
+    area_ids_subquery = db.query(PhysicalFieldArea.id).filter(PhysicalFieldArea.host_location_id.in_(host_location_ids_subquery)).subquery()
+    today = date.today()
+    return [
+        ('Host Locations', db.query(HostLocation).filter(HostLocation.organization_id == organization_id).count()),
+        ('Hosting Site Field Setups', db.query(PhysicalFieldArea).filter(PhysicalFieldArea.host_location_id.in_(host_location_ids_subquery)).count()),
+        ('Field Configuration Options', db.query(FieldConfigurationOption).filter(FieldConfigurationOption.physical_field_area_id.in_(area_ids_subquery)).count()),
+        ('Hosting Availability', db.query(HostingAvailability).filter((HostingAvailability.field_id.in_(field_ids_subquery)) | (HostingAvailability.physical_field_area_id.in_(area_ids_subquery))).count()),
+        ('Organization Division Participation', db.query(OrganizationDivisionParticipation).filter(OrganizationDivisionParticipation.organization_id == organization_id).count()),
+        ('Teams', db.query(Team).filter(Team.organization_id == organization_id).count()),
+        ('Future Games', db.query(Game).filter(and_(Game.game_date >= today, (Game.home_team_id.in_(team_ids_subquery) | Game.away_team_id.in_(team_ids_subquery)))).count()),
+        ('Published Games', db.query(Game).join(Game.status).filter(and_(GameStatus.code == 'published', (Game.home_team_id.in_(team_ids_subquery) | Game.away_team_id.in_(team_ids_subquery)))).count()),
+    ]
+
+
+def _format_organization_blockers(org_name: str, dependencies: list[tuple[str, int]]) -> str:
+    blockers = [f"- {count} {label} record{'s' if count != 1 else ''}" for label, count in dependencies if count > 0]
+    if not blockers:
+        return ''
+    return f"{org_name} cannot be deleted because:\n" + '\n'.join(blockers)
+
 def _user_payload(user: User) -> dict:
     return {
         'id': user.id, 'email': user.email, 'full_name': user.full_name,
@@ -122,11 +148,50 @@ def update_organization(org_id: uuid.UUID, payload: OrganizationCreate, db: Sess
     for k, v in payload.model_dump().items(): setattr(o, k, v)
     db.commit(); db.refresh(o); return o
 
-@router.delete('/organizations/{org_id}', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
-def delete_organization(org_id: uuid.UUID, db: Session = Depends(get_db)):
+@router.get('/organizations/{org_id}/delete-check', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+def get_organization_delete_check(org_id: uuid.UUID, db: Session = Depends(get_db)):
     o = db.query(Organization).filter(Organization.id == org_id).first()
     if not o: raise HTTPException(404, 'Organization not found')
-    db.delete(o); db.commit(); return {'ok': True}
+    dependencies = _organization_dependency_summary(db, org_id)
+    return {
+        'organization_id': str(o.id),
+        'organization_name': o.name,
+        'can_delete': all(count == 0 for _, count in dependencies),
+        'dependencies': [{'label': label, 'count': count} for label, count in dependencies],
+    }
+
+@router.delete('/organizations/{org_id}', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Session = Depends(get_db)):
+    o = db.query(Organization).filter(Organization.id == org_id).first()
+    if not o: raise HTTPException(404, 'Organization not found')
+    dependencies = _organization_dependency_summary(db, org_id)
+    dependency_map = {label: count for label, count in dependencies}
+
+    if not force:
+        detail = _format_organization_blockers(o.name, dependencies)
+        if detail:
+            raise HTTPException(400, detail)
+        db.delete(o); db.commit(); return {'ok': True, 'deleted': {'organizations': 1}}
+
+    if dependency_map.get('Published Games', 0) > 0:
+        raise HTTPException(400, 'Cannot force delete organization with published games.')
+
+    host_location_ids = [host_id for (host_id,) in db.query(HostLocation.id).filter(HostLocation.organization_id == org_id).all()]
+    field_ids = [field_id for (field_id,) in db.query(Field.id).filter(Field.host_location_id.in_(host_location_ids)).all()] if host_location_ids else []
+    area_ids = [area_id for (area_id,) in db.query(PhysicalFieldArea.id).filter(PhysicalFieldArea.host_location_id.in_(host_location_ids)).all()] if host_location_ids else []
+    team_ids = [team_id for (team_id,) in db.query(Team.id).filter(Team.organization_id == org_id).all()]
+
+    deleted_games = db.query(Game).filter((Game.home_team_id.in_(team_ids)) | (Game.away_team_id.in_(team_ids))).delete(synchronize_session=False) if team_ids else 0
+    deleted_availability = db.query(HostingAvailability).filter((HostingAvailability.field_id.in_(field_ids)) | (HostingAvailability.physical_field_area_id.in_(area_ids))).delete(synchronize_session=False) if (field_ids or area_ids) else 0
+    deleted_field_config = db.query(FieldConfigurationOption).filter(FieldConfigurationOption.physical_field_area_id.in_(area_ids)).delete(synchronize_session=False) if area_ids else 0
+    deleted_fields = db.query(Field).filter(Field.host_location_id.in_(host_location_ids)).delete(synchronize_session=False) if host_location_ids else 0
+    deleted_areas = db.query(PhysicalFieldArea).filter(PhysicalFieldArea.host_location_id.in_(host_location_ids)).delete(synchronize_session=False) if host_location_ids else 0
+    deleted_hosts = db.query(HostLocation).filter(HostLocation.organization_id == org_id).delete(synchronize_session=False)
+    deleted_participation = db.query(OrganizationDivisionParticipation).filter(OrganizationDivisionParticipation.organization_id == org_id).delete(synchronize_session=False)
+    deleted_teams = db.query(Team).filter(Team.organization_id == org_id).delete(synchronize_session=False)
+    db.delete(o)
+    db.commit()
+    return {'ok': True, 'deleted': {'games': deleted_games, 'hosting_availability': deleted_availability, 'field_configuration_options': deleted_field_config, 'fields': deleted_fields, 'physical_field_areas': deleted_areas, 'host_locations': deleted_hosts, 'organization_division_participation': deleted_participation, 'teams': deleted_teams, 'organizations': 1}}
 
 @router.post('/divisions', response_model=DivisionRead, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def create_division(payload: DivisionCreate, db: Session = Depends(get_db)):
