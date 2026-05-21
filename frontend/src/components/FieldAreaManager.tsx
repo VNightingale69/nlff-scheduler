@@ -4,8 +4,8 @@ import Toast from './Toast';
 import { apiFetch } from '@/lib/api';
 import { getToken } from '@/lib/auth';
 
-const STADIUM_TYPE = 'STADIUM_FIELD';
-const GRASS_TYPE = 'GRASS_PARK_FIELDS';
+const STADIUM_TYPE = 'STADIUM_SITE';
+const GRASS_TYPE = 'GRASS_PARK_SITE';
 const STADIUM_OPTIONS = [
   { name: '2x53', title: 'Two Large Fields', help: 'Used for 5th–8th Grade', thirty: 0, fiftyThree: 2 },
   { name: '1x53_plus_2x30', title: 'One Large Field + Two Small Fields', help: 'Used for mixed grade hosting', thirty: 2, fiftyThree: 1 },
