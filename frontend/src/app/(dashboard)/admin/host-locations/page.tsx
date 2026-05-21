@@ -11,7 +11,12 @@ type HostLocation = {
   id: string;
   organization_id: string;
   name: string;
-  address: string;
+  address?: string;
+  address_line1?: string;
+  address_line2?: string;
+  city?: string;
+  state?: string;
+  zip_code?: string;
   is_active?: boolean;
 };
 
@@ -35,7 +40,7 @@ export default function HostLocationsAdminPage() {
   const [items, setItems] = useState<HostLocation[]>([]);
   const [organizations, setOrganizations] = useState<Organization[]>([]);
   const [query, setQuery] = useState('');
-  const [form, setForm] = useState<Partial<HostLocation>>({ is_active: true });
+  const [form, setForm] = useState<Partial<HostLocation>>({ is_active: true, state: 'WI' });
   const [editingId, setEditingId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -47,6 +52,10 @@ export default function HostLocationsAdminPage() {
   const [cascadeConfirmed, setCascadeConfirmed] = useState(false);
 
   const orgNameById = useMemo(() => Object.fromEntries(organizations.map((x) => [x.id, x.name])), [organizations]);
+  const displayItems = useMemo(
+    () => items.map((item) => ({ ...item, address_line1: item.address_line1 || item.address || '' })),
+    [items],
+  );
 
   const loadOrganizations = async () => {
     try {
@@ -79,7 +88,10 @@ export default function HostLocationsAdminPage() {
     const missing: string[] = [];
     if (!form.organization_id) missing.push('Organization');
     if (!form.name?.trim()) missing.push('Name');
-    if (!form.address?.trim()) missing.push('Address');
+    if (!form.address_line1?.trim() && !form.address?.trim()) missing.push('Street Address');
+    if (!form.city?.trim()) missing.push('City');
+    if (!form.state?.trim()) missing.push('State');
+    if (!form.zip_code?.trim()) missing.push('Zip Code');
     return missing;
   }, [form]);
 
@@ -96,6 +108,11 @@ export default function HostLocationsAdminPage() {
         organization_id: form.organization_id,
         name: form.name?.trim(),
         address: form.address?.trim(),
+        address_line1: (form.address_line1 || form.address || '').trim(),
+        address_line2: form.address_line2?.trim() || null,
+        city: form.city?.trim(),
+        state: form.state?.trim(),
+        zip_code: form.zip_code?.trim(),
         ...(form.is_active !== undefined ? { is_active: Boolean(form.is_active) } : {}),
       };
 
@@ -107,7 +124,7 @@ export default function HostLocationsAdminPage() {
 
       setMessage(editingId ? 'Updated successfully' : 'Created successfully');
       setType('ok');
-      setForm({ is_active: true });
+      setForm({ is_active: true, state: 'WI' });
       setEditingId(null);
       load();
     } catch (e: any) {
@@ -119,7 +136,7 @@ export default function HostLocationsAdminPage() {
   };
 
   const edit = (item: HostLocation) => {
-    setForm(item);
+    setForm({ ...item, address_line1: item.address_line1 || item.address || '', state: item.state || 'WI' });
     setEditingId(item.id);
   };
 
@@ -209,7 +226,11 @@ export default function HostLocationsAdminPage() {
         </label>
 
         <FormField label='Name' type='text' value={form.name ?? ''} onChange={(value) => setForm({ ...form, name: String(value) })} />
-        <FormField label='Address' type='text' value={form.address ?? ''} onChange={(value) => setForm({ ...form, address: String(value) })} />
+        <FormField label='Street Address' type='text' value={form.address_line1 ?? form.address ?? ''} onChange={(value) => setForm({ ...form, address_line1: String(value) })} />
+        <FormField label='Address Line 2 (Optional)' type='text' value={form.address_line2 ?? ''} onChange={(value) => setForm({ ...form, address_line2: String(value) })} />
+        <FormField label='City' type='text' value={form.city ?? ''} onChange={(value) => setForm({ ...form, city: String(value) })} />
+        <FormField label='State' type='text' value={form.state ?? 'WI'} onChange={(value) => setForm({ ...form, state: String(value) })} />
+        <FormField label='Zip Code' type='text' value={form.zip_code ?? ''} onChange={(value) => setForm({ ...form, zip_code: String(value) })} />
         <FormField label='Active' type='checkbox' value={form.is_active ?? true} onChange={(value) => setForm({ ...form, is_active: Boolean(value) })} />
 
         <div className='flex gap-2 md:col-span-2'>
@@ -217,7 +238,7 @@ export default function HostLocationsAdminPage() {
             {saving ? 'Saving…' : editingId ? 'Update' : 'Create'}
           </button>
           {editingId && (
-            <button className='rounded border px-4 py-2 disabled:cursor-not-allowed disabled:opacity-50' onClick={() => { setForm({ is_active: true }); setEditingId(null); }} disabled={saving}>
+            <button className='rounded border px-4 py-2 disabled:cursor-not-allowed disabled:opacity-50' onClick={() => { setForm({ is_active: true, state: 'WI' }); setEditingId(null); }} disabled={saving}>
               Cancel
             </button>
           )}
@@ -226,9 +247,10 @@ export default function HostLocationsAdminPage() {
 
       {loading ? <p>Loading records...</p> : items.length === 0 ? <div className='rounded border border-dashed p-6 text-center text-slate-500'>No records yet.</div> : (
         <DataTable
-          items={items}
-          columns={['organization_id', 'name', 'address', 'is_active']}
+          items={displayItems}
+          columns={['organization_id', 'name', 'address_line1', 'city', 'state', 'zip_code', 'is_active']}
           valueLabels={{ organization_id: orgNameById }}
+          headerLabels={{ organization_id: 'Organization', address_line1: 'Street Address', city: 'City', state: 'State', zip_code: 'Zip Code', is_active: 'Active' }}
           onEdit={edit}
           onDelete={openDeleteModal}
         />
