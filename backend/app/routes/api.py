@@ -1,6 +1,6 @@
 import uuid
 from fastapi import APIRouter, Depends, HTTPException, Query
-from datetime import date
+from datetime import date, time
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session, aliased
@@ -22,6 +22,25 @@ ALLOWED_FIELD_SPACE_TYPES = {
     'STADIUM_SITE',
     'GRASS_PARK_SITE',
 }
+
+
+
+def validate_hour_block(start_time, end_time):
+    if end_time <= start_time:
+        raise HTTPException(status_code=400, detail="Invalid hourly availability block")
+    if (
+        start_time.minute != 0
+        or start_time.second != 0
+        or start_time.microsecond != 0
+        or end_time.minute != 0
+        or end_time.second != 0
+        or end_time.microsecond != 0
+    ):
+        raise HTTPException(status_code=400, detail="Invalid hourly availability block")
+    if end_time.hour - start_time.hour != 1:
+        raise HTTPException(status_code=400, detail="Invalid hourly availability block")
+    if start_time < time(9, 0) or end_time > time(17, 0):
+        raise HTTPException(status_code=400, detail="Invalid hourly availability block")
 
 def paginate(query, page: int, page_size: int):
     total = query.count(); items = query.offset((page - 1) * page_size).limit(page_size).all()
