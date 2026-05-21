@@ -179,6 +179,26 @@ class HostingAvailabilityBulkUpsertResponse(BaseModel):
     updated: int
 
 
+
+
+class SavedAvailabilityRange(BaseModel):
+    start_time: time
+    end_time: time
+
+
+class SavedAvailabilityEntry(BaseModel):
+    available_date: date
+    host_location_name: str
+    site_type: str
+    available_layout: str
+    small_field_capacity: int
+    large_field_capacity: int
+    time_ranges: list[SavedAvailabilityRange]
+
+
+class SavedAvailabilityResponse(BaseModel):
+    items: list[SavedAvailabilityEntry]
+
 class GameStatusCreate(BaseModel):
     code: str
     label: str
