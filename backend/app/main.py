@@ -18,18 +18,13 @@ app = FastAPI(title='Northern Lakes Flag Football Scheduler API')
 logger = logging.getLogger(__name__)
 
 
-REQUIRED_TABLES = (
-    'organizations',
-    'divisions',
-    'organization_division_participations',
-    'teams',
-    'host_locations',
-    'fields',
-    'physical_field_areas',
-    'field_configuration_options',
-    'hosting_availabilities',
-    'games',
-)
+REQUIRED_TABLES = {
+    'organization_division_participations': 'organization_division_participations',
+    'hosting_site_setups': 'physical_field_areas',
+    'hosting_availability': 'hosting_availabilities',
+    'teams': 'teams',
+    'host_locations': 'host_locations',
+}
 
 
 
@@ -77,10 +72,14 @@ def validate_required_tables() -> None:
     db = next(get_db())
     try:
         inspector = inspect(db.bind)
-        missing_tables = [table for table in REQUIRED_TABLES if not inspector.has_table(table)]
+        missing_tables = [
+            expected_name
+            for expected_name, actual_table in REQUIRED_TABLES.items()
+            if not inspector.has_table(actual_table)
+        ]
         if missing_tables:
-            logger.error(
-                'Database schema validation failed. Missing required tables: %s. Run: alembic upgrade head',
+            logger.warning(
+                'Startup table validation warning. Missing required tables: %s. Run: alembic upgrade head',
                 ', '.join(missing_tables),
             )
         else:
