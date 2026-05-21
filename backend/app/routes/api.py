@@ -215,7 +215,8 @@ def create_physical_field_area(payload: PhysicalFieldAreaCreate, current_user: U
     host_location = db.query(HostLocation).filter(HostLocation.id == payload.host_location_id).first()
     if not host_location: raise HTTPException(400, 'Invalid host location')
     enforce_organization_scope(host_location.organization_id, current_user)
-    if payload.field_space_type not in ALLOWED_FIELD_SPACE_TYPES: raise HTTPException(400, 'Invalid field space type')
+    if payload.field_space_type not in ALLOWED_FIELD_SPACE_TYPES:
+        raise HTTPException(400, f"Invalid field space type: {payload.field_space_type}")
     x = PhysicalFieldArea(**payload.model_dump()); db.add(x); db.commit(); db.refresh(x); return x
 
 @router.get('/physical-field-areas', response_model=PagedResponse[PhysicalFieldAreaRead], dependencies=[Depends(get_current_user)])

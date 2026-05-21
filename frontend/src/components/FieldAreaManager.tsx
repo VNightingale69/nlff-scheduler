@@ -6,6 +6,10 @@ import { getToken } from '@/lib/auth';
 
 const STADIUM_TYPE = 'STADIUM_SITE';
 const GRASS_TYPE = 'GRASS_PARK_SITE';
+const FIELD_SPACE_TYPE_OPTIONS = [
+  { label: 'Stadium Site', value: STADIUM_TYPE },
+  { label: 'Grass/Park Site', value: GRASS_TYPE },
+];
 const STADIUM_OPTIONS = [
   { name: '2x53', title: 'Two Large Fields', help: 'Used for 5th–8th Grade', thirty: 0, fiftyThree: 2 },
   { name: '1x53_plus_2x30', title: 'One Large Field + Two Small Fields', help: 'Used for mixed grade hosting', thirty: 2, fiftyThree: 1 },
@@ -49,7 +53,7 @@ export default function FieldAreaManager(){
       <div className='grid gap-2 md:grid-cols-2'>
         <select className='rounded border p-2' value={orgId} onChange={e=>setOrgId(e.target.value)}><option value=''>Select organization</option>{orgs.map((o:any)=><option key={o.id} value={o.id}>{o.name}</option>)}</select>
         <select className='rounded border p-2' value={form.host_location_id} onChange={e=>setForm({...form,host_location_id:e.target.value})}><option value=''>Select hosting site</option>{hostOptions.map((h:any)=><option key={h.id} value={h.id}>{h.name}</option>)}</select>
-        <select className='rounded border p-2' value={form.field_space_type} onChange={e=>setForm({...form,field_space_type:e.target.value})}><option value={STADIUM_TYPE}>Stadium Site</option><option value={GRASS_TYPE}>Grass/Park Site</option></select>
+        <select className='rounded border p-2' value={form.field_space_type} onChange={e=>setForm({...form,field_space_type:e.target.value})}>{FIELD_SPACE_TYPE_OPTIONS.map((option)=><option key={option.value} value={option.value}>{option.label}</option>)}</select>
         <input className='rounded border p-2' placeholder='Notes about lining or setup' value={form.notes} onChange={e=>setForm({...form,notes:e.target.value})}/>
       </div>
       {form.field_space_type===STADIUM_TYPE ? <div className='mt-4'><p className='text-sm font-medium'>How can this stadium typically be configured?</p><div className='mt-2 grid gap-3 md:grid-cols-3'>{STADIUM_OPTIONS.map((o)=><button key={o.name} onClick={()=>setStadiumSelections({...stadiumSelections,[o.name]:!stadiumSelections[o.name]})} className={`rounded border p-3 text-left ${stadiumSelections[o.name]?'border-emerald-600 bg-emerald-50':''}`}><p className='font-semibold'>{o.title}</p><p className='text-xs text-slate-600'>{o.help}</p><p className='mt-1 text-xs'>Small Field: {o.thirty} · Large Field: {o.fiftyThree}</p></button>)}</div></div> : <div className='mt-4 space-y-2'><p className='text-sm font-medium'>What field sizes can this park support?</p><div className='grid gap-2 md:grid-cols-2'><input type='number' min={0} className='rounded border p-2' placeholder='Number of Small Fields' value={form.grass30} onChange={e=>setForm({...form,grass30:e.target.value})}/><input type='number' min={0} className='rounded border p-2' placeholder='Number of Large Fields' value={form.grass53} onChange={e=>setForm({...form,grass53:e.target.value})}/></div><label className='flex items-center gap-2 text-sm'><input type='checkbox' checked={form.is_active} onChange={e=>setForm({...form,is_active:e.target.checked})}/>Can support small and large fields at the same time</label></div>}
