@@ -7,7 +7,7 @@ import Toast from '@/components/Toast';
 import FormField from '@/components/ui/FormField';
 
 type Organization = { id: string; name: string; is_active: boolean };
-type DeleteCheck = { organization_name: string; can_delete: boolean; dependencies: Array<{ label: string; count: number }> };
+type DeleteCheck = { organization_name: string; can_delete: boolean; dependencies: Array<{ label: string; count: number | string }> };
 type DeleteDependencyResponse = { success: false; message: string; dependencies?: Record<string, number> };
 
 export default function OrganizationsAdminPage() {
@@ -90,7 +90,21 @@ export default function OrganizationsAdminPage() {
     try {
       const hasDependencies = !!deleteCheck && !deleteCheck.can_delete;
       const endpoint = hasDependencies && isLeagueAdmin ? `/organizations/${deleteTarget.id}?force=true` : `/organizations/${deleteTarget.id}`;
-      await apiFetch(endpoint, { method: 'DELETE' }, getToken());
+      const response = await apiFetch(endpoint, { method: 'DELETE' }, getToken());
+      if (response?.deleted && deleteCheck) {
+        const mappings: Record<string, string> = {
+          hosting_availability: 'Hosting Availability',
+          field_configuration_options: 'Field Configuration Options',
+          hosting_site_setups: 'Hosting Site Field Setups / Physical Field Areas',
+          teams: 'Teams',
+          division_participation: 'Community Division Participation',
+          fields: 'Fields',
+          host_locations: 'Host Locations',
+          organization: 'Organization',
+        };
+        const dependencies = Object.entries(response.deleted).map(([key, count]) => ({ label: mappings[key] || key, count: Number(count) }));
+        setDeleteCheck({ organization_name: deleteTarget.name, can_delete: false, dependencies });
+      }
       setMessage('Deleted successfully'); setType('ok'); closeDeleteModal(); load();
     } catch (e: any) {
       const details = (e instanceof ApiError ? e.details : undefined) as DeleteDependencyResponse | undefined;
@@ -125,16 +139,16 @@ export default function OrganizationsAdminPage() {
     {loading ? <p>Loading records...</p> : <div className='overflow-x-auto rounded border'><table className='w-full text-left text-sm'><thead className='bg-slate-100'><tr><th className='px-3 py-2'>Name</th><th className='px-3 py-2'>Active</th><th className='px-3 py-2'>Actions</th></tr></thead><tbody>{items.map((item) => <tr key={item.id} className='border-t'><td className='px-3 py-2'>{item.name}</td><td className='px-3 py-2'>{item.is_active ? 'Active' : 'Inactive'}</td><td className='space-x-2 px-3 py-2'><button className='text-blue-700' onClick={() => { setForm(item); setEditingId(item.id); }}>Edit</button><button className='text-rose-700' onClick={() => openDeleteModal(item)}>Delete</button></td></tr>)}</tbody></table></div>}
 
     {deleteTarget && <div className='fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4'><div className='w-full max-w-lg rounded bg-white p-5 shadow-lg'>
-      <h2 className='text-lg font-semibold'>Delete Organization</h2>
+      <h2 className='text-lg font-semibold'>Organization Actions</h2>
       <p className='mt-2 text-sm text-slate-700'>You are deleting <span className='font-semibold'>{deleteTarget.name}</span>.</p>
       {deleteError && <p className='mt-3 rounded border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700'>{deleteError}</p>}
       {checkingDelete && <p className='mt-3 text-sm text-slate-500'>Checking dependencies...</p>}
       {!checkingDelete && deleteCheck && <div className='mt-3 rounded border p-3 text-sm'>
-        <p className='font-medium'>{deleteCheck.can_delete ? 'No blocking dependencies found.' : `${deleteCheck.organization_name} cannot be deleted until dependencies are removed.`}</p>
-        <ul className='mt-2 list-disc pl-6'>{deleteCheck.dependencies.filter((d) => d.count > 0).map((d) => <li key={d.label}>{d.count} {d.label}</li>)}</ul>
-        {!deleteCheck.can_delete && isLeagueAdmin && <><p className='mt-3 font-semibold text-rose-700'>Force delete will permanently remove this organization and related records.</p><label className='mt-3 flex items-start gap-2'><input type='checkbox' className='mt-1' checked={cascadeConfirmed} onChange={(e) => setCascadeConfirmed(e.target.checked)} /><span>I understand this will permanently delete this organization and all related records.</span></label></>}
+        <p className='font-medium'>{deleteCheck.can_delete ? 'No blocking dependencies found.' : 'Dependency summary for organization setup data:'}</p>
+        <ul className='mt-2 list-disc pl-6'>{deleteCheck.dependencies.filter((d) => Number(d.count) > 0).map((d) => <li key={d.label}>{d.count} {d.label}</li>)}</ul>
+        {!deleteCheck.can_delete && isLeagueAdmin && <><p className='mt-3 font-semibold text-rose-700'>Delete Organization and All Related Data is permanent.</p><label className='mt-3 flex items-start gap-2'><input type='checkbox' className='mt-1' checked={cascadeConfirmed} onChange={(e) => setCascadeConfirmed(e.target.checked)} /><span>I understand this will permanently delete this organization and all related setup data.</span></label></>}
       </div>}
-      <div className='mt-4 flex flex-wrap justify-end gap-2'><button className='rounded border px-3 py-2' onClick={closeDeleteModal}>Cancel</button><button className='rounded border border-amber-500 px-3 py-2 text-amber-700' onClick={deactivateOrganization}>Mark Inactive</button><button className='rounded bg-rose-700 px-3 py-2 text-white disabled:opacity-50' disabled={!!deleteCheck && !deleteCheck.can_delete && (!isLeagueAdmin || !cascadeConfirmed)} onClick={confirmDelete}>Confirm Delete</button></div>
+      <div className='mt-4 flex flex-wrap justify-end gap-2'><button className='rounded border px-3 py-2' onClick={closeDeleteModal}>Cancel</button><button className='rounded border border-amber-500 px-3 py-2 text-amber-700' onClick={deactivateOrganization}>Mark Inactive</button><button className='rounded bg-rose-700 px-3 py-2 text-white disabled:opacity-50' disabled={!!deleteCheck && !deleteCheck.can_delete && (!isLeagueAdmin || !cascadeConfirmed)} onClick={confirmDelete}>{deleteCheck && !deleteCheck.can_delete ? 'Delete Organization and Related Data' : 'Delete Organization'}</button></div>
     </div></div>}
   </div>;
 }

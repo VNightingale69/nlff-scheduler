@@ -4,6 +4,7 @@ import logging
 from datetime import date, time
 
 from sqlalchemy import and_, func
+from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.orm import Session, aliased
 
 from app.auth import ROLE_COMMUNITY_SCHEDULER, ROLE_LEAGUE_ADMIN, enforce_organization_scope, get_current_user, require_roles
@@ -116,6 +117,16 @@ def _organization_dependencies_payload(dependencies: list[tuple[str, int | str]]
     }
     return {key_map[label]: count for label, count in dependencies if label in key_map}
 
+
+def _safe_delete_count(label: str, deleter):
+    try:
+        return deleter(), None
+    except Exception as exc:
+        if isinstance(exc, ProgrammingError) or 'does not exist' in str(exc).lower():
+            logger.warning("Skipping delete for %s because dependency table is unavailable: %s", label, exc)
+            return 0, f'{label} table unavailable'
+        raise
+
 def _user_payload(user: User) -> dict:
     return {
         'id': user.id, 'email': user.email, 'full_name': user.full_name,
@@ -191,22 +202,6 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
         dependencies = _organization_dependency_summary(db, org_id)
         dependency_map = {label: count for label, count in dependencies}
         dependency_payload = _organization_dependencies_payload(dependencies)
-        unavailable = [label for label, count in dependencies if count == "Unavailable"]
-        if unavailable:
-            unavailable_map = {
-                'Organization Division Participation': 'organization_division_participations table missing',
-                'Hosting Site Field Setups': 'hosting_site_setups table missing',
-                'Hosting Availability': 'hosting_availability table missing',
-                'Teams': 'teams table missing',
-                'Host Locations': 'host_locations table missing',
-            }
-            return {
-                'success': False,
-                'message': 'Dependency validation failed',
-                'details': unavailable_map.get(unavailable[0], f'{unavailable[0]} dependency unavailable'),
-                'dependencies': dependency_payload,
-            }
-
         has_dependencies = any(isinstance(count, int) and count > 0 for count in dependency_payload.values())
 
         if not force:
@@ -216,27 +211,41 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
                     'message': 'Organization cannot be deleted because dependent records exist.',
                     'dependencies': dependency_payload,
                 }
-            db.delete(o); db.commit(); return {'ok': True, 'deleted': {'organizations': 1}}
+            db.delete(o); db.commit(); return {'success': True, 'deleted': {'organization': 1}}
 
-        if isinstance(dependency_map.get('Published Games', 0), int) and dependency_map.get('Published Games', 0) > 0:
-            raise HTTPException(400, 'Cannot force delete organization with published games.')
+        blocked_game_count = db.query(Game).join(Game.status).filter(
+            and_(
+                Game.game_date >= date.today(),
+                GameStatus.code.in_(['published', 'completed']),
+                (Game.home_team_id.in_(db.query(Team.id).filter(Team.organization_id == org_id).subquery()) | Game.away_team_id.in_(db.query(Team.id).filter(Team.organization_id == org_id).subquery()))
+            )
+        ).count()
+        if blocked_game_count > 0:
+            raise HTTPException(400, 'Cannot force delete organization with future published or completed games. Delete historical game data confirmation is required.')
 
         host_location_ids = [host_id for (host_id,) in db.query(HostLocation.id).filter(HostLocation.organization_id == org_id).all()]
         field_ids = [field_id for (field_id,) in db.query(Field.id).filter(Field.host_location_id.in_(host_location_ids)).all()] if host_location_ids else []
         area_ids = [area_id for (area_id,) in db.query(PhysicalFieldArea.id).filter(PhysicalFieldArea.host_location_id.in_(host_location_ids)).all()] if host_location_ids else []
         team_ids = [team_id for (team_id,) in db.query(Team.id).filter(Team.organization_id == org_id).all()]
 
-        deleted_availability = db.query(HostingAvailability).filter((HostingAvailability.field_id.in_(field_ids)) | (HostingAvailability.physical_field_area_id.in_(area_ids))).delete(synchronize_session=False) if (field_ids or area_ids) else 0
-        deleted_field_config = db.query(FieldConfigurationOption).filter(FieldConfigurationOption.physical_field_area_id.in_(area_ids)).delete(synchronize_session=False) if area_ids else 0
-        deleted_fields = db.query(Field).filter(Field.host_location_id.in_(host_location_ids)).delete(synchronize_session=False) if host_location_ids else 0
-        deleted_areas = db.query(PhysicalFieldArea).filter(PhysicalFieldArea.host_location_id.in_(host_location_ids)).delete(synchronize_session=False) if host_location_ids else 0
-        deleted_games = db.query(Game).filter((Game.home_team_id.in_(team_ids)) | (Game.away_team_id.in_(team_ids))).delete(synchronize_session=False) if team_ids else 0
-        deleted_teams = db.query(Team).filter(Team.organization_id == org_id).delete(synchronize_session=False)
-        deleted_participation = db.query(OrganizationDivisionParticipation).filter(OrganizationDivisionParticipation.organization_id == org_id).delete(synchronize_session=False)
-        deleted_hosts = db.query(HostLocation).filter(HostLocation.organization_id == org_id).delete(synchronize_session=False)
+        warnings: list[str] = []
+        deleted_availability, warning = _safe_delete_count('hosting_availability', lambda: db.query(HostingAvailability).filter((HostingAvailability.field_id.in_(field_ids)) | (HostingAvailability.physical_field_area_id.in_(area_ids))).delete(synchronize_session=False) if (field_ids or area_ids) else 0)
+        if warning: warnings.append(warning)
+        deleted_field_config, warning = _safe_delete_count('field_configuration_options', lambda: db.query(FieldConfigurationOption).filter(FieldConfigurationOption.physical_field_area_id.in_(area_ids)).delete(synchronize_session=False) if area_ids else 0)
+        if warning: warnings.append(warning)
+        deleted_areas, warning = _safe_delete_count('hosting_site_setups', lambda: db.query(PhysicalFieldArea).filter(PhysicalFieldArea.host_location_id.in_(host_location_ids)).delete(synchronize_session=False) if host_location_ids else 0)
+        if warning: warnings.append(warning)
+        deleted_teams, warning = _safe_delete_count('teams', lambda: db.query(Team).filter(Team.organization_id == org_id).delete(synchronize_session=False))
+        if warning: warnings.append(warning)
+        deleted_participation, warning = _safe_delete_count('division_participation', lambda: db.query(OrganizationDivisionParticipation).filter(OrganizationDivisionParticipation.organization_id == org_id).delete(synchronize_session=False))
+        if warning: warnings.append(warning)
+        deleted_fields, warning = _safe_delete_count('fields', lambda: db.query(Field).filter(Field.host_location_id.in_(host_location_ids)).delete(synchronize_session=False) if host_location_ids else 0)
+        if warning: warnings.append(warning)
+        deleted_hosts, warning = _safe_delete_count('host_locations', lambda: db.query(HostLocation).filter(HostLocation.organization_id == org_id).delete(synchronize_session=False))
+        if warning: warnings.append(warning)
         db.delete(o)
         db.commit()
-        return {'ok': True, 'deleted': {'games': deleted_games, 'hosting_availability': deleted_availability, 'field_configuration_options': deleted_field_config, 'fields': deleted_fields, 'physical_field_areas': deleted_areas, 'host_locations': deleted_hosts, 'organization_division_participation': deleted_participation, 'teams': deleted_teams, 'organizations': 1}}
+        return {'success': True, 'message': 'Organization and related data deleted successfully.', 'deleted': {'hosting_availability': deleted_availability, 'field_configuration_options': deleted_field_config, 'hosting_site_setups': deleted_areas, 'teams': deleted_teams, 'division_participation': deleted_participation, 'fields': deleted_fields, 'host_locations': deleted_hosts, 'organization': 1}, 'warnings': warnings}
     except HTTPException:
         raise
     except Exception:
