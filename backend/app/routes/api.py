@@ -7,9 +7,10 @@ from sqlalchemy.orm import Session, aliased
 
 from app.auth import ROLE_COMMUNITY_SCHEDULER, ROLE_LEAGUE_ADMIN, enforce_organization_scope, get_current_user, require_roles
 from app.database import get_db
-from app.models import Division, Field, FieldConfigurationOption, Game, GameStatus, HostLocation, HostingAvailability, Organization, PhysicalFieldArea, Role, Season, Team, User, Week
+from app.models import Division, Field, FieldConfigurationOption, Game, GameStatus, HostLocation, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Season, Team, User, Week
 from app.schemas import (
     DivisionCreate, DivisionRead, FieldConfigurationOptionCreate, FieldConfigurationOptionRead, FieldCreate, FieldRead, GameCreate, GameRead, GameSaveResponse,
+    OrganizationDivisionParticipationBulkUpsertRequest, OrganizationDivisionParticipationRead,
     HostLocationCreate, HostLocationRead, HostingAvailabilityCreate, HostingAvailabilityRead, HostingAvailabilityBulkUpsertRequest, HostingAvailabilityBulkUpsertResponse, PhysicalFieldAreaCreate, PhysicalFieldAreaRead, SavedAvailabilityResponse,
     LoginRequest, OrganizationCreate, OrganizationRead, PagedResponse, PublicGameRead, RefreshRequest,
     TeamCreate, TeamRead, TokenResponse, UserCreate, UserRead
@@ -127,7 +128,7 @@ def delete_organization(org_id: uuid.UUID, db: Session = Depends(get_db)):
     if not o: raise HTTPException(404, 'Organization not found')
     db.delete(o); db.commit(); return {'ok': True}
 
-@router.post('/divisions', response_model=DivisionRead, dependencies=[Depends(get_current_user)])
+@router.post('/divisions', response_model=DivisionRead, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def create_division(payload: DivisionCreate, db: Session = Depends(get_db)):
     d = Division(**payload.model_dump()); db.add(d); db.commit(); db.refresh(d); return d
 
@@ -135,20 +136,67 @@ def create_division(payload: DivisionCreate, db: Session = Depends(get_db)):
 def list_divisions(search: str | None = None, page: int = 1, page_size: int = 20, db: Session = Depends(get_db)):
     q = db.query(Division)
     if search: q = q.filter(func.lower(Division.name).like(f"%{search.lower()}%"))
-    return paginate(q.order_by(Division.name), page, page_size)
+    return paginate(q.order_by(Division.division_group, Division.sort_order, Division.name), page, page_size)
 
-@router.put('/divisions/{item_id}', response_model=DivisionRead, dependencies=[Depends(get_current_user)])
+@router.put('/divisions/{item_id}', response_model=DivisionRead, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def upd_div(item_id: uuid.UUID, payload: DivisionCreate, db: Session = Depends(get_db)):
     x = db.query(Division).filter(Division.id == item_id).first()
     if not x: raise HTTPException(404, 'Division not found')
     for k, v in payload.model_dump().items(): setattr(x, k, v)
     db.commit(); db.refresh(x); return x
 
-@router.delete('/divisions/{item_id}', dependencies=[Depends(get_current_user)])
+@router.delete('/divisions/{item_id}', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def del_div(item_id: uuid.UUID, db: Session = Depends(get_db)):
     x = db.query(Division).filter(Division.id == item_id).first()
     if not x: raise HTTPException(404, 'Division not found')
     db.delete(x); db.commit(); return {'ok': True}
+
+
+@router.get('/organization-division-participation', response_model=list[OrganizationDivisionParticipationRead], dependencies=[Depends(get_current_user)])
+def list_organization_division_participation(
+    organization_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    enforce_organization_scope(organization_id, current_user)
+    rows = (
+        db.query(OrganizationDivisionParticipation)
+        .filter(OrganizationDivisionParticipation.organization_id == organization_id)
+        .all()
+    )
+    return rows
+
+
+@router.put('/organization-division-participation', response_model=list[OrganizationDivisionParticipationRead], dependencies=[Depends(get_current_user)])
+def upsert_organization_division_participation(
+    payload: OrganizationDivisionParticipationBulkUpsertRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    enforce_organization_scope(payload.organization_id, current_user)
+    for item in payload.items:
+        if item.team_count < 0:
+            raise HTTPException(400, 'Team count must be zero or greater')
+        if item.is_participating and item.team_count < 1:
+            raise HTTPException(400, 'Participating divisions must have at least 1 team')
+        existing = db.query(OrganizationDivisionParticipation).filter(
+            OrganizationDivisionParticipation.organization_id == payload.organization_id,
+            OrganizationDivisionParticipation.division_id == item.division_id,
+        ).first()
+        if existing:
+            existing.is_participating = item.is_participating
+            existing.team_count = item.team_count
+            existing.is_active = True
+        else:
+            db.add(OrganizationDivisionParticipation(
+                organization_id=payload.organization_id,
+                division_id=item.division_id,
+                is_participating=item.is_participating,
+                team_count=item.team_count,
+                is_active=True,
+            ))
+    db.commit()
+    return db.query(OrganizationDivisionParticipation).filter(OrganizationDivisionParticipation.organization_id == payload.organization_id).all()
 
 @router.post('/host-locations', response_model=HostLocationRead, dependencies=[Depends(get_current_user)])
 def create_host_location(payload: HostLocationCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -464,6 +512,20 @@ def delete_saved_hosting_availability(host_location_id: uuid.UUID, available_dat
 @router.post('/teams', response_model=TeamRead, dependencies=[Depends(get_current_user)])
 def create_team(payload: TeamCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     enforce_organization_scope(payload.organization_id, current_user)
+    participation = db.query(OrganizationDivisionParticipation).filter(
+        OrganizationDivisionParticipation.organization_id == payload.organization_id,
+        OrganizationDivisionParticipation.division_id == payload.division_id,
+        OrganizationDivisionParticipation.is_participating.is_(True),
+    ).first()
+    if not participation:
+        raise HTTPException(400, 'Organization is not participating in this division')
+    active_count = db.query(Team).filter(
+        Team.organization_id == payload.organization_id,
+        Team.division_id == payload.division_id,
+        Team.is_active.is_(True),
+    ).count()
+    if payload.is_active and active_count >= participation.team_count and current_user.role.name != ROLE_LEAGUE_ADMIN:
+        raise HTTPException(400, 'Cannot exceed participating team count for this division')
     x = Team(**payload.model_dump()); db.add(x); db.commit(); db.refresh(x); return x
 
 @router.get('/teams', response_model=PagedResponse[TeamRead], dependencies=[Depends(get_current_user)])
@@ -480,6 +542,21 @@ def upd_team(item_id: uuid.UUID, payload: TeamCreate, current_user: User = Depen
     x = db.query(Team).filter(Team.id == item_id).first()
     if not x: raise HTTPException(404, 'Team not found')
     enforce_organization_scope(payload.organization_id, current_user)
+    participation = db.query(OrganizationDivisionParticipation).filter(
+        OrganizationDivisionParticipation.organization_id == payload.organization_id,
+        OrganizationDivisionParticipation.division_id == payload.division_id,
+        OrganizationDivisionParticipation.is_participating.is_(True),
+    ).first()
+    if not participation:
+        raise HTTPException(400, 'Organization is not participating in this division')
+    active_count = db.query(Team).filter(
+        Team.organization_id == payload.organization_id,
+        Team.division_id == payload.division_id,
+        Team.is_active.is_(True),
+        Team.id != item_id,
+    ).count()
+    if payload.is_active and active_count >= participation.team_count and current_user.role.name != ROLE_LEAGUE_ADMIN:
+        raise HTTPException(400, 'Cannot exceed participating team count for this division')
     for k, v in payload.model_dump().items(): setattr(x, k, v)
     db.commit(); db.refresh(x); return x
 

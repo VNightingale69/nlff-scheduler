@@ -8,7 +8,7 @@ export type EntityConfig = {
 
 export const ENTITIES: Record<string, EntityConfig> = {
   organizations: { title: 'Organizations', path: '/organizations', nav: true, fields: [{ key: 'name', label: 'Name' }, { key: 'is_active', label: 'Active', type: 'checkbox' }] },
-  divisions: { title: 'Divisions', path: '/divisions', nav: true, fields: [{ key: 'name', label: 'Name' }, { key: 'required_field_layout_type', label: 'Required field layout', type: 'select' }, { key: 'is_active', label: 'Active', type: 'checkbox' }] },
+  divisions: { title: 'Community Division Participation', path: '/divisions', nav: true, fields: [{ key: 'name', label: 'Name' }] },
   'host-locations': { title: 'Host Locations', path: '/host-locations', nav: true, fields: [{ key: 'organization_id', label: 'Organization', type: 'select' }, { key: 'name', label: 'Name' }, { key: 'address_line1', label: 'Street Address' }, { key: 'address_line2', label: 'Address Line 2' }, { key: 'city', label: 'City' }, { key: 'state', label: 'State' }, { key: 'zip_code', label: 'Zip Code' }, { key: 'is_active', label: 'Active', type: 'checkbox' }] },
   fields: { title: 'Fields', path: '/fields', nav: true, fields: [{ key: 'host_location_id', label: 'Host Location', type: 'select' }, { key: 'name', label: 'Name' }, { key: 'layout_type', label: 'Layout Type', type: 'select' }, { key: 'is_active', label: 'Active', type: 'checkbox' }] },
   teams: { title: 'Teams', path: '/teams', nav: true, fields: [{ key: 'organization_id', label: 'Organization', type: 'select' }, { key: 'division_id', label: 'Division', type: 'select' }, { key: 'name', label: 'Name' }, { key: 'is_active', label: 'Active', type: 'checkbox' }] },

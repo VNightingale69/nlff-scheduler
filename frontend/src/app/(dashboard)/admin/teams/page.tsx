@@ -1,7 +1,5 @@
-import CrudPage from '@/components/CrudPage';
-import { ENTITIES } from '@/config/entities';
+import TeamsByParticipationManager from '@/components/TeamsByParticipationManager';
 
 export default function Page() {
-  const config = ENTITIES['teams'];
-  return <CrudPage title={config.title} path={config.path} fields={config.fields} />;
+  return <TeamsByParticipationManager />;
 }

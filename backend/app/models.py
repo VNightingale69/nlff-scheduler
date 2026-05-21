@@ -51,8 +51,23 @@ class Division(Base, TimestampMixin):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
+    division_group: Mapped[str] = mapped_column(String(20), nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     required_field_layout_type: Mapped[str] = mapped_column(String(100), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+
+class OrganizationDivisionParticipation(Base, TimestampMixin):
+    __tablename__ = 'organization_division_participations'
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('organizations.id'), nullable=False)
+    division_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('divisions.id'), nullable=False)
+    is_participating: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    team_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    organization = relationship('Organization')
+    division = relationship('Division')
+    __table_args__ = (UniqueConstraint('organization_id', 'division_id', name='uq_org_division_participation'),)
 
 class HostLocation(Base, TimestampMixin):
     __tablename__ = 'host_locations'
