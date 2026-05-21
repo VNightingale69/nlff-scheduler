@@ -4,7 +4,7 @@ import logging
 from datetime import date, time
 
 from sqlalchemy import and_, func
-from sqlalchemy.exc import ProgrammingError
+from sqlalchemy.exc import ProgrammingError, SQLAlchemyError
 from sqlalchemy.orm import Session, aliased
 
 from app.auth import ROLE_COMMUNITY_SCHEDULER, ROLE_LEAGUE_ADMIN, enforce_organization_scope, get_current_user, require_roles
@@ -76,6 +76,11 @@ def _format_delete_blockers(host_location_name: str, dependencies: list[tuple[st
 def _safe_dependency_count(label: str, counter):
     try:
         return label, counter()
+    except SQLAlchemyError as exc:
+        if isinstance(exc, ProgrammingError) or 'does not exist' in str(exc).lower():
+            logger.warning("Dependency count unavailable for %s because table is unavailable: %s", label, exc)
+            return label, "Unavailable"
+        raise
     except Exception as exc:
         logger.warning("Dependency count unavailable for %s: %s", label, exc)
         return label, "Unavailable"
@@ -185,7 +190,18 @@ def update_organization(org_id: uuid.UUID, payload: OrganizationCreate, db: Sess
 def get_organization_delete_check(org_id: uuid.UUID, db: Session = Depends(get_db)):
     o = db.query(Organization).filter(Organization.id == org_id).first()
     if not o: raise HTTPException(404, 'Organization not found')
-    dependencies = _organization_dependency_summary(db, org_id)
+    try:
+        dependencies = _organization_dependency_summary(db, org_id)
+    except SQLAlchemyError:
+        db.rollback()
+        logger.exception('Organization dependency check failed for org_id=%s', org_id)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                'error': 'organization_dependency_check_failed',
+                'message': 'Unable to check organization dependencies due to a server error.',
+            },
+        )
     return {
         'organization_id': str(o.id),
         'organization_name': o.name,
@@ -199,18 +215,32 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
         o = db.query(Organization).filter(Organization.id == org_id).first()
         if not o:
             raise HTTPException(404, 'Organization not found')
-        dependencies = _organization_dependency_summary(db, org_id)
+        try:
+            dependencies = _organization_dependency_summary(db, org_id)
+        except SQLAlchemyError:
+            db.rollback()
+            logger.exception('Organization dependency check failed during delete for org_id=%s force=%s', org_id, force)
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    'error': 'organization_dependency_check_failed',
+                    'message': 'Unable to check organization dependencies due to a server error.',
+                },
+            )
         dependency_map = {label: count for label, count in dependencies}
         dependency_payload = _organization_dependencies_payload(dependencies)
         has_dependencies = any(isinstance(count, int) and count > 0 for count in dependency_payload.values())
 
         if not force:
             if has_dependencies:
-                return {
-                    'success': False,
-                    'message': 'Organization cannot be deleted because dependent records exist.',
-                    'dependencies': dependency_payload,
-                }
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        'error': 'organization_dependencies_exist',
+                        'message': 'Organization cannot be deleted because dependent records exist.',
+                        'dependencies': dependency_payload,
+                    },
+                )
             db.delete(o); db.commit(); return {'success': True, 'deleted': {'organization': 1}}
 
         blocked_game_count = db.query(Game).join(Game.status).filter(
@@ -235,11 +265,11 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
         if warning: warnings.append(warning)
         deleted_areas, warning = _safe_delete_count('hosting_site_setups', lambda: db.query(PhysicalFieldArea).filter(PhysicalFieldArea.host_location_id.in_(host_location_ids)).delete(synchronize_session=False) if host_location_ids else 0)
         if warning: warnings.append(warning)
+        deleted_fields, warning = _safe_delete_count('fields', lambda: db.query(Field).filter(Field.host_location_id.in_(host_location_ids)).delete(synchronize_session=False) if host_location_ids else 0)
+        if warning: warnings.append(warning)
         deleted_teams, warning = _safe_delete_count('teams', lambda: db.query(Team).filter(Team.organization_id == org_id).delete(synchronize_session=False))
         if warning: warnings.append(warning)
         deleted_participation, warning = _safe_delete_count('division_participation', lambda: db.query(OrganizationDivisionParticipation).filter(OrganizationDivisionParticipation.organization_id == org_id).delete(synchronize_session=False))
-        if warning: warnings.append(warning)
-        deleted_fields, warning = _safe_delete_count('fields', lambda: db.query(Field).filter(Field.host_location_id.in_(host_location_ids)).delete(synchronize_session=False) if host_location_ids else 0)
         if warning: warnings.append(warning)
         deleted_hosts, warning = _safe_delete_count('host_locations', lambda: db.query(HostLocation).filter(HostLocation.organization_id == org_id).delete(synchronize_session=False))
         if warning: warnings.append(warning)

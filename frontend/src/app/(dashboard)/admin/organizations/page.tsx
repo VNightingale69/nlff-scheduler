@@ -8,7 +8,7 @@ import FormField from '@/components/ui/FormField';
 
 type Organization = { id: string; name: string; is_active: boolean };
 type DeleteCheck = { organization_name: string; can_delete: boolean; dependencies: Array<{ label: string; count: number | string }> };
-type DeleteDependencyResponse = { success: false; message: string; dependencies?: Record<string, number> };
+type DeleteDependencyErrorDetail = { error?: string; message?: string; dependencies?: Record<string, number | string> };
 
 export default function OrganizationsAdminPage() {
   const [items, setItems] = useState<Organization[]>([]);
@@ -108,21 +108,40 @@ export default function OrganizationsAdminPage() {
       }
       setMessage('Deleted successfully'); setType('ok'); closeDeleteModal(); load();
     } catch (e: any) {
-      const details = (e instanceof ApiError ? e.details : undefined) as DeleteDependencyResponse | undefined;
-      if (details?.dependencies) {
+      const apiError = e instanceof ApiError ? e : undefined;
+      const detailObject = (apiError?.detail && typeof apiError.detail === 'object' ? apiError.detail : apiError?.details) as DeleteDependencyErrorDetail | undefined;
+      if (apiError?.status === 409 && detailObject?.dependencies) {
         const mappings: Record<string, string> = {
           host_locations: 'Host Locations',
           hosting_site_setups: 'Hosting Site Field Setups',
           hosting_availability: 'Hosting Availability',
+          field_configuration_options: 'Field Configuration Options',
+          fields: 'Fields',
           teams: 'Teams',
           division_participation: 'Community Division Participation',
           future_games: 'Future Games',
         };
-        const dependencies = Object.entries(details.dependencies).map(([key, count]) => ({ label: mappings[key] || key, count }));
+        const dependencies = Object.entries(detailObject.dependencies).map(([key, count]) => ({ label: mappings[key] || key, count }));
         setDeleteCheck({ organization_name: deleteTarget.name, can_delete: false, dependencies });
+        const dependencyMessage = detailObject.message || 'Organization has dependent records and cannot be deleted without force.';
+        setDeleteError(dependencyMessage);
+        setMessage(dependencyMessage);
+        setType('err');
+        return;
       }
-      setDeleteError('Unable to delete organization.');
-      setMessage('Unable to delete organization.');
+
+      if (apiError?.status === 500) {
+        const serverMessage = detailObject?.message || 'A server error occurred while deleting this organization. Please try again.';
+        setDeleteError(serverMessage);
+        setMessage(serverMessage);
+        setType('err');
+        return;
+      }
+
+      const unreachable = apiError?.status === 0;
+      const fallback = unreachable ? 'Unable to delete organization because the server is unreachable.' : (apiError?.message || 'Unable to delete organization.');
+      setDeleteError(fallback);
+      setMessage(fallback);
       setType('err');
     }
   };
