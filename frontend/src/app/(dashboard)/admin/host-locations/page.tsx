@@ -4,8 +4,8 @@ import { useEffect, useMemo, useState } from 'react';
 import { apiFetch } from '@/lib/api';
 import { getToken } from '@/lib/auth';
 import Toast from '@/components/Toast';
-import DataTable from '@/components/ui/DataTable';
 import FormField from '@/components/ui/FormField';
+import Link from 'next/link';
 
 type HostLocation = {
   id: string;
@@ -24,6 +24,7 @@ type Organization = {
   id: string;
   name: string;
 };
+const STADIUM_TYPE = 'STADIUM_SITE';
 
 type DeleteCheck = {
   host_location_name: string;
@@ -50,11 +51,21 @@ export default function HostLocationsAdminPage() {
   const [deleteCheck, setDeleteCheck] = useState<DeleteCheck | null>(null);
   const [checkingDelete, setCheckingDelete] = useState(false);
   const [cascadeConfirmed, setCascadeConfirmed] = useState(false);
+  const [siteTypeByHostId, setSiteTypeByHostId] = useState<Record<string, string>>({});
 
   const orgNameById = useMemo(() => Object.fromEntries(organizations.map((x) => [x.id, x.name])), [organizations]);
   const displayItems = useMemo(
-    () => items.map((item) => ({ ...item, address_line1: item.address_line1 || item.address || '' })),
-    [items],
+    () => items.map((item) => {
+      const city = item.city?.trim() || '';
+      const state = item.state?.trim() || '';
+      return {
+        ...item,
+        address_line1: item.address_line1 || item.address || '',
+        location: city && state ? `${city}, ${state}` : city || state || '-',
+        site_type: siteTypeByHostId[item.id] || '—',
+      };
+    }),
+    [items, siteTypeByHostId],
   );
 
   const loadOrganizations = async () => {
@@ -69,8 +80,37 @@ export default function HostLocationsAdminPage() {
   const load = async () => {
     setLoading(true);
     try {
-      const d = await apiFetch(`/host-locations?search=${encodeURIComponent(query)}`, {}, getToken());
-      setItems(d.items || []);
+      const [hostResponse, areaResponse] = await Promise.all([
+        apiFetch('/host-locations?page_size=500', {}, getToken()),
+        apiFetch('/physical-field-areas?page_size=1000', {}, getToken()),
+      ]);
+      const hosts = hostResponse.items || [];
+      const areas = areaResponse.items || [];
+      const nextSiteTypes: Record<string, string> = {};
+      for (const area of areas) {
+        if (!area?.host_location_id || nextSiteTypes[area.host_location_id]) continue;
+        nextSiteTypes[area.host_location_id] = area.field_space_type === STADIUM_TYPE ? 'Stadium Site' : 'Grass/Park Site';
+      }
+      const normalizedQuery = query.trim().toLowerCase();
+      const filteredHosts = normalizedQuery
+        ? hosts.filter((item: HostLocation) => {
+            const siteType = nextSiteTypes[item.id] || '';
+            const haystack = [
+              orgNameById[item.organization_id] || '',
+              item.name || '',
+              item.address_line1 || item.address || '',
+              item.city || '',
+              item.state || '',
+              item.zip_code || '',
+              siteType,
+            ]
+              .join(' ')
+              .toLowerCase();
+            return haystack.includes(normalizedQuery);
+          })
+        : hosts;
+      setSiteTypeByHostId(nextSiteTypes);
+      setItems(filteredHosts);
     } catch {
       setMessage('Failed to load host locations');
       setType('err');
@@ -87,17 +127,27 @@ export default function HostLocationsAdminPage() {
   const missingRequired = useMemo(() => {
     const missing: string[] = [];
     if (!form.organization_id) missing.push('Organization');
-    if (!form.name?.trim()) missing.push('Name');
+    if (!form.name?.trim()) missing.push('Hosting Site Name');
     if (!form.address_line1?.trim() && !form.address?.trim()) missing.push('Street Address');
     if (!form.city?.trim()) missing.push('City');
     if (!form.state?.trim()) missing.push('State');
     if (!form.zip_code?.trim()) missing.push('Zip Code');
     return missing;
   }, [form]);
+  const zipCodeError = useMemo(() => {
+    const zip = form.zip_code?.trim() || '';
+    if (!zip) return 'Zip Code is required.';
+    if (!/^\d{5}$/.test(zip)) return 'Zip Code must be 5 digits.';
+    return '';
+  }, [form.zip_code]);
 
   const save = async () => {
-    if (missingRequired.length) {
-      setMessage(`Missing: ${missingRequired.join(', ')}`);
+    if (missingRequired.length || zipCodeError) {
+      if (zipCodeError) {
+        setMessage(zipCodeError);
+      } else {
+        setMessage(`Missing: ${missingRequired.join(', ')}`);
+      }
       setType('err');
       return;
     }
@@ -225,12 +275,12 @@ export default function HostLocationsAdminPage() {
           </select>
         </label>
 
-        <FormField label='Name' type='text' value={form.name ?? ''} onChange={(value) => setForm({ ...form, name: String(value) })} />
+        <FormField label='Hosting Site Name' type='text' value={form.name ?? ''} onChange={(value) => setForm({ ...form, name: String(value) })} />
         <FormField label='Street Address' type='text' value={form.address_line1 ?? form.address ?? ''} onChange={(value) => setForm({ ...form, address_line1: String(value) })} />
         <FormField label='Address Line 2 (Optional)' type='text' value={form.address_line2 ?? ''} onChange={(value) => setForm({ ...form, address_line2: String(value) })} />
         <FormField label='City' type='text' value={form.city ?? ''} onChange={(value) => setForm({ ...form, city: String(value) })} />
         <FormField label='State' type='text' value={form.state ?? 'WI'} onChange={(value) => setForm({ ...form, state: String(value) })} />
-        <FormField label='Zip Code' type='text' value={form.zip_code ?? ''} onChange={(value) => setForm({ ...form, zip_code: String(value) })} />
+        <FormField label='Zip Code' type='text' value={form.zip_code ?? ''} onChange={(value) => setForm({ ...form, zip_code: String(value).replace(/\D/g, '').slice(0, 5) })} />
         <FormField label='Active' type='checkbox' value={form.is_active ?? true} onChange={(value) => setForm({ ...form, is_active: Boolean(value) })} />
 
         <div className='flex gap-2 md:col-span-2'>
@@ -245,15 +295,43 @@ export default function HostLocationsAdminPage() {
         </div>
       </div>
 
+      {zipCodeError && <p className='text-sm text-rose-700'>{zipCodeError}</p>}
+
       {loading ? <p>Loading records...</p> : items.length === 0 ? <div className='rounded border border-dashed p-6 text-center text-slate-500'>No records yet.</div> : (
-        <DataTable
-          items={displayItems}
-          columns={['organization_id', 'name', 'address_line1', 'city', 'state', 'zip_code', 'is_active']}
-          valueLabels={{ organization_id: orgNameById }}
-          headerLabels={{ organization_id: 'Organization', address_line1: 'Street Address', city: 'City', state: 'State', zip_code: 'Zip Code', is_active: 'Active' }}
-          onEdit={edit}
-          onDelete={openDeleteModal}
-        />
+        <div className='overflow-x-auto rounded border'>
+          <table className='w-full text-left text-sm'>
+            <thead className='bg-slate-100'>
+              <tr>
+                <th className='px-3 py-2'>Organization</th>
+                <th className='px-3 py-2'>Hosting Site Name</th>
+                <th className='px-3 py-2'>Street Address</th>
+                <th className='px-3 py-2'>Location</th>
+                <th className='px-3 py-2'>Zip Code</th>
+                <th className='px-3 py-2'>Site Type</th>
+                <th className='px-3 py-2'>Active</th>
+                <th className='px-3 py-2'>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {displayItems.map((item) => (
+                <tr key={item.id} className='border-t'>
+                  <td className='px-3 py-2'>{orgNameById[item.organization_id] || '-'}</td>
+                  <td className='px-3 py-2'>{item.name}</td>
+                  <td className='px-3 py-2'>{item.address_line1 || '-'}</td>
+                  <td className='px-3 py-2'>{(item as any).location}</td>
+                  <td className='px-3 py-2'>{item.zip_code || '-'}</td>
+                  <td className='px-3 py-2'>{(item as any).site_type}</td>
+                  <td className='px-3 py-2'>{item.is_active ? 'Active' : 'Inactive'}</td>
+                  <td className='space-x-2 px-3 py-2'>
+                    <button className='text-blue-700' onClick={() => edit(item)}>Edit</button>
+                    <button className='text-rose-700' onClick={() => openDeleteModal(item)}>Delete</button>
+                    <Link className='text-emerald-700' href={`/admin/hosting-availability?host_location_id=${encodeURIComponent(item.id)}&organization_id=${encodeURIComponent(item.organization_id)}`}>View Availability</Link>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
 
       {deleteTarget && (
