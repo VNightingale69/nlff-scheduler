@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { apiFetch } from '@/lib/api';
+import { ApiError, apiFetch } from '@/lib/api';
 import { getAuthUser, getToken } from '@/lib/auth';
 import Toast from '@/components/Toast';
 import FormField from '@/components/ui/FormField';
@@ -22,6 +22,7 @@ export default function OrganizationsAdminPage() {
   const [deleteTarget, setDeleteTarget] = useState<Organization | null>(null);
   const [deleteCheck, setDeleteCheck] = useState<DeleteCheck | null>(null);
   const [checkingDelete, setCheckingDelete] = useState(false);
+  const [deleteError, setDeleteError] = useState('');
   const [cascadeConfirmed, setCascadeConfirmed] = useState(false);
 
   const user = getAuthUser();
@@ -55,31 +56,44 @@ export default function OrganizationsAdminPage() {
   };
 
   const openDeleteModal = async (item: Organization) => {
-    setDeleteTarget(item); setDeleteCheck(null); setCheckingDelete(true); setCascadeConfirmed(false);
-    try { setDeleteCheck(await apiFetch(`/organizations/${item.id}/delete-check`, {}, getToken())); }
-    catch (e: any) { setMessage(e?.message || 'Failed to load dependency summary'); setType('err'); }
+    setDeleteTarget(item); setDeleteCheck(null); setCheckingDelete(true); setCascadeConfirmed(false); setDeleteError('');
+    try {
+      const result = await apiFetch(`/organizations/${item.id}/delete-check`, {}, getToken());
+      setDeleteCheck(result);
+    }
+    catch {
+      setDeleteError('Unable to check organization dependencies.');
+      setMessage('Unable to check organization dependencies.');
+      setType('err');
+    }
     finally { setCheckingDelete(false); }
   };
 
-  const closeDeleteModal = () => { setDeleteTarget(null); setDeleteCheck(null); setCheckingDelete(false); };
+  const closeDeleteModal = () => { setDeleteTarget(null); setDeleteCheck(null); setCheckingDelete(false); setDeleteError(''); };
 
   const deactivateOrganization = async () => {
     if (!deleteTarget) return;
+    setDeleteError('');
     try {
       await apiFetch(`/organizations/${deleteTarget.id}`, { method: 'PUT', body: JSON.stringify({ ...deleteTarget, is_active: false }) }, getToken());
       setMessage(`${deleteTarget.name} marked inactive`); setType('ok'); closeDeleteModal(); load();
-    } catch (e: any) { setMessage(e?.message || 'Failed to mark organization inactive'); setType('err'); }
+    } catch {
+      setDeleteError('Unable to mark organization inactive.');
+      setMessage('Unable to mark organization inactive.');
+      setType('err');
+    }
   };
 
   const confirmDelete = async () => {
     if (!deleteTarget) return;
+    setDeleteError('');
     try {
       const hasDependencies = !!deleteCheck && !deleteCheck.can_delete;
       const endpoint = hasDependencies && isLeagueAdmin ? `/organizations/${deleteTarget.id}?force=true` : `/organizations/${deleteTarget.id}`;
       await apiFetch(endpoint, { method: 'DELETE' }, getToken());
       setMessage('Deleted successfully'); setType('ok'); closeDeleteModal(); load();
     } catch (e: any) {
-      const details = e?.details as DeleteDependencyResponse | undefined;
+      const details = (e instanceof ApiError ? e.details : undefined) as DeleteDependencyResponse | undefined;
       if (details?.dependencies) {
         const mappings: Record<string, string> = {
           host_locations: 'Host Locations',
@@ -92,7 +106,8 @@ export default function OrganizationsAdminPage() {
         const dependencies = Object.entries(details.dependencies).map(([key, count]) => ({ label: mappings[key] || key, count }));
         setDeleteCheck({ organization_name: deleteTarget.name, can_delete: false, dependencies });
       }
-      setMessage(e?.message || 'Delete failed');
+      setDeleteError('Unable to delete organization.');
+      setMessage('Unable to delete organization.');
       setType('err');
     }
   };
@@ -112,6 +127,7 @@ export default function OrganizationsAdminPage() {
     {deleteTarget && <div className='fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4'><div className='w-full max-w-lg rounded bg-white p-5 shadow-lg'>
       <h2 className='text-lg font-semibold'>Delete Organization</h2>
       <p className='mt-2 text-sm text-slate-700'>You are deleting <span className='font-semibold'>{deleteTarget.name}</span>.</p>
+      {deleteError && <p className='mt-3 rounded border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700'>{deleteError}</p>}
       {checkingDelete && <p className='mt-3 text-sm text-slate-500'>Checking dependencies...</p>}
       {!checkingDelete && deleteCheck && <div className='mt-3 rounded border p-3 text-sm'>
         <p className='font-medium'>{deleteCheck.can_delete ? 'No blocking dependencies found.' : `${deleteCheck.organization_name} cannot be deleted until dependencies are removed.`}</p>
