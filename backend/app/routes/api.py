@@ -266,12 +266,34 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
             },
         )
 
+
+LEAGUE_DIVISION_SEED = [
+    {'name': 'K/1st', 'division_group': 'COED', 'sort_order': 1, 'required_field_layout_type': 'THIRTY_YARD_WIDTH', 'is_active': True},
+    {'name': '2nd/3rd', 'division_group': 'COED', 'sort_order': 2, 'required_field_layout_type': 'THIRTY_YARD_WIDTH', 'is_active': True},
+    {'name': '4th/5th', 'division_group': 'COED', 'sort_order': 3, 'required_field_layout_type': 'THIRTY_YARD_WIDTH', 'is_active': True},
+    {'name': '6th/7th', 'division_group': 'COED', 'sort_order': 4, 'required_field_layout_type': 'FIFTY_THREE_YARD_WIDTH', 'is_active': True},
+    {'name': '8th', 'division_group': 'COED', 'sort_order': 5, 'required_field_layout_type': 'FIFTY_THREE_YARD_WIDTH', 'is_active': True},
+    {'name': 'K/1st', 'division_group': 'GIRLS', 'sort_order': 1, 'required_field_layout_type': 'THIRTY_YARD_WIDTH', 'is_active': True},
+    {'name': '2nd/3rd', 'division_group': 'GIRLS', 'sort_order': 2, 'required_field_layout_type': 'THIRTY_YARD_WIDTH', 'is_active': True},
+    {'name': '4th/5th', 'division_group': 'GIRLS', 'sort_order': 3, 'required_field_layout_type': 'THIRTY_YARD_WIDTH', 'is_active': True},
+    {'name': '6th/7th/8th', 'division_group': 'GIRLS', 'sort_order': 4, 'required_field_layout_type': 'FIFTY_THREE_YARD_WIDTH', 'is_active': True},
+]
+
+
+def ensure_league_defined_divisions(db: Session) -> None:
+    if db.query(Division).count() > 0:
+        return
+    for item in LEAGUE_DIVISION_SEED:
+        db.add(Division(**item))
+    db.commit()
+
 @router.post('/divisions', response_model=DivisionRead, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def create_division(payload: DivisionCreate, db: Session = Depends(get_db)):
     d = Division(**payload.model_dump()); db.add(d); db.commit(); db.refresh(d); return d
 
 @router.get('/divisions', response_model=PagedResponse[DivisionRead], dependencies=[Depends(get_current_user)])
 def list_divisions(search: str | None = None, page: int = 1, page_size: int = 20, db: Session = Depends(get_db)):
+    ensure_league_defined_divisions(db)
     q = db.query(Division)
     if search: q = q.filter(func.lower(Division.name).like(f"%{search.lower()}%"))
     return paginate(q.order_by(Division.division_group, Division.sort_order, Division.name), page, page_size)
@@ -297,6 +319,7 @@ def list_organization_division_participation(
     db: Session = Depends(get_db),
 ):
     enforce_organization_scope(organization_id, current_user)
+    ensure_league_defined_divisions(db)
     rows = (
         db.query(OrganizationDivisionParticipation)
         .filter(OrganizationDivisionParticipation.organization_id == organization_id)
@@ -312,25 +335,26 @@ def upsert_organization_division_participation(
     db: Session = Depends(get_db),
 ):
     enforce_organization_scope(payload.organization_id, current_user)
+    ensure_league_defined_divisions(db)
     for item in payload.items:
         if item.team_count < 0:
             raise HTTPException(400, 'Team count must be zero or greater')
-        if item.is_participating and item.team_count < 1:
-            raise HTTPException(400, 'Participating divisions must have at least 1 team')
+        normalized_team_count = int(item.team_count) if item.team_count > 0 else 0
+        is_participating = normalized_team_count > 0
         existing = db.query(OrganizationDivisionParticipation).filter(
             OrganizationDivisionParticipation.organization_id == payload.organization_id,
             OrganizationDivisionParticipation.division_id == item.division_id,
         ).first()
         if existing:
-            existing.is_participating = item.is_participating
-            existing.team_count = item.team_count
+            existing.is_participating = is_participating
+            existing.team_count = normalized_team_count
             existing.is_active = True
         else:
             db.add(OrganizationDivisionParticipation(
                 organization_id=payload.organization_id,
                 division_id=item.division_id,
-                is_participating=item.is_participating,
-                team_count=item.team_count,
+                is_participating=is_participating,
+                team_count=normalized_team_count,
                 is_active=True,
             ))
     db.commit()
