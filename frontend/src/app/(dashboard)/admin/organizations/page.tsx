@@ -7,7 +7,6 @@ import Toast from '@/components/Toast';
 import FormField from '@/components/ui/FormField';
 
 type Organization = { id: string; name: string; is_active: boolean };
-type DeleteCheck = { organization_name: string; can_delete: boolean; dependencies: Array<{ label: string; count: number | string }> };
 type DeleteDependencyErrorDetail = { error?: string; message?: string; dependencies?: Record<string, number | string> };
 
 export default function OrganizationsAdminPage() {
@@ -20,8 +19,6 @@ export default function OrganizationsAdminPage() {
   const [message, setMessage] = useState('');
   const [type, setType] = useState<'ok' | 'err'>('ok');
   const [deleteTarget, setDeleteTarget] = useState<Organization | null>(null);
-  const [deleteCheck, setDeleteCheck] = useState<DeleteCheck | null>(null);
-  const [checkingDelete, setCheckingDelete] = useState(false);
   const [deleteError, setDeleteError] = useState('');
   const [cascadeConfirmed, setCascadeConfirmed] = useState(false);
 
@@ -55,21 +52,11 @@ export default function OrganizationsAdminPage() {
     finally { setSaving(false); }
   };
 
-  const openDeleteModal = async (item: Organization) => {
-    setDeleteTarget(item); setDeleteCheck(null); setCheckingDelete(true); setCascadeConfirmed(false); setDeleteError('');
-    try {
-      const result = await apiFetch(`/organizations/${item.id}/delete-check`, {}, getToken());
-      setDeleteCheck(result);
-    }
-    catch {
-      setDeleteError('Unable to check organization dependencies.');
-      setMessage('Unable to check organization dependencies.');
-      setType('err');
-    }
-    finally { setCheckingDelete(false); }
+  const openDeleteModal = (item: Organization) => {
+    setDeleteTarget(item); setCascadeConfirmed(false); setDeleteError('');
   };
 
-  const closeDeleteModal = () => { setDeleteTarget(null); setDeleteCheck(null); setCheckingDelete(false); setDeleteError(''); setCascadeConfirmed(false); };
+  const closeDeleteModal = () => { setDeleteTarget(null); setDeleteError(''); setCascadeConfirmed(false); };
 
   const deactivateOrganization = async () => {
     if (!deleteTarget) return;
@@ -88,70 +75,23 @@ export default function OrganizationsAdminPage() {
     if (!deleteTarget) return;
     setDeleteError('');
     try {
-      const hasDependencies = !!deleteCheck && !deleteCheck.can_delete;
-      const allowForceDelete = isLeagueAdmin && (hasDependencies || dependencySummaryUnavailable);
-      const endpoint = allowForceDelete ? `/organizations/${deleteTarget.id}?force=true` : `/organizations/${deleteTarget.id}`;
-      const response = await apiFetch(endpoint, { method: 'DELETE' }, getToken());
-      if (response?.deleted && deleteCheck) {
-        const mappings: Record<string, string> = {
-          hosting_availability: 'Hosting Availability',
-          field_configuration_options: 'Field Configuration Options',
-          hosting_site_setups: 'Hosting Site Field Setups / Physical Field Areas',
-          teams: 'Teams',
-          division_participation: 'Community Division Participation',
-          fields: 'Fields',
-          host_locations: 'Host Locations',
-          organization: 'Organization',
-        };
-        const dependencies = Object.entries(response.deleted).map(([key, count]) => ({ label: mappings[key] || key, count: Number(count) }));
-        setDeleteCheck({ organization_name: deleteTarget.name, can_delete: false, dependencies });
-      }
+      const endpoint = isLeagueAdmin ? `/organizations/${deleteTarget.id}?force=true` : `/organizations/${deleteTarget.id}`;
+      await apiFetch(endpoint, { method: 'DELETE' }, getToken());
       setMessage('Deleted successfully'); setType('ok'); closeDeleteModal(); load();
     } catch (e: any) {
       const apiError = e instanceof ApiError ? e : undefined;
       const detailObject = (apiError?.detail && typeof apiError.detail === 'object' ? apiError.detail : apiError?.details) as DeleteDependencyErrorDetail | undefined;
-      if (apiError?.status === 409 && detailObject?.dependencies) {
-        const mappings: Record<string, string> = {
-          host_locations: 'Host Locations',
-          hosting_site_setups: 'Hosting Site Field Setups',
-          hosting_availability: 'Hosting Availability',
-          field_configuration_options: 'Field Configuration Options',
-          fields: 'Fields',
-          teams: 'Teams',
-          division_participation: 'Community Division Participation',
-          future_games: 'Future Games',
-        };
-        const dependencies = Object.entries(detailObject.dependencies).map(([key, count]) => ({ label: mappings[key] || key, count }));
-        setDeleteCheck({ organization_name: deleteTarget.name, can_delete: false, dependencies });
-        const dependencyMessage = detailObject.message || 'Organization has dependent records and cannot be deleted without force.';
-        setDeleteError(dependencyMessage);
-        setMessage(dependencyMessage);
-        setType('err');
-        return;
-      }
-
-      if (apiError?.status === 500) {
-        const serverMessage = detailObject?.message || 'A server error occurred while deleting this organization. Please try again.';
-        setDeleteError(serverMessage);
-        setMessage(serverMessage);
-        setType('err');
-        return;
-      }
-
-      const unreachable = apiError?.status === 0;
-      const fallback = unreachable ? 'Unable to delete organization because the server is unreachable.' : (apiError?.message || 'Unable to delete organization.');
-      setDeleteError(fallback);
-      setMessage(fallback);
+      const fallback = 'Unable to delete organization. Check backend logs.';
+      const serverMessage = detailObject?.message ? `${fallback}` : fallback;
+      setDeleteError(serverMessage);
+      setMessage(serverMessage);
       setType('err');
     }
   };
 
 
-  const visibleDependencies = deleteCheck?.dependencies.filter((d) => Number(d.count) > 0) ?? [];
-  const dependencySummaryUnavailable = !checkingDelete && (Boolean(deleteError) || (Boolean(deleteCheck) && !deleteCheck.can_delete && visibleDependencies.length === 0));
-  const requiresCascadeConfirmation = isLeagueAdmin && (dependencySummaryUnavailable || (Boolean(deleteCheck) && !deleteCheck.can_delete));
-  const deleteButtonDisabled = (requiresCascadeConfirmation && !cascadeConfirmed) || checkingDelete;
-  const deleteButtonLabel = requiresCascadeConfirmation ? 'Delete Organization and Related Data' : 'Delete Organization';
+  const requiresCascadeConfirmation = isLeagueAdmin;
+  const deleteButtonDisabled = requiresCascadeConfirmation && !cascadeConfirmed;
 
   return <div className='space-y-4'>
     <Toast message={message} type={type} />
@@ -169,14 +109,9 @@ export default function OrganizationsAdminPage() {
       <h2 className='text-lg font-semibold'>Organization Actions</h2>
       <p className='mt-2 text-sm text-slate-700'>You are deleting <span className='font-semibold'>{deleteTarget.name}</span>.</p>
       {deleteError && <p className='mt-3 rounded border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700'>{deleteError}</p>}
-      {checkingDelete && <p className='mt-3 text-sm text-slate-500'>Checking dependencies...</p>}
-      {!checkingDelete && deleteCheck && <div className='mt-3 rounded border p-3 text-sm'>
-        <p className='font-medium'>{deleteCheck.can_delete ? 'No blocking dependencies found.' : 'Dependency summary for organization setup data:'}</p>
-        <ul className='mt-2 list-disc pl-6'>{visibleDependencies.map((d) => <li key={d.label}>{d.count} {d.label}</li>)}</ul>
-      </div>}
-      {dependencySummaryUnavailable && isLeagueAdmin && <p className='mt-3 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800'>Dependency summary could not be loaded, but League Admin may still delete related setup data.</p>}
+      <p className='mt-3 rounded border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800'>This will permanently delete the organization and all related setup data, including host locations, hosting site setup, availability, division participation, and teams. This action cannot be undone.</p>
       {requiresCascadeConfirmation && <div className='mt-3 rounded border border-rose-200 bg-rose-50 p-3 text-sm'><label className='flex items-start gap-2'><input type='checkbox' className='mt-1' checked={cascadeConfirmed} onChange={(e) => setCascadeConfirmed(e.target.checked)} /><span>I understand this will permanently delete this organization and all related setup data.</span></label><p className='mt-2 text-rose-700'>This action cannot be undone.</p></div>}
-      <div className='mt-4 flex flex-wrap justify-end gap-2'><button className='rounded border px-3 py-2' onClick={closeDeleteModal}>Cancel</button><button className='rounded border border-amber-500 px-3 py-2 text-amber-700' onClick={deactivateOrganization}>Mark Inactive</button><button className={`rounded px-3 py-2 text-white ${deleteButtonDisabled ? 'bg-slate-400' : 'bg-rose-700 hover:bg-rose-800'}`} disabled={deleteButtonDisabled} onClick={confirmDelete}>{deleteButtonLabel}</button></div>
+      <div className='mt-4 flex flex-wrap justify-end gap-2'><button className='rounded border px-3 py-2' onClick={closeDeleteModal}>Cancel</button><button className='rounded border border-amber-500 px-3 py-2 text-amber-700' onClick={deactivateOrganization}>Mark Inactive</button><button className={`rounded px-3 py-2 text-white ${deleteButtonDisabled ? 'bg-slate-400' : 'bg-rose-700 hover:bg-rose-800'}`} disabled={deleteButtonDisabled} onClick={confirmDelete}>Delete Organization</button></div>
     </div></div>}
   </div>;
 }

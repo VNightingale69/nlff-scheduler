@@ -215,33 +215,10 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
         o = db.query(Organization).filter(Organization.id == org_id).first()
         if not o:
             raise HTTPException(404, 'Organization not found')
-        try:
-            dependencies = _organization_dependency_summary(db, org_id)
-        except SQLAlchemyError:
-            db.rollback()
-            logger.exception('Organization dependency check failed during delete for org_id=%s force=%s', org_id, force)
-            raise HTTPException(
-                status_code=500,
-                detail={
-                    'error': 'organization_dependency_check_failed',
-                    'message': 'Unable to check organization dependencies due to a server error.',
-                },
-            )
-        dependency_map = {label: count for label, count in dependencies}
-        dependency_payload = _organization_dependencies_payload(dependencies)
-        has_dependencies = any(isinstance(count, int) and count > 0 for count in dependency_payload.values())
-
         if not force:
-            if has_dependencies:
-                raise HTTPException(
-                    status_code=409,
-                    detail={
-                        'error': 'organization_dependencies_exist',
-                        'message': 'Organization cannot be deleted because dependent records exist.',
-                        'dependencies': dependency_payload,
-                    },
-                )
-            db.delete(o); db.commit(); return {'success': True, 'deleted': {'organization': 1}}
+            db.delete(o)
+            db.commit()
+            return {'success': True, 'deleted': {'organization': 1}}
 
         blocked_game_count = db.query(Game).join(Game.status).filter(
             and_(
