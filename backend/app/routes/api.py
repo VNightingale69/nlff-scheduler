@@ -18,6 +18,10 @@ from app.security import create_access_token, create_refresh_token, hash_passwor
 from app.services.scheduling_validation import validate_game
 
 router = APIRouter(prefix='/api')
+ALLOWED_FIELD_SPACE_TYPES = {
+    'STADIUM_SITE',
+    'GRASS_PARK_SITE',
+}
 
 def paginate(query, page: int, page_size: int):
     total = query.count(); items = query.offset((page - 1) * page_size).limit(page_size).all()
