@@ -24,11 +24,15 @@ const layoutKey = (areaId: string, date: string) => `${areaId}|${date}`;
 
 const hourLabel = (hour: number) => (hour <= 11 ? `${hour}:00 AM` : hour === 12 ? '12:00 PM' : `${hour - 12}:00 PM`);
 const displayHour = (hour: number) => {
-  if (hour === 12) return '12 PM';
-  if (hour === 24 || hour === 0) return '12 AM';
-  if (hour > 12) return `${hour - 12} PM`;
-  return `${hour} AM`;
+  if (hour === 12) return '12:00 PM';
+  if (hour === 24 || hour === 0) return '12:00 AM';
+  if (hour > 12) return `${hour - 12}:00 PM`;
+  return `${hour}:00 AM`;
 };
+
+const formatDateLabel = (date: string) => new Date(`${date}T00:00:00`).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+
+const layoutLabel = (layout: string) => (layout === '2x53' ? 'Two Large Fields' : layout === '1x53_plus_2x30' ? 'One Large Field + Two Small Fields' : layout === '3x30' ? 'Three Small Fields' : 'Custom Layout');
 
 export default function HostingAvailabilityManager() {
   const [message, setMessage] = useState('');
@@ -44,6 +48,10 @@ export default function HostingAvailabilityManager() {
   const [activeConfigByAreaDate, setActiveConfigByAreaDate] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [savedAvailability, setSavedAvailability] = useState<any[]>([]);
+  const [savedDateFilter, setSavedDateFilter] = useState('');
+  const [savedSiteTypeFilter, setSavedSiteTypeFilter] = useState('');
+  const [savedLayoutFilter, setSavedLayoutFilter] = useState('');
 
   const user = getAuthUser();
   const token = getToken();
@@ -121,6 +129,51 @@ export default function HostingAvailabilityManager() {
     return ranges;
   };
 
+  const loadSavedAvailability = async () => {
+    if (!hostId) {
+      setSavedAvailability([]);
+      return;
+    }
+    const params = new URLSearchParams();
+    if (orgId) params.set('organization_id', orgId);
+    params.set('host_location_id', hostId);
+    if (savedDateFilter) params.set('available_date', savedDateFilter);
+    if (savedSiteTypeFilter) params.set('site_type', savedSiteTypeFilter);
+    if (savedLayoutFilter) params.set('layout', savedLayoutFilter);
+    const data = await apiFetch(`/hosting-availabilities/saved?${params.toString()}`, {}, token);
+    setSavedAvailability(data.items || []);
+  };
+
+  useEffect(() => {
+    loadSavedAvailability().catch(() => setSavedAvailability([]));
+  }, [hostId, orgId, savedDateFilter, savedSiteTypeFilter, savedLayoutFilter]);
+
+  const editSaved = (entry: any) => {
+    setSelectedDates([entry.available_date]);
+    const nextSlots: Record<string, boolean> = {};
+    const nextConfigs: Record<string, string> = {};
+    const area = visibleAreas[0];
+    if (!area) return;
+    for (const range of entry.time_ranges) {
+      const start = Number(range.start_time.slice(0, 2));
+      const end = Number(range.end_time.slice(0, 2));
+      for (let h = start; h < end; h += 1) nextSlots[slotKey(area.id, entry.available_date, h)] = true;
+    }
+    const cfg = (configsByArea[area.id] || []).find((c: any) => c.name === entry.available_layout);
+    if (cfg) nextConfigs[layoutKey(area.id, entry.available_date)] = cfg.id;
+    setSelectedSlots(nextSlots);
+    setActiveConfigByAreaDate(nextConfigs);
+  };
+
+  const deleteSaved = async (entry: any) => {
+    const prompt = `Delete availability for ${entry.host_location_name} on ${formatDateLabel(entry.available_date)}?`;
+    if (!window.confirm(prompt)) return;
+    await apiFetch(`/hosting-availabilities/saved?host_location_id=${hostId}&available_date=${entry.available_date}`, { method: 'DELETE' }, token);
+    setMessage('Saved availability deleted.');
+    setType('ok');
+    await loadSavedAvailability();
+  };
+
   const save = async () => {
     if (!selectedDates.length || !visibleAreas.length) {
       setType('err');
@@ -152,6 +205,7 @@ export default function HostingAvailabilityManager() {
       await apiFetch('/hosting-availabilities/bulk-upsert', { method: 'POST', body: JSON.stringify({ slots }) }, token);
       setType('ok');
       setMessage('Availability saved successfully.');
+      await loadSavedAvailability();
     } catch (e: any) {
       setType('err');
       setMessage(e.message || 'Save failed');
@@ -196,7 +250,7 @@ export default function HostingAvailabilityManager() {
                   <div className='font-medium'>{area.name}</div>
                   <div className='text-sm text-slate-600'>{area.field_space_type === STADIUM_TYPE ? 'Stadium Site' : 'Grass/Park Site'}</div>
                   <ul className='mt-2 list-disc pl-6 text-sm'>
-                    {cfgs.map((c: any) => <li key={c.id}>{c.name === '2x53' ? 'Two Large Fields' : c.name === '1x53_plus_2x30' ? 'One Large + Two Small Fields' : c.name === '3x30' ? 'Three Small Fields' : 'Custom Layout'} ({c.thirty_yard_capacity} Small / {c.fifty_three_yard_capacity} Large)</li>)}
+                    {cfgs.map((c: any) => <li key={c.id}>{layoutLabel(c.name)} ({c.thirty_yard_capacity} Small / {c.fifty_three_yard_capacity} Large)</li>)}
                   </ul>
                 </div>
               );
@@ -235,7 +289,7 @@ export default function HostingAvailabilityManager() {
                     </div>
                     {isStadium ? (
                       <select className='rounded border p-2 text-sm' value={selectedCfg} onChange={(e) => setActiveConfigByAreaDate({ ...activeConfigByAreaDate, [layoutKey(area.id, date)]: e.target.value })}>
-                        {cfgs.map((c: any) => <option key={c.id} value={c.id}>{c.name === '2x53' ? 'Two Large Fields' : c.name === '1x53_plus_2x30' ? 'One Large + Two Small Fields' : c.name === '3x30' ? 'Three Small Fields' : 'Custom Layout'}</option>)}
+                        {cfgs.map((c: any) => <option key={c.id} value={c.id}>{layoutLabel(c.name)}</option>)}
                       </select>
                     ) : <div className='text-sm text-slate-700'>Layout uses saved site setup automatically.</div>}
                   </div>
@@ -259,6 +313,24 @@ export default function HostingAvailabilityManager() {
             })}
           </div>
         ))}
+      </section>
+
+      <section className='rounded border p-4'>
+        <h2 className='mb-2 font-semibold'>Saved Availability</h2>
+        <div className='mb-3 grid gap-2 md:grid-cols-4'>
+          <input type='date' className='rounded border p-2' value={savedDateFilter} onChange={(e) => setSavedDateFilter(e.target.value)} />
+          <select className='rounded border p-2' value={savedSiteTypeFilter} onChange={(e) => setSavedSiteTypeFilter(e.target.value)}><option value=''>All Site Types</option><option value='STADIUM_SITE'>Stadium Site</option><option value='GRASS_PARK_SITE'>Grass/Park Site</option></select>
+          <select className='rounded border p-2' value={savedLayoutFilter} onChange={(e) => setSavedLayoutFilter(e.target.value)}><option value=''>All Layouts</option><option value='2x53'>Two Large Fields</option><option value='1x53_plus_2x30'>One Large Field + Two Small Fields</option><option value='3x30'>Three Small Fields</option></select>
+        </div>
+        {!hostId ? <p className='text-slate-500'>Select a hosting site to view saved availability.</p> : !savedAvailability.length ? <p className='text-slate-500'>No saved availability has been entered for this hosting site.</p> : <div className='space-y-3'>{savedAvailability.map((entry: any, idx: number) => (
+          <div key={`${entry.available_date}-${idx}`} className='rounded border bg-slate-50 p-3 text-sm'>
+            <div className='flex items-start justify-between gap-2'>
+              <div><div className='font-semibold'>{formatDateLabel(entry.available_date)}</div><div>{entry.host_location_name}</div><div>{entry.site_type === 'STADIUM_SITE' ? 'Stadium Site' : 'Grass/Park Site'}</div><div>Available Layout: {layoutLabel(entry.available_layout)}</div><div>Capacity: {entry.small_field_capacity} Small Fields / {entry.large_field_capacity} Large Field</div></div>
+              <div className='flex gap-2'><button onClick={() => editSaved(entry)} className='rounded border px-3 py-1'>Edit</button><button onClick={() => deleteSaved(entry)} className='rounded border border-red-300 px-3 py-1 text-red-700'>Delete</button></div>
+            </div>
+            <div className='mt-1'>Available:</div><ul className='list-disc pl-6'>{entry.time_ranges.map((range: any, rIdx: number) => <li key={rIdx}>{displayHour(Number(range.start_time.slice(0,2)))}–{displayHour(Number(range.end_time.slice(0,2)))}</li>)}</ul>
+          </div>
+        ))}</div>}
       </section>
 
       <section className='rounded border p-4'>

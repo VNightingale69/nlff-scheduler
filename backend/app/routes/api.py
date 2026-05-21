@@ -2,7 +2,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Query
 from datetime import date, time
 
-from sqlalchemy import func
+from sqlalchemy import and_, func
 from sqlalchemy.orm import Session, aliased
 
 from app.auth import ROLE_COMMUNITY_SCHEDULER, ROLE_LEAGUE_ADMIN, enforce_organization_scope, get_current_user, require_roles
@@ -10,7 +10,7 @@ from app.database import get_db
 from app.models import Division, Field, FieldConfigurationOption, Game, GameStatus, HostLocation, HostingAvailability, Organization, PhysicalFieldArea, Role, Season, Team, User, Week
 from app.schemas import (
     DivisionCreate, DivisionRead, FieldConfigurationOptionCreate, FieldConfigurationOptionRead, FieldCreate, FieldRead, GameCreate, GameRead, GameSaveResponse,
-    HostLocationCreate, HostLocationRead, HostingAvailabilityCreate, HostingAvailabilityRead, HostingAvailabilityBulkUpsertRequest, HostingAvailabilityBulkUpsertResponse, PhysicalFieldAreaCreate, PhysicalFieldAreaRead,
+    HostLocationCreate, HostLocationRead, HostingAvailabilityCreate, HostingAvailabilityRead, HostingAvailabilityBulkUpsertRequest, HostingAvailabilityBulkUpsertResponse, PhysicalFieldAreaCreate, PhysicalFieldAreaRead, SavedAvailabilityResponse,
     LoginRequest, OrganizationCreate, OrganizationRead, PagedResponse, PublicGameRead, RefreshRequest,
     TeamCreate, TeamRead, TokenResponse, UserCreate, UserRead
 )
@@ -384,6 +384,83 @@ def bulk_upsert_hosting_availabilities(payload: HostingAvailabilityBulkUpsertReq
             created += 1
     db.commit()
     return HostingAvailabilityBulkUpsertResponse(created=created, updated=updated)
+@router.get('/hosting-availabilities/saved', response_model=SavedAvailabilityResponse, dependencies=[Depends(get_current_user)])
+def list_saved_hosting_availability(organization_id: uuid.UUID | None = None, host_location_id: uuid.UUID | None = None, site_type: str | None = None, layout: str | None = None, available_date: str | None = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    q = db.query(HostingAvailability).join(HostingAvailability.physical_field_area).join(PhysicalFieldArea.host_location).outerjoin(HostingAvailability.field_configuration_option).filter(HostingAvailability.is_available.is_(True))
+    if current_user.role.name == ROLE_COMMUNITY_SCHEDULER:
+        q = q.filter(HostLocation.organization_id == current_user.organization_id)
+    elif organization_id:
+        q = q.filter(HostLocation.organization_id == organization_id)
+    if host_location_id:
+        q = q.filter(HostLocation.id == host_location_id)
+    if site_type:
+        q = q.filter(PhysicalFieldArea.field_space_type == site_type)
+    if layout:
+        q = q.filter(FieldConfigurationOption.name == layout)
+    if available_date:
+        q = q.filter(func.cast(HostingAvailability.available_date, str) == available_date)
+
+    rows = q.order_by(HostingAvailability.available_date, HostLocation.name, PhysicalFieldArea.name, HostingAvailability.start_time).all()
+    grouped: dict[tuple[str, str, str], dict] = {}
+    for row in rows:
+        if not row.physical_field_area:
+            continue
+        area = row.physical_field_area
+        host = area.host_location
+        option = row.field_configuration_option
+        layout_name = option.name if option else 'Custom Layout'
+        key = (str(row.available_date), str(area.id), layout_name)
+        if key not in grouped:
+            grouped[key] = {
+                'available_date': row.available_date,
+                'host_location_name': host.name,
+                'site_type': area.field_space_type,
+                'available_layout': layout_name,
+                'small_field_capacity': option.thirty_yard_capacity if option else 0,
+                'large_field_capacity': option.fifty_three_yard_capacity if option else 0,
+                'hours': []
+            }
+        grouped[key]['hours'].append(row.start_time.hour)
+
+    items = []
+    for data in grouped.values():
+        hours = sorted(set(data['hours']))
+        ranges = []
+        if hours:
+            start = hours[0]
+            prev = hours[0]
+            for hour in hours[1:]:
+                if hour != prev + 1:
+                    ranges.append({'start_time': time(start, 0), 'end_time': time(prev + 1, 0)})
+                    start = hour
+                prev = hour
+            ranges.append({'start_time': time(start, 0), 'end_time': time(prev + 1, 0)})
+        items.append({
+            'available_date': data['available_date'],
+            'host_location_name': data['host_location_name'],
+            'site_type': data['site_type'],
+            'available_layout': data['available_layout'],
+            'small_field_capacity': data['small_field_capacity'],
+            'large_field_capacity': data['large_field_capacity'],
+            'time_ranges': ranges,
+        })
+    items.sort(key=lambda x: (x['available_date'], x['host_location_name']))
+    return {'items': items}
+
+
+@router.delete('/hosting-availabilities/saved', dependencies=[Depends(get_current_user)])
+def delete_saved_hosting_availability(host_location_id: uuid.UUID, available_date: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    date_value = date.fromisoformat(available_date)
+    q = db.query(HostingAvailability).join(HostingAvailability.physical_field_area).join(PhysicalFieldArea.host_location).filter(HostLocation.id == host_location_id, HostingAvailability.available_date == date_value)
+    sample = q.first()
+    if not sample:
+        raise HTTPException(404, 'Saved availability not found')
+    enforce_organization_scope(sample.physical_field_area.host_location.organization_id, current_user)
+    deleted = q.delete(synchronize_session=False)
+    db.commit()
+    return {'ok': True, 'deleted': deleted}
+
+
 @router.post('/teams', response_model=TeamRead, dependencies=[Depends(get_current_user)])
 def create_team(payload: TeamCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     enforce_organization_scope(payload.organization_id, current_user)
