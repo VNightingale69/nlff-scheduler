@@ -24,6 +24,7 @@ export default function OrganizationsAdminPage() {
 
   const user = getAuthUser();
   const isLeagueAdmin = user?.role_name === 'league_admin';
+  const notifyOrganizationsChanged = () => window.dispatchEvent(new Event('organizations:changed'));
 
   const load = async () => {
     setLoading(true);
@@ -47,7 +48,7 @@ export default function OrganizationsAdminPage() {
       const payload = { name: form.name?.trim(), is_active: Boolean(form.is_active) };
       if (editingId) await apiFetch(`/organizations/${editingId}`, { method: 'PUT', body: JSON.stringify(payload) }, getToken());
       else await apiFetch('/organizations', { method: 'POST', body: JSON.stringify(payload) }, getToken());
-      setMessage(editingId ? 'Updated successfully' : 'Created successfully'); setType('ok'); setForm({ is_active: true }); setEditingId(null); load();
+      setMessage(editingId ? 'Updated successfully' : 'Created successfully'); setType('ok'); setForm({ is_active: true }); setEditingId(null); notifyOrganizationsChanged(); load();
     } catch (e: any) { setMessage(e?.message || 'Save failed'); setType('err'); }
     finally { setSaving(false); }
   };
@@ -63,7 +64,7 @@ export default function OrganizationsAdminPage() {
     setDeleteError('');
     try {
       await apiFetch(`/organizations/${deleteTarget.id}`, { method: 'PUT', body: JSON.stringify({ ...deleteTarget, is_active: false }) }, getToken());
-      setMessage(`${deleteTarget.name} marked inactive`); setType('ok'); closeDeleteModal(); load();
+      setMessage(`${deleteTarget.name} marked inactive`); setType('ok'); closeDeleteModal(); notifyOrganizationsChanged(); load();
     } catch {
       setDeleteError('Unable to mark organization inactive.');
       setMessage('Unable to mark organization inactive.');
@@ -77,7 +78,7 @@ export default function OrganizationsAdminPage() {
     try {
       const endpoint = isLeagueAdmin ? `/organizations/${deleteTarget.id}?force=true` : `/organizations/${deleteTarget.id}`;
       await apiFetch(endpoint, { method: 'DELETE' }, getToken());
-      setMessage('Deleted successfully'); setType('ok'); closeDeleteModal(); load();
+      setMessage('Deleted successfully'); setType('ok'); closeDeleteModal(); notifyOrganizationsChanged(); load();
     } catch (e: any) {
       const apiError = e instanceof ApiError ? e : undefined;
       const detailObject = (apiError?.detail && typeof apiError.detail === 'object' ? apiError.detail : apiError?.details) as DeleteDependencyErrorDetail | undefined;
