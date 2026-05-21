@@ -69,7 +69,7 @@ export default function OrganizationsAdminPage() {
     finally { setCheckingDelete(false); }
   };
 
-  const closeDeleteModal = () => { setDeleteTarget(null); setDeleteCheck(null); setCheckingDelete(false); setDeleteError(''); };
+  const closeDeleteModal = () => { setDeleteTarget(null); setDeleteCheck(null); setCheckingDelete(false); setDeleteError(''); setCascadeConfirmed(false); };
 
   const deactivateOrganization = async () => {
     if (!deleteTarget) return;
@@ -89,7 +89,8 @@ export default function OrganizationsAdminPage() {
     setDeleteError('');
     try {
       const hasDependencies = !!deleteCheck && !deleteCheck.can_delete;
-      const endpoint = hasDependencies && isLeagueAdmin ? `/organizations/${deleteTarget.id}?force=true` : `/organizations/${deleteTarget.id}`;
+      const allowForceDelete = isLeagueAdmin && (hasDependencies || dependencySummaryUnavailable);
+      const endpoint = allowForceDelete ? `/organizations/${deleteTarget.id}?force=true` : `/organizations/${deleteTarget.id}`;
       const response = await apiFetch(endpoint, { method: 'DELETE' }, getToken());
       if (response?.deleted && deleteCheck) {
         const mappings: Record<string, string> = {
@@ -126,6 +127,13 @@ export default function OrganizationsAdminPage() {
     }
   };
 
+
+  const visibleDependencies = deleteCheck?.dependencies.filter((d) => Number(d.count) > 0) ?? [];
+  const dependencySummaryUnavailable = !checkingDelete && (Boolean(deleteError) || (Boolean(deleteCheck) && !deleteCheck.can_delete && visibleDependencies.length === 0));
+  const requiresCascadeConfirmation = isLeagueAdmin && (dependencySummaryUnavailable || (Boolean(deleteCheck) && !deleteCheck.can_delete));
+  const deleteButtonDisabled = (requiresCascadeConfirmation && !cascadeConfirmed) || checkingDelete;
+  const deleteButtonLabel = requiresCascadeConfirmation ? 'Delete Organization and Related Data' : 'Delete Organization';
+
   return <div className='space-y-4'>
     <Toast message={message} type={type} />
     <h1 className='text-2xl font-bold'>Organizations</h1>
@@ -145,10 +153,11 @@ export default function OrganizationsAdminPage() {
       {checkingDelete && <p className='mt-3 text-sm text-slate-500'>Checking dependencies...</p>}
       {!checkingDelete && deleteCheck && <div className='mt-3 rounded border p-3 text-sm'>
         <p className='font-medium'>{deleteCheck.can_delete ? 'No blocking dependencies found.' : 'Dependency summary for organization setup data:'}</p>
-        <ul className='mt-2 list-disc pl-6'>{deleteCheck.dependencies.filter((d) => Number(d.count) > 0).map((d) => <li key={d.label}>{d.count} {d.label}</li>)}</ul>
-        {!deleteCheck.can_delete && isLeagueAdmin && <><p className='mt-3 font-semibold text-rose-700'>Delete Organization and All Related Data is permanent.</p><label className='mt-3 flex items-start gap-2'><input type='checkbox' className='mt-1' checked={cascadeConfirmed} onChange={(e) => setCascadeConfirmed(e.target.checked)} /><span>I understand this will permanently delete this organization and all related setup data.</span></label></>}
+        <ul className='mt-2 list-disc pl-6'>{visibleDependencies.map((d) => <li key={d.label}>{d.count} {d.label}</li>)}</ul>
       </div>}
-      <div className='mt-4 flex flex-wrap justify-end gap-2'><button className='rounded border px-3 py-2' onClick={closeDeleteModal}>Cancel</button><button className='rounded border border-amber-500 px-3 py-2 text-amber-700' onClick={deactivateOrganization}>Mark Inactive</button><button className='rounded bg-rose-700 px-3 py-2 text-white disabled:opacity-50' disabled={!!deleteCheck && !deleteCheck.can_delete && (!isLeagueAdmin || !cascadeConfirmed)} onClick={confirmDelete}>{deleteCheck && !deleteCheck.can_delete ? 'Delete Organization and Related Data' : 'Delete Organization'}</button></div>
+      {dependencySummaryUnavailable && isLeagueAdmin && <p className='mt-3 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800'>Dependency summary could not be loaded, but League Admin may still delete related setup data.</p>}
+      {requiresCascadeConfirmation && <div className='mt-3 rounded border border-rose-200 bg-rose-50 p-3 text-sm'><label className='flex items-start gap-2'><input type='checkbox' className='mt-1' checked={cascadeConfirmed} onChange={(e) => setCascadeConfirmed(e.target.checked)} /><span>I understand this will permanently delete this organization and all related setup data.</span></label><p className='mt-2 text-rose-700'>This action cannot be undone.</p></div>}
+      <div className='mt-4 flex flex-wrap justify-end gap-2'><button className='rounded border px-3 py-2' onClick={closeDeleteModal}>Cancel</button><button className='rounded border border-amber-500 px-3 py-2 text-amber-700' onClick={deactivateOrganization}>Mark Inactive</button><button className={`rounded px-3 py-2 text-white ${deleteButtonDisabled ? 'bg-slate-400' : 'bg-rose-700 hover:bg-rose-800'}`} disabled={deleteButtonDisabled} onClick={confirmDelete}>{deleteButtonLabel}</button></div>
     </div></div>}
   </div>;
 }
