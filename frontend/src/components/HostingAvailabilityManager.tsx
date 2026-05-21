@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { apiFetch } from '@/lib/api';
 import { getAuthUser, getToken } from '@/lib/auth';
 import Toast from './Toast';
+import { useSearchParams } from 'next/navigation';
 
 const HOSTING_DATES = [
   { date: '2026-09-06', label: 'Saturday, September 6' },
@@ -46,6 +47,9 @@ export default function HostingAvailabilityManager() {
 
   const user = getAuthUser();
   const token = getToken();
+  const searchParams = useSearchParams();
+  const preselectedHostId = searchParams.get('host_location_id') || '';
+  const preselectedOrgId = searchParams.get('organization_id') || '';
 
   useEffect(() => {
     (async () => {
@@ -62,6 +66,8 @@ export default function HostingAvailabilityManager() {
         setAreas(a.items || []);
         setConfigs(c.items || []);
         if (user?.role_name === 'community_scheduler') setOrgId(user.organization_id || '');
+        else if (preselectedOrgId) setOrgId(preselectedOrgId);
+        if (preselectedHostId) setHostId(preselectedHostId);
       } catch (e: any) {
         setMessage(e.message || 'Failed to load');
         setType('err');
@@ -69,7 +75,7 @@ export default function HostingAvailabilityManager() {
         setLoading(false);
       }
     })();
-  }, []);
+  }, [preselectedHostId, preselectedOrgId]);
 
   const hostOptions = useMemo(() => hosts.filter((h: any) => !orgId || h.organization_id === orgId), [hosts, orgId]);
   const selectedHost = useMemo(() => hostOptions.find((h: any) => h.id === hostId), [hostId, hostOptions]);
