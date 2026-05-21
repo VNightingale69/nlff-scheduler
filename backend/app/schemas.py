@@ -64,11 +64,36 @@ class OrganizationRead(BaseSchema, OrganizationCreate):
 
 class DivisionCreate(BaseModel):
     name: str
+    division_group: str
+    sort_order: int = 0
     required_field_layout_type: str
     is_active: bool = True
 
 class DivisionRead(BaseSchema, DivisionCreate):
     pass
+
+
+class OrganizationDivisionParticipationCreate(BaseModel):
+    organization_id: uuid.UUID
+    division_id: uuid.UUID
+    is_participating: bool
+    team_count: int = 0
+    is_active: bool = True
+
+
+class OrganizationDivisionParticipationRead(BaseSchema, OrganizationDivisionParticipationCreate):
+    pass
+
+
+class OrganizationDivisionParticipationUpsertItem(BaseModel):
+    division_id: uuid.UUID
+    is_participating: bool
+    team_count: int
+
+
+class OrganizationDivisionParticipationBulkUpsertRequest(BaseModel):
+    organization_id: uuid.UUID
+    items: list[OrganizationDivisionParticipationUpsertItem]
 
 class HostLocationCreate(BaseModel):
     organization_id: uuid.UUID
