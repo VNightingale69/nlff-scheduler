@@ -6,12 +6,28 @@ export const API_URL = TRIMMED_API_URL.endsWith('/api') ? TRIMMED_API_URL : `${T
 export class ApiError extends Error {
   status: number;
   details: unknown;
+  detail?: unknown;
+  dependencies?: unknown;
 
   constructor(message: string, status: number, details: unknown) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.details = details;
+
+    if (details && typeof details === 'object') {
+      if ('detail' in details) this.detail = (details as { detail: unknown }).detail;
+      if ('dependencies' in details) this.dependencies = (details as { dependencies: unknown }).dependencies;
+    }
+  }
+}
+
+async function parseJsonSafely(raw: string): Promise<unknown> {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
   }
 }
 
@@ -32,29 +48,21 @@ export async function apiFetch(path: string, opts: RequestInit = {}, token?: str
 
   if (!res.ok) {
     const raw = await res.text();
-    let parsed: unknown = null;
-
-    if (raw) {
-      try {
-        parsed = JSON.parse(raw);
-      } catch {
-        parsed = raw;
-      }
-    }
+    const parsed = await parseJsonSafely(raw);
 
     const message =
-      typeof parsed === 'object' && parsed && 'detail' in parsed
+      typeof parsed === 'object' && parsed && 'message' in parsed
+        ? String((parsed as { message: unknown }).message)
+        : typeof parsed === 'object' && parsed && 'detail' in parsed
         ? String((parsed as { detail: unknown }).detail)
-        : typeof parsed === 'string' && parsed
-          ? parsed
-          : 'Request failed';
+        : 'Request failed.';
 
     throw new ApiError(message, res.status, parsed);
   }
 
-  const data = res.status === 204 ? null : await res.json();
+  const data = res.status === 204 ? null : await parseJsonSafely(await res.text());
   if (data && typeof data === 'object' && 'success' in data && (data as { success: unknown }).success === false) {
-    const message = typeof (data as { message?: unknown }).message === 'string' ? (data as { message: string }).message : 'Request failed';
+    const message = typeof (data as { message?: unknown }).message === 'string' ? String((data as { message?: unknown }).message) : 'Request failed.';
     throw new ApiError(message, res.status, data);
   }
   return data;
