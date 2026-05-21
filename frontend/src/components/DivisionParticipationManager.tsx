@@ -10,16 +10,40 @@ type Participation = { division_id: string; is_participating: boolean; team_coun
 export default function DivisionParticipationManager() {
   const [orgs, setOrgs] = useState<any[]>([]);
   const [orgId, setOrgId] = useState('');
+  const [showInactive, setShowInactive] = useState(false);
+  const [orgsLoading, setOrgsLoading] = useState(true);
+  const [orgsError, setOrgsError] = useState('');
   const [divisions, setDivisions] = useState<Division[]>([]);
   const [rows, setRows] = useState<Record<string, Participation>>({});
   const [msg, setMsg] = useState('');
 
+  const loadOrganizations = async () => {
+    setOrgsLoading(true);
+    setOrgsError('');
+    try {
+      const token = getToken();
+      const orgResp = await apiFetch('/organizations', { cache: 'no-store' }, token);
+      setOrgs(orgResp.items || []);
+    } catch (e: any) {
+      setOrgs([]);
+      setOrgsError(e?.message || 'Failed to load organizations.');
+    } finally {
+      setOrgsLoading(false);
+    }
+  };
+
   useEffect(() => { (async () => {
+    await loadOrganizations();
     const token = getToken();
-    const [orgResp, divResp] = await Promise.all([apiFetch('/organizations?page_size=500', {}, token), apiFetch('/divisions?page_size=500', {}, token)]);
-    setOrgs(orgResp.items || []);
+    const divResp = await apiFetch('/divisions?page_size=500', {}, token);
     setDivisions((divResp.items || []).filter((d: any) => d.is_active));
   })(); }, []);
+
+  useEffect(() => {
+    const handler = () => { loadOrganizations(); };
+    window.addEventListener('organizations:changed', handler);
+    return () => window.removeEventListener('organizations:changed', handler);
+  }, []);
 
   useEffect(() => { if (!orgId) return; (async () => {
     const token = getToken();
@@ -45,9 +69,24 @@ export default function DivisionParticipationManager() {
     setMsg('Saved participation successfully.');
   };
 
+  const visibleOrgs = useMemo(
+    () => orgs.filter((o) => showInactive || o.is_active !== false),
+    [orgs, showInactive],
+  );
+
   return <div className='space-y-4'>
     <h1 className='text-2xl font-bold'>Community Division Participation</h1>
-    <select className='rounded border p-2' value={orgId} onChange={(e) => setOrgId(e.target.value)}><option value=''>Select Organization</option>{orgs.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select>
+    {orgsError && <p className='rounded border border-rose-200 bg-rose-50 p-2 text-sm text-rose-700'>{orgsError}</p>}
+    <div className='flex items-center gap-2'>
+      <select className='rounded border p-2' value={orgId} onChange={(e) => setOrgId(e.target.value)} disabled={orgsLoading || !!orgsError}>
+        <option value=''>Select Organization</option>
+        {visibleOrgs.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+      </select>
+      <label className='flex items-center gap-1 text-sm'>
+        <input type='checkbox' checked={showInactive} onChange={(e) => setShowInactive(e.target.checked)} /> Show Inactive
+      </label>
+    </div>
+    {!orgsLoading && !orgsError && visibleOrgs.length === 0 && <p className='text-sm text-slate-700'>No active organizations found. Create an organization first.</p>}
     {orgId && (['COED', 'GIRLS'] as const).map((g) => <div key={g} className='rounded border p-3'><h2 className='mb-2 text-lg font-semibold'>{g === 'COED' ? 'Coed' : 'Girls'}</h2><div className='space-y-2'>{groups[g].map((d) => <div key={d.id} className='flex items-center gap-3'><span className='w-40'>{d.name}</span><label className='flex items-center gap-1'><input type='checkbox' checked={rows[d.id]?.is_participating || false} onChange={(e) => setRows({ ...rows, [d.id]: { ...rows[d.id], division_id: d.id, is_participating: e.target.checked } })} /> Participating</label><input type='number' min={0} className='w-24 rounded border p-1' value={rows[d.id]?.team_count ?? 0} onChange={(e) => setRows({ ...rows, [d.id]: { ...rows[d.id], division_id: d.id, team_count: Number(e.target.value), is_participating: rows[d.id]?.is_participating ?? false } })} /></div>)}</div></div>)}
     <button disabled={!orgId} className='rounded bg-emerald-700 px-4 py-2 text-white disabled:opacity-50' onClick={save}>Save Participation</button>
     {msg && <p className='text-sm text-slate-700'>{msg}</p>}
