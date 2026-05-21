@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, String, Text, Time, UniqueConstraint, func
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Index, Integer, String, Text, Time, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -67,7 +67,11 @@ class OrganizationDivisionParticipation(Base, TimestampMixin):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     organization = relationship('Organization')
     division = relationship('Division')
-    __table_args__ = (UniqueConstraint('organization_id', 'division_id', name='uq_org_division_participation'),)
+    __table_args__ = (
+        UniqueConstraint('organization_id', 'division_id', name='uq_org_division_participation'),
+        Index('ix_org_division_participations_organization_id', 'organization_id'),
+        Index('ix_org_division_participations_division_id', 'division_id'),
+    )
 
 class HostLocation(Base, TimestampMixin):
     __tablename__ = 'host_locations'
