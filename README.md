@@ -56,11 +56,13 @@ Services:
 - Backend health: http://localhost:8000/health
 - Public schedule page: http://localhost:3000/schedule
 
+> Backend container startup now runs `alembic upgrade head` automatically before starting Uvicorn.
+
 ---
 
 ### 3) Run migrations
 
-If services are already up:
+If services are already up (manual run still supported):
 
 ```bash
 docker compose run --rm backend alembic upgrade head
