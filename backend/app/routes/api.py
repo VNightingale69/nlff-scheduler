@@ -406,8 +406,18 @@ def get_schedule_readiness(current_user: User = Depends(get_current_user), db: S
         Division.name.label('division_name'),
         Division.sort_order,
         Division.required_field_layout_type,
-        func.count(Team.id).label('team_count'),
-    ).outerjoin(Team, and_(Team.division_id == Division.id, Team.is_active.is_(True))).group_by(
+        func.count(func.distinct(Team.id)).label('team_count'),
+    ).outerjoin(
+        OrganizationDivisionParticipation,
+        OrganizationDivisionParticipation.division_id == Division.id,
+    ).outerjoin(
+        Team,
+        and_(
+            Team.division_id == Division.id,
+            Team.organization_id == OrganizationDivisionParticipation.organization_id,
+            Team.is_active.is_(True),
+        ),
+    ).group_by(
         Division.id, Division.division_group, Division.name, Division.sort_order, Division.required_field_layout_type
     ).order_by(Division.division_group, Division.sort_order, Division.name).all()
 
