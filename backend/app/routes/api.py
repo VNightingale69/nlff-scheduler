@@ -15,7 +15,8 @@ from app.schemas import (
     OrganizationDivisionParticipationBulkUpsertRequest, OrganizationDivisionParticipationRead,
     GeneratedSlotRead, HostLocationCreate, HostLocationRead, HostingAvailabilityCreate, HostingAvailabilityRead, HostingAvailabilityBulkUpsertRequest, HostingAvailabilityBulkUpsertResponse, HostingGenerationRunResult, HostingGenerationLocationResult, PhysicalFieldAreaCreate, PhysicalFieldAreaRead, SavedAvailabilityResponse,
     LoginRequest, OrganizationCreate, OrganizationRead, PagedResponse, PublicGameRead, RefreshRequest,
-    TeamCreate, TeamRead, TeamUpdate, TokenResponse, UserCreate, UserRead
+    TeamCreate, TeamRead, TeamUpdate, TokenResponse, UserCreate, UserRead,
+    ScheduleReadinessDivisionRow, ScheduleReadinessResponse, ScheduleReadinessTotals
 )
 from app.security import create_access_token, create_refresh_token, hash_password, validate_password_strength, verify_password, decode_token
 from app.services.scheduling_validation import validate_game
@@ -393,6 +394,72 @@ def ensure_league_defined_divisions(db: Session) -> None:
     if changed:
         db.commit()
 
+
+
+@router.get('/schedule-readiness', response_model=ScheduleReadinessResponse, dependencies=[Depends(get_current_user)])
+def get_schedule_readiness(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    ensure_league_defined_divisions(db)
+
+    division_rows = db.query(
+        Division.id.label('division_id'),
+        Division.division_group,
+        Division.name.label('division_name'),
+        Division.sort_order,
+        Division.required_field_layout_type,
+        func.count(Team.id).label('team_count'),
+    ).outerjoin(Team, and_(Team.division_id == Division.id, Team.is_active.is_(True))).group_by(
+        Division.id, Division.division_group, Division.name, Division.sort_order, Division.required_field_layout_type
+    ).order_by(Division.division_group, Division.sort_order, Division.name).all()
+
+    open_slot_counts = dict(
+        db.query(GameSlot.field_type, func.count(GameSlot.id))
+        .filter(GameSlot.status == 'OPEN')
+        .group_by(GameSlot.field_type)
+        .all()
+    )
+
+    small_slots = int(open_slot_counts.get('SMALL', 0) or 0)
+    large_slots = int(open_slot_counts.get('LARGE', 0) or 0)
+
+    rows: list[ScheduleReadinessDivisionRow] = []
+    total_teams = 0
+    total_games_needed = 0
+
+    for row in division_rows:
+        teams = int(row.team_count or 0)
+        games_needed = (teams * (teams - 1)) // 2
+        required_field_type = 'SMALL' if row.required_field_layout_type == 'THIRTY_YARD_WIDTH' else 'LARGE'
+        available_matching_slots = small_slots if required_field_type == 'SMALL' else large_slots
+
+        if teams == 0:
+            status = 'NO TEAMS'
+        elif available_matching_slots >= games_needed:
+            status = 'READY'
+        else:
+            status = 'SHORT'
+
+        rows.append(ScheduleReadinessDivisionRow(
+            division_id=row.division_id,
+            division_label=f"{row.division_group.title()} {row.division_name}",
+            field_type_required=required_field_type,
+            number_of_teams=teams,
+            estimated_games_needed=games_needed,
+            available_matching_slots=available_matching_slots,
+            status=status,
+        ))
+        total_teams += teams
+        total_games_needed += games_needed
+
+    return ScheduleReadinessResponse(
+        rows=rows,
+        totals=ScheduleReadinessTotals(
+            total_teams=total_teams,
+            total_games_needed=total_games_needed,
+            total_small_field_slots=small_slots,
+            total_large_field_slots=large_slots,
+            total_open_slots=small_slots + large_slots,
+        ),
+    )
 @router.post('/divisions', response_model=DivisionRead, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def create_division(payload: DivisionCreate, db: Session = Depends(get_db)):
     d = Division(**payload.model_dump()); db.add(d); db.commit(); db.refresh(d); return d
