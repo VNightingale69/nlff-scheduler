@@ -242,6 +242,29 @@ class GeneratedSlotRead(BaseModel):
     status: str
 
 
+class ScheduleReadinessDivisionRow(BaseModel):
+    division_id: uuid.UUID
+    division_label: str
+    field_type_required: str
+    number_of_teams: int
+    estimated_games_needed: int
+    available_matching_slots: int
+    status: str
+
+
+class ScheduleReadinessTotals(BaseModel):
+    total_teams: int
+    total_games_needed: int
+    total_small_field_slots: int
+    total_large_field_slots: int
+    total_open_slots: int
+
+
+class ScheduleReadinessResponse(BaseModel):
+    rows: list[ScheduleReadinessDivisionRow]
+    totals: ScheduleReadinessTotals
+
+
 class HostingGenerationLocationResult(BaseModel):
     host_location_id: uuid.UUID
     host_location_name: str
