@@ -22,6 +22,25 @@ def upgrade() -> None:
     op.execute("UPDATE divisions SET division_group='COED' WHERE division_group IS NULL")
     op.alter_column('divisions', 'division_group', nullable=False)
 
+
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    unique_constraints = inspector.get_unique_constraints('divisions')
+
+    has_group_name_unique = False
+    for constraint in unique_constraints:
+        columns = constraint.get('column_names') or []
+        name = constraint.get('name')
+
+        if columns == ['name'] and name:
+            op.drop_constraint(name, 'divisions', type_='unique')
+
+        if columns == ['division_group', 'name']:
+            has_group_name_unique = True
+
+    if not has_group_name_unique:
+        op.create_unique_constraint('uq_division_group_name', 'divisions', ['division_group', 'name'])
+
     op.create_table(
         'organization_division_participations',
         sa.Column('id', postgresql.UUID(as_uuid=True), nullable=False),
@@ -56,5 +75,7 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_table('organization_division_participations')
+    op.drop_constraint('uq_division_group_name', 'divisions', type_='unique')
+    op.create_unique_constraint('divisions_name_key', 'divisions', ['name'])
     op.drop_column('divisions', 'sort_order')
     op.drop_column('divisions', 'division_group')
