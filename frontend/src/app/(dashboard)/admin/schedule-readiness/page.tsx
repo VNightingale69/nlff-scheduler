@@ -53,11 +53,11 @@ export default function ScheduleReadinessPage() {
       {error ? <div className='rounded border border-red-200 bg-red-50 p-2 text-sm text-red-700'>{error}</div> : null}
       {totals ? (
         <div className='grid gap-3 rounded border bg-white p-3 text-sm md:grid-cols-5'>
-          <div><div className='text-slate-500'>Total teams</div><div className='font-semibold'>{totals.total_teams}</div></div>
-          <div><div className='text-slate-500'>Total games needed</div><div className='font-semibold'>{totals.total_games_needed}</div></div>
-          <div><div className='text-slate-500'>Total small-field slots</div><div className='font-semibold'>{totals.total_small_field_slots}</div></div>
-          <div><div className='text-slate-500'>Total large-field slots</div><div className='font-semibold'>{totals.total_large_field_slots}</div></div>
-          <div><div className='text-slate-500'>Total open slots</div><div className='font-semibold'>{totals.total_open_slots}</div></div>
+          <div><div className='text-slate-500'>Total Teams</div><div className='font-semibold'>{totals.total_teams}</div></div>
+          <div><div className='text-slate-500'>Total Games Needed</div><div className='font-semibold'>{totals.total_games_needed}</div></div>
+          <div><div className='text-slate-500'>Total Small Slots</div><div className='font-semibold'>{totals.total_small_field_slots}</div></div>
+          <div><div className='text-slate-500'>Total Large Slots</div><div className='font-semibold'>{totals.total_large_field_slots}</div></div>
+          <div><div className='text-slate-500'>Total Open Slots</div><div className='font-semibold'>{totals.total_open_slots}</div></div>
         </div>
       ) : null}
       <div className='overflow-auto rounded border bg-white'>
@@ -65,7 +65,7 @@ export default function ScheduleReadinessPage() {
           <thead><tr className='border-b text-left'><th className='p-2'>Division</th><th className='p-2'>Field Type Required</th><th className='p-2'>Number of Teams</th><th className='p-2'>Estimated Games Needed</th><th className='p-2'>Available Matching Slots</th><th className='p-2'>Status</th></tr></thead>
           <tbody>
             {rows.map((row) => (
-              <tr key={row.division_id} className='border-b'>
+              <tr key={row.division_label} className='border-b'>
                 <td className='p-2'>{row.division_label}</td><td className='p-2'>{row.field_type_required}</td><td className='p-2'>{row.number_of_teams}</td><td className='p-2'>{row.estimated_games_needed}</td><td className='p-2'>{row.available_matching_slots}</td>
                 <td className='p-2'><span className={`rounded px-2 py-1 text-xs font-semibold ${statusClass(row.status)}`}>{row.status}</span></td>
               </tr>

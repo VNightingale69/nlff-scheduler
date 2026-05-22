@@ -15,8 +15,21 @@ export default function DashboardShell({ children }: { children: React.ReactNode
   }, []);
 
   const role = user?.role_name;
+  const navOrder = [
+    'organizations',
+    'divisions',
+    'host-locations',
+    'fields',
+    'teams',
+    'hosting-availability',
+    'generated-slots',
+    'schedule-readiness',
+    'games',
+  ];
   const links = useMemo(
-    () => Object.entries(ENTITIES).filter(([, c]) => c.nav && (!c.roles || (role && c.roles.includes(role)))),
+    () => navOrder
+      .map((key) => [key, ENTITIES[key]] as const)
+      .filter(([, c]) => c && c.nav && (!c.roles || (role && c.roles.includes(role)))),
     [role]
   );
 
