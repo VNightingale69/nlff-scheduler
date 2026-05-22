@@ -471,6 +471,18 @@ def list_physical_field_areas(host_location_id: uuid.UUID | None = None, page: i
     if host_location_id: q = q.filter(PhysicalFieldArea.host_location_id == host_location_id)
     return paginate(q.order_by(PhysicalFieldArea.name), page, page_size)
 
+@router.put('/physical-field-areas/{item_id}', response_model=PhysicalFieldAreaRead, dependencies=[Depends(get_current_user)])
+def upd_physical_field_area(item_id: uuid.UUID, payload: PhysicalFieldAreaCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    x = db.query(PhysicalFieldArea).filter(PhysicalFieldArea.id == item_id).first()
+    if not x: raise HTTPException(404, 'Physical field area not found')
+    host_location = db.query(HostLocation).filter(HostLocation.id == payload.host_location_id).first()
+    if not host_location: raise HTTPException(400, 'Invalid host location')
+    enforce_organization_scope(host_location.organization_id, current_user)
+    if payload.field_space_type not in ALLOWED_FIELD_SPACE_TYPES:
+        raise HTTPException(400, f"Invalid field space type: {payload.field_space_type}")
+    for k, v in payload.model_dump().items(): setattr(x, k, v)
+    db.commit(); db.refresh(x); return x
+
 @router.post('/field-configuration-options', response_model=FieldConfigurationOptionRead, dependencies=[Depends(get_current_user)])
 def create_field_configuration_option(payload: FieldConfigurationOptionCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     area = db.query(PhysicalFieldArea).join(PhysicalFieldArea.host_location).filter(PhysicalFieldArea.id == payload.physical_field_area_id).first()
@@ -486,6 +498,25 @@ def list_field_configuration_options(physical_field_area_id: uuid.UUID | None = 
     if current_user.role.name == ROLE_COMMUNITY_SCHEDULER: q = q.filter(HostLocation.organization_id == current_user.organization_id)
     if physical_field_area_id: q = q.filter(FieldConfigurationOption.physical_field_area_id == physical_field_area_id)
     return paginate(q.order_by(FieldConfigurationOption.name), page, page_size)
+
+@router.put('/field-configuration-options/{item_id}', response_model=FieldConfigurationOptionRead, dependencies=[Depends(get_current_user)])
+def upd_field_configuration_option(item_id: uuid.UUID, payload: FieldConfigurationOptionCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    x = db.query(FieldConfigurationOption).filter(FieldConfigurationOption.id == item_id).first()
+    if not x: raise HTTPException(404, 'Field configuration option not found')
+    area = db.query(PhysicalFieldArea).join(PhysicalFieldArea.host_location).filter(PhysicalFieldArea.id == payload.physical_field_area_id).first()
+    if not area: raise HTTPException(400, 'Invalid physical field area')
+    enforce_organization_scope(area.host_location.organization_id, current_user)
+    if payload.thirty_yard_capacity < 0 or payload.fifty_three_yard_capacity < 0:
+        raise HTTPException(400, 'Capacities must be non-negative')
+    for k, v in payload.model_dump().items(): setattr(x, k, v)
+    db.commit(); db.refresh(x); return x
+
+@router.delete('/field-configuration-options/{item_id}', dependencies=[Depends(get_current_user)])
+def del_field_configuration_option(item_id: uuid.UUID, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    x = db.query(FieldConfigurationOption).filter(FieldConfigurationOption.id == item_id).first()
+    if not x: raise HTTPException(404, 'Field configuration option not found')
+    enforce_organization_scope(x.physical_field_area.host_location.organization_id, current_user)
+    db.delete(x); db.commit(); return {'ok': True}
 
 @router.post('/fields', response_model=FieldRead, dependencies=[Depends(get_current_user)])
 def create_field(payload: FieldCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
