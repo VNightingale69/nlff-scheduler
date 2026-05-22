@@ -55,11 +55,12 @@ def upgrade() -> None:
             sa.text(
                 """
                 INSERT INTO divisions (id, name, division_group, sort_order, required_field_layout_type, is_active)
-                SELECT gen_random_uuid(), :name, :division_group, :sort_order, :required_field_layout_type, :is_active
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM divisions
-                    WHERE division_group = :division_group AND name = :name
-                )
+                VALUES (gen_random_uuid(), :name, :division_group, :sort_order, :required_field_layout_type, :is_active)
+                ON CONFLICT (division_group, name)
+                DO UPDATE SET
+                    sort_order = EXCLUDED.sort_order,
+                    required_field_layout_type = EXCLUDED.required_field_layout_type,
+                    is_active = EXCLUDED.is_active
                 """
             ).bindparams(**item)
         )
