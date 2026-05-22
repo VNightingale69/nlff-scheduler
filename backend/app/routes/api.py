@@ -1,7 +1,7 @@
 import uuid
 from fastapi import APIRouter, Depends, HTTPException, Query
 import logging
-from datetime import date, time
+from datetime import date, datetime, time, timedelta
 
 from sqlalchemy import and_, func
 from sqlalchemy.exc import ProgrammingError, SQLAlchemyError
@@ -9,11 +9,11 @@ from sqlalchemy.orm import Session, aliased
 
 from app.auth import ROLE_COMMUNITY_SCHEDULER, ROLE_LEAGUE_ADMIN, enforce_organization_scope, get_current_user, require_roles
 from app.database import get_db
-from app.models import Division, Field, FieldConfigurationOption, Game, GameStatus, HostLocation, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Season, Team, User, Week
+from app.models import Division, Field, FieldConfigurationOption, FieldInstance, Game, GameSlot, GameStatus, HostLocation, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Season, Team, User, Week
 from app.schemas import (
     DivisionCreate, DivisionRead, FieldConfigurationOptionCreate, FieldConfigurationOptionRead, FieldCreate, FieldRead, GameCreate, GameRead, GameSaveResponse,
     OrganizationDivisionParticipationBulkUpsertRequest, OrganizationDivisionParticipationRead,
-    HostLocationCreate, HostLocationRead, HostingAvailabilityCreate, HostingAvailabilityRead, HostingAvailabilityBulkUpsertRequest, HostingAvailabilityBulkUpsertResponse, PhysicalFieldAreaCreate, PhysicalFieldAreaRead, SavedAvailabilityResponse,
+    GeneratedSlotRead, HostLocationCreate, HostLocationRead, HostingAvailabilityCreate, HostingAvailabilityRead, HostingAvailabilityBulkUpsertRequest, HostingAvailabilityBulkUpsertResponse, PhysicalFieldAreaCreate, PhysicalFieldAreaRead, SavedAvailabilityResponse,
     LoginRequest, OrganizationCreate, OrganizationRead, PagedResponse, PublicGameRead, RefreshRequest,
     TeamCreate, TeamRead, TeamUpdate, TokenResponse, UserCreate, UserRead
 )
@@ -26,6 +26,52 @@ ALLOWED_FIELD_SPACE_TYPES = {
     'STADIUM_SITE',
     'GRASS_PARK_SITE',
 }
+
+def _capacity_for_layout(layout_name: str | None, option: FieldConfigurationOption | None) -> tuple[int, int]:
+    if option:
+        return option.thirty_yard_capacity, option.fifty_three_yard_capacity
+    if layout_name == '1x53_plus_2x30':
+        return 2, 1
+    if layout_name == '2x53':
+        return 0, 2
+    if layout_name == '3x30':
+        return 3, 0
+    return 0, 0
+
+
+def _regenerate_generated_slots(db: Session, availability: HostingAvailability, host_location_id: uuid.UUID):
+    assigned_slots = db.query(GameSlot).join(GameSlot.field_instance).filter(
+        FieldInstance.hosting_availability_id == availability.id,
+        GameSlot.assigned_game_id.isnot(None),
+    ).count()
+    if assigned_slots > 0:
+        raise HTTPException(400, 'Cannot update availability because one or more generated slots are assigned to games.')
+
+    db.query(GameSlot).filter(GameSlot.field_instance_id.in_(db.query(FieldInstance.id).filter(FieldInstance.hosting_availability_id == availability.id))).delete(synchronize_session=False)
+    db.query(FieldInstance).filter(FieldInstance.hosting_availability_id == availability.id).delete(synchronize_session=False)
+
+    if not availability.is_available:
+        return
+    area = availability.physical_field_area
+    if not area:
+        return
+    option = availability.field_configuration_option
+    small_count, large_count = _capacity_for_layout(availability.layout_type or (option.name if option else None), option)
+    instances: list[FieldInstance] = []
+    for i in range(large_count):
+        instances.append(FieldInstance(host_location_id=host_location_id, hosting_availability_id=availability.id, instance_date=availability.available_date, field_name=f'Large Field {i + 1}', field_type='LARGE', is_active=True))
+    for i in range(small_count):
+        instances.append(FieldInstance(host_location_id=host_location_id, hosting_availability_id=availability.id, instance_date=availability.available_date, field_name=f'Small Field {i + 1}', field_type='SMALL', is_active=True))
+    for instance in instances:
+        db.add(instance)
+    db.flush()
+    start_dt = datetime.combine(availability.available_date, availability.start_time)
+    end_dt = datetime.combine(availability.available_date, availability.end_time)
+    while start_dt < end_dt:
+        next_dt = start_dt + timedelta(hours=1)
+        for instance in instances:
+            db.add(GameSlot(field_instance_id=instance.id, host_location_id=host_location_id, slot_date=availability.available_date, start_time=start_dt.time(), end_time=next_dt.time(), field_type=instance.field_type, status='OPEN'))
+        start_dt = next_dt
 
 
 
@@ -568,7 +614,10 @@ def create_hosting_availability(payload: HostingAvailabilityCreate, current_user
     else:
         raise HTTPException(400, 'field_id or physical_field_area_id is required')
     validate_hour_block(payload.start_time, payload.end_time)
-    x = HostingAvailability(**payload.model_dump()); db.add(x); db.commit(); db.refresh(x); return x
+    x = HostingAvailability(**payload.model_dump()); db.add(x); db.flush()
+    resolved_host_id = area.host_location_id if area else field.host_location_id
+    _regenerate_generated_slots(db, x, resolved_host_id)
+    db.commit(); db.refresh(x); return x
 
 @router.get('/hosting-availabilities', response_model=PagedResponse[HostingAvailabilityRead], dependencies=[Depends(get_current_user)])
 def list_hosting_availabilities(field_id: uuid.UUID | None = None, field_ids: str | None = None, host_location_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, available_date: str | None = None, available_dates: str | None = None, page: int = 1, page_size: int = 20, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -589,10 +638,21 @@ def list_hosting_availabilities(field_id: uuid.UUID | None = None, field_ids: st
 def upd_hosting_availability(item_id: uuid.UUID, payload: HostingAvailabilityCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     x = db.query(HostingAvailability).filter(HostingAvailability.id == item_id).first()
     if not x: raise HTTPException(404, 'Hosting availability not found')
-    field = db.query(Field).join(Field.host_location).filter(Field.id == payload.field_id).first()
-    if not field: raise HTTPException(400, 'Invalid field')
-    enforce_organization_scope(field.host_location.organization_id, current_user)
+    field = None
+    area = None
+    if payload.field_id:
+        field = db.query(Field).join(Field.host_location).filter(Field.id == payload.field_id).first()
+        if not field: raise HTTPException(400, 'Invalid field')
+        enforce_organization_scope(field.host_location.organization_id, current_user)
+    elif payload.physical_field_area_id:
+        area = db.query(PhysicalFieldArea).join(PhysicalFieldArea.host_location).filter(PhysicalFieldArea.id == payload.physical_field_area_id).first()
+        if not area: raise HTTPException(400, 'Invalid physical field area')
+        enforce_organization_scope(area.host_location.organization_id, current_user)
+    validate_hour_block(payload.start_time, payload.end_time)
     for k, v in payload.model_dump().items(): setattr(x, k, v)
+    db.flush()
+    resolved_host_id = area.host_location_id if area else field.host_location_id
+    _regenerate_generated_slots(db, x, resolved_host_id)
     db.commit(); db.refresh(x); return x
 
 @router.delete('/hosting-availabilities/{item_id}', dependencies=[Depends(get_current_user)])
@@ -600,6 +660,14 @@ def del_hosting_availability(item_id: uuid.UUID, current_user: User = Depends(ge
     x = db.query(HostingAvailability).filter(HostingAvailability.id == item_id).first()
     if not x: raise HTTPException(404, 'Hosting availability not found')
     enforce_organization_scope(x.field.host_location.organization_id, current_user)
+    assigned_slots = db.query(GameSlot).join(GameSlot.field_instance).filter(
+        FieldInstance.hosting_availability_id == x.id,
+        GameSlot.assigned_game_id.isnot(None),
+    ).count()
+    if assigned_slots > 0:
+        raise HTTPException(400, 'Cannot delete availability with assigned generated slots.')
+    db.query(GameSlot).filter(GameSlot.field_instance_id.in_(db.query(FieldInstance.id).filter(FieldInstance.hosting_availability_id == x.id))).delete(synchronize_session=False)
+    db.query(FieldInstance).filter(FieldInstance.hosting_availability_id == x.id).delete(synchronize_session=False)
     db.delete(x); db.commit(); return {'ok': True}
 
 
@@ -636,8 +704,12 @@ def bulk_upsert_hosting_availabilities(payload: HostingAvailabilityBulkUpsertReq
         if existing:
             existing.is_available = slot.is_available
             updated += 1
+            _regenerate_generated_slots(db, existing, area.host_location_id if slot.physical_field_area_id else field.host_location_id)
         else:
-            db.add(HostingAvailability(**slot.model_dump()))
+            availability = HostingAvailability(**slot.model_dump())
+            db.add(availability)
+            db.flush()
+            _regenerate_generated_slots(db, availability, area.host_location_id if slot.physical_field_area_id else field.host_location_id)
             created += 1
     db.commit()
     return HostingAvailabilityBulkUpsertResponse(created=created, updated=updated)
@@ -713,9 +785,31 @@ def delete_saved_hosting_availability(host_location_id: uuid.UUID, available_dat
     if not sample:
         raise HTTPException(404, 'Saved availability not found')
     enforce_organization_scope(sample.physical_field_area.host_location.organization_id, current_user)
+    availability_ids = [row.id for row in q.all()]
+    assigned_slots = db.query(GameSlot).join(GameSlot.field_instance).filter(
+        FieldInstance.hosting_availability_id.in_(availability_ids),
+        GameSlot.assigned_game_id.isnot(None),
+    ).count()
+    if assigned_slots > 0:
+        raise HTTPException(400, 'Cannot delete saved availability that has assigned generated slots.')
+    db.query(GameSlot).filter(GameSlot.field_instance_id.in_(db.query(FieldInstance.id).filter(FieldInstance.hosting_availability_id.in_(availability_ids)))).delete(synchronize_session=False)
+    db.query(FieldInstance).filter(FieldInstance.hosting_availability_id.in_(availability_ids)).delete(synchronize_session=False)
     deleted = q.delete(synchronize_session=False)
     db.commit()
     return {'ok': True, 'deleted': deleted}
+
+
+@router.get('/hosting-availabilities/generated-slots', response_model=list[GeneratedSlotRead], dependencies=[Depends(get_current_user)])
+def list_generated_slots(host_location_id: uuid.UUID, available_date: str | None = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    host = db.query(HostLocation).filter(HostLocation.id == host_location_id).first()
+    if not host:
+        raise HTTPException(404, 'Host location not found')
+    enforce_organization_scope(host.organization_id, current_user)
+    q = db.query(GameSlot, FieldInstance.field_name, HostLocation.name.label('host_location_name')).join(GameSlot.field_instance).join(GameSlot.host_location).filter(GameSlot.host_location_id == host_location_id)
+    if available_date:
+        q = q.filter(func.cast(GameSlot.slot_date, str) == available_date)
+    rows = q.order_by(GameSlot.slot_date, GameSlot.start_time, FieldInstance.field_name).all()
+    return [{'id': row.GameSlot.id, 'available_date': row.GameSlot.slot_date, 'host_location_name': row.host_location_name, 'field_instance_name': row.field_name, 'field_type': row.GameSlot.field_type, 'start_time': row.GameSlot.start_time, 'end_time': row.GameSlot.end_time, 'status': row.GameSlot.status} for row in rows]
 
 
 @router.post('/teams', response_model=TeamRead, dependencies=[Depends(get_current_user)])

@@ -49,6 +49,7 @@ export default function HostingAvailabilityManager() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [savedAvailability, setSavedAvailability] = useState<any[]>([]);
+  const [generatedSlots, setGeneratedSlots] = useState<any[]>([]);
   const [savedDateFilter, setSavedDateFilter] = useState('');
   const [savedSiteTypeFilter, setSavedSiteTypeFilter] = useState('');
   const [savedLayoutFilter, setSavedLayoutFilter] = useState('');
@@ -142,6 +143,8 @@ export default function HostingAvailabilityManager() {
     if (savedLayoutFilter) params.set('layout', savedLayoutFilter);
     const data = await apiFetch(`/hosting-availabilities/saved?${params.toString()}`, {}, token);
     setSavedAvailability(data.items || []);
+    const slots = await apiFetch(`/hosting-availabilities/generated-slots?${params.toString()}`, {}, token);
+    setGeneratedSlots(slots || []);
   };
 
   useEffect(() => {
@@ -331,6 +334,30 @@ export default function HostingAvailabilityManager() {
             <div className='mt-1'>Available:</div><ul className='list-disc pl-6'>{entry.time_ranges.map((range: any, rIdx: number) => <li key={rIdx}>{displayHour(Number(range.start_time.slice(0,2)))}–{displayHour(Number(range.end_time.slice(0,2)))}</li>)}</ul>
           </div>
         ))}</div>}
+      </section>
+
+      <section className='rounded border p-4'>
+        <h2 className='mb-2 font-semibold'>Generated Slots</h2>
+        {!hostId ? <p className='text-slate-500'>Select a hosting site to view generated slots.</p> : !generatedSlots.length ? <p className='text-slate-500'>No generated slots for this filter yet.</p> : (
+          <div className='overflow-auto'>
+            <table className='min-w-full text-sm'>
+              <thead><tr className='border-b text-left'><th className='p-2'>Date</th><th className='p-2'>Hosting Site</th><th className='p-2'>Field Instance</th><th className='p-2'>Field Type</th><th className='p-2'>Start Time</th><th className='p-2'>End Time</th><th className='p-2'>Status</th></tr></thead>
+              <tbody>
+                {generatedSlots.map((slot: any) => (
+                  <tr key={slot.id} className='border-b'>
+                    <td className='p-2'>{formatDateLabel(slot.available_date)}</td>
+                    <td className='p-2'>{slot.host_location_name}</td>
+                    <td className='p-2'>{slot.field_instance_name}</td>
+                    <td className='p-2'>{slot.field_type}</td>
+                    <td className='p-2'>{displayHour(Number(slot.start_time.slice(0, 2)))}</td>
+                    <td className='p-2'>{displayHour(Number(slot.end_time.slice(0, 2)))}</td>
+                    <td className='p-2'>{slot.status}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </section>
 
       <section className='rounded border p-4'>

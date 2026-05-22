@@ -173,6 +173,37 @@ class HostingAvailability(Base, TimestampMixin):
     field_configuration_option = relationship('FieldConfigurationOption')
     __table_args__ = (UniqueConstraint('field_id', 'physical_field_area_id', 'available_date', 'start_time', 'end_time', 'layout_type', 'slot_index', name='uq_field_availability_slot'),)
 
+
+class FieldInstance(Base, TimestampMixin):
+    __tablename__ = 'field_instances'
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    host_location_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('host_locations.id'), nullable=False)
+    hosting_availability_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('hosting_availabilities.id'), nullable=False)
+    instance_date: Mapped[Date] = mapped_column(Date, nullable=False)
+    field_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    field_type: Mapped[str] = mapped_column(String(10), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    host_location = relationship('HostLocation')
+    hosting_availability = relationship('HostingAvailability')
+    __table_args__ = (UniqueConstraint('hosting_availability_id', 'field_name', name='uq_field_instance_availability_name'),)
+
+
+class GameSlot(Base, TimestampMixin):
+    __tablename__ = 'game_slots'
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    field_instance_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('field_instances.id'), nullable=False)
+    host_location_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('host_locations.id'), nullable=False)
+    slot_date: Mapped[Date] = mapped_column(Date, nullable=False)
+    start_time: Mapped[Time] = mapped_column(Time, nullable=False)
+    end_time: Mapped[Time] = mapped_column(Time, nullable=False)
+    field_type: Mapped[str] = mapped_column(String(10), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default='OPEN')
+    assigned_game_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('games.id'))
+    field_instance = relationship('FieldInstance')
+    host_location = relationship('HostLocation')
+    assigned_game = relationship('Game')
+    __table_args__ = (UniqueConstraint('field_instance_id', 'start_time', 'end_time', name='uq_game_slot_instance_time'),)
+
 class GameStatus(Base, TimestampMixin):
     __tablename__ = 'game_statuses'
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
