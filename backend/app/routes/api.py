@@ -15,7 +15,7 @@ from app.schemas import (
     OrganizationDivisionParticipationBulkUpsertRequest, OrganizationDivisionParticipationRead,
     HostLocationCreate, HostLocationRead, HostingAvailabilityCreate, HostingAvailabilityRead, HostingAvailabilityBulkUpsertRequest, HostingAvailabilityBulkUpsertResponse, PhysicalFieldAreaCreate, PhysicalFieldAreaRead, SavedAvailabilityResponse,
     LoginRequest, OrganizationCreate, OrganizationRead, PagedResponse, PublicGameRead, RefreshRequest,
-    TeamCreate, TeamRead, TokenResponse, UserCreate, UserRead
+    TeamCreate, TeamRead, TeamUpdate, TokenResponse, UserCreate, UserRead
 )
 from app.security import create_access_token, create_refresh_token, hash_password, validate_password_strength, verify_password, decode_token
 from app.services.scheduling_validation import validate_game
@@ -769,11 +769,54 @@ def upd_team(item_id: uuid.UUID, payload: TeamCreate, current_user: User = Depen
     for k, v in payload.model_dump().items(): setattr(x, k, v)
     db.commit(); db.refresh(x); return x
 
+@router.patch('/teams/{item_id}', response_model=TeamRead, dependencies=[Depends(get_current_user)])
+def patch_team(item_id: uuid.UUID, payload: TeamUpdate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    x = db.query(Team).filter(Team.id == item_id).first()
+    if not x:
+        raise HTTPException(404, 'Team not found')
+    enforce_organization_scope(x.organization_id, current_user)
+
+    updates = payload.model_dump(exclude_unset=True)
+    if not updates:
+        return x
+
+    if 'name' in updates and updates['name'] is not None:
+        updates['name'] = updates['name'].strip()
+        if not updates['name']:
+            raise HTTPException(400, 'Team name is required')
+
+    new_is_active = updates.get('is_active', x.is_active)
+    if new_is_active:
+        participation = db.query(OrganizationDivisionParticipation).filter(
+            OrganizationDivisionParticipation.organization_id == x.organization_id,
+            OrganizationDivisionParticipation.division_id == x.division_id,
+            OrganizationDivisionParticipation.is_participating.is_(True),
+        ).first()
+        if not participation:
+            raise HTTPException(400, 'Organization is not participating in this division')
+        active_count = db.query(Team).filter(
+            Team.organization_id == x.organization_id,
+            Team.division_id == x.division_id,
+            Team.is_active.is_(True),
+            Team.id != item_id,
+        ).count()
+        if active_count >= participation.team_count and current_user.role.name != ROLE_LEAGUE_ADMIN:
+            raise HTTPException(400, 'Cannot exceed participating team count for this division')
+
+    for k, v in updates.items():
+        setattr(x, k, v)
+    db.commit(); db.refresh(x)
+    return x
+
+
 @router.delete('/teams/{item_id}', dependencies=[Depends(get_current_user)])
 def del_team(item_id: uuid.UUID, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     x = db.query(Team).filter(Team.id == item_id).first()
     if not x: raise HTTPException(404, 'Team not found')
-    enforce_organization_scope(x.organization_id, current_user); db.delete(x); db.commit(); return {'ok': True}
+    enforce_organization_scope(x.organization_id, current_user)
+    x.is_active = False
+    db.commit()
+    return {'ok': True}
 
 # keep existing game/public routes omitted for brevity
 
