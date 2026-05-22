@@ -150,6 +150,11 @@ class TeamCreate(BaseModel):
 class TeamRead(BaseSchema, TeamCreate):
     pass
 
+
+class TeamUpdate(BaseModel):
+    name: str | None = None
+    is_active: bool | None = None
+
 class SeasonCreate(BaseModel):
     name: str
     start_date: date
