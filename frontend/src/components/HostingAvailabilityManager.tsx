@@ -50,6 +50,7 @@ export default function HostingAvailabilityManager() {
   const [saving, setSaving] = useState(false);
   const [savedAvailability, setSavedAvailability] = useState<any[]>([]);
   const [generatedSlots, setGeneratedSlots] = useState<any[]>([]);
+  const [generationDebug, setGenerationDebug] = useState<{ field_instances: number; slots: number } | null>(null);
   const [savedDateFilter, setSavedDateFilter] = useState('');
   const [savedSiteTypeFilter, setSavedSiteTypeFilter] = useState('');
   const [savedLayoutFilter, setSavedLayoutFilter] = useState('');
@@ -205,7 +206,8 @@ export default function HostingAvailabilityManager() {
           }
         }
       }
-      await apiFetch('/hosting-availabilities/bulk-upsert', { method: 'POST', body: JSON.stringify({ slots }) }, token);
+      const result = await apiFetch('/hosting-availabilities/bulk-upsert', { method: 'POST', body: JSON.stringify({ slots }) }, token);
+      setGenerationDebug({ field_instances: result.generated_field_instances || 0, slots: result.generated_slots || 0 });
       setType('ok');
       setMessage('Availability saved successfully.');
       await loadSavedAvailability();
@@ -338,6 +340,15 @@ export default function HostingAvailabilityManager() {
 
       <section className='rounded border p-4'>
         <h2 className='mb-2 font-semibold'>Generated Slots</h2>
+        {generationDebug ? (
+          <div className='mb-2 rounded border bg-amber-50 p-2 text-sm'>
+            Generated:
+            <ul className='list-disc pl-6'>
+              <li>{generationDebug.field_instances} field instances</li>
+              <li>{generationDebug.slots} slots</li>
+            </ul>
+          </div>
+        ) : null}
         {!hostId ? <p className='text-slate-500'>Select a hosting site to view generated slots.</p> : !generatedSlots.length ? <p className='text-slate-500'>No generated slots for this filter yet.</p> : (
           <div className='overflow-auto'>
             <table className='min-w-full text-sm'>

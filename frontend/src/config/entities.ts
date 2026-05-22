@@ -14,4 +14,5 @@ export const ENTITIES: Record<string, EntityConfig> = {
   teams: { title: 'Teams', path: '/teams', nav: true, fields: [{ key: 'organization_id', label: 'Organization', type: 'select' }, { key: 'division_id', label: 'Division', type: 'select' }, { key: 'name', label: 'Name' }, { key: 'is_active', label: 'Active', type: 'checkbox' }] },
   games: { title: 'Games', path: '/games', nav: true, roles: ['league_admin'], fields: [] },
   'hosting-availability': { title: 'Hosting Availability', path: '/hosting-availabilities', nav: true, fields: [{ key: 'field_id', label: 'Field ID' }, { key: 'available_date', label: 'Available Date', type: 'date' }, { key: 'start_time', label: 'Start Time', type: 'time' }, { key: 'end_time', label: 'End Time', type: 'time' }, { key: 'is_available', label: 'Is Available', type: 'checkbox' }] },
+  'generated-slots': { title: 'Generated Slots', path: '/generated-game-slots', nav: true, fields: [] },
 };

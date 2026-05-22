@@ -65,13 +65,17 @@ def _regenerate_generated_slots(db: Session, availability: HostingAvailability, 
     for instance in instances:
         db.add(instance)
     db.flush()
+    logger.info('Generated %s field instances for availability_id=%s host_location_id=%s', len(instances), availability.id, host_location_id)
+    created_slots = 0
     start_dt = datetime.combine(availability.available_date, availability.start_time)
     end_dt = datetime.combine(availability.available_date, availability.end_time)
     while start_dt < end_dt:
         next_dt = start_dt + timedelta(hours=1)
         for instance in instances:
             db.add(GameSlot(field_instance_id=instance.id, host_location_id=host_location_id, slot_date=availability.available_date, start_time=start_dt.time(), end_time=next_dt.time(), field_type=instance.field_type, status='OPEN'))
+            created_slots += 1
         start_dt = next_dt
+    logger.info('Generated %s game slots for availability_id=%s host_location_id=%s', created_slots, availability.id, host_location_id)
 
 
 
@@ -712,7 +716,17 @@ def bulk_upsert_hosting_availabilities(payload: HostingAvailabilityBulkUpsertReq
             _regenerate_generated_slots(db, availability, area.host_location_id if slot.physical_field_area_id else field.host_location_id)
             created += 1
     db.commit()
-    return HostingAvailabilityBulkUpsertResponse(created=created, updated=updated)
+    generated_field_instances = db.query(FieldInstance).join(FieldInstance.hosting_availability).join(HostingAvailability.physical_field_area).join(PhysicalFieldArea.host_location)
+    generated_slots = db.query(GameSlot).join(GameSlot.host_location)
+    if current_user.role.name == ROLE_COMMUNITY_SCHEDULER:
+        generated_field_instances = generated_field_instances.filter(HostLocation.organization_id == current_user.organization_id)
+        generated_slots = generated_slots.filter(HostLocation.organization_id == current_user.organization_id)
+    return HostingAvailabilityBulkUpsertResponse(
+        created=created,
+        updated=updated,
+        generated_field_instances=generated_field_instances.count(),
+        generated_slots=generated_slots.count(),
+    )
 @router.get('/hosting-availabilities/saved', response_model=SavedAvailabilityResponse, dependencies=[Depends(get_current_user)])
 def list_saved_hosting_availability(organization_id: uuid.UUID | None = None, host_location_id: uuid.UUID | None = None, site_type: str | None = None, layout: str | None = None, available_date: str | None = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     q = db.query(HostingAvailability).join(HostingAvailability.physical_field_area).join(PhysicalFieldArea.host_location).outerjoin(HostingAvailability.field_configuration_option).filter(HostingAvailability.is_available.is_(True))
@@ -810,6 +824,24 @@ def list_generated_slots(host_location_id: uuid.UUID, available_date: str | None
         q = q.filter(func.cast(GameSlot.slot_date, str) == available_date)
     rows = q.order_by(GameSlot.slot_date, GameSlot.start_time, FieldInstance.field_name).all()
     return [{'id': row.GameSlot.id, 'available_date': row.GameSlot.slot_date, 'host_location_name': row.host_location_name, 'field_instance_name': row.field_name, 'field_type': row.GameSlot.field_type, 'start_time': row.GameSlot.start_time, 'end_time': row.GameSlot.end_time, 'status': row.GameSlot.status} for row in rows]
+
+
+@router.get('/field-instances', dependencies=[Depends(get_current_user)])
+def list_field_instances(host_location_id: uuid.UUID | None = None, available_date: str | None = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    q = db.query(FieldInstance, HostLocation.name.label('host_location_name')).join(FieldInstance.host_location)
+    if current_user.role.name == ROLE_COMMUNITY_SCHEDULER:
+        q = q.filter(HostLocation.organization_id == current_user.organization_id)
+    if host_location_id:
+        q = q.filter(FieldInstance.host_location_id == host_location_id)
+    if available_date:
+        q = q.filter(func.cast(FieldInstance.instance_date, str) == available_date)
+    rows = q.order_by(FieldInstance.instance_date, HostLocation.name, FieldInstance.field_name).all()
+    return [{'id': r.FieldInstance.id, 'date': r.FieldInstance.instance_date, 'host_location_name': r.host_location_name, 'field_instance_name': r.FieldInstance.field_name, 'field_type': r.FieldInstance.field_type, 'hosting_availability_id': r.FieldInstance.hosting_availability_id} for r in rows]
+
+
+@router.get('/generated-game-slots', response_model=list[GeneratedSlotRead], dependencies=[Depends(get_current_user)])
+def list_generated_game_slots(host_location_id: uuid.UUID, available_date: str | None = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return list_generated_slots(host_location_id=host_location_id, available_date=available_date, current_user=current_user, db=db)
 
 
 @router.post('/teams', response_model=TeamRead, dependencies=[Depends(get_current_user)])
