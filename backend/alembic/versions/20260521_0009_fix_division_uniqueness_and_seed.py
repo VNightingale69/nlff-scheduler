@@ -16,8 +16,26 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.drop_constraint('divisions_name_key', 'divisions', type_='unique')
-    op.create_unique_constraint('uq_division_group_name', 'divisions', ['division_group', 'name'])
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+
+    unique_constraints = inspector.get_unique_constraints('divisions')
+
+    has_group_name_unique = False
+
+    for constraint in unique_constraints:
+        columns = constraint.get('column_names') or []
+        name = constraint.get('name')
+
+        if columns == ['name']:
+            if name:
+                op.drop_constraint(name, 'divisions', type_='unique')
+
+        if columns == ['division_group', 'name']:
+            has_group_name_unique = True
+
+    if not has_group_name_unique:
+        op.create_unique_constraint('uq_division_group_name', 'divisions', ['division_group', 'name'])
 
     op.execute("""
     UPDATE divisions
