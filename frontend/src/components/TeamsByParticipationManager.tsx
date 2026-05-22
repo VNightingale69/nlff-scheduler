@@ -1,7 +1,7 @@
 'use client';
 import { useEffect, useMemo, useState } from 'react';
 import { apiFetch } from '@/lib/api';
-import { getToken, getUser } from '@/lib/auth';
+import { getAuthUser, getToken } from '@/lib/auth';
 
 export default function TeamsByParticipationManager() {
   const [orgs, setOrgs] = useState<any[]>([]);
@@ -24,7 +24,7 @@ export default function TeamsByParticipationManager() {
   };
 
   useEffect(() => { (async () => {
-    const user = getUser();
+    const user = getAuthUser();
     const token = getToken();
     const orgResp = await apiFetch('/organizations?page_size=500', {}, token);
     setOrgs(orgResp.items || []);
