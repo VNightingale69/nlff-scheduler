@@ -241,6 +241,26 @@ class GeneratedSlotRead(BaseModel):
     end_time: time
     status: str
 
+
+class HostingGenerationLocationResult(BaseModel):
+    host_location_id: uuid.UUID
+    host_location_name: str
+    field_instances_created: int = 0
+    slots_created: int = 0
+    skipped_reason: str | None = None
+    errors: list[str] = []
+
+
+class HostingGenerationRunResult(BaseModel):
+    message: str
+    processed: int = 0
+    skipped: int = 0
+    errors: int = 0
+    total_field_instances_created: int = 0
+    total_slots_created: int = 0
+    last_generated_at: datetime
+    results: list[HostingGenerationLocationResult]
+
 class GameStatusCreate(BaseModel):
     code: str
     label: str

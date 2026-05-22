@@ -13,7 +13,7 @@ from app.models import Division, Field, FieldConfigurationOption, FieldInstance,
 from app.schemas import (
     DivisionCreate, DivisionRead, FieldConfigurationOptionCreate, FieldConfigurationOptionRead, FieldCreate, FieldRead, GameCreate, GameRead, GameSaveResponse,
     OrganizationDivisionParticipationBulkUpsertRequest, OrganizationDivisionParticipationRead,
-    GeneratedSlotRead, HostLocationCreate, HostLocationRead, HostingAvailabilityCreate, HostingAvailabilityRead, HostingAvailabilityBulkUpsertRequest, HostingAvailabilityBulkUpsertResponse, PhysicalFieldAreaCreate, PhysicalFieldAreaRead, SavedAvailabilityResponse,
+    GeneratedSlotRead, HostLocationCreate, HostLocationRead, HostingAvailabilityCreate, HostingAvailabilityRead, HostingAvailabilityBulkUpsertRequest, HostingAvailabilityBulkUpsertResponse, HostingGenerationRunResult, HostingGenerationLocationResult, PhysicalFieldAreaCreate, PhysicalFieldAreaRead, SavedAvailabilityResponse,
     LoginRequest, OrganizationCreate, OrganizationRead, PagedResponse, PublicGameRead, RefreshRequest,
     TeamCreate, TeamRead, TeamUpdate, TokenResponse, UserCreate, UserRead
 )
@@ -76,6 +76,46 @@ def _regenerate_generated_slots(db: Session, availability: HostingAvailability, 
             created_slots += 1
         start_dt = next_dt
     logger.info('Generated %s game slots for availability_id=%s host_location_id=%s', created_slots, availability.id, host_location_id)
+
+
+def _regenerate_hosting_day(db: Session, availability_rows: list[HostingAvailability], host: HostLocation) -> HostingGenerationLocationResult:
+    result = HostingGenerationLocationResult(
+        host_location_id=host.id,
+        host_location_name=host.name,
+        field_instances_created=0,
+        slots_created=0,
+        errors=[],
+    )
+    if not availability_rows:
+        result.skipped_reason = 'No hosting availability records found.'
+        logger.info('Skipping host location %s (%s): %s', host.name, host.id, result.skipped_reason)
+        return result
+
+    for availability in availability_rows:
+        try:
+            if not availability.physical_field_area:
+                msg = 'Hosting setup missing for this location.'
+                result.errors.append(msg)
+                logger.error('Host %s (%s) availability %s error: %s', host.name, host.id, availability.id, msg)
+                continue
+
+            before_instances = db.query(FieldInstance).filter(FieldInstance.hosting_availability_id == availability.id).count()
+            before_slots = db.query(GameSlot).join(GameSlot.field_instance).filter(FieldInstance.hosting_availability_id == availability.id).count()
+            _regenerate_generated_slots(db, availability, host.id)
+            after_instances = db.query(FieldInstance).filter(FieldInstance.hosting_availability_id == availability.id).count()
+            after_slots = db.query(GameSlot).join(GameSlot.field_instance).filter(FieldInstance.hosting_availability_id == availability.id).count()
+            result.field_instances_created += max(after_instances, before_instances)
+            result.slots_created += max(after_slots, before_slots)
+            logger.info('Host %s (%s): availability %s regenerated, field_instances=%s slots=%s', host.name, host.id, availability.id, after_instances, after_slots)
+        except HTTPException as exc:
+            detail = str(exc.detail)
+            result.errors.append(detail)
+            logger.error('Host %s (%s): availability %s failed: %s', host.name, host.id, availability.id, detail)
+        except Exception as exc:
+            detail = str(exc)
+            result.errors.append(detail)
+            logger.exception('Host %s (%s): availability %s failed unexpectedly: %s', host.name, host.id, availability.id, detail)
+    return result
 
 
 
@@ -842,6 +882,51 @@ def list_field_instances(host_location_id: uuid.UUID | None = None, available_da
 @router.get('/generated-game-slots', response_model=list[GeneratedSlotRead], dependencies=[Depends(get_current_user)])
 def list_generated_game_slots(host_location_id: uuid.UUID, available_date: str | None = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     return list_generated_slots(host_location_id=host_location_id, available_date=available_date, current_user=current_user, db=db)
+
+
+@router.post('/generated-game-slots/regenerate', response_model=HostingGenerationRunResult, dependencies=[Depends(get_current_user)])
+def regenerate_generated_game_slots(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    host_query = db.query(HostLocation).filter(HostLocation.is_active.is_(True))
+    if current_user.role.name == ROLE_COMMUNITY_SCHEDULER:
+        host_query = host_query.filter(HostLocation.organization_id == current_user.organization_id)
+    hosts = host_query.order_by(HostLocation.name).all()
+
+    if not hosts:
+        raise HTTPException(400, 'No hosting availability records found.')
+
+    results: list[HostingGenerationLocationResult] = []
+    processed = 0
+    skipped = 0
+    errors = 0
+    total_field_instances = 0
+    total_slots = 0
+    for host in hosts:
+        availabilities = db.query(HostingAvailability).join(HostingAvailability.physical_field_area).filter(
+            PhysicalFieldArea.host_location_id == host.id,
+            HostingAvailability.is_available.is_(True),
+        ).order_by(HostingAvailability.available_date, HostingAvailability.start_time).all()
+        result = _regenerate_hosting_day(db, availabilities, host)
+        results.append(result)
+        if result.skipped_reason:
+            skipped += 1
+        else:
+            processed += 1
+        if result.errors:
+            errors += 1
+        total_field_instances += result.field_instances_created
+        total_slots += result.slots_created
+
+    db.commit()
+    return HostingGenerationRunResult(
+        message='Slots generated successfully' if processed > 0 else 'No hosting availability records found.',
+        processed=processed,
+        skipped=skipped,
+        errors=errors,
+        total_field_instances_created=total_field_instances,
+        total_slots_created=total_slots,
+        last_generated_at=datetime.utcnow(),
+        results=results,
+    )
 
 
 @router.post('/teams', response_model=TeamRead, dependencies=[Depends(get_current_user)])
