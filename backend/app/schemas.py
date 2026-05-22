@@ -207,6 +207,8 @@ class HostingAvailabilityBulkUpsertRequest(BaseModel):
 class HostingAvailabilityBulkUpsertResponse(BaseModel):
     created: int
     updated: int
+    generated_field_instances: int = 0
+    generated_slots: int = 0
 
 
 
