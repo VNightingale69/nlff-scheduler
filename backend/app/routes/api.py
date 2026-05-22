@@ -19,6 +19,7 @@ from app.schemas import (
     ScheduleReadinessDivisionRow, ScheduleReadinessResponse, ScheduleReadinessTotals
 )
 from app.security import create_access_token, create_refresh_token, hash_password, validate_password_strength, verify_password, decode_token
+from app.services.game_statuses import REQUIRED_GAME_STATUSES, ensure_required_game_statuses
 from app.services.scheduling_validation import validate_game
 
 router = APIRouter(prefix='/api')
@@ -1125,6 +1126,13 @@ def list_game_statuses(page:int=1,page_size:int=50, db:Session=Depends(get_db)):
     q=db.query(GameStatus).order_by(GameStatus.label)
     return PagedResponse(items=[{"id":x.id,"code":x.code,"label":x.label} for x in q.offset((page-1)*page_size).limit(page_size).all()], total=q.count(), page=page, page_size=page_size)
 
+
+@router.post('/game-statuses/seed', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+def seed_game_statuses_endpoint(db: Session = Depends(get_db)):
+    changed = ensure_required_game_statuses(db)
+    db.commit()
+    return {'status': 'ok', 'ensured': changed, 'required': [code for code, _ in REQUIRED_GAME_STATUSES]}
+
 @router.get('/seasons', response_model=PagedResponse[dict], dependencies=[Depends(get_current_user)])
 def list_seasons(page:int=1,page_size:int=50, db:Session=Depends(get_db)):
     q=db.query(Season).order_by(Season.start_date.desc())
@@ -1208,9 +1216,10 @@ def assign_generated_slot(payload: dict, db: Session = Depends(get_db)):
         raise HTTPException(400, 'Duplicate matchup exists. Confirm override to continue.')
     season = db.query(Season).filter(Season.is_active.is_(True)).order_by(Season.start_date.desc()).first()
     week = db.query(Week).filter(Week.start_date <= slot.slot_date, Week.end_date >= slot.slot_date).order_by(Week.week_number).first()
-    status = db.query(GameStatus).filter(func.lower(GameStatus.code) == 'scheduled').first()
+    status = db.query(GameStatus).filter(GameStatus.code == 'SCHEDULED').first()
     if not status:
-        raise HTTPException(400, 'Missing required game status configuration: SCHEDULED')
+        logger.error('Manual assignment blocked: missing required SCHEDULED game status.')
+        raise HTTPException(400, 'Game status setup is incomplete. Please contact an administrator.')
     field = db.query(Field).filter(Field.host_location_id == slot.host_location_id, Field.layout_type == division.required_field_layout_type).first() or db.query(Field).filter(Field.host_location_id == slot.host_location_id).first()
     if not field:
         raise HTTPException(400, 'No field is configured for the selected host location')

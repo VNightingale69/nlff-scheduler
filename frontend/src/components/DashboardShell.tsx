@@ -25,6 +25,7 @@ export default function DashboardShell({ children }: { children: React.ReactNode
     'generated-slots',
     'schedule-readiness',
     'manual-schedule-builder',
+    'game-statuses',
     'games',
   ];
   const links = useMemo(
