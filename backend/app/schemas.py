@@ -229,6 +229,16 @@ class SavedAvailabilityEntry(BaseModel):
 class SavedAvailabilityResponse(BaseModel):
     items: list[SavedAvailabilityEntry]
 
+class GeneratedSlotRead(BaseModel):
+    id: uuid.UUID
+    available_date: date
+    host_location_name: str
+    field_instance_name: str
+    field_type: str
+    start_time: time
+    end_time: time
+    status: str
+
 class GameStatusCreate(BaseModel):
     code: str
     label: str
