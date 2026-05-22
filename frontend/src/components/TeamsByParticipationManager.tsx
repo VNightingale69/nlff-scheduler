@@ -38,10 +38,7 @@ export default function TeamsByParticipationManager() {
   const grouped = useMemo(() => Object.fromEntries(divisions.map((d) => [d.id, teams.filter((t) => t.division_id === d.id)])), [divisions, teams]);
 
   const addTeam = async (divisionId: string, expectedCount: number, activeCount: number) => {
-    if (activeCount >= expectedCount) {
-      setMsg('Team limit reached for this division.');
-      return;
-    }
+    if (activeCount >= expectedCount) return;
     const name = (newNames[divisionId] || '').trim();
     if (!name) return;
     await apiFetch('/teams', { method: 'POST', body: JSON.stringify({ organization_id: orgId, division_id: divisionId, name, is_active: true }) }, getToken());
@@ -102,10 +99,9 @@ export default function TeamsByParticipationManager() {
           </li>)}
         </ul>
         <div className='flex gap-2'>
-          <input className='rounded border p-1' value={newNames[d.id] || ''} onChange={(e) => setNewNames({ ...newNames, [d.id]: e.target.value })} placeholder='Team Name' />
+          <input disabled={atLimit} className='rounded border p-1 disabled:cursor-not-allowed disabled:bg-slate-100' value={newNames[d.id] || ''} onChange={(e) => setNewNames({ ...newNames, [d.id]: e.target.value })} placeholder='Team Name' />
           <button disabled={atLimit} className='rounded bg-slate-700 px-3 py-1 text-white disabled:cursor-not-allowed disabled:bg-slate-400' onClick={() => addTeam(d.id, d.expected_count, existing.length)}>Add Team</button>
         </div>
-        {atLimit && <p className='text-sm text-amber-700'>Team limit reached for this division.</p>}
       </div>;
     })}
     {msg && <p className='text-sm'>{msg}</p>}
