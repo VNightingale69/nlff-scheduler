@@ -281,11 +281,27 @@ LEAGUE_DIVISION_SEED = [
 
 
 def ensure_league_defined_divisions(db: Session) -> None:
-    if db.query(Division).count() > 0:
-        return
+    changed = False
     for item in LEAGUE_DIVISION_SEED:
+        existing = db.query(Division).filter(
+            Division.division_group == item['division_group'],
+            Division.name == item['name'],
+        ).first()
+        if existing:
+            if (
+                existing.sort_order != item['sort_order']
+                or existing.required_field_layout_type != item['required_field_layout_type']
+                or existing.is_active != item['is_active']
+            ):
+                existing.sort_order = item['sort_order']
+                existing.required_field_layout_type = item['required_field_layout_type']
+                existing.is_active = item['is_active']
+                changed = True
+            continue
         db.add(Division(**item))
-    db.commit()
+        changed = True
+    if changed:
+        db.commit()
 
 @router.post('/divisions', response_model=DivisionRead, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def create_division(payload: DivisionCreate, db: Session = Depends(get_db)):
