@@ -13,6 +13,7 @@ from app.database import get_db
 from app.models import Role, User
 from app.routes.api import ensure_league_defined_divisions, router as api_router
 from app.security import hash_password, validate_password_strength
+from app.services.game_statuses import seed_required_game_statuses
 
 app = FastAPI(title='Northern Lakes Flag Football Scheduler API')
 logger = logging.getLogger(__name__)
@@ -171,5 +172,14 @@ def seed_league_divisions() -> None:
     except SQLAlchemyError:
         logger.exception('League division seed failed due to database error.')
         db.rollback()
+    finally:
+        db.close()
+
+
+@app.on_event('startup')
+def seed_game_statuses() -> None:
+    db = next(get_db())
+    try:
+        seed_required_game_statuses(db)
     finally:
         db.close()

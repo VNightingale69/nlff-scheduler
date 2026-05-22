@@ -17,4 +17,5 @@ export const ENTITIES: Record<string, EntityConfig> = {
   'generated-slots': { title: 'Generated Slots', path: '/generated-game-slots', nav: true, fields: [] },
   'schedule-readiness': { title: 'Schedule Readiness', path: '/schedule-readiness', nav: true, fields: [] },
   'manual-schedule-builder': { title: 'Manual Schedule Builder', path: '/manual-schedule-builder', nav: true, fields: [] },
+  'game-statuses': { title: 'Game Statuses', path: '/game-statuses', nav: true, roles: ['league_admin'], fields: [] },
 };
