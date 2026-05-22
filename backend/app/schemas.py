@@ -293,8 +293,8 @@ class GameStatusRead(BaseSchema, GameStatusCreate):
     pass
 
 class GameCreate(BaseModel):
-    season_id: uuid.UUID
-    week_id: uuid.UUID
+    season_id: uuid.UUID | None
+    week_id: uuid.UUID | None
     division_id: uuid.UUID
     home_team_id: uuid.UUID
     away_team_id: uuid.UUID
@@ -337,8 +337,8 @@ class PublicGameRead(BaseModel):
     organization_name: str
     division_id: uuid.UUID
     division_name: str
-    week_id: uuid.UUID
-    week_number: int
+    week_id: uuid.UUID | None
+    week_number: int | None
     home_team_id: uuid.UUID
     home_team_name: str
     away_team_id: uuid.UUID
