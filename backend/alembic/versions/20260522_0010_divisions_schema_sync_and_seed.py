@@ -33,6 +33,23 @@ def upgrade() -> None:
     inspector = sa.inspect(bind)
     division_columns = {column['name'] for column in inspector.get_columns('divisions')}
 
+
+    unique_constraints = inspector.get_unique_constraints('divisions')
+    has_group_name_unique = False
+
+    for constraint in unique_constraints:
+        columns = constraint.get('column_names') or []
+        name = constraint.get('name')
+
+        if columns == ['name'] and name:
+            op.drop_constraint(name, 'divisions', type_='unique')
+
+        if columns == ['division_group', 'name']:
+            has_group_name_unique = True
+
+    if not has_group_name_unique:
+        op.create_unique_constraint('uq_division_group_name', 'divisions', ['division_group', 'name'])
+
     if 'division_group' not in division_columns:
         op.add_column('divisions', sa.Column('division_group', sa.String(length=20), nullable=False, server_default='COED'))
     if 'sort_order' not in division_columns:
