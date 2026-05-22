@@ -1208,11 +1208,13 @@ def assign_generated_slot(payload: dict, db: Session = Depends(get_db)):
         raise HTTPException(400, 'Duplicate matchup exists. Confirm override to continue.')
     season = db.query(Season).filter(Season.is_active.is_(True)).order_by(Season.start_date.desc()).first()
     week = db.query(Week).filter(Week.start_date <= slot.slot_date, Week.end_date >= slot.slot_date).order_by(Week.week_number).first()
-    status = db.query(GameStatus).filter(GameStatus.code == 'scheduled').first()
+    status = db.query(GameStatus).filter(func.lower(GameStatus.code) == 'scheduled').first()
+    if not status:
+        raise HTTPException(400, 'Missing required game status configuration: SCHEDULED')
     field = db.query(Field).filter(Field.host_location_id == slot.host_location_id, Field.layout_type == division.required_field_layout_type).first() or db.query(Field).filter(Field.host_location_id == slot.host_location_id).first()
-    if not season or not week or not status or not field:
-        raise HTTPException(400, 'Missing required season/week/status/field configuration for scheduling')
-    game = Game(season_id=season.id, week_id=week.id, home_team_id=home_team.id, away_team_id=away_team.id, field_id=field.id, game_status_id=status.id, game_date=slot.slot_date, kickoff_time=slot.start_time)
+    if not field:
+        raise HTTPException(400, 'No field is configured for the selected host location')
+    game = Game(season_id=season.id if season else None, week_id=week.id if week else None, home_team_id=home_team.id, away_team_id=away_team.id, field_id=field.id, game_status_id=status.id, game_date=slot.slot_date, kickoff_time=slot.start_time)
     db.add(game); db.flush()
     slot.status = 'ASSIGNED'; slot.assigned_game_id = game.id
     db.commit(); db.refresh(game)
@@ -1229,7 +1231,7 @@ def list_public_games(host_location_id: uuid.UUID | None = None, organization_id
     if team_id: q = q.filter((Game.home_team_id == team_id) | (Game.away_team_id == team_id))
     if status_code: q = q.filter(GameStatus.code == status_code)
     total = q.count(); items = q.order_by(Game.game_date, Game.kickoff_time).offset((page - 1) * page_size).limit(page_size).all()
-    return PagedResponse(items=[PublicGameRead(id=g.id,game_date=g.game_date,kickoff_time=g.kickoff_time,host_location_id=g.field.host_location.id,host_location_name=g.field.host_location.name,field_id=g.field.id,field_name=g.field.name,organization_id=g.field.host_location.organization.id,organization_name=g.field.host_location.organization.name,division_id=g.home_team.division_id,division_name=g.home_team.division.name,week_id=g.week_id,week_number=g.week.week_number,home_team_id=g.home_team_id,home_team_name=g.home_team.name,away_team_id=g.away_team_id,away_team_name=g.away_team.name,game_status_id=g.game_status_id,game_status_code=g.status.code,game_status_label=g.status.label) for g in items], total=total, page=page, page_size=page_size)
+    return PagedResponse(items=[PublicGameRead(id=g.id,game_date=g.game_date,kickoff_time=g.kickoff_time,host_location_id=g.field.host_location.id,host_location_name=g.field.host_location.name,field_id=g.field.id,field_name=g.field.name,organization_id=g.field.host_location.organization.id,organization_name=g.field.host_location.organization.name,division_id=g.home_team.division_id,division_name=g.home_team.division.name,week_id=g.week_id,week_number=(g.week.week_number if g.week else None),home_team_id=g.home_team_id,home_team_name=g.home_team.name,away_team_id=g.away_team_id,away_team_name=g.away_team.name,game_status_id=g.game_status_id,game_status_code=g.status.code,game_status_label=g.status.label) for g in items], total=total, page=page, page_size=page_size)
 
 @router.get('/public/schedule-filters')
 def list_public_schedule_filters(db: Session = Depends(get_db)):
