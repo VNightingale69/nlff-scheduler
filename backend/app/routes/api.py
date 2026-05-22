@@ -957,8 +957,20 @@ def list_field_instances(host_location_id: uuid.UUID | None = None, available_da
 
 
 @router.get('/generated-game-slots', response_model=list[GeneratedSlotRead], dependencies=[Depends(get_current_user)])
-def list_generated_game_slots(host_location_id: uuid.UUID, available_date: str | None = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    return list_generated_slots(host_location_id=host_location_id, available_date=available_date, current_user=current_user, db=db)
+def list_generated_game_slots(host_location_id: uuid.UUID | None = None, available_date: str | None = None, status: str | None = None, field_type: str | None = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    q = db.query(GameSlot, FieldInstance.field_name, HostLocation.name.label('host_location_name')).join(GameSlot.field_instance).join(GameSlot.host_location)
+    if current_user.role.name == ROLE_COMMUNITY_SCHEDULER:
+        q = q.filter(HostLocation.organization_id == current_user.organization_id)
+    if host_location_id:
+        q = q.filter(GameSlot.host_location_id == host_location_id)
+    if available_date:
+        q = q.filter(func.cast(GameSlot.slot_date, str) == available_date)
+    if status:
+        q = q.filter(GameSlot.status == status)
+    if field_type:
+        q = q.filter(GameSlot.field_type == field_type)
+    rows = q.order_by(GameSlot.slot_date, GameSlot.start_time, FieldInstance.field_name).all()
+    return [{'id': row.GameSlot.id, 'available_date': row.GameSlot.slot_date, 'host_location_name': row.host_location_name, 'field_instance_name': row.field_name, 'field_type': row.GameSlot.field_type, 'start_time': row.GameSlot.start_time, 'end_time': row.GameSlot.end_time, 'status': row.GameSlot.status} for row in rows]
 
 
 @router.post('/generated-game-slots/regenerate', response_model=HostingGenerationRunResult, dependencies=[Depends(get_current_user)])
@@ -1139,6 +1151,72 @@ def list_games(division_id:uuid.UUID|None=None, week_id:uuid.UUID|None=None, tea
     total=q.count(); items=q.order_by(Game.game_date, Game.kickoff_time).offset((page-1)*page_size).limit(page_size).all()
     return PagedResponse(items=[_to_game_read(x) for x in items], total=total, page=page, page_size=page_size)
 
+
+
+@router.get('/manual-schedule-builder/options', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+def manual_schedule_builder_options(db: Session = Depends(get_db)):
+    divisions = db.query(Division).filter(Division.is_active.is_(True)).order_by(Division.sort_order, Division.name).all()
+    teams = db.query(Team).filter(Team.is_active.is_(True)).order_by(Team.name).all()
+    host_locations = db.query(HostLocation).filter(HostLocation.is_active.is_(True)).order_by(HostLocation.name).all()
+    return {
+        'divisions': [{'id': d.id, 'name': d.name, 'required_field_type': 'LARGE' if '53' in (d.required_field_layout_type or '') else 'SMALL'} for d in divisions],
+        'teams': [{'id': t.id, 'name': t.name, 'division_id': t.division_id, 'is_active': t.is_active} for t in teams],
+        'host_locations': [{'id': h.id, 'name': h.name} for h in host_locations],
+    }
+
+
+
+@router.post('/manual-schedule-builder/assign', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+def assign_generated_slot(payload: dict, db: Session = Depends(get_db)):
+    division_id = payload.get('division_id')
+    home_team_id = payload.get('home_team_id')
+    away_team_id = payload.get('away_team_id')
+    generated_slot_id = payload.get('generated_slot_id')
+    if not home_team_id or not away_team_id:
+        raise HTTPException(400, 'Home Team and Away Team are required')
+    if home_team_id == away_team_id:
+        raise HTTPException(400, 'Home Team and Away Team cannot be the same')
+    home_team = db.query(Team).filter(Team.id == home_team_id).first()
+    away_team = db.query(Team).filter(Team.id == away_team_id).first()
+    if not home_team or not away_team:
+        raise HTTPException(404, 'Team not found')
+    if not home_team.is_active or not away_team.is_active:
+        raise HTTPException(400, 'Cannot assign inactive teams')
+    slot = db.query(GameSlot).join(GameSlot.field_instance).filter(GameSlot.id == generated_slot_id).first()
+    if not slot or slot.status != 'OPEN':
+        raise HTTPException(400, 'Selected slot must be OPEN')
+    division = db.query(Division).filter(Division.id == division_id).first()
+    if not division:
+        raise HTTPException(404, 'Division not found')
+    expected_field_type = 'LARGE' if '53' in (division.required_field_layout_type or '') else 'SMALL'
+    if slot.field_type != expected_field_type:
+        raise HTTPException(400, 'Selected slot field type must match division requirement')
+    overlap = db.query(Game).join(GameSlot, GameSlot.assigned_game_id == Game.id).filter(
+        Game.game_date == slot.slot_date,
+        GameSlot.start_time < slot.end_time,
+        GameSlot.end_time > slot.start_time,
+        ((Game.home_team_id == home_team.id) | (Game.away_team_id == home_team.id) | (Game.home_team_id == away_team.id) | (Game.away_team_id == away_team.id))
+    ).count()
+    if overlap:
+        raise HTTPException(400, 'A team cannot be scheduled in overlapping slots')
+    duplicate = db.query(Game).filter(
+        Game.home_team_id == home_team.id,
+        Game.away_team_id == away_team.id,
+        Game.game_date == slot.slot_date,
+    ).count()
+    if duplicate and not payload.get('override_duplicate_matchup'):
+        raise HTTPException(400, 'Duplicate matchup exists. Confirm override to continue.')
+    season = db.query(Season).filter(Season.is_active.is_(True)).order_by(Season.start_date.desc()).first()
+    week = db.query(Week).filter(Week.start_date <= slot.slot_date, Week.end_date >= slot.slot_date).order_by(Week.week_number).first()
+    status = db.query(GameStatus).filter(GameStatus.code == 'scheduled').first()
+    field = db.query(Field).filter(Field.host_location_id == slot.host_location_id, Field.layout_type == division.required_field_layout_type).first() or db.query(Field).filter(Field.host_location_id == slot.host_location_id).first()
+    if not season or not week or not status or not field:
+        raise HTTPException(400, 'Missing required season/week/status/field configuration for scheduling')
+    game = Game(season_id=season.id, week_id=week.id, home_team_id=home_team.id, away_team_id=away_team.id, field_id=field.id, game_status_id=status.id, game_date=slot.slot_date, kickoff_time=slot.start_time)
+    db.add(game); db.flush()
+    slot.status = 'ASSIGNED'; slot.assigned_game_id = game.id
+    db.commit(); db.refresh(game)
+    return {'game': _to_game_read(game), 'generated_slot_id': slot.id, 'status': 'SCHEDULED'}
 @router.get('/public/games', response_model=PagedResponse[PublicGameRead])
 def list_public_games(host_location_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, division_id: uuid.UUID | None = None, week_id: uuid.UUID | None = None, team_id: uuid.UUID | None = None, status_code: str | None = None, page: int = 1, page_size: int = 50, db: Session = Depends(get_db)):
     home_team = aliased(Team); away_team = aliased(Team)
@@ -1177,3 +1255,22 @@ def update_game(game_id:uuid.UUID,payload:GameCreate, db:Session=Depends(get_db)
     for k,v in payload.model_dump(exclude={'division_id'}).items(): setattr(obj,k,v)
     db.commit(); db.refresh(obj)
     return GameSaveResponse(game=_to_game_read(obj), validation=validation)
+
+
+@router.patch('/games/{game_id}', response_model=GameSaveResponse, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+def patch_game(game_id: uuid.UUID, payload: GameCreate, db: Session = Depends(get_db)):
+    return update_game(game_id, payload, db)
+
+
+@router.delete('/games/{game_id}', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+def delete_game(game_id: uuid.UUID, db: Session = Depends(get_db)):
+    obj = db.query(Game).filter(Game.id == game_id).first()
+    if not obj:
+        raise HTTPException(404, 'Game not found')
+    slot = db.query(GameSlot).filter(GameSlot.assigned_game_id == game_id).first()
+    if slot:
+        slot.status = 'OPEN'
+        slot.assigned_game_id = None
+    db.delete(obj)
+    db.commit()
+    return {'ok': True}
