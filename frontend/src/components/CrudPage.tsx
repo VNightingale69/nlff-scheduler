@@ -2,6 +2,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { apiFetch } from '@/lib/api';
 import { getToken } from '@/lib/auth';
+import { getDivisionLabel } from '@/lib/divisionLabel';
 import Toast from './Toast';
 import FormField from './ui/FormField';
 import DataTable from './ui/DataTable';
@@ -59,7 +60,7 @@ export default function CrudPage({ title, path, fields }: { title: string; path:
 
       setRefOptions({
         organization_id: (orgs.items || []).map((o: any) => ({ value: o.id, label: o.name })),
-        division_id: (divs.items || []).map((o: any) => ({ value: o.id, label: o.name })),
+        division_id: (divs.items || []).map((o: any) => ({ value: o.id, label: getDivisionLabel(o) })),
         host_location_id: (hosts.items || []).map((host: any) => ({
           value: host.id,
           label: host.organization_id && orgsById[host.organization_id] ? `${host.name} (${orgsById[host.organization_id]})` : host.name,
