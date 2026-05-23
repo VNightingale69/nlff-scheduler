@@ -1487,10 +1487,13 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     teams = db.query(Team).filter(Team.division_id == division_id, Team.is_active.is_(True)).order_by(Team.name).all()
     teams_by_id = {t.id: t for t in teams}
     max_games_for_division_week = len(teams) // 2
-    existing_division_games = db.query(Game).join(Game.home_team).filter(
+    existing_division_games = db.query(Game).join(Game.home_team).join(Game.status).filter(
         Game.season_id == season_id,
         Game.week_id == week_id,
         Team.division_id == division_id,
+        Team.is_active.is_(True),
+        GameStatus.code == 'SCHEDULED',
+        GameStatus.is_active.is_(True),
     ).all()
     used_team_ids: set[uuid.UUID] = set()
     used_pairs: set[tuple[uuid.UUID, uuid.UUID]] = set()
@@ -1514,12 +1517,23 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     existing_games_count = len(existing_division_games)
     max_new_games = max(0, max_games_for_division_week - existing_games_count)
     if max_new_games == 0:
+        counted_game_ids = [str(g.id) for g in existing_division_games]
         return {
             'proposals': plans,
-            'skipped': [{'slot_id': '', 'reason': 'Weekly game limit reached for selected division/week'}],
+            'skipped': [{
+                'slot_id': '',
+                'reason': 'Weekly game limit reached for selected division/week',
+                'selected_division_id': str(division_id),
+                'selected_week_id': str(week_id),
+                'active_games_counted': existing_games_count,
+                'max_games_allowed': max_games_for_division_week,
+                'counted_game_ids': counted_game_ids,
+            }],
             'proposed_game_count': 0,
             'max_allowed_game_count': max_games_for_division_week,
             'existing_game_count': existing_games_count,
+            'active_games_counted': existing_games_count,
+            'counted_game_ids': counted_game_ids,
             'unused_team_ids': [str(tid) for tid in teams_by_id if tid not in used_team_ids],
             'unused_teams': [teams_by_id[tid].name for tid in teams_by_id if tid not in used_team_ids],
         }
@@ -1589,10 +1603,13 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
     teams = db.query(Team).filter(Team.division_id == division_id, Team.is_active.is_(True)).all()
     team_ids = {t.id for t in teams}
     max_games_for_division_week = len(teams) // 2
-    existing_division_games = db.query(Game).join(Game.home_team).filter(
+    existing_division_games = db.query(Game).join(Game.home_team).join(Game.status).filter(
         Game.season_id == season_id,
         Game.week_id == week_id,
         Team.division_id == division_id,
+        Team.is_active.is_(True),
+        GameStatus.code == 'SCHEDULED',
+        GameStatus.is_active.is_(True),
     ).all()
     used_team_ids: set[uuid.UUID] = set()
     for g in existing_division_games:
@@ -1609,7 +1626,11 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
     existing_games_count = len(existing_division_games)
     for proposal in proposals:
         if existing_games_count + created_games >= max_games_for_division_week:
-            skipped.append('Weekly game limit reached for selected division/week')
+            skipped.append(
+                f"Weekly game limit reached for selected division/week (division_id={division_id}, week_id={week_id}, "
+                f"active_games_counted={existing_games_count + created_games}, max_games_allowed={max_games_for_division_week}, "
+                f"counted_game_ids={[str(g.id) for g in existing_division_games]})"
+            )
             break
         slot = db.query(GameSlot).join(GameSlot.field_instance).filter(GameSlot.id == proposal.get('slot_id')).first()
         if not slot or slot.status != 'OPEN' or slot.assigned_game_id is not None:
