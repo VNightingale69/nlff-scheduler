@@ -1171,19 +1171,44 @@ def update_week(week_id: uuid.UUID, payload: dict, db: Session = Depends(get_db)
     week.season_id = payload.get('season_id', week.season_id); week.week_number = payload.get('week_number', week.week_number); week.start_date = payload.get('start_date', week.start_date); week.end_date = payload.get('end_date', week.end_date)
     db.commit(); db.refresh(week); return {"id": week.id, "week_number": week.week_number, "season_id": week.season_id}
 
-def _to_game_read(g: Game) -> GameRead:
-    return GameRead(id=g.id,created_at=g.created_at,updated_at=g.updated_at,season_id=g.season_id,week_id=g.week_id,division_id=g.home_team.division_id,home_team_id=g.home_team_id,away_team_id=g.away_team_id,field_id=g.field_id,game_status_id=g.game_status_id,game_date=g.game_date,kickoff_time=g.kickoff_time,status_code=g.status.code)
+def _to_game_read(g: Game, generated_slot: GameSlot | None = None, field_instance_name: str | None = None, host_location_name: str | None = None) -> GameRead:
+    return GameRead(
+        id=g.id,
+        created_at=g.created_at,
+        updated_at=g.updated_at,
+        season_id=g.season_id,
+        week_id=g.week_id,
+        division_id=g.home_team.division_id,
+        home_team_id=g.home_team_id,
+        away_team_id=g.away_team_id,
+        field_id=g.field_id,
+        game_status_id=g.game_status_id,
+        game_date=g.game_date,
+        kickoff_time=g.kickoff_time,
+        status_code=g.status.code,
+        generated_slot_id=(generated_slot.id if generated_slot else None),
+        field_instance_id=(generated_slot.field_instance_id if generated_slot else None),
+        host_location_id=(generated_slot.host_location_id if generated_slot else None),
+        field_instance_name=field_instance_name,
+        host_location_name=host_location_name,
+    )
 
 @router.get('/games', response_model=PagedResponse[GameRead], dependencies=[Depends(get_current_user)])
 def list_games(division_id:uuid.UUID|None=None, week_id:uuid.UUID|None=None, team_id:uuid.UUID|None=None, host_location_id:uuid.UUID|None=None, status_code:str|None=None, page:int=1,page_size:int=50, db:Session=Depends(get_db)):
-    q=db.query(Game).join(Game.status).join(Game.home_team).outerjoin(Game.field).outerjoin(GameSlot, GameSlot.assigned_game_id == Game.id)
+    q = db.query(
+        Game,
+        GameSlot,
+        FieldInstance.field_name.label('field_instance_name'),
+        HostLocation.name.label('host_location_name'),
+    ).join(Game.status).join(Game.home_team).outerjoin(Game.field).outerjoin(GameSlot, GameSlot.assigned_game_id == Game.id).outerjoin(FieldInstance, FieldInstance.id == GameSlot.field_instance_id).outerjoin(HostLocation, HostLocation.id == GameSlot.host_location_id)
     if division_id: q=q.filter(Team.division_id==division_id)
     if week_id: q=q.filter(Game.week_id==week_id)
     if team_id: q=q.filter((Game.home_team_id==team_id)|(Game.away_team_id==team_id))
     if host_location_id: q=q.filter((Field.host_location_id==host_location_id) | (GameSlot.host_location_id==host_location_id))
     if status_code: q=q.filter(GameStatus.code==status_code)
-    total=q.count(); items=q.order_by(Game.game_date, Game.kickoff_time).offset((page-1)*page_size).limit(page_size).all()
-    return PagedResponse(items=[_to_game_read(x) for x in items], total=total, page=page, page_size=page_size)
+    total=q.count(); rows=q.order_by(Game.game_date, Game.kickoff_time).offset((page-1)*page_size).limit(page_size).all()
+    items = [_to_game_read(game, generated_slot=slot, field_instance_name=field_instance_name, host_location_name=host_location_name) for game, slot, field_instance_name, host_location_name in rows]
+    return PagedResponse(items=items, total=total, page=page, page_size=page_size)
 
 
 
