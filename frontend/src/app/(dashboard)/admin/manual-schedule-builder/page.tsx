@@ -116,7 +116,16 @@ export default function ManualScheduleBuilderPage() {
               try {
                 const res: any = await apiFetch('/manual-schedule-builder/auto-fill-preview', { method: 'POST', body: JSON.stringify({ season_id: seasonId, week_id: weekId, division_id: divisionId }) }, token);
                 setAutoFillPreview(res.proposals || []);
-                setAutoFillSkipped(res.skipped || []);
+                const normalizedSkipped = (res.skipped || []).filter((s: any) => {
+                  if ((s.reason || '').includes('Weekly game limit reached') && Number(s.active_games_counted || 0) === 0) return false;
+                  return true;
+                }).map((s: any) => {
+                  if ((s.reason || '').includes('Weekly game limit reached') && Number(s.max_games_allowed || 0) > 0) {
+                    return { ...s, reason: `Weekly game limit reached: ${s.max_games_allowed} of ${s.max_games_allowed} games already scheduled.` };
+                  }
+                  return s;
+                });
+                setAutoFillSkipped(normalizedSkipped);
               } catch (e: unknown) {
                 setError(extractError(e));
               } finally {
