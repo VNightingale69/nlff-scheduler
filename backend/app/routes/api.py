@@ -1222,16 +1222,142 @@ def manual_schedule_builder_options(db: Session = Depends(get_db)):
     host_locations = db.query(HostLocation).filter(HostLocation.is_active.is_(True)).order_by(HostLocation.name).all()
     seasons = db.query(Season).filter(Season.is_active.is_(True)).order_by(Season.start_date.desc()).all()
     weeks = db.query(Week).order_by(Week.week_number).all()
+    organizations = db.query(Organization).filter(Organization.is_active.is_(True)).order_by(Organization.name).all()
     return {
         'divisions': [{'id': d.id, 'name': d.name, 'division_group': d.division_group, 'sort_order': d.sort_order, 'required_field_layout_type': d.required_field_layout_type, 'required_field_type': 'LARGE' if '53' in (d.required_field_layout_type or '') else 'SMALL'} for d in divisions],
         'teams': [{'id': t.id, 'name': t.name, 'division_id': t.division_id, 'is_active': t.is_active} for t in teams],
         'host_locations': [{'id': h.id, 'name': h.name} for h in host_locations],
         'seasons': [{'id': s.id, 'name': s.name, 'start_date': s.start_date, 'end_date': s.end_date, 'is_active': s.is_active} for s in seasons],
         'weeks': [{'id': w.id, 'season_id': w.season_id, 'week_number': w.week_number, 'start_date': w.start_date, 'end_date': w.end_date} for w in weeks],
+        'organizations': [{'id': o.id, 'name': o.name} for o in organizations],
     }
 
 
 
+
+
+@router.post('/manual-schedule-builder/recommendations', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+def manual_schedule_builder_recommendations(payload: dict, db: Session = Depends(get_db)):
+    season_id = payload.get('season_id')
+    week_id = payload.get('week_id')
+    division_id = payload.get('division_id')
+    organization_id = payload.get('organization_id')
+    host_location_id = payload.get('host_location_id')
+    home_team_id = payload.get('home_team_id')
+    away_team_id = payload.get('away_team_id')
+
+    division = db.query(Division).filter(Division.id == division_id).first() if division_id else None
+    expected_field_type = _required_field_type_for_division(division)
+
+    teams_q = db.query(Team).filter(Team.is_active.is_(True))
+    if division_id:
+        teams_q = teams_q.filter(Team.division_id == division_id)
+    teams = teams_q.order_by(Team.name).all()
+    team_ids = {t.id for t in teams}
+
+    games_q = db.query(Game).filter(Game.season_id == season_id) if season_id else db.query(Game)
+    if week_id:
+        games_q = games_q.filter(Game.week_id == week_id)
+    if division_id:
+        games_q = games_q.join(Game.home_team).filter(Team.division_id == division_id)
+    division_games = games_q.all()
+
+    team_game_counts: dict[uuid.UUID, int] = {t.id: 0 for t in teams}
+    matchup_counts: dict[tuple[uuid.UUID, uuid.UUID], int] = {}
+    for g in division_games:
+        if g.home_team_id in team_game_counts:
+            team_game_counts[g.home_team_id] += 1
+        if g.away_team_id in team_game_counts:
+            team_game_counts[g.away_team_id] += 1
+        key = tuple(sorted([g.home_team_id, g.away_team_id]))
+        matchup_counts[key] = matchup_counts.get(key, 0) + 1
+
+    same_day_team_counts: dict[tuple[uuid.UUID, date], int] = {}
+    for g in division_games:
+        same_day_team_counts[(g.home_team_id, g.game_date)] = same_day_team_counts.get((g.home_team_id, g.game_date), 0) + 1
+        same_day_team_counts[(g.away_team_id, g.game_date)] = same_day_team_counts.get((g.away_team_id, g.game_date), 0) + 1
+
+    suggested_matchups = []
+    team_list = list(teams)
+    for i in range(len(team_list)):
+        for j in range(i + 1, len(team_list)):
+            a = team_list[i]
+            b = team_list[j]
+            key = tuple(sorted([a.id, b.id]))
+            repeats = matchup_counts.get(key, 0)
+            score = 70
+            reasons = []
+            if repeats == 0:
+                score += 20; reasons.append('unscheduled matchup')
+            else:
+                score -= min(25, repeats * 12); reasons.append(f'repeat count: {repeats}')
+            total_games = team_game_counts.get(a.id, 0) + team_game_counts.get(b.id, 0)
+            score += max(0, 15 - total_games * 2)
+            reasons.append('prioritizes teams with fewer games')
+            suggested_matchups.append({'home_team_id': a.id, 'home_team_name': a.name, 'away_team_id': b.id, 'away_team_name': b.name, 'score': max(0, min(100, score)), 'reason': ', '.join(reasons), 'repeat_count': repeats})
+    suggested_matchups.sort(key=lambda x: x['score'], reverse=True)
+
+    slots_q = db.query(GameSlot).join(GameSlot.field_instance).join(GameSlot.host_location).filter(GameSlot.status == 'OPEN')
+    if division:
+        slots_q = slots_q.filter(GameSlot.field_type == expected_field_type)
+    if host_location_id:
+        slots_q = slots_q.filter(GameSlot.host_location_id == host_location_id)
+    if organization_id:
+        slots_q = slots_q.filter(HostLocation.organization_id == organization_id)
+    slot_rows = slots_q.order_by(GameSlot.slot_date, GameSlot.start_time).limit(300).all()
+
+    slot_suggestions = []
+    selected_pair = [home_team_id, away_team_id] if home_team_id and away_team_id else []
+    for slot in slot_rows:
+        score = 65
+        reasons = []
+        conflicts = []
+        if division and slot.field_type == expected_field_type:
+            score += 15; reasons.append('correct field type')
+        else:
+            score -= 35; conflicts.append('invalid field type')
+
+        if selected_pair:
+            overlap = db.query(Game).join(GameSlot, GameSlot.assigned_game_id == Game.id).filter(
+                Game.game_date == slot.slot_date,
+                GameSlot.start_time < slot.end_time,
+                GameSlot.end_time > slot.start_time,
+                ((Game.home_team_id == selected_pair[0]) | (Game.away_team_id == selected_pair[0]) | (Game.home_team_id == selected_pair[1]) | (Game.away_team_id == selected_pair[1]))
+            ).count()
+            if overlap:
+                score -= 50; conflicts.append('team conflict at this time')
+            day_games = 0
+            for tid in selected_pair:
+                day_games += same_day_team_counts.get((tid, slot.slot_date), 0)
+            if day_games == 0:
+                score += 10; reasons.append('no same-day game yet')
+            elif day_games <= 2:
+                reasons.append('possible back-to-back double header')
+            else:
+                score -= 20; conflicts.append('excess same-day games')
+
+        hour = slot.start_time.hour if hasattr(slot.start_time, 'hour') else int(str(slot.start_time).split(':')[0])
+        if 11 <= hour <= 16:
+            score += 8; reasons.append('balanced time-of-day')
+
+        rating = 'Excellent' if score >= 85 else ('Good' if score >= 65 else 'Warning')
+        color = 'green' if rating == 'Excellent' else ('yellow' if rating == 'Good' else 'red')
+        slot_suggestions.append({
+            'slot_id': slot.id,
+            'slot_date': slot.slot_date,
+            'start_time': slot.start_time,
+            'end_time': slot.end_time,
+            'host_location_name': slot.host_location.name,
+            'field_instance_name': slot.field_instance.field_name,
+            'field_type': slot.field_type,
+            'score': max(0, min(100, score)),
+            'reason': ', '.join(reasons + conflicts) if (reasons or conflicts) else 'open slot',
+            'rating': rating,
+            'indicator': color,
+            'conflicts': conflicts,
+        })
+    slot_suggestions.sort(key=lambda x: x['score'], reverse=True)
+    return {'suggested_matchups': suggested_matchups[:25], 'suggested_slots': slot_suggestions[:40]}
 @router.post('/manual-schedule-builder/assign', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def assign_generated_slot(payload: dict, db: Session = Depends(get_db)):
     season_id = payload.get('season_id')
