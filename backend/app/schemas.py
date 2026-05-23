@@ -174,7 +174,7 @@ class WeekRead(BaseSchema, WeekCreate):
     pass
 
 class HostingAvailabilityCreate(BaseModel):
-    field_id: uuid.UUID | None = None
+    field_id: uuid.UUID | None | None = None
     physical_field_area_id: uuid.UUID | None = None
     field_configuration_option_id: uuid.UUID | None = None
     layout_type: str | None = None
@@ -189,7 +189,7 @@ class HostingAvailabilityRead(BaseSchema, HostingAvailabilityCreate):
 
 
 class HostingAvailabilityBulkSlot(BaseModel):
-    field_id: uuid.UUID | None = None
+    field_id: uuid.UUID | None | None = None
     physical_field_area_id: uuid.UUID | None = None
     field_configuration_option_id: uuid.UUID | None = None
     layout_type: str | None = None
@@ -298,7 +298,7 @@ class GameCreate(BaseModel):
     division_id: uuid.UUID
     home_team_id: uuid.UUID
     away_team_id: uuid.UUID
-    field_id: uuid.UUID
+    field_id: uuid.UUID | None
     game_status_id: uuid.UUID
     game_date: date
     kickoff_time: time
@@ -331,7 +331,7 @@ class PublicGameRead(BaseModel):
     kickoff_time: time
     host_location_id: uuid.UUID
     host_location_name: str
-    field_id: uuid.UUID
+    field_id: uuid.UUID | None
     field_name: str
     organization_id: uuid.UUID
     organization_name: str
