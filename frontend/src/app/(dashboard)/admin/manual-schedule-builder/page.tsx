@@ -129,8 +129,40 @@ export default function ManualScheduleBuilderPage() {
 
       <div className='overflow-auto rounded border'>
         <table className='min-w-full text-sm'>
-          <thead><tr><th>Date</th><th>Time</th><th>Division</th><th>Home</th><th>Away</th><th>Status</th><th>Actions</th></tr></thead>
-          <tbody>{games.map((g: any) => <tr key={g.id}><td>{g.game_date}</td><td>{g.kickoff_time}</td><td>{options.divisions.find((d: any) => d.id === g.division_id)?.name || '-'}</td><td>{options.teams.find((t: any) => t.id === g.home_team_id)?.name || '-'}</td><td>{options.teams.find((t: any) => t.id === g.away_team_id)?.name || '-'}</td><td>{g.status_code}</td><td><button className='text-red-600 underline' onClick={async () => { await apiFetch(`/games/${g.id}`, { method: 'DELETE' }, token); await load(); }}>Delete / Unschedule</button></td></tr>)}</tbody>
+          <thead>
+            <tr>
+              {['Date', 'Time', 'Division', 'Home', 'Away', 'Host Location', 'Field', 'Status', 'Actions'].map((h) => (
+                <th key={h} className='px-2 py-2 text-center font-bold'>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {games.map((g: any) => {
+              const divisionName = options.divisions.find((d: any) => d.id === g.division_id)?.name || '-';
+              const homeName = options.teams.find((t: any) => t.id === g.home_team_id)?.name || '-';
+              const awayName = options.teams.find((t: any) => t.id === g.away_team_id)?.name || '-';
+              const hostLocation = g.host_location_name || '-';
+              const field = g.field_name || g.field_instance_name || '-';
+
+              return (
+                <tr key={g.id} className='align-middle'>
+                  <td className='px-2 py-2 text-center'>{g.game_date}</td>
+                  <td className='px-2 py-2 text-center'>{g.kickoff_time}</td>
+                  <td className='px-2 py-2 text-center'>{divisionName}</td>
+                  <td className='px-2 py-2 text-center'>{homeName}</td>
+                  <td className='px-2 py-2 text-center'>{awayName}</td>
+                  <td className='px-2 py-2 text-center'>{hostLocation}</td>
+                  <td className='px-2 py-2 text-center'>{field}</td>
+                  <td className='px-2 py-2 text-center'>{g.status_code}</td>
+                  <td className='px-2 py-2 text-center'>
+                    <button className='text-red-600 underline' onClick={async () => { await apiFetch(`/games/${g.id}`, { method: 'DELETE' }, token); await load(); }}>
+                      Delete / Unschedule
+                    </button>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
         </table>
       </div>
     </div>
