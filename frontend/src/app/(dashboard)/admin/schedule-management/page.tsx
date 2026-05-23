@@ -1,18 +1,219 @@
 'use client';
+
 import { useEffect, useMemo, useState } from 'react';
-import { ApiError, API_URL, apiFetch } from '@/lib/api';
+import { API_URL, ApiError, apiFetch } from '@/lib/api';
 import { getToken } from '@/lib/auth';
-const tabs = ['By Date', 'By Host Location', 'By Team', 'By Division'];
-export default function ScheduleManagementPage() { /* omitted for brevity */
-  const token = getToken(); const [tab,setTab]=useState(tabs[0]); const [options,setOptions]=useState<any>({divisions:[],teams:[],host_locations:[],organizations:[]}); const [filters,setFilters]=useState<any>({date:'',division_id:'',organization_id:'',host_location_id:'',field_type:'',team_id:''}); const [games,setGames]=useState<any[]>([]); const [conflicts,setConflicts]=useState<any[]>([]); const [error,setError]=useState('');
-  const qs=useMemo(()=>Object.entries(filters).filter(([,v])=>v).map(([k,v])=>`${k}=${encodeURIComponent(String(v))}`).join('&'),[filters]);
-  const load=async()=>{const opts:any=await apiFetch('/manual-schedule-builder/options',{},token); const orgs:any=await apiFetch('/organizations?page_size=500',{},token); setOptions({...opts,organizations:orgs.items||[]}); const g:any=await apiFetch(`/schedule-management/games${qs?`?${qs}`:''}`,{},token); const c:any=await apiFetch('/schedule-management/conflicts',{},token); setGames(g.items||[]); setConflicts(c.conflicts||[]);};
-  useEffect(()=>{load().catch((e)=>setError(e instanceof ApiError?e.message:'Unable to load schedule management data.'));},[qs]);
-  const grouped=useMemo(()=>{const by:any={}; games.forEach((g)=>{const key=`${g.date}__${g.host_location_name||'Unassigned'}__${g.field||'Unassigned'}__${g.time}`; by[key]=by[key]||{...g,games:[]}; by[key].games.push(g);}); return Object.values(by);},[games]);
-  return <div className='space-y-4'><h1 className='text-2xl font-bold'>Schedule Management</h1>{error?<div className='rounded border border-red-300 bg-red-50 p-2 text-red-700'>{error}</div>:null}
-  <div className='grid gap-2 md:grid-cols-6'><input type='date' className='rounded border p-2' value={filters.date} onChange={(e)=>setFilters({...filters,date:e.target.value})}/><select className='rounded border p-2' value={filters.division_id} onChange={(e)=>setFilters({...filters,division_id:e.target.value})}><option value=''>Division</option>{options.divisions.map((d:any)=><option key={d.id} value={d.id}>{d.name}</option>)}</select><select className='rounded border p-2' value={filters.organization_id} onChange={(e)=>setFilters({...filters,organization_id:e.target.value})}><option value=''>Organization</option>{options.organizations.map((o:any)=><option key={o.id} value={o.id}>{o.name}</option>)}</select><select className='rounded border p-2' value={filters.host_location_id} onChange={(e)=>setFilters({...filters,host_location_id:e.target.value})}><option value=''>Host Location</option>{options.host_locations.map((h:any)=><option key={h.id} value={h.id}>{h.name}</option>)}</select><select className='rounded border p-2' value={filters.field_type} onChange={(e)=>setFilters({...filters,field_type:e.target.value})}><option value=''>Field Type</option><option value='SMALL'>SMALL</option><option value='LARGE'>LARGE</option></select><select className='rounded border p-2' value={filters.team_id} onChange={(e)=>setFilters({...filters,team_id:e.target.value})}><option value=''>Team</option>{options.teams.map((t:any)=><option key={t.id} value={t.id}>{t.name}</option>)}</select></div>
-  <div className='flex gap-2'>{tabs.map((t)=><button key={t} onClick={()=>setTab(t)} className={`rounded px-3 py-1 ${tab===t?'bg-blue-600 text-white':'bg-slate-200'}`}>{t}</button>)}</div>
-  <a className='inline-block rounded bg-emerald-600 px-3 py-2 text-white' href={`${API_URL}/schedule-management/export.csv${qs?`?${qs}`:''}`} target='_blank'>Export CSV</a>
-  <div className='rounded border p-3'><h2 className='mb-2 font-semibold'>Schedule Conflicts</h2>{conflicts.length===0?<p>No schedule conflicts found.</p>:<ul className='list-disc pl-6'>{conflicts.map((c:any,i:number)=><li key={i}>{c.message}</li>)}</ul>}</div>
-  <div className='space-y-2'>{grouped.map((row:any,i:number)=><div key={i} className='rounded border p-3'><div className='font-semibold'>{row.date}</div><div>{row.host_location_name}</div><div>{row.field}</div>{row.games.map((g:any)=><div key={g.id} className='mt-1 flex items-center justify-between border-t pt-1'><span>{g.time} — {g.division_name} — {g.home_team_name} vs {g.away_team_name}</span><span className='space-x-2'><button className='text-blue-700 underline' onClick={async()=>{const slots:any=await apiFetch(`/generated-game-slots?status=OPEN&field_type=${g.field_type||'SMALL'}`,{},token); const next=slots?.[0]; if(!next){setError('No eligible OPEN slots found.');return;} await apiFetch(`/schedule-management/games/${g.id}/move`,{method:'PATCH',body:JSON.stringify({generated_slot_id:next.id})},token); await load();}}>Move to OPEN Slot</button><button className='text-red-700 underline' onClick={async()=>{await apiFetch(`/schedule-management/games/${g.id}/unschedule`,{method:'PATCH'},token); await load();}}>Unschedule</button></span></div>)}</div>)}</div>
-  </div>; }
+
+const tabs = ['By Date', 'By Host Location', 'By Team', 'By Division'] as const;
+type TabKey = (typeof tabs)[number];
+
+export default function ScheduleManagementPage() {
+  const token = getToken();
+  const [tab, setTab] = useState<TabKey>('By Date');
+  const [options, setOptions] = useState<any>({
+    divisions: [],
+    teams: [],
+    host_locations: [],
+    organizations: [],
+    fields: [],
+  });
+  const [filters, setFilters] = useState<any>({
+    date: '',
+    division_id: '',
+    organization_id: '',
+    host_location_id: '',
+    field_id: '',
+    team_id: '',
+  });
+  const [games, setGames] = useState<any[]>([]);
+  const [conflicts, setConflicts] = useState<any[]>([]);
+  const [error, setError] = useState('');
+
+  const qs = useMemo(
+    () =>
+      Object.entries(filters)
+        .filter(([, value]) => value)
+        .map(([key, value]) => `${key}=${encodeURIComponent(String(value))}`)
+        .join('&'),
+    [filters]
+  );
+
+  const load = async () => {
+    const opts: any = await apiFetch('/manual-schedule-builder/options', {}, token);
+    const orgs: any = await apiFetch('/organizations?page_size=500', {}, token);
+    setOptions({
+      ...opts,
+      organizations: orgs.items || [],
+      fields: opts.fields || [],
+    });
+
+    const gameResponse: any = await apiFetch(`/schedule-management/games${qs ? `?${qs}` : ''}`, {}, token);
+    const conflictResponse: any = await apiFetch('/schedule-management/conflicts', {}, token);
+
+    setGames(gameResponse.items || []);
+    setConflicts(conflictResponse.conflicts || []);
+  };
+
+  useEffect(() => {
+    load().catch((e) => {
+      setError(e instanceof ApiError ? e.message : 'Unable to load schedule management data.');
+    });
+  }, [qs]);
+
+  const grouped = useMemo(() => {
+    const by: Record<string, any[]> = {};
+
+    for (const game of games) {
+      const groupKey =
+        tab === 'By Date'
+          ? game.date || 'No Date'
+          : tab === 'By Host Location'
+            ? game.host_location_name || 'Unassigned Host Location'
+            : tab === 'By Team'
+              ? `${game.home_team_name || 'Unknown'} vs ${game.away_team_name || 'Unknown'}`
+              : game.division_name || 'Unknown Division';
+
+      if (!by[groupKey]) by[groupKey] = [];
+      by[groupKey].push(game);
+    }
+
+    return Object.entries(by);
+  }, [games, tab]);
+
+  return (
+    <div className='space-y-4'>
+      <h1 className='text-2xl font-bold'>Schedule Management</h1>
+
+      {error ? <div className='rounded border border-red-300 bg-red-50 p-2 text-red-700'>{error}</div> : null}
+
+      <div className='grid gap-2 md:grid-cols-6'>
+        <input
+          type='date'
+          className='rounded border p-2'
+          value={filters.date}
+          onChange={(e) => setFilters({ ...filters, date: e.target.value })}
+          aria-label='Date'
+        />
+
+        <select
+          className='rounded border p-2'
+          value={filters.division_id}
+          onChange={(e) => setFilters({ ...filters, division_id: e.target.value })}
+        >
+          <option value=''>Division</option>
+          {options.divisions.map((division: any) => (
+            <option key={division.id} value={division.id}>
+              {division.name}
+            </option>
+          ))}
+        </select>
+
+        <select
+          className='rounded border p-2'
+          value={filters.organization_id}
+          onChange={(e) => setFilters({ ...filters, organization_id: e.target.value })}
+        >
+          <option value=''>Organization</option>
+          {options.organizations.map((organization: any) => (
+            <option key={organization.id} value={organization.id}>
+              {organization.name}
+            </option>
+          ))}
+        </select>
+
+        <select
+          className='rounded border p-2'
+          value={filters.host_location_id}
+          onChange={(e) => setFilters({ ...filters, host_location_id: e.target.value })}
+        >
+          <option value=''>Host Location</option>
+          {options.host_locations.map((hostLocation: any) => (
+            <option key={hostLocation.id} value={hostLocation.id}>
+              {hostLocation.name}
+            </option>
+          ))}
+        </select>
+
+        <select
+          className='rounded border p-2'
+          value={filters.field_id}
+          onChange={(e) => setFilters({ ...filters, field_id: e.target.value })}
+        >
+          <option value=''>Field</option>
+          {options.fields.map((field: any) => (
+            <option key={field.id} value={field.id}>
+              {field.name}
+            </option>
+          ))}
+        </select>
+
+        <select
+          className='rounded border p-2'
+          value={filters.team_id}
+          onChange={(e) => setFilters({ ...filters, team_id: e.target.value })}
+        >
+          <option value=''>Team</option>
+          {options.teams.map((team: any) => (
+            <option key={team.id} value={team.id}>
+              {team.name}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      <div className='flex flex-wrap gap-2'>
+        {tabs.map((tabName) => (
+          <button
+            key={tabName}
+            onClick={() => setTab(tabName)}
+            className={`rounded px-3 py-1 ${tab === tabName ? 'bg-blue-600 text-white' : 'bg-slate-200'}`}
+          >
+            {tabName}
+          </button>
+        ))}
+      </div>
+
+      <a
+        className='inline-block rounded bg-emerald-600 px-3 py-2 text-white'
+        href={`${API_URL}/schedule-management/export.csv${qs ? `?${qs}` : ''}`}
+        target='_blank'
+      >
+        Export CSV
+      </a>
+
+      <div className='rounded border p-3'>
+        <h2 className='mb-2 font-semibold'>Schedule Conflicts</h2>
+        {conflicts.length === 0 ? (
+          <p>No schedule conflicts found.</p>
+        ) : (
+          <ul className='list-disc pl-6'>
+            {conflicts.map((conflict: any, index: number) => (
+              <li key={index}>{conflict.message}</li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      <div className='space-y-3'>
+        {grouped.map(([groupName, groupGames]) => (
+          <div key={groupName} className='rounded border p-3'>
+            <h3 className='mb-2 text-lg font-semibold'>{groupName}</h3>
+
+            {(groupGames as any[]).map((game) => (
+              <div key={game.id} className='mb-2 rounded border p-2'>
+                <div><strong>Date:</strong> {game.date || 'N/A'}</div>
+                <div><strong>Host Location:</strong> {game.host_location_name || 'Unassigned'}</div>
+                <div><strong>Field:</strong> {game.field || 'Unassigned'}</div>
+                <div><strong>Time:</strong> {game.time || 'N/A'}</div>
+                <div>
+                  <strong>Matchup:</strong> {game.home_team_name || 'TBD'} vs {game.away_team_name || 'TBD'}
+                </div>
+                <div><strong>Division:</strong> {game.division_name || 'N/A'}</div>
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
