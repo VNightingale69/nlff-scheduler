@@ -67,7 +67,7 @@ export default function ManualScheduleBuilderPage() {
     if (!seasonId && activeSeason?.id) setSeasonId(activeSeason.id);
     if (!divisionId && opts.divisions?.length) setDivisionId(opts.divisions[0].id);
     const scheduled: any = await apiFetch('/games?page_size=300', {}, token);
-    setGames(scheduled.items || []);
+    setGames((scheduled.items || []).filter((game: any) => (game.status_code || game.game_status_code) !== 'UNSCHEDULED'));
   };
 
   const loadRecommendations = async () => {
@@ -205,8 +205,18 @@ export default function ManualScheduleBuilderPage() {
                 <button className='rounded border border-red-300 px-2 py-1 text-xs text-red-700' onClick={async () => {
                   if (!window.confirm('Remove this scheduled game?')) return;
                   setError('');
-                  try { await apiFetch(`/schedule-management/games/${g.id}/unschedule`, { method: 'PATCH' }, token); await load(); await loadRecommendations(); setSuccess('Game unscheduled.'); }
-                  catch (e: unknown) { setError(extractError(e)); }
+                  try {
+                    setGames((prev) => prev.filter((game: any) => game.id !== g.id));
+                    await apiFetch(`/schedule-management/games/${g.id}/unschedule`, { method: 'PATCH' }, token);
+                    await load();
+                    await loadRecommendations();
+                    setSuccess('Game unscheduled.');
+                  }
+                  catch (e: unknown) {
+                    await load();
+                    await loadRecommendations();
+                    setError(extractError(e));
+                  }
                 }}>Delete / Unschedule</button>
               </td>
             </tr>)}
