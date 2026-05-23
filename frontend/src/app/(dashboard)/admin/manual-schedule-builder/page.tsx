@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { ApiError, apiFetch } from '@/lib/api';
 import { getToken } from '@/lib/auth';
+import { getDivisionLabel } from '@/lib/divisionLabel';
 
 export default function ManualScheduleBuilderPage() {
   const token = getToken();
@@ -72,7 +73,7 @@ export default function ManualScheduleBuilderPage() {
         </select>
         <select className='rounded border p-2' value={divisionId} onChange={(e) => setDivisionId(e.target.value)}>
           <option value=''>Division</option>
-          {options.divisions.map((d: any) => <option key={d.id} value={d.id}>{d.name}</option>)}
+          {options.divisions.map((d: any) => <option key={d.id} value={d.id}>{getDivisionLabel(d)}</option>)}
         </select>
         <select className='rounded border p-2' value={homeTeamId} onChange={(e) => setHomeTeamId(e.target.value)}>
           <option value=''>Home Team</option>
@@ -138,7 +139,7 @@ export default function ManualScheduleBuilderPage() {
           </thead>
           <tbody>
             {games.map((g: any) => {
-              const divisionName = options.divisions.find((d: any) => d.id === g.division_id)?.name || '-';
+              const divisionName = getDivisionLabel(options.divisions.find((d: any) => d.id === g.division_id)) || '-';
               const homeName = options.teams.find((t: any) => t.id === g.home_team_id)?.name || '-';
               const awayName = options.teams.find((t: any) => t.id === g.away_team_id)?.name || '-';
               const hostLocation = g.host_location_name || '-';

@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { API_URL, ApiError, apiFetch } from '@/lib/api';
 import { getToken } from '@/lib/auth';
+import { getDivisionLabel } from '@/lib/divisionLabel';
 
 const tabs = ['By Date', 'By Host Location', 'By Team', 'By Division'] as const;
 type TabKey = (typeof tabs)[number];
@@ -133,7 +134,7 @@ export default function ScheduleManagementPage() {
           <option value=''>Division</option>
           {options.divisions.map((division: any) => (
             <option key={division.id} value={division.id}>
-              {division.name}
+              {getDivisionLabel(division)}
             </option>
           ))}
         </select>

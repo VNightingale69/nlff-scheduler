@@ -1,6 +1,7 @@
 'use client';
 import { useEffect, useMemo, useState } from 'react';
 import { API_URL } from '@/lib/api';
+import { getDivisionLabel } from '@/lib/divisionLabel';
 
 type Game = { id: string; game_date: string; kickoff_time: string; host_location_name: string; field_name: string; division_name: string; home_team_name: string; away_team_name: string; game_status_label: string; };
 
@@ -27,7 +28,7 @@ export default function PublicSchedulePage() {
     <div className='grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3'>
       <select className='rounded border p-2' value={filters.host_location_id||''} onChange={e=>setFilters({...filters,host_location_id:e.target.value})}><option value=''>All Host Locations</option>{options.host_locations.map((o:any)=><option key={o.id} value={o.id}>{o.name}</option>)}</select>
       <select className='rounded border p-2' value={filters.organization_id||''} onChange={e=>setFilters({...filters,organization_id:e.target.value})}><option value=''>All Communities</option>{options.organizations.map((o:any)=><option key={o.id} value={o.id}>{o.name}</option>)}</select>
-      <select className='rounded border p-2' value={filters.division_id||''} onChange={e=>setFilters({...filters,division_id:e.target.value})}><option value=''>All Divisions</option>{options.divisions.map((o:any)=><option key={o.id} value={o.id}>{o.name}</option>)}</select>
+      <select className='rounded border p-2' value={filters.division_id||''} onChange={e=>setFilters({...filters,division_id:e.target.value})}><option value=''>All Divisions</option>{options.divisions.map((o:any)=><option key={o.id} value={o.id}>{getDivisionLabel(o)}</option>)}</select>
       <select className='rounded border p-2' value={filters.week_id||''} onChange={e=>setFilters({...filters,week_id:e.target.value})}><option value=''>All Weeks</option>{options.weeks.map((o:any)=><option key={o.id} value={o.id}>Week {o.week_number}</option>)}</select>
       <select className='rounded border p-2' value={filters.team_id||''} onChange={e=>setFilters({...filters,team_id:e.target.value})}><option value=''>All Teams</option>{options.teams.map((o:any)=><option key={o.id} value={o.id}>{o.name}</option>)}</select>
       <select className='rounded border p-2' value={filters.status_code||''} onChange={e=>setFilters({...filters,status_code:e.target.value})}><option value=''>All Statuses</option>{options.statuses.map((o:any)=><option key={o.code} value={o.code}>{o.label}</option>)}</select>
