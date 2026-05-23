@@ -28,6 +28,7 @@ export default function ScheduleManagementPage() {
   });
   const [games, setGames] = useState<any[]>([]);
   const [conflicts, setConflicts] = useState<any[]>([]);
+  const [quality, setQuality] = useState<any | null>(null);
   const [error, setError] = useState('');
 
   const qs = useMemo(
@@ -50,9 +51,11 @@ export default function ScheduleManagementPage() {
 
     const gameResponse: any = await apiFetch(`/schedule-management/games${qs ? `?${qs}` : ''}`, {}, token);
     const conflictResponse: any = await apiFetch('/schedule-management/conflicts', {}, token);
+    const qualityResponse: any = await apiFetch(`/schedule-management/quality-report${qs ? `?${qs}` : ''}`, {}, token);
 
     setGames(gameResponse.items || []);
     setConflicts(conflictResponse.conflicts || []);
+    setQuality(qualityResponse || null);
   };
 
   useEffect(() => {
@@ -89,6 +92,14 @@ export default function ScheduleManagementPage() {
     } catch (e) {
       setError(e instanceof ApiError ? e.message : 'Unable to export schedule CSV.');
     }
+  };
+
+
+
+  const statusClass = (status: string) => {
+    if (status === 'OK') return 'bg-emerald-100 text-emerald-700';
+    if (status === 'Warning') return 'bg-amber-100 text-amber-700';
+    return 'bg-red-100 text-red-700';
   };
 
   const grouped = useMemo(() => {
@@ -218,6 +229,48 @@ export default function ScheduleManagementPage() {
               <li key={index}>{conflict.message}</li>
             ))}
           </ul>
+        )}
+      </div>
+
+
+
+      <div className='space-y-4 rounded border p-3'>
+        <h2 className='text-xl font-semibold'>Schedule Quality Report</h2>
+        {!quality ? <p>Loading quality report...</p> : (
+          <>
+            <section>
+              <h3 className='font-semibold'>Games Per Team</h3>
+              {quality.games_per_team?.map((row: any) => <div key={row.team_id} className='flex items-center justify-between border-b py-1 text-sm'><span>{row.team_name} ({row.division_name}) - {row.games_scheduled} games (avg {row.division_average})</span><span className={`rounded px-2 py-0.5 ${statusClass(row.status)}`}>{row.status}</span></div>)}
+            </section>
+            <section>
+              <h3 className='font-semibold'>Repeat Matchups</h3>
+              {quality.repeat_matchups?.length ? quality.repeat_matchups.map((row: any, i: number) => <div key={i} className='flex items-center justify-between border-b py-1 text-sm'><span>{row.team_a} vs {row.team_b}: {row.games} times</span><span className={`rounded px-2 py-0.5 ${statusClass(row.status)}`}>{row.status}</span></div>) : <p className='text-sm'>None found.</p>}
+            </section>
+            <section>
+              <h3 className='font-semibold'>Home/Away Balance</h3>
+              {quality.home_away_balance?.map((row: any, i: number) => <div key={i} className='flex items-center justify-between border-b py-1 text-sm'><span>{row.team_name}: H {row.home_games} / A {row.away_games} (variance {row.variance})</span><span className={`rounded px-2 py-0.5 ${statusClass(row.status)}`}>{row.status}</span></div>)}
+            </section>
+            <section>
+              <h3 className='font-semibold'>Time-of-Day Balance</h3>
+              {quality.time_of_day_balance?.map((row: any, i: number) => <div key={i} className='flex items-center justify-between border-b py-1 text-sm'><span>{row.team_name}: Morning {row.morning}, Midday {row.midday}, Afternoon {row.afternoon}</span><span className={`rounded px-2 py-0.5 ${statusClass(row.status)}`}>{row.status}</span></div>)}
+            </section>
+            <section>
+              <h3 className='font-semibold'>Host Community Priority</h3>
+              {quality.host_community_priority?.map((row: any, i: number) => <div key={i} className='flex items-center justify-between border-b py-1 text-sm'><span>{row.organization_name}: {row.games_when_community_hosts} games, {row.home_percentage_during_host_dates}% home</span><span className={`rounded px-2 py-0.5 ${statusClass(row.status)}`}>{row.status}</span></div>)}
+            </section>
+            <section>
+              <h3 className='font-semibold'>Double Headers</h3>
+              {quality.double_headers?.length ? quality.double_headers.map((row: any, i: number) => <div key={i} className='flex items-center justify-between border-b py-1 text-sm'><span>{row.team_name} on {row.date}: {row.games} games ({row.is_back_to_back ? 'Back-to-back' : 'Not back-to-back'})</span><span className={`rounded px-2 py-0.5 ${statusClass(row.status)}`}>{row.status}</span></div>) : <p className='text-sm'>None found.</p>}
+            </section>
+            <section>
+              <h3 className='font-semibold'>Unscheduled Teams</h3>
+              {quality.unscheduled_teams?.length ? quality.unscheduled_teams.map((row: any, i: number) => <div key={i} className='flex items-center justify-between border-b py-1 text-sm'><span>{row.team_name} ({row.division_name})</span><span className={`rounded px-2 py-0.5 ${statusClass(row.status)}`}>{row.status}</span></div>) : <p className='text-sm'>None found.</p>}
+            </section>
+            <section>
+              <h3 className='font-semibold'>Field Utilization</h3>
+              {quality.field_utilization?.map((row: any, i: number) => <div key={i} className='flex items-center justify-between border-b py-1 text-sm'><span>{row.host_location_name} {row.date}: open {row.open_slots}, assigned {row.assigned_slots}, {row.utilization_percent}%</span><span className={`rounded px-2 py-0.5 ${statusClass(row.status)}`}>{row.status}</span></div>)}
+            </section>
+          </>
         )}
       </div>
 

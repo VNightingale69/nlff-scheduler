@@ -1341,6 +1341,158 @@ def _schedule_management_rows(db: Session, filters: dict | None = None):
     return q.order_by(Game.game_date, Game.kickoff_time).all()
 
 
+
+
+def _quality_status(ok: bool, warning: bool = False) -> str:
+    if ok:
+        return 'OK'
+    if warning:
+        return 'Warning'
+    return 'Issue'
+
+
+@router.get('/schedule-management/quality-report', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+def schedule_quality_report(division_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, db: Session = Depends(get_db)):
+    filters = {'division_id': division_id, 'organization_id': organization_id}
+    rows = _schedule_management_rows(db, filters)
+    teams_query = db.query(Team, Division, Organization).join(Team.division).join(Team.organization).filter(Team.is_active.is_(True))
+    if division_id:
+        teams_query = teams_query.filter(Team.division_id == division_id)
+    if organization_id:
+        teams_query = teams_query.filter(Team.organization_id == organization_id)
+    teams = teams_query.order_by(Division.sort_order, Division.name, Team.name).all()
+
+    team_stats: dict[uuid.UUID, dict] = {}
+    division_totals: dict[uuid.UUID, list[int]] = {}
+    for team, div, org in teams:
+        team_stats[team.id] = {
+            'team_id': str(team.id),
+            'team_name': team.name,
+            'division_id': str(div.id),
+            'division_name': div.name,
+            'organization_id': str(org.id),
+            'organization_name': org.name,
+            'games_scheduled': 0,
+            'home_games': 0,
+            'away_games': 0,
+            'time_of_day': {'Morning': 0, 'Midday': 0, 'Afternoon': 0},
+        }
+
+    matchup_counts: dict[tuple[uuid.UUID, uuid.UUID], int] = {}
+    team_games_by_date: dict[tuple[uuid.UUID, date], list[dict]] = {}
+    org_host_stats: dict[uuid.UUID, dict] = {}
+    utilization: dict[tuple[str, date], dict] = {}
+
+    for g, slot, fi, host, home, away, div, org, status in rows:
+        for tid, is_home in ((home.id, True), (away.id, False)):
+            if tid not in team_stats:
+                continue
+            entry = team_stats[tid]
+            entry['games_scheduled'] += 1
+            if is_home:
+                entry['home_games'] += 1
+            else:
+                entry['away_games'] += 1
+            time_val = g.kickoff_time
+            if time_val.hour < 11:
+                bucket = 'Morning'
+            elif time_val.hour < 14:
+                bucket = 'Midday'
+            else:
+                bucket = 'Afternoon'
+            entry['time_of_day'][bucket] += 1
+            team_games_by_date.setdefault((tid, g.game_date), []).append({'time': g.kickoff_time, 'slot_id': str(slot.id) if slot else None})
+
+        key = tuple(sorted((home.id, away.id), key=lambda x: str(x)))
+        matchup_counts[key] = matchup_counts.get(key, 0) + 1
+
+        if host:
+            utilization_key = (host.name, g.game_date)
+            if utilization_key not in utilization:
+                total_slots = db.query(GameSlot).filter(GameSlot.host_location_id == host.id, GameSlot.slot_date == g.game_date).count()
+                utilization[utilization_key] = {'host_location_name': host.name, 'date': g.game_date.isoformat(), 'assigned_slots': 0, 'open_slots': total_slots, 'utilization_percent': 0.0}
+            utilization[utilization_key]['assigned_slots'] += 1
+
+    for team in team_stats.values():
+        division_totals.setdefault(uuid.UUID(team['division_id']), []).append(team['games_scheduled'])
+
+    games_per_team = []
+    for team in team_stats.values():
+        div_games = division_totals.get(uuid.UUID(team['division_id']), [0])
+        avg = (sum(div_games) / len(div_games)) if div_games else 0
+        delta = team['games_scheduled'] - avg
+        status = _quality_status(abs(delta) <= 0.5, warning=abs(delta) <= 1.5)
+        games_per_team.append({**team, 'division_average': round(avg, 2), 'status': status})
+
+    repeat_matchups = []
+    for (home_id, away_id), count in matchup_counts.items():
+        if count > 1 and home_id in team_stats and away_id in team_stats:
+            repeat_matchups.append({'team_a': team_stats[home_id]['team_name'], 'team_b': team_stats[away_id]['team_name'], 'games': count, 'status': _quality_status(False, warning=count == 2)})
+
+    home_away_balance = []
+    time_of_day_balance = []
+    unscheduled = []
+    for team in games_per_team:
+        variance = abs(team['home_games'] - team['away_games'])
+        home_away_balance.append({'team_name': team['team_name'], 'home_games': team['home_games'], 'away_games': team['away_games'], 'variance': variance, 'status': _quality_status(variance <= 1, warning=variance == 2)})
+        total = team['games_scheduled']
+        counts = team['time_of_day']
+        max_bucket = max(counts.values()) if total else 0
+        balance_status = _quality_status(total == 0 or max_bucket <= (total * 0.6), warning=total > 0 and max_bucket <= (total * 0.8))
+        time_of_day_balance.append({'team_name': team['team_name'], 'morning': counts['Morning'], 'midday': counts['Midday'], 'afternoon': counts['Afternoon'], 'status': balance_status})
+        if total == 0:
+            unscheduled.append({'team_name': team['team_name'], 'division_name': team['division_name'], 'organization_name': team['organization_name'], 'status': 'Issue'})
+
+    host_rows = db.query(HostingAvailability, HostLocation, Organization).join(HostingAvailability.host_location).join(HostLocation.organization)
+    if organization_id:
+        host_rows = host_rows.filter(Organization.id == organization_id)
+    host_rows = host_rows.all()
+    for availability, host_location, host_org in host_rows:
+        item = org_host_stats.setdefault(host_org.id, {'organization_name': host_org.name, 'host_dates': set(), 'games_when_hosting': 0, 'home_team_games': 0, 'total_team_games': 0})
+        item['host_dates'].add(availability.available_date)
+
+    for g, slot, fi, host, home, away, div, org, status in rows:
+        for stat in org_host_stats.values():
+            if g.game_date in stat['host_dates']:
+                stat['games_when_hosting'] += 1
+                if home.organization_id == next((k for k, v in org_host_stats.items() if v is stat), None):
+                    stat['home_team_games'] += 1
+                stat['total_team_games'] += 1
+
+    host_priority = []
+    for org_id, stat in org_host_stats.items():
+        pct = (stat['home_team_games'] / stat['total_team_games'] * 100) if stat['total_team_games'] else 0
+        host_priority.append({'organization_name': stat['organization_name'], 'games_when_community_hosts': stat['games_when_hosting'], 'home_percentage_during_host_dates': round(pct, 1), 'status': _quality_status(pct >= 50, warning=pct >= 35)})
+
+    double_headers = []
+    for (team_id, game_date), entries in team_games_by_date.items():
+        if len(entries) <= 1:
+            continue
+        entries = sorted(entries, key=lambda e: e['time'])
+        back_to_back = True
+        for prev, cur in zip(entries, entries[1:]):
+            if (datetime.combine(date.today(), cur['time']) - datetime.combine(date.today(), prev['time'])).seconds > 7200:
+                back_to_back = False
+        double_headers.append({'team_name': team_stats[team_id]['team_name'], 'date': game_date.isoformat(), 'games': len(entries), 'is_back_to_back': back_to_back, 'status': _quality_status(back_to_back, warning=False)})
+
+    field_utilization = []
+    for data in utilization.values():
+        data['open_slots'] = max(data['open_slots'] - data['assigned_slots'], 0)
+        total = data['assigned_slots'] + data['open_slots']
+        data['utilization_percent'] = round((data['assigned_slots'] / total * 100) if total else 0, 1)
+        data['status'] = _quality_status(data['utilization_percent'] >= 70, warning=data['utilization_percent'] >= 40)
+        field_utilization.append(data)
+
+    return {
+        'games_per_team': games_per_team,
+        'repeat_matchups': repeat_matchups,
+        'home_away_balance': home_away_balance,
+        'time_of_day_balance': time_of_day_balance,
+        'host_community_priority': host_priority,
+        'double_headers': double_headers,
+        'unscheduled_teams': unscheduled,
+        'field_utilization': field_utilization,
+    }
 @router.get('/schedule-management/games', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def schedule_management_games(date: date | None = None, division_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, host_location_id: uuid.UUID | None = None, field_type: str | None = None, field_id: uuid.UUID | None = None, team_id: uuid.UUID | None = None, db: Session = Depends(get_db)):
     rows = _schedule_management_rows(db, {'date': date, 'division_id': division_id, 'organization_id': organization_id, 'host_location_id': host_location_id, 'field_type': field_type, 'field_id': field_id, 'team_id': team_id})
