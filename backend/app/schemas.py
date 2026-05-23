@@ -308,6 +308,10 @@ class GameUpdate(GameCreate):
 
 class GameRead(BaseSchema, GameCreate):
     status_code: str
+    division_name: str | None = None
+    division_group: str | None = None
+    home_team_name: str | None = None
+    away_team_name: str | None = None
     generated_slot_id: uuid.UUID | None = None
     field_instance_id: uuid.UUID | None = None
     host_location_id: uuid.UUID | None = None

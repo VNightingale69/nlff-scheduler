@@ -189,11 +189,15 @@ export default function ManualScheduleBuilderPage() {
       <div className='rounded border p-3'>
         <h2 className='mb-2 text-lg font-semibold'>Scheduled Games</h2>
         <table className='min-w-full text-sm'>
-          <thead><tr>{['Date', 'Matchup', 'Status', 'Actions'].map((h) => <th key={h} className='px-2 py-2 text-left'>{h}</th>)}</tr></thead>
+          <thead><tr>{['Date', 'Time', 'Division', 'Matchup', 'Host Location', 'Field', 'Status', 'Actions'].map((h) => <th key={h} className='px-2 py-2 text-left'>{h}</th>)}</tr></thead>
           <tbody>
             {games.map((g: any) => <tr key={g.id} className='border-t'>
-              <td className='p-2'>{g.game_date} {g.kickoff_time}</td>
-              <td className='p-2'>{g.home_team_name} vs {g.away_team_name}</td>
+              <td className='p-2'>{g.game_date || '-'}</td>
+              <td className='p-2'>{g.kickoff_time || '-'}</td>
+              <td className='p-2'>{g.division_name || 'Unknown Division'}</td>
+              <td className='p-2'>{g.home_team_name || 'Unknown Team'} vs {g.away_team_name || 'Unknown Team'}</td>
+              <td className='p-2'>{g.host_location_name || '-'}</td>
+              <td className='p-2'>{g.field_instance_name || '-'}</td>
               <td className='p-2'>{g.game_status_code}</td>
               <td className='p-2 space-x-2'>
                 <button className='rounded border px-2 py-1 text-xs' onClick={() => setEditGame({ ...g, division_id: g.division_id })}>Edit</button>
