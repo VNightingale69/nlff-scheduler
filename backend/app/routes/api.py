@@ -1336,13 +1336,14 @@ def _schedule_management_rows(db: Session, filters: dict | None = None):
     if filters.get('organization_id'): q = q.filter(home.organization_id == filters['organization_id'])
     if filters.get('host_location_id'): q = q.filter(HostLocation.id == filters['host_location_id'])
     if filters.get('field_type'): q = q.filter(GameSlot.field_type == filters['field_type'])
+    if filters.get('field_id'): q = q.filter(FieldInstance.field_id == filters['field_id'])
     if filters.get('team_id'): q = q.filter((home.id == filters['team_id']) | (away.id == filters['team_id']))
     return q.order_by(Game.game_date, Game.kickoff_time).all()
 
 
 @router.get('/schedule-management/games', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
-def schedule_management_games(date: date | None = None, division_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, host_location_id: uuid.UUID | None = None, field_type: str | None = None, team_id: uuid.UUID | None = None, db: Session = Depends(get_db)):
-    rows = _schedule_management_rows(db, {'date': date, 'division_id': division_id, 'organization_id': organization_id, 'host_location_id': host_location_id, 'field_type': field_type, 'team_id': team_id})
+def schedule_management_games(date: date | None = None, division_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, host_location_id: uuid.UUID | None = None, field_type: str | None = None, field_id: uuid.UUID | None = None, team_id: uuid.UUID | None = None, db: Session = Depends(get_db)):
+    rows = _schedule_management_rows(db, {'date': date, 'division_id': division_id, 'organization_id': organization_id, 'host_location_id': host_location_id, 'field_type': field_type, 'field_id': field_id, 'team_id': team_id})
     return {'items': [{
         'id': str(g.id), 'date': g.game_date.isoformat(), 'time': g.kickoff_time.strftime('%H:%M:%S'), 'division_id': str(div.id), 'division_name': div.name,
         'home_team_id': str(home.id), 'home_team_name': home.name, 'away_team_id': str(away.id), 'away_team_name': away.name,
@@ -1401,12 +1402,12 @@ def unschedule_game(game_id: uuid.UUID, db: Session = Depends(get_db)):
     return {'ok': True}
 
 @router.get('/schedule-management/export.csv', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
-def export_schedule_management_csv(date: date | None = None, division_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, host_location_id: uuid.UUID | None = None, field_type: str | None = None, team_id: uuid.UUID | None = None, db: Session = Depends(get_db)):
-    rows = _schedule_management_rows(db, {'date': date, 'division_id': division_id, 'organization_id': organization_id, 'host_location_id': host_location_id, 'field_type': field_type, 'team_id': team_id})
+def export_schedule_management_csv(date: date | None = None, division_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, host_location_id: uuid.UUID | None = None, field_type: str | None = None, field_id: uuid.UUID | None = None, team_id: uuid.UUID | None = None, db: Session = Depends(get_db)):
+    rows = _schedule_management_rows(db, {'date': date, 'division_id': division_id, 'organization_id': organization_id, 'host_location_id': host_location_id, 'field_type': field_type, 'field_id': field_id, 'team_id': team_id})
     out = io.StringIO(); w=csv.writer(out); w.writerow(['Date','Time','Division','Home Team','Away Team','Host Location','Field','Status'])
     for g, slot, fi, host, home, away, div, org, status in rows:
         w.writerow([g.game_date.isoformat(), g.kickoff_time.strftime('%H:%M'), div.name, home.name, away.name, host.name if host else '', fi.field_name if fi else '', status.code])
-    return StreamingResponse(iter([out.getvalue()]), media_type='text/csv', headers={'Content-Disposition':'attachment; filename=schedule-management.csv'})
+    return StreamingResponse(iter([out.getvalue()]), media_type='text/csv', headers={'Content-Disposition':'attachment; filename="schedule-export.csv"'})
 @router.post('/games', response_model=GameSaveResponse, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def create_game(payload:GameCreate, db:Session=Depends(get_db)):
     validation=validate_game(db,payload); status=db.query(GameStatus).filter(GameStatus.id==payload.game_status_id).first()
