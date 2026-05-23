@@ -160,10 +160,10 @@ export default function ManualScheduleBuilderPage() {
               setSuccess('');
               try {
                 const applied: any = await apiFetch('/manual-schedule-builder/auto-fill-apply', { method: 'POST', body: JSON.stringify({ season_id: seasonId, week_id: weekId, division_id: divisionId, proposals: autoFillPreview }) }, token);
-                const skippedCount = (applied.skipped || []).length;
-                const skippedLabel = skippedCount === 1 ? '1 proposed game' : `${skippedCount} proposed games`;
-                setSuccess(`Applied auto-fill. Created ${applied.created_games} games, skipped ${skippedLabel}.`);
-                setAutoFillSkipped([]);
+                const maxGames = Number(applied.max_games ?? autoFillPreview.length ?? 0);
+                const createdCount = Number(applied.created_count ?? applied.created_games ?? 0);
+                setSuccess(`Applied auto-fill. Created ${createdCount} of ${maxGames} possible games.`);
+                setAutoFillSkipped((applied.skipped || []).map((s: any) => ({ reason: s.reason || String(s) })));
                 setAutoFillPreview([]);
                 await load();
                 await loadRecommendations();

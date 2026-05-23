@@ -100,12 +100,50 @@ class AutoFillPreviewTest(unittest.TestCase):
         result = auto_fill_apply(payload, db=self.db)
 
         self.assertEqual(result['created_games'], 1)
-        self.assertEqual(len(result['skipped']), 1)
-        skipped_message = result['skipped'][0]
+        self.assertEqual(result['skipped_count'], 1)
+        skipped_message = result['skipped'][0]['reason']
         self.assertIn('Skipped Westosha Maroon vs Antioch Black because that matchup is already scheduled in Week 2.', skipped_message)
         self.assertIn('Date:', skipped_message)
         self.assertIn('Time:', skipped_message)
         self.assertNotIn(str(self.slot.id), skipped_message)
+
+    def test_eight_team_week_creates_four_games_from_preview(self):
+        org_c = Organization(id=uuid.uuid4(), name='Bristol', is_active=True)
+        org_d = Organization(id=uuid.uuid4(), name='Salem', is_active=True)
+        self.db.add_all([org_c, org_d])
+        extra_teams = [
+            Team(id=uuid.uuid4(), organization_id=org_c.id, division_id=self.division.id, name='Bristol Blue', is_active=True),
+            Team(id=uuid.uuid4(), organization_id=org_c.id, division_id=self.division.id, name='Bristol White', is_active=True),
+            Team(id=uuid.uuid4(), organization_id=org_d.id, division_id=self.division.id, name='Salem Green', is_active=True),
+            Team(id=uuid.uuid4(), organization_id=org_d.id, division_id=self.division.id, name='Salem Orange', is_active=True),
+        ]
+        self.db.add_all(extra_teams)
+        slots = []
+        for hour in (10, 11, 12):
+            fi = FieldInstance(id=uuid.uuid4(), host_location_id=self.host.id, hosting_availability_id=uuid.uuid4(), instance_date=self.week2.start_date, field_name=f'Small Field {hour}', field_type='SMALL', is_active=True)
+            slot = GameSlot(id=uuid.uuid4(), field_instance_id=fi.id, host_location_id=self.host.id, slot_date=self.week2.start_date, start_time=time(hour, 0), end_time=time(hour + 1, 0), field_type='SMALL', status='OPEN')
+            slots.extend([fi, slot])
+        self.db.add_all(slots)
+        self.db.commit()
+
+        preview = auto_fill_preview({'season_id': self.season.id, 'week_id': self.week2.id, 'division_id': self.division.id}, db=self.db)
+        self.assertEqual(preview['max_allowed_game_count'], 4)
+        self.assertEqual(preview['proposed_game_count'], 4)
+        proposal_team_ids = set()
+        for row in preview['proposals']:
+            proposal_team_ids.add(row['home_team_id'])
+            proposal_team_ids.add(row['away_team_id'])
+        self.assertEqual(len(proposal_team_ids), 8)
+
+        applied = auto_fill_apply({
+            'season_id': self.season.id,
+            'week_id': self.week2.id,
+            'division_id': self.division.id,
+            'proposals': preview['proposals'],
+        }, db=self.db)
+        self.assertEqual(applied['proposed_count'], 4)
+        self.assertEqual(applied['created_count'], 4)
+        self.assertEqual(applied['skipped_count'], 0)
 
     def test_same_community_prefers_home_slot_over_away_slot(self):
         away_host = HostLocation(id=uuid.uuid4(), organization_id=self.org_a.id, name='Antioch Park', is_active=True)
