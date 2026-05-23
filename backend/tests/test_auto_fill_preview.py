@@ -107,5 +107,30 @@ class AutoFillPreviewTest(unittest.TestCase):
         self.assertIn('Time:', skipped_message)
         self.assertNotIn(str(self.slot.id), skipped_message)
 
+    def test_same_community_prefers_home_slot_over_away_slot(self):
+        away_host = HostLocation(id=uuid.uuid4(), organization_id=self.org_a.id, name='Antioch Park', is_active=True)
+        away_fi = FieldInstance(id=uuid.uuid4(), host_location_id=away_host.id, hosting_availability_id=uuid.uuid4(), instance_date=self.week2.start_date, field_name='Small Field 2', field_type='SMALL', is_active=True)
+        away_slot = GameSlot(id=uuid.uuid4(), field_instance_id=away_fi.id, host_location_id=away_host.id, slot_date=self.week2.start_date, start_time=time(10, 0), end_time=time(11, 0), field_type='SMALL', status='OPEN')
+        self.db.add_all([away_host, away_fi, away_slot])
+        self.db.commit()
+
+        # consume Antioch teams in existing week-2 game so the remaining valid matchup is same-community Westosha
+        self.db.add(Game(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week2.id,
+            home_team_id=self.ab.id,
+            away_team_id=self.as_.id,
+            game_status_id=self.status.id,
+            game_date=self.week2.start_date,
+            kickoff_time=time(8, 0),
+        ))
+        self.db.commit()
+
+        result = auto_fill_preview({'season_id': self.season.id, 'week_id': self.week2.id, 'division_id': self.division.id}, db=self.db)
+        self.assertEqual(result['proposed_game_count'], 1)
+        self.assertEqual(result['proposals'][0]['host_location'], 'Westosha Park')
+        self.assertIn('Same-community matchup placed at home field', result['proposals'][0]['reason'])
+
 if __name__ == '__main__':
     unittest.main()
