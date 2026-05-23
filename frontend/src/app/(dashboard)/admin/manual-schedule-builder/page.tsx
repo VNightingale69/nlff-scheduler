@@ -7,15 +7,19 @@ import { getDivisionLabel } from '@/lib/divisionLabel';
 
 export default function ManualScheduleBuilderPage() {
   const token = getToken();
-  const [options, setOptions] = useState<any>({ divisions: [], teams: [], host_locations: [], seasons: [], weeks: [] });
+  const [options, setOptions] = useState<any>({ divisions: [], teams: [], host_locations: [], seasons: [], weeks: [], organizations: [] });
   const [seasonId, setSeasonId] = useState('');
   const [weekId, setWeekId] = useState('');
   const [divisionId, setDivisionId] = useState('');
   const [homeTeamId, setHomeTeamId] = useState('');
   const [awayTeamId, setAwayTeamId] = useState('');
   const [slotId, setSlotId] = useState('');
+  const [organizationId, setOrganizationId] = useState('');
+  const [hostLocationId, setHostLocationId] = useState('');
   const [slots, setSlots] = useState<any[]>([]);
   const [games, setGames] = useState<any[]>([]);
+  const [suggestedMatchups, setSuggestedMatchups] = useState<any[]>([]);
+  const [suggestedSlots, setSuggestedSlots] = useState<any[]>([]);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
 
@@ -45,126 +49,56 @@ export default function ManualScheduleBuilderPage() {
     setGames(scheduled.items || []);
   };
 
-  useEffect(() => {
-    load().catch((e) => setError(extractError(e)));
-  }, []);
+  const loadRecommendations = async () => {
+    if (!divisionId || !weekId) return;
+    const r: any = await apiFetch('/manual-schedule-builder/recommendations', { method: 'POST', body: JSON.stringify({ season_id: seasonId, week_id: weekId, division_id: divisionId, organization_id: organizationId || null, host_location_id: hostLocationId || null, home_team_id: homeTeamId || null, away_team_id: awayTeamId || null }) }, token);
+    setSuggestedMatchups(r.suggested_matchups || []);
+    setSuggestedSlots(r.suggested_slots || []);
+    setSlots(r.suggested_slots || []);
+  };
 
-  useEffect(() => {
-    if (!division?.required_field_type) return;
-    apiFetch(`/generated-game-slots?status=OPEN&field_type=${division.required_field_type}`, {}, token)
-      .then((r: any) => setSlots(r || []))
-      .catch((e: unknown) => setError(extractError(e)));
-  }, [division?.required_field_type]);
+  useEffect(() => { load().catch((e) => setError(extractError(e))); }, []);
+  useEffect(() => { loadRecommendations().catch((e) => setError(extractError(e))); }, [seasonId, weekId, divisionId, organizationId, hostLocationId, homeTeamId, awayTeamId]);
 
   return (
     <div className='space-y-4'>
-      <h1 className='text-2xl font-bold'>Manual Schedule Builder</h1>
+      <h1 className='text-2xl font-bold'>Manual Schedule Builder (Assisted)</h1>
       {error ? <div className='rounded border border-red-200 bg-red-50 p-2 text-red-700'>{error}</div> : null}
       {success ? <div className='rounded border border-emerald-200 bg-emerald-50 p-2 text-emerald-700'>{success}</div> : null}
 
-      <div className='grid gap-2 md:grid-cols-6'>
-        <select className='rounded border p-2' value={seasonId} onChange={(e) => { setSeasonId(e.target.value); setWeekId(''); }}>
-          <option value=''>Season</option>
-          {options.seasons.map((s: any) => <option key={s.id} value={s.id}>{s.name}</option>)}
-        </select>
-        <select className='rounded border p-2' value={weekId} onChange={(e) => setWeekId(e.target.value)}>
-          <option value=''>Week</option>
-          {seasonWeeks.map((w: any) => <option key={w.id} value={w.id}>Week {w.week_number}</option>)}
-        </select>
-        <select className='rounded border p-2' value={divisionId} onChange={(e) => setDivisionId(e.target.value)}>
-          <option value=''>Division</option>
-          {options.divisions.map((d: any) => <option key={d.id} value={d.id}>{getDivisionLabel(d)}</option>)}
-        </select>
-        <select className='rounded border p-2' value={homeTeamId} onChange={(e) => setHomeTeamId(e.target.value)}>
-          <option value=''>Home Team</option>
-          {divisionTeams.map((t: any) => <option key={t.id} value={t.id}>{t.name}</option>)}
-        </select>
-        <select className='rounded border p-2' value={awayTeamId} onChange={(e) => setAwayTeamId(e.target.value)}>
-          <option value=''>Away Team</option>
-          {divisionTeams.map((t: any) => <option key={t.id} value={t.id}>{t.name}</option>)}
-        </select>
-        <button
-          className='rounded bg-blue-600 px-3 py-2 text-white disabled:cursor-not-allowed disabled:bg-slate-300'
-          disabled={!canSave}
-          onClick={async () => {
-            setError('');
-            setSuccess('');
-            try {
-              await apiFetch('/manual-schedule-builder/assign', { method: 'POST', body: JSON.stringify({ season_id: seasonId, week_id: weekId, division_id: divisionId, home_team_id: homeTeamId, away_team_id: awayTeamId, generated_slot_id: slotId }) }, token);
-              await load();
-              setSlotId('');
-              setSuccess('Game successfully scheduled.');
-            } catch (e: unknown) {
-              setError(extractError(e));
-            }
-          }}
-        >
-          Save Game Assignment
-        </button>
+      <div className='grid gap-2 md:grid-cols-8'>
+        <select className='rounded border p-2' value={seasonId} onChange={(e) => { setSeasonId(e.target.value); setWeekId(''); }}><option value=''>Season</option>{options.seasons.map((s: any) => <option key={s.id} value={s.id}>{s.name}</option>)}</select>
+        <select className='rounded border p-2' value={weekId} onChange={(e) => setWeekId(e.target.value)}><option value=''>Week</option>{seasonWeeks.map((w: any) => <option key={w.id} value={w.id}>Week {w.week_number}</option>)}</select>
+        <select className='rounded border p-2' value={divisionId} onChange={(e) => setDivisionId(e.target.value)}><option value=''>Division</option>{options.divisions.map((d: any) => <option key={d.id} value={d.id}>{getDivisionLabel(d)}</option>)}</select>
+        <select className='rounded border p-2' value={organizationId} onChange={(e) => setOrganizationId(e.target.value)}><option value=''>Organization</option>{options.organizations?.map((o: any) => <option key={o.id} value={o.id}>{o.name}</option>)}</select>
+        <select className='rounded border p-2' value={hostLocationId} onChange={(e) => setHostLocationId(e.target.value)}><option value=''>Host Location</option>{options.host_locations.map((h: any) => <option key={h.id} value={h.id}>{h.name}</option>)}</select>
+        <select className='rounded border p-2' value={homeTeamId} onChange={(e) => setHomeTeamId(e.target.value)}><option value=''>Home Team</option>{divisionTeams.map((t: any) => <option key={t.id} value={t.id}>{t.name}</option>)}</select>
+        <select className='rounded border p-2' value={awayTeamId} onChange={(e) => setAwayTeamId(e.target.value)}><option value=''>Away Team</option>{divisionTeams.map((t: any) => <option key={t.id} value={t.id}>{t.name}</option>)}</select>
+        <button className='rounded bg-blue-600 px-3 py-2 text-white disabled:cursor-not-allowed disabled:bg-slate-300' disabled={!canSave} onClick={async () => {
+          setError(''); setSuccess('');
+          try {
+            await apiFetch('/manual-schedule-builder/assign', { method: 'POST', body: JSON.stringify({ season_id: seasonId, week_id: weekId, division_id: divisionId, home_team_id: homeTeamId, away_team_id: awayTeamId, generated_slot_id: slotId }) }, token);
+            await load(); await loadRecommendations(); setSlotId(''); setSuccess('Game successfully scheduled.');
+          } catch (e: unknown) { setError(extractError(e)); }
+        }}>Save Game Assignment</button>
+      </div>
+
+      <div className='rounded border p-3'>
+        <h2 className='mb-2 text-lg font-semibold'>Suggested Matchups</h2>
+        <table className='min-w-full text-sm'><thead><tr>{['Home Team', 'Away Team', 'Reason', 'Score'].map((h) => <th key={h} className='px-2 py-2 text-left font-bold'>{h}</th>)}</tr></thead><tbody>
+          {suggestedMatchups.map((m: any, idx: number) => <tr key={`${m.home_team_id}-${m.away_team_id}-${idx}`} className='border-t'><td className='p-2'>{m.home_team_name}</td><td className='p-2'>{m.away_team_name}</td><td className='p-2'>{m.reason}</td><td className='p-2 font-semibold'>{m.score}</td></tr>)}
+        </tbody></table>
       </div>
 
       <div className='overflow-auto rounded border'>
-        <table className='min-w-full border-separate border-spacing-y-1 text-sm'>
-          <thead>
-            <tr>
-              {['Date', 'Host Location', 'Field', 'Field Type', 'Start', 'End', 'Select'].map((h) => (
-                <th key={h} className='px-2 py-2 text-center font-bold'>{h}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {slots.map((s: any) => (
-              <tr key={s.id} className={`align-middle ${slotId === s.id ? 'bg-blue-50' : 'bg-white'}`}>
-                <td className='px-2 py-3 text-center'>{s.available_date}</td>
-                <td className='px-2 py-3 text-center'>{s.host_location_name}</td>
-                <td className='px-2 py-3 text-center'>{s.field_instance_name}</td>
-                <td className='px-2 py-3 text-center'>{s.field_type}</td>
-                <td className='px-2 py-3 text-center'>{s.start_time}</td>
-                <td className='px-2 py-3 text-center'>{s.end_time}</td>
-                <td className='px-2 py-3 text-center'><input type='radio' checked={slotId === s.id} onChange={() => setSlotId(s.id)} /></td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-
-      <div className='overflow-auto rounded border'>
-        <table className='min-w-full text-sm'>
-          <thead>
-            <tr>
-              {['Date', 'Time', 'Division', 'Home', 'Away', 'Host Location', 'Field', 'Status', 'Actions'].map((h) => (
-                <th key={h} className='px-2 py-2 text-center font-bold'>{h}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {games.map((g: any) => {
-              const divisionName = getDivisionLabel(options.divisions.find((d: any) => d.id === g.division_id)) || '-';
-              const homeName = options.teams.find((t: any) => t.id === g.home_team_id)?.name || '-';
-              const awayName = options.teams.find((t: any) => t.id === g.away_team_id)?.name || '-';
-              const hostLocation = g.host_location_name || '-';
-              const field = g.field_name || g.field_instance_name || '-';
-
-              return (
-                <tr key={g.id} className='align-middle'>
-                  <td className='px-2 py-2 text-center'>{g.game_date}</td>
-                  <td className='px-2 py-2 text-center'>{g.kickoff_time}</td>
-                  <td className='px-2 py-2 text-center'>{divisionName}</td>
-                  <td className='px-2 py-2 text-center'>{homeName}</td>
-                  <td className='px-2 py-2 text-center'>{awayName}</td>
-                  <td className='px-2 py-2 text-center'>{hostLocation}</td>
-                  <td className='px-2 py-2 text-center'>{field}</td>
-                  <td className='px-2 py-2 text-center'>{g.status_code}</td>
-                  <td className='px-2 py-2 text-center'>
-                    <button className='text-red-600 underline' onClick={async () => { await apiFetch(`/games/${g.id}`, { method: 'DELETE' }, token); await load(); }}>
-                      Delete / Unschedule
-                    </button>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+        <table className='min-w-full border-separate border-spacing-y-1 text-sm'><thead><tr>{['Date', 'Host Location', 'Field', 'Field Type', 'Start', 'End', 'Reason', 'Score', 'Recommendation', 'Select'].map((h) => <th key={h} className='px-2 py-2 text-center font-bold'>{h}</th>)}</tr></thead><tbody>
+          {slots.map((s: any) => {
+            const color = s.indicator === 'green' ? 'bg-emerald-50' : s.indicator === 'yellow' ? 'bg-yellow-50' : s.indicator === 'red' ? 'bg-red-50' : 'bg-white';
+            return <tr key={s.slot_id || s.id} className={`align-middle ${slotId === (s.slot_id || s.id) ? 'ring-1 ring-blue-300' : ''} ${color}`}>
+              <td className='px-2 py-3 text-center'>{s.slot_date || s.available_date}</td><td className='px-2 py-3 text-center'>{s.host_location_name}</td><td className='px-2 py-3 text-center'>{s.field_instance_name}</td><td className='px-2 py-3 text-center'>{s.field_type}</td><td className='px-2 py-3 text-center'>{s.start_time}</td><td className='px-2 py-3 text-center'>{s.end_time}</td><td className='px-2 py-3 text-center'>{s.reason || '-'}</td><td className='px-2 py-3 text-center font-semibold'>{s.score ?? '-'}</td><td className='px-2 py-3 text-center'>{s.rating || '-'}</td><td className='px-2 py-3 text-center'><button className='rounded border px-2 py-1 text-xs' onClick={() => setSlotId(s.slot_id || s.id)}>Use Recommended Slot</button></td>
+            </tr>;
+          })}
+        </tbody></table>
       </div>
     </div>
   );
