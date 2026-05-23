@@ -7,7 +7,7 @@ import { getDivisionLabel } from '@/lib/divisionLabel';
 
 export default function ManualScheduleBuilderPage() {
   const token = getToken();
-  const [options, setOptions] = useState<any>({ divisions: [], teams: [], host_locations: [], seasons: [], weeks: [], organizations: [] });
+  const [options, setOptions] = useState<any>({ divisions: [], teams: [], host_locations: [], seasons: [], weeks: [], organizations: [], game_statuses: [] });
   const [seasonId, setSeasonId] = useState('');
   const [weekId, setWeekId] = useState('');
   const [divisionId, setDivisionId] = useState('');
@@ -25,6 +25,8 @@ export default function ManualScheduleBuilderPage() {
   const [autoFillPreview, setAutoFillPreview] = useState<any[]>([]);
   const [autoFillSkipped, setAutoFillSkipped] = useState<any[]>([]);
   const [autoFillLoading, setAutoFillLoading] = useState(false);
+  const [editGame, setEditGame] = useState<any | null>(null);
+  const [moveGame, setMoveGame] = useState<any | null>(null);
 
   const division = useMemo(() => options.divisions.find((d: any) => d.id === divisionId), [options, divisionId]);
   const divisionTeams = useMemo(() => options.teams.filter((t: any) => t.division_id === divisionId && t.is_active), [options, divisionId]);
@@ -59,7 +61,8 @@ export default function ManualScheduleBuilderPage() {
 
   const load = async () => {
     const opts: any = await apiFetch('/manual-schedule-builder/options', {}, token);
-    setOptions(opts);
+    const statuses: any = await apiFetch('/game-statuses?page_size=200', {}, token);
+    setOptions({ ...opts, game_statuses: statuses.items || [] });
     const activeSeason = opts.seasons?.find((s: any) => s.is_active);
     if (!seasonId && activeSeason?.id) setSeasonId(activeSeason.id);
     if (!divisionId && opts.divisions?.length) setDivisionId(opts.divisions[0].id);
@@ -183,6 +186,71 @@ export default function ManualScheduleBuilderPage() {
           })}
         </tbody></table>
       </div>
+      <div className='rounded border p-3'>
+        <h2 className='mb-2 text-lg font-semibold'>Scheduled Games</h2>
+        <table className='min-w-full text-sm'>
+          <thead><tr>{['Date', 'Matchup', 'Status', 'Actions'].map((h) => <th key={h} className='px-2 py-2 text-left'>{h}</th>)}</tr></thead>
+          <tbody>
+            {games.map((g: any) => <tr key={g.id} className='border-t'>
+              <td className='p-2'>{g.game_date} {g.kickoff_time}</td>
+              <td className='p-2'>{g.home_team_name} vs {g.away_team_name}</td>
+              <td className='p-2'>{g.game_status_code}</td>
+              <td className='p-2 space-x-2'>
+                <button className='rounded border px-2 py-1 text-xs' onClick={() => setEditGame({ ...g, division_id: g.division_id })}>Edit</button>
+                <button className='rounded border px-2 py-1 text-xs' onClick={() => setMoveGame(g)}>Move</button>
+                <button className='rounded border border-red-300 px-2 py-1 text-xs text-red-700' onClick={async () => {
+                  if (!window.confirm('Remove this scheduled game?')) return;
+                  setError('');
+                  try { await apiFetch(`/schedule-management/games/${g.id}/unschedule`, { method: 'PATCH' }, token); await load(); await loadRecommendations(); setSuccess('Game unscheduled.'); }
+                  catch (e: unknown) { setError(extractError(e)); }
+                }}>Delete / Unschedule</button>
+              </td>
+            </tr>)}
+          </tbody>
+        </table>
+      </div>
+      {editGame ? <div className='rounded border bg-slate-50 p-3'>
+        <h3 className='mb-2 font-semibold'>Edit Game</h3>
+        <div className='grid gap-2 md:grid-cols-5'>
+          <select className='rounded border p-2' value={editGame.division_id || ''} onChange={(e) => setEditGame({ ...editGame, division_id: e.target.value, home_team_id: '', away_team_id: '' })}><option value=''>Division</option>{options.divisions.map((d: any) => <option key={d.id} value={d.id}>{getDivisionLabel(d)}</option>)}</select>
+          <select className='rounded border p-2' value={editGame.home_team_id} onChange={(e) => setEditGame({ ...editGame, home_team_id: e.target.value })}><option value=''>Home Team</option>{options.teams.filter((t: any) => t.division_id === editGame.division_id).map((t: any) => <option key={t.id} value={t.id}>{t.name}</option>)}</select>
+          <select className='rounded border p-2' value={editGame.away_team_id} onChange={(e) => setEditGame({ ...editGame, away_team_id: e.target.value })}><option value=''>Away Team</option>{options.teams.filter((t: any) => t.division_id === editGame.division_id).map((t: any) => <option key={t.id} value={t.id}>{t.name}</option>)}</select>
+          <select className='rounded border p-2' value={editGame.game_status_id} onChange={(e) => setEditGame({ ...editGame, game_status_id: e.target.value })}><option value=''>Status</option>{options.game_statuses?.map((s: any) => <option key={s.id} value={s.id}>{s.label}</option>)}</select>
+          <div className='rounded border p-2 text-xs text-slate-500'>Notes editing not available in current game schema.</div>
+        </div>
+        <div className='mt-2 flex gap-2'>
+          <button className='rounded bg-blue-600 px-3 py-2 text-white' onClick={async () => {
+            setError('');
+            if (editGame.home_team_id === editGame.away_team_id) { setError('Home and away cannot be the same.'); return; }
+            const home = options.teams.find((t: any) => t.id === editGame.home_team_id);
+            const away = options.teams.find((t: any) => t.id === editGame.away_team_id);
+            if (!home || !away || home.division_id !== editGame.division_id || away.division_id !== editGame.division_id) { setError('Teams must belong to selected division.'); return; }
+            const dup = games.some((g: any) => g.id !== editGame.id && ((g.home_team_id === editGame.home_team_id && g.away_team_id === editGame.away_team_id) || (g.home_team_id === editGame.away_team_id && g.away_team_id === editGame.home_team_id)));
+            if (dup && !window.confirm('Duplicate matchup warning: proceed?')) return;
+            try {
+              await apiFetch(`/games/${editGame.id}`, { method: 'PATCH', body: JSON.stringify({ season_id: editGame.season_id, week_id: editGame.week_id, division_id: editGame.division_id, home_team_id: editGame.home_team_id, away_team_id: editGame.away_team_id, field_id: editGame.field_id, game_status_id: editGame.game_status_id, game_date: editGame.game_date, kickoff_time: editGame.kickoff_time }) }, token);
+              setEditGame(null); await load(); await loadRecommendations(); setSuccess('Game updated.');
+            } catch (e: unknown) { setError(extractError(e)); }
+          }}>Save Edit</button>
+          <button className='rounded border px-3 py-2' onClick={() => setEditGame(null)}>Cancel</button>
+        </div>
+      </div> : null}
+      {moveGame ? <div className='rounded border bg-slate-50 p-3'>
+        <h3 className='mb-2 font-semibold'>Move Game</h3>
+        <select className='rounded border p-2' value={slotId} onChange={(e) => setSlotId(e.target.value)}>
+          <option value=''>Select OPEN slot</option>
+          {slots.map((s: any) => <option key={s.slot_id || s.id} value={s.slot_id || s.id}>{s.slot_date || s.available_date} {s.start_time} - {s.host_location_name} ({s.field_type})</option>)}
+        </select>
+        <div className='mt-2 flex gap-2'>
+          <button className='rounded bg-blue-600 px-3 py-2 text-white' onClick={async () => {
+            if (!slotId) return;
+            setError('');
+            try { await apiFetch(`/schedule-management/games/${moveGame.id}/move`, { method: 'PATCH', body: JSON.stringify({ generated_slot_id: slotId }) }, token); setMoveGame(null); setSlotId(''); await load(); await loadRecommendations(); setSuccess('Game moved.'); }
+            catch (e: unknown) { setError(extractError(e)); }
+          }}>Save Move</button>
+          <button className='rounded border px-3 py-2' onClick={() => { setMoveGame(null); setSlotId(''); }}>Cancel</button>
+        </div>
+      </div> : null}
     </div>
   );
 }
