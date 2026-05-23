@@ -308,6 +308,11 @@ class GameUpdate(GameCreate):
 
 class GameRead(BaseSchema, GameCreate):
     status_code: str
+    generated_slot_id: uuid.UUID | None = None
+    field_instance_id: uuid.UUID | None = None
+    host_location_id: uuid.UUID | None = None
+    field_instance_name: str | None = None
+    host_location_name: str | None = None
 
 
 class GameSaveResponse(BaseModel):
