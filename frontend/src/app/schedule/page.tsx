@@ -5,6 +5,22 @@ import { getDivisionLabel } from '@/lib/divisionLabel';
 
 type Game = { id: string; game_date: string; kickoff_time: string; host_location_name: string; field_name: string; division_name: string; home_team_name: string; away_team_name: string; game_status_label: string; };
 
+
+const getWeekOptionLabel = (week: any) => {
+  const baseLabel = week.label || `Week ${week.week_number}`;
+  if (!week.start_date) return baseLabel;
+  const parsed = new Date(week.start_date);
+  const formattedDate = Number.isNaN(parsed.getTime())
+    ? week.start_date
+    : parsed.toLocaleDateString('en-US', {
+        month: '2-digit',
+        day: '2-digit',
+        year: 'numeric',
+        timeZone: 'UTC',
+      });
+  return `${baseLabel} — ${formattedDate}`;
+};
+
 export default function PublicSchedulePage() {
   const [games, setGames] = useState<Game[]>([]);
   const [filters, setFilters] = useState<Record<string, string>>({});
@@ -29,7 +45,7 @@ export default function PublicSchedulePage() {
       <select className='rounded border p-2' value={filters.host_location_id||''} onChange={e=>setFilters({...filters,host_location_id:e.target.value})}><option value=''>All Host Locations</option>{options.host_locations.map((o:any)=><option key={o.id} value={o.id}>{o.name}</option>)}</select>
       <select className='rounded border p-2' value={filters.organization_id||''} onChange={e=>setFilters({...filters,organization_id:e.target.value})}><option value=''>All Communities</option>{options.organizations.map((o:any)=><option key={o.id} value={o.id}>{o.name}</option>)}</select>
       <select className='rounded border p-2' value={filters.division_id||''} onChange={e=>setFilters({...filters,division_id:e.target.value})}><option value=''>All Divisions</option>{options.divisions.map((o:any)=><option key={o.id} value={o.id}>{getDivisionLabel(o)}</option>)}</select>
-      <select className='rounded border p-2' value={filters.week_id||''} onChange={e=>setFilters({...filters,week_id:e.target.value})}><option value=''>All Weeks</option>{options.weeks.map((o:any)=><option key={o.id} value={o.id}>Week {o.week_number}</option>)}</select>
+      <select className='rounded border p-2' value={filters.week_id||''} onChange={e=>setFilters({...filters,week_id:e.target.value})}><option value=''>All Weeks</option>{options.weeks.map((o:any)=><option key={o.id} value={o.id}>{getWeekOptionLabel(o)}</option>)}</select>
       <select className='rounded border p-2' value={filters.team_id||''} onChange={e=>setFilters({...filters,team_id:e.target.value})}><option value=''>All Teams</option>{options.teams.map((o:any)=><option key={o.id} value={o.id}>{o.name}</option>)}</select>
       <select className='rounded border p-2' value={filters.status_code||''} onChange={e=>setFilters({...filters,status_code:e.target.value})}><option value=''>All Statuses</option>{options.statuses.map((o:any)=><option key={o.code} value={o.code}>{o.label}</option>)}</select>
     </div>

@@ -28,6 +28,21 @@ export default function ManualScheduleBuilderPage() {
   const seasonWeeks = useMemo(() => options.weeks.filter((w: any) => w.season_id === seasonId), [options, seasonId]);
   const canSave = Boolean(seasonId && weekId && divisionId && homeTeamId && awayTeamId && slotId);
 
+  const getWeekOptionLabel = (week: any) => {
+    const baseLabel = week.label || `Week ${week.week_number}`;
+    if (!week.start_date) return baseLabel;
+    const parsed = new Date(week.start_date);
+    const formattedDate = Number.isNaN(parsed.getTime())
+      ? week.start_date
+      : parsed.toLocaleDateString('en-US', {
+          month: '2-digit',
+          day: '2-digit',
+          year: 'numeric',
+          timeZone: 'UTC',
+        });
+    return `${baseLabel} — ${formattedDate}`;
+  };
+
   const extractError = (e: unknown) => {
     if (e instanceof ApiError && e.details && typeof e.details === 'object') {
       const detail = (e.details as any).detail;
@@ -68,7 +83,7 @@ export default function ManualScheduleBuilderPage() {
 
       <div className='grid gap-2 md:grid-cols-8'>
         <select className='rounded border p-2' value={seasonId} onChange={(e) => { setSeasonId(e.target.value); setWeekId(''); }}><option value=''>Season</option>{options.seasons.map((s: any) => <option key={s.id} value={s.id}>{s.name}</option>)}</select>
-        <select className='rounded border p-2' value={weekId} onChange={(e) => setWeekId(e.target.value)}><option value=''>Week</option>{seasonWeeks.map((w: any) => <option key={w.id} value={w.id}>Week {w.week_number}</option>)}</select>
+        <select className='rounded border p-2' value={weekId} onChange={(e) => setWeekId(e.target.value)}><option value=''>Week</option>{seasonWeeks.map((w: any) => <option key={w.id} value={w.id}>{getWeekOptionLabel(w)}</option>)}</select>
         <select className='rounded border p-2' value={divisionId} onChange={(e) => setDivisionId(e.target.value)}><option value=''>Division</option>{options.divisions.map((d: any) => <option key={d.id} value={d.id}>{getDivisionLabel(d)}</option>)}</select>
         <select className='rounded border p-2' value={organizationId} onChange={(e) => setOrganizationId(e.target.value)}><option value=''>Organization</option>{options.organizations?.map((o: any) => <option key={o.id} value={o.id}>{o.name}</option>)}</select>
         <select className='rounded border p-2' value={hostLocationId} onChange={(e) => setHostLocationId(e.target.value)}><option value=''>Host Location</option>{options.host_locations.map((h: any) => <option key={h.id} value={h.id}>{h.name}</option>)}</select>
