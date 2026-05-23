@@ -20,6 +20,7 @@ export default function ManualScheduleBuilderPage() {
   const [games, setGames] = useState<any[]>([]);
   const [suggestedMatchups, setSuggestedMatchups] = useState<any[]>([]);
   const [suggestedSlots, setSuggestedSlots] = useState<any[]>([]);
+  const [allWeeklyMatchupsScheduled, setAllWeeklyMatchupsScheduled] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [autoFillPreview, setAutoFillPreview] = useState<any[]>([]);
@@ -76,6 +77,7 @@ export default function ManualScheduleBuilderPage() {
     setSuggestedMatchups(r.suggested_matchups || []);
     setSuggestedSlots(r.suggested_slots || []);
     setSlots(r.suggested_slots || []);
+    setAllWeeklyMatchupsScheduled(Boolean(r.all_available_weekly_matchups_scheduled));
   };
 
   useEffect(() => { load().catch((e) => setError(extractError(e))); }, []);
@@ -161,7 +163,7 @@ export default function ManualScheduleBuilderPage() {
                 const skippedCount = (applied.skipped || []).length;
                 const skippedLabel = skippedCount === 1 ? '1 proposed game' : `${skippedCount} proposed games`;
                 setSuccess(`Applied auto-fill. Created ${applied.created_games} games, skipped ${skippedLabel}.`);
-                setAutoFillSkipped((applied.skipped || []).map((s: string) => ({ reason: s })));
+                setAutoFillSkipped([]);
                 setAutoFillPreview([]);
                 await load();
                 await loadRecommendations();
@@ -182,6 +184,11 @@ export default function ManualScheduleBuilderPage() {
 
       <div className='rounded border p-3'>
         <h2 className='mb-2 text-lg font-semibold'>Suggested Matchups</h2>
+        {allWeeklyMatchupsScheduled && suggestedMatchups.length === 0 ? (
+          <div className='mb-2 rounded border border-blue-200 bg-blue-50 p-2 text-sm text-blue-800'>
+            All available weekly matchups have been scheduled for this division/week.
+          </div>
+        ) : null}
         <table className='min-w-full text-sm'><thead><tr>{['Home Team', 'Away Team', 'Reason', 'Score'].map((h) => <th key={h} className='px-2 py-2 text-left font-bold'>{h}</th>)}</tr></thead><tbody>
           {suggestedMatchups.map((m: any, idx: number) => <tr key={`${m.home_team_id}-${m.away_team_id}-${idx}`} className='border-t'><td className='p-2'>{m.home_team_name}</td><td className='p-2'>{m.away_team_name}</td><td className='p-2'>{m.reason}</td><td className='p-2 font-semibold'>{m.score}</td></tr>)}
         </tbody></table>
