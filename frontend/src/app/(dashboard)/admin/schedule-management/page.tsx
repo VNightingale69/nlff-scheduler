@@ -29,6 +29,8 @@ export default function ScheduleManagementPage() {
   const [games, setGames] = useState<any[]>([]);
   const [conflicts, setConflicts] = useState<any[]>([]);
   const [quality, setQuality] = useState<any | null>(null);
+  const [qualityLoading, setQualityLoading] = useState(true);
+  const [qualityError, setQualityError] = useState('');
   const [error, setError] = useState('');
 
   const qs = useMemo(
@@ -41,6 +43,10 @@ export default function ScheduleManagementPage() {
   );
 
   const load = async () => {
+    setError('');
+    setQualityError('');
+    setQualityLoading(true);
+
     const opts: any = await apiFetch('/manual-schedule-builder/options', {}, token);
     const orgs: any = await apiFetch('/organizations?page_size=500', {}, token);
     setOptions({
@@ -49,17 +55,32 @@ export default function ScheduleManagementPage() {
       fields: opts.fields || [],
     });
 
-    const gameResponse: any = await apiFetch(`/schedule-management/games${qs ? `?${qs}` : ''}`, {}, token);
-    const conflictResponse: any = await apiFetch('/schedule-management/conflicts', {}, token);
-    const qualityResponse: any = await apiFetch(`/schedule-management/quality-report${qs ? `?${qs}` : ''}`, {}, token);
+    const [gameResponse, conflictResponse, qualityResult] = await Promise.allSettled([
+      apiFetch(`/schedule-management/games${qs ? `?${qs}` : ''}`, {}, token),
+      apiFetch('/schedule-management/conflicts', {}, token),
+      apiFetch(`/schedule-management/quality-report${qs ? `?${qs}` : ''}`, {}, token),
+    ]);
 
-    setGames(gameResponse.items || []);
-    setConflicts(conflictResponse.conflicts || []);
-    setQuality(qualityResponse || null);
+    if (gameResponse.status === 'rejected' || conflictResponse.status === 'rejected') {
+      throw gameResponse.status === 'rejected' ? gameResponse.reason : conflictResponse.reason;
+    }
+
+    setGames((gameResponse.value as any).items || []);
+    setConflicts((conflictResponse.value as any).conflicts || []);
+
+    if (qualityResult.status === 'fulfilled') {
+      setQuality((qualityResult.value as any) || null);
+    } else {
+      setQuality(null);
+      setQualityError('Unable to load schedule quality report.');
+    }
+
+    setQualityLoading(false);
   };
 
   useEffect(() => {
     load().catch((e) => {
+      setQualityLoading(false);
       setError(e instanceof ApiError ? e.message : 'Unable to load schedule management data.');
     });
   }, [qs]);
@@ -236,7 +257,7 @@ export default function ScheduleManagementPage() {
 
       <div className='space-y-4 rounded border p-3'>
         <h2 className='text-xl font-semibold'>Schedule Quality Report</h2>
-        {!quality ? <p>Loading quality report...</p> : (
+        {qualityLoading ? <p>Loading quality report...</p> : qualityError ? <p>{qualityError}</p> : !quality ? <p>No quality report data available.</p> : (
           <>
             <section>
               <h3 className='font-semibold'>Games Per Team</h3>
