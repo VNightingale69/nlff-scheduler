@@ -1600,86 +1600,94 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'unused_team_ids': [str(tid) for tid in teams_by_id if tid not in used_team_ids],
             'unused_teams': [teams_by_id[tid].name for tid in teams_by_id if tid not in used_team_ids],
         }
-    for slot in open_slots:
-        if len(plans) >= max_new_games:
-            break
+    remaining_slots = list(open_slots)
+    while remaining_slots and len(plans) < max_new_games:
         available_team_ids = [tid for tid in teams_by_id if tid not in used_team_ids]
         if len(available_team_ids) < 2:
             break
-        pair_candidates = []
-        for i in range(len(available_team_ids)):
-            for j in range(i + 1, len(available_team_ids)):
-                a = available_team_ids[i]
-                b = available_team_ids[j]
-                pair = tuple(sorted((a, b)))
-                if pair in used_pairs:
-                    continue
-                team_a = teams_by_id[a]
-                team_b = teams_by_id[b]
-                host_org_id = slot.host_location.organization_id if slot.host_location else None
-                same_community = bool(team_a.organization_id and team_a.organization_id == team_b.organization_id)
-                host_pref = bool(host_org_id and host_org_id in {team_a.organization_id, team_b.organization_id})
-                repeat_count = matchup_counts.get(pair, 0)
-                community_pair = tuple(sorted((team_a.organization_id, team_b.organization_id))) if team_a.organization_id and team_b.organization_id else None
-                prior_week_team_repeat = pair in prior_week_team_pairs
-                prior_week_community_repeat = bool(community_pair and community_pair in prior_week_community_pairs)
-                community_repeat_count = community_matchup_counts.get(community_pair, 0) if community_pair else 0
+        all_candidates = []
+        for slot in remaining_slots:
+            for i in range(len(available_team_ids)):
+                for j in range(i + 1, len(available_team_ids)):
+                    a = available_team_ids[i]
+                    b = available_team_ids[j]
+                    pair = tuple(sorted((a, b)))
+                    if pair in used_pairs:
+                        continue
+                    team_a = teams_by_id[a]
+                    team_b = teams_by_id[b]
+                    host_org_id = slot.host_location.organization_id if slot.host_location else None
+                    same_community = bool(team_a.organization_id and team_a.organization_id == team_b.organization_id)
+                    hosted_by_own_community = bool(same_community and host_org_id and host_org_id == team_a.organization_id)
+                    host_pref = bool(host_org_id and host_org_id in {team_a.organization_id, team_b.organization_id})
+                    repeat_count = matchup_counts.get(pair, 0)
+                    community_pair = tuple(sorted((team_a.organization_id, team_b.organization_id))) if team_a.organization_id and team_b.organization_id else None
+                    prior_week_team_repeat = pair in prior_week_team_pairs
+                    prior_week_community_repeat = bool(community_pair and community_pair in prior_week_community_pairs)
+                    community_repeat_count = community_matchup_counts.get(community_pair, 0) if community_pair else 0
 
-                score = 0
-                reason_bits = []
-                warning_bits = []
-                if not same_community:
-                    score += 30
-                    reason_bits.append('cross-community matchup')
-                if host_pref:
-                    score += 20
-                    reason_bits.append('host community preference')
-                if same_community:
-                    if host_org_id and host_org_id == team_a.organization_id:
-                        score -= 10
-                        reason_bits.append('same-community matchup hosted by own community')
+                    score = 0
+                    reason_bits = []
+                    warning_bits = []
+                    if not same_community:
+                        score += 30
+                        reason_bits.append('cross-community matchup')
                     else:
-                        score -= 50
-                if repeat_count > 0:
-                    score -= 40
-                if prior_week_team_repeat:
-                    score -= 75
-                    warning_bits.append('Warning: same matchup occurred last week')
-                else:
-                    reason_bits.append('Avoids prior-week team repeat')
-                if prior_week_community_repeat:
-                    score -= 35
-                    warning_bits.append('Warning: same community pairing occurred last week')
-                else:
-                    reason_bits.append('Avoids prior-week community repeat')
-                if community_repeat_count > 0:
-                    score -= 20
+                        score -= 40
+                    if hosted_by_own_community:
+                        score += 35
+                        reason_bits.append('Same-community matchup placed at home field')
+                    elif same_community:
+                        score -= 75
+                        warning_bits.append('Warning: same-community matchup not at home field because no eligible home slot was available')
+                    if host_pref:
+                        score += 20
+                        reason_bits.append('host community preference')
+                    if repeat_count > 0:
+                        score -= 40
+                    if prior_week_team_repeat:
+                        score -= 75
+                        warning_bits.append('Warning: same matchup occurred last week')
+                    else:
+                        reason_bits.append('Avoids prior-week team repeat')
+                    if prior_week_community_repeat:
+                        score -= 35
+                        warning_bits.append('Warning: same community pairing occurred last week')
+                    else:
+                        reason_bits.append('Avoids prior-week community repeat')
+                    if community_repeat_count > 0:
+                        score -= 20
 
-                pair_candidates.append({
-                    'home_team_id': a,
-                    'away_team_id': b,
-                    'pair': pair,
-                    'score': score,
-                    'same_community': same_community,
-                    'hosted_by_own_community': bool(same_community and host_org_id and host_org_id == team_a.organization_id),
-                    'reason_bits': reason_bits,
-                    'warning_bits': warning_bits,
-                    'prior_week_team_repeat': prior_week_team_repeat,
-                })
+                    all_candidates.append({
+                        'slot': slot,
+                        'home_team_id': a,
+                        'away_team_id': b,
+                        'pair': pair,
+                        'score': score,
+                        'same_community': same_community,
+                        'hosted_by_own_community': hosted_by_own_community,
+                        'reason_bits': reason_bits,
+                        'warning_bits': warning_bits,
+                        'prior_week_team_repeat': prior_week_team_repeat,
+                    })
 
-        cross_candidates = [c for c in pair_candidates if not c['same_community']]
-        if cross_candidates:
-            valid_candidates = cross_candidates
-        else:
-            valid_candidates = [c for c in pair_candidates if c['hosted_by_own_community']] or pair_candidates
+        home_same_community_pairs = {c['pair'] for c in all_candidates if c['same_community'] and c['hosted_by_own_community']}
+        filtered_candidates = [
+            c for c in all_candidates
+            if not (c['same_community'] and not c['hosted_by_own_community'] and c['pair'] in home_same_community_pairs)
+        ]
+        cross_candidates = [c for c in filtered_candidates if not c['same_community']]
+        valid_candidates = cross_candidates if cross_candidates else filtered_candidates
 
         if not valid_candidates:
-            skipped.append({'slot_id': str(slot.id), 'reason': 'No unused team pairs remain'})
-            continue
+            break
 
         best = max(valid_candidates, key=lambda c: c['score'])
-        if best['same_community'] and 'same-community matchup hosted by own community' not in best['reason_bits']:
-            best['reason_bits'].append('same-community matchup allowed because no cross-community alternative remained')
+        slot = best['slot']
+        if cross_candidates:
+            same_community_rejected = any(c['same_community'] for c in filtered_candidates)
+            if same_community_rejected:
+                best['reason_bits'].append('Same-community matchup avoided because cross-community option exists')
         if best['prior_week_team_repeat']:
             best['reason_bits'].append('Selected because no better alternative remained')
         home_team = teams_by_id[best['home_team_id']]
@@ -1700,6 +1708,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         used_pairs.add(tuple(sorted((best['home_team_id'], best['away_team_id']))))
         used_team_ids.add(best['home_team_id'])
         used_team_ids.add(best['away_team_id'])
+        remaining_slots = [s for s in remaining_slots if s.id != slot.id]
     unused_team_ids = [str(tid) for tid in teams_by_id if tid not in used_team_ids]
     return {
         'proposals': plans,
