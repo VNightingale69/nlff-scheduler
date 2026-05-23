@@ -1512,6 +1512,14 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     assigned_games = db.query(Game).join(GameSlot, GameSlot.assigned_game_id == Game.id).filter(
         Game.game_date == week.start_date
     ).all()
+    matchup_counts: dict[tuple[uuid.UUID, uuid.UUID], int] = {}
+    for game in db.query(Game).join(Game.home_team).filter(
+        Game.season_id == season_id,
+        Team.division_id == division_id,
+        Team.is_active.is_(True),
+    ).all():
+        key = tuple(sorted((game.home_team_id, game.away_team_id)))
+        matchup_counts[key] = matchup_counts.get(key, 0) + 1
     plans = []
     skipped = []
     existing_games_count = len(existing_division_games)
@@ -1543,7 +1551,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         available_team_ids = [tid for tid in teams_by_id if tid not in used_team_ids]
         if len(available_team_ids) < 2:
             break
-        best = None
+        pair_candidates = []
         for i in range(len(available_team_ids)):
             for j in range(i + 1, len(available_team_ids)):
                 a = available_team_ids[i]
@@ -1551,18 +1559,56 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                 pair = tuple(sorted((a, b)))
                 if pair in used_pairs:
                     continue
-                host_pref = 10 if (slot.host_location and slot.host_location.organization_id in {teams_by_id[a].organization_id, teams_by_id[b].organization_id}) else 0
-                score = 60 + host_pref
-                if best is None or score > best['score']:
-                    best = {'home_team_id': a, 'away_team_id': b, 'score': score, 'host_pref': host_pref > 0}
-        if not best:
+                team_a = teams_by_id[a]
+                team_b = teams_by_id[b]
+                host_org_id = slot.host_location.organization_id if slot.host_location else None
+                same_community = bool(team_a.organization_id and team_a.organization_id == team_b.organization_id)
+                host_pref = bool(host_org_id and host_org_id in {team_a.organization_id, team_b.organization_id})
+                repeat_count = matchup_counts.get(pair, 0)
+
+                score = 0
+                reason_bits = []
+                if not same_community:
+                    score += 30
+                    reason_bits.append('cross-community matchup')
+                if host_pref:
+                    score += 20
+                    reason_bits.append('host community preference')
+                if same_community:
+                    if host_org_id and host_org_id == team_a.organization_id:
+                        score -= 10
+                        reason_bits.append('same-community matchup hosted by own community')
+                    else:
+                        score -= 50
+                if repeat_count > 0:
+                    score -= 40
+
+                pair_candidates.append({
+                    'home_team_id': a,
+                    'away_team_id': b,
+                    'pair': pair,
+                    'score': score,
+                    'same_community': same_community,
+                    'hosted_by_own_community': bool(same_community and host_org_id and host_org_id == team_a.organization_id),
+                    'reason_bits': reason_bits,
+                })
+
+        cross_candidates = [c for c in pair_candidates if not c['same_community']]
+        if cross_candidates:
+            valid_candidates = cross_candidates
+        else:
+            valid_candidates = [c for c in pair_candidates if c['hosted_by_own_community']] or pair_candidates
+
+        if not valid_candidates:
             skipped.append({'slot_id': str(slot.id), 'reason': 'No unused team pairs remain'})
             continue
+
+        best = max(valid_candidates, key=lambda c: c['score'])
+        if best['same_community'] and 'same-community matchup hosted by own community' not in best['reason_bits']:
+            best['reason_bits'].append('same-community matchup allowed because no cross-community alternative remained')
         home_team = teams_by_id[best['home_team_id']]
         away_team = teams_by_id[best['away_team_id']]
-        reason_bits = ['single game per team per selected week']
-        if best['host_pref']:
-            reason_bits.append('host community preference')
+        reason_bits = ['single game per team per selected week', *best['reason_bits']]
         plans.append({
             'slot_id': str(slot.id),
             'proposed_matchup': f'{home_team.name} vs {away_team.name}',
