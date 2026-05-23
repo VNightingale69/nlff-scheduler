@@ -1286,7 +1286,9 @@ def manual_schedule_builder_recommendations(payload: dict, db: Session = Depends
     teams = teams_q.order_by(Team.name).all()
     team_ids = {t.id for t in teams}
 
-    games_q = db.query(Game).filter(Game.season_id == season_id) if season_id else db.query(Game)
+    games_q = db.query(Game).join(Game.status).filter(GameStatus.code.notin_(['UNSCHEDULED', 'DELETED']))
+    if season_id:
+        games_q = games_q.filter(Game.season_id == season_id)
     if week_id:
         games_q = games_q.filter(Game.week_id == week_id)
     if division_id:
@@ -1310,11 +1312,30 @@ def manual_schedule_builder_recommendations(payload: dict, db: Session = Depends
 
     suggested_matchups = []
     team_list = list(teams)
+    already_scheduled_team_ids: set[uuid.UUID] = set()
+    already_scheduled_pairs: set[tuple[uuid.UUID, uuid.UUID]] = set()
+    for g in division_games:
+        if g.home_team_id in team_ids:
+            already_scheduled_team_ids.add(g.home_team_id)
+        if g.away_team_id in team_ids:
+            already_scheduled_team_ids.add(g.away_team_id)
+        already_scheduled_pairs.add(tuple(sorted((g.home_team_id, g.away_team_id))))
+
+    max_games_for_division_week = len(team_list) // 2 if division_id and week_id else None
+    all_available_weekly_matchups_scheduled = (
+        max_games_for_division_week is not None
+        and len(already_scheduled_team_ids) >= (max_games_for_division_week * 2)
+    )
+
     for i in range(len(team_list)):
         for j in range(i + 1, len(team_list)):
             a = team_list[i]
             b = team_list[j]
             key = tuple(sorted([a.id, b.id]))
+            if a.id in already_scheduled_team_ids or b.id in already_scheduled_team_ids:
+                continue
+            if key in already_scheduled_pairs:
+                continue
             repeats = matchup_counts.get(key, 0)
             score = 70
             reasons = []
@@ -1388,7 +1409,11 @@ def manual_schedule_builder_recommendations(payload: dict, db: Session = Depends
             'conflicts': conflicts,
         })
     slot_suggestions.sort(key=lambda x: x['score'], reverse=True)
-    return {'suggested_matchups': suggested_matchups[:25], 'suggested_slots': slot_suggestions[:40]}
+    return {
+        'suggested_matchups': suggested_matchups[:25],
+        'suggested_slots': slot_suggestions[:40],
+        'all_available_weekly_matchups_scheduled': all_available_weekly_matchups_scheduled,
+    }
 @router.post('/manual-schedule-builder/assign', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def assign_generated_slot(payload: dict, db: Session = Depends(get_db)):
     season_id = payload.get('season_id')
