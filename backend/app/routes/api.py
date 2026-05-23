@@ -1425,6 +1425,158 @@ def assign_generated_slot(payload: dict, db: Session = Depends(get_db)):
     slot.status = 'ASSIGNED'; slot.assigned_game_id = game.id
     db.commit(); db.refresh(game)
     return {'game': _to_game_read(game), 'generated_slot_id': slot.id, 'status': 'SCHEDULED'}
+
+
+@router.post('/manual-schedule-builder/auto-fill-preview', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
+    season_id = payload.get('season_id')
+    week_id = payload.get('week_id')
+    division_id = payload.get('division_id')
+    if not season_id or not week_id or not division_id:
+        raise HTTPException(400, 'season_id, week_id, and division_id are required')
+    division = db.query(Division).filter(Division.id == division_id).first()
+    week = db.query(Week).filter(Week.id == week_id, Week.season_id == season_id).first()
+    if not division or not week:
+        raise HTTPException(404, 'Selected season/week/division is invalid')
+    required_field_type = _required_field_type_for_division(division)
+    teams = db.query(Team).filter(Team.division_id == division_id, Team.is_active.is_(True)).order_by(Team.name).all()
+    team_ids = [t.id for t in teams]
+    existing_division_games = db.query(Game).join(Game.home_team).filter(
+        Game.season_id == season_id,
+        Game.week_id == week_id,
+        Team.division_id == division_id,
+    ).all()
+    scheduled_count: dict[uuid.UUID, int] = {t.id: 0 for t in teams}
+    used_pairs: set[tuple[uuid.UUID, uuid.UUID]] = set()
+    for g in existing_division_games:
+        if g.home_team_id in scheduled_count:
+            scheduled_count[g.home_team_id] += 1
+        if g.away_team_id in scheduled_count:
+            scheduled_count[g.away_team_id] += 1
+        used_pairs.add(tuple(sorted((g.home_team_id, g.away_team_id))))
+    open_slots = db.query(GameSlot).join(GameSlot.field_instance).filter(
+        GameSlot.status == 'OPEN',
+        GameSlot.slot_date == week.start_date,
+        GameSlot.field_type == required_field_type,
+        GameSlot.assigned_game_id.is_(None),
+    ).order_by(GameSlot.slot_date, GameSlot.start_time).all()
+    assigned_games = db.query(Game).join(GameSlot, GameSlot.assigned_game_id == Game.id).filter(
+        Game.game_date == week.start_date
+    ).all()
+    plans = []
+    skipped = []
+    for slot in open_slots:
+        busy_teams = set()
+        for g in assigned_games:
+            slot_row = db.query(GameSlot).filter(GameSlot.assigned_game_id == g.id).first()
+            if not slot_row:
+                continue
+            overlaps = slot_row.start_time < slot.end_time and slot_row.end_time > slot.start_time
+            if overlaps:
+                busy_teams.add(g.home_team_id)
+                busy_teams.add(g.away_team_id)
+        candidates = [tid for tid in team_ids if tid not in busy_teams]
+        if len(candidates) < 2:
+            skipped.append({'slot_id': str(slot.id), 'reason': 'Not enough available teams for this time slot'})
+            continue
+        best = None
+        for i in range(len(candidates)):
+            for j in range(i + 1, len(candidates)):
+                a = candidates[i]
+                b = candidates[j]
+                if a == b:
+                    continue
+                pair = tuple(sorted((a, b)))
+                repeat_penalty = 30 if pair in used_pairs else 0
+                load_score = max(0, 20 - (scheduled_count.get(a, 0) + scheduled_count.get(b, 0)) * 4)
+                host_pref = 10 if (slot.host_location and (slot.host_location.organization_id in {db.query(Team).filter(Team.id == a).first().organization_id, db.query(Team).filter(Team.id == b).first().organization_id})) else 0
+                score = 50 + load_score + host_pref - repeat_penalty
+                if best is None or score > best['score']:
+                    best = {'home_team_id': a, 'away_team_id': b, 'score': score, 'repeat': pair in used_pairs, 'host_pref': host_pref > 0}
+        if not best:
+            skipped.append({'slot_id': str(slot.id), 'reason': 'No valid matchup found for slot'})
+            continue
+        home_team = db.query(Team).filter(Team.id == best['home_team_id']).first()
+        away_team = db.query(Team).filter(Team.id == best['away_team_id']).first()
+        reason_bits = ['prefer fewer scheduled games']
+        if not best['repeat']:
+            reason_bits.append('non-duplicate matchup')
+        if best['host_pref']:
+            reason_bits.append('host community preference')
+        plans.append({
+            'slot_id': str(slot.id),
+            'proposed_matchup': f'{home_team.name} vs {away_team.name}',
+            'home_team_id': str(home_team.id),
+            'away_team_id': str(away_team.id),
+            'proposed_date': str(slot.slot_date),
+            'proposed_start_time': str(slot.start_time),
+            'host_location': slot.host_location.name if slot.host_location else '',
+            'field': slot.field_instance.field_name if slot.field_instance else '',
+            'score': max(0, min(100, int(best['score']))),
+            'reason': ', '.join(reason_bits),
+        })
+        used_pairs.add(tuple(sorted((best['home_team_id'], best['away_team_id']))))
+        scheduled_count[best['home_team_id']] = scheduled_count.get(best['home_team_id'], 0) + 1
+        scheduled_count[best['away_team_id']] = scheduled_count.get(best['away_team_id'], 0) + 1
+        assigned_games.append(Game(home_team_id=best['home_team_id'], away_team_id=best['away_team_id'], game_date=slot.slot_date))
+    return {'proposals': plans, 'skipped': skipped}
+
+
+@router.post('/manual-schedule-builder/auto-fill-apply', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
+    season_id = payload.get('season_id')
+    week_id = payload.get('week_id')
+    division_id = payload.get('division_id')
+    proposals = payload.get('proposals') or []
+    if not season_id or not week_id or not division_id:
+        raise HTTPException(400, 'season_id, week_id, and division_id are required')
+    if not proposals:
+        return {'created_games': 0, 'assigned_slots': 0, 'skipped': ['No proposals to apply']}
+    status = db.query(GameStatus).filter(GameStatus.code == 'SCHEDULED').first()
+    if not status:
+        raise HTTPException(400, 'Game status setup is incomplete: missing SCHEDULED status')
+    created_games = 0
+    assigned_slots = 0
+    skipped: list[str] = []
+    for proposal in proposals:
+        slot = db.query(GameSlot).join(GameSlot.field_instance).filter(GameSlot.id == proposal.get('slot_id')).first()
+        if not slot or slot.status != 'OPEN' or slot.assigned_game_id is not None:
+            skipped.append(f"Slot unavailable: {proposal.get('slot_id')}")
+            continue
+        home_team_id = proposal.get('home_team_id')
+        away_team_id = proposal.get('away_team_id')
+        if not home_team_id or not away_team_id or home_team_id == away_team_id:
+            skipped.append(f"Invalid matchup for slot {proposal.get('slot_id')}")
+            continue
+        duplicate = db.query(Game).filter(
+            Game.season_id == season_id,
+            Game.week_id == week_id,
+            Game.home_team_id == home_team_id,
+            Game.away_team_id == away_team_id,
+            Game.game_date == slot.slot_date,
+            Game.kickoff_time == slot.start_time,
+        ).count()
+        if duplicate:
+            skipped.append(f"Duplicate matchup exists for slot {proposal.get('slot_id')}")
+            continue
+        game = Game(
+            season_id=season_id,
+            week_id=week_id,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+            field_id=None,
+            game_status_id=status.id,
+            game_date=slot.slot_date,
+            kickoff_time=slot.start_time,
+        )
+        db.add(game)
+        db.flush()
+        slot.status = 'ASSIGNED'
+        slot.assigned_game_id = game.id
+        created_games += 1
+        assigned_slots += 1
+    db.commit()
+    return {'created_games': created_games, 'assigned_slots': assigned_slots, 'skipped': skipped}
 @router.get('/public/games', response_model=PagedResponse[PublicGameRead])
 def list_public_games(host_location_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, division_id: uuid.UUID | None = None, week_id: uuid.UUID | None = None, team_id: uuid.UUID | None = None, status_code: str | None = None, page: int = 1, page_size: int = 50, db: Session = Depends(get_db)):
     home_team = aliased(Team); away_team = aliased(Team)

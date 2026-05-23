@@ -22,6 +22,9 @@ export default function ManualScheduleBuilderPage() {
   const [suggestedSlots, setSuggestedSlots] = useState<any[]>([]);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+  const [autoFillPreview, setAutoFillPreview] = useState<any[]>([]);
+  const [autoFillSkipped, setAutoFillSkipped] = useState<any[]>([]);
+  const [autoFillLoading, setAutoFillLoading] = useState(false);
 
   const division = useMemo(() => options.divisions.find((d: any) => d.id === divisionId), [options, divisionId]);
   const divisionTeams = useMemo(() => options.teams.filter((t: any) => t.division_id === divisionId && t.is_active), [options, divisionId]);
@@ -96,6 +99,71 @@ export default function ManualScheduleBuilderPage() {
             await load(); await loadRecommendations(); setSlotId(''); setSuccess('Game successfully scheduled.');
           } catch (e: unknown) { setError(extractError(e)); }
         }}>Save Game Assignment</button>
+      </div>
+      <div className='rounded border p-3'>
+        <div className='flex items-center justify-between'>
+          <h2 className='text-lg font-semibold'>Auto-Schedule Assistant</h2>
+          <button
+            className='rounded bg-indigo-700 px-3 py-2 text-white disabled:cursor-not-allowed disabled:bg-slate-300'
+            disabled={!seasonId || !weekId || !divisionId || autoFillLoading}
+            onClick={async () => {
+              setError('');
+              setSuccess('');
+              setAutoFillLoading(true);
+              try {
+                const res: any = await apiFetch('/manual-schedule-builder/auto-fill-preview', { method: 'POST', body: JSON.stringify({ season_id: seasonId, week_id: weekId, division_id: divisionId }) }, token);
+                setAutoFillPreview(res.proposals || []);
+                setAutoFillSkipped(res.skipped || []);
+              } catch (e: unknown) {
+                setError(extractError(e));
+              } finally {
+                setAutoFillLoading(false);
+              }
+            }}
+          >
+            Auto-Fill Selected Division/Week
+          </button>
+        </div>
+        {autoFillPreview.length > 0 ? <div className='mt-3 space-y-3'>
+          <div className='overflow-auto rounded border'>
+            <table className='min-w-full text-sm'>
+              <thead><tr>{['Proposed Matchup', 'Date/Time', 'Host Location', 'Field', 'Reason', 'Score'].map((h) => <th key={h} className='px-2 py-2 text-left'>{h}</th>)}</tr></thead>
+              <tbody>
+                {autoFillPreview.map((p: any, idx: number) => <tr key={`${p.slot_id}-${idx}`} className='border-t'>
+                  <td className='p-2'>{p.proposed_matchup}</td>
+                  <td className='p-2'>{p.proposed_date} {p.proposed_start_time}</td>
+                  <td className='p-2'>{p.host_location}</td>
+                  <td className='p-2'>{p.field}</td>
+                  <td className='p-2'>{p.reason}</td>
+                  <td className='p-2 font-semibold'>{p.score}</td>
+                </tr>)}
+              </tbody>
+            </table>
+          </div>
+          <div className='flex gap-2'>
+            <button className='rounded bg-emerald-700 px-3 py-2 text-white' onClick={async () => {
+              setError('');
+              setSuccess('');
+              try {
+                const applied: any = await apiFetch('/manual-schedule-builder/auto-fill-apply', { method: 'POST', body: JSON.stringify({ season_id: seasonId, week_id: weekId, division_id: divisionId, proposals: autoFillPreview }) }, token);
+                setSuccess(`Applied auto-fill. Created ${applied.created_games} game(s), assigned ${applied.assigned_slots} slot(s).`);
+                setAutoFillSkipped((applied.skipped || []).map((s: string) => ({ reason: s })));
+                setAutoFillPreview([]);
+                await load();
+                await loadRecommendations();
+              } catch (e: unknown) {
+                setError(extractError(e));
+              }
+            }}>Apply Schedule</button>
+            <button className='rounded border px-3 py-2' onClick={() => { setAutoFillPreview([]); setAutoFillSkipped([]); }}>Cancel</button>
+          </div>
+        </div> : null}
+        {autoFillSkipped.length > 0 ? <div className='mt-3 rounded border bg-amber-50 p-2 text-sm'>
+          <div className='font-semibold'>Skipped teams/matchups</div>
+          <ul className='list-inside list-disc'>
+            {autoFillSkipped.map((s: any, idx: number) => <li key={idx}>{s.reason || JSON.stringify(s)}</li>)}
+          </ul>
+        </div> : null}
       </div>
 
       <div className='rounded border p-3'>
