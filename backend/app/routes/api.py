@@ -1655,6 +1655,7 @@ def _schedule_management_rows(db: Session, filters: dict | None = None):
     home = aliased(Team)
     away = aliased(Team)
     q = db.query(Game, GameSlot, FieldInstance, HostLocation, home, away, Division, Organization, GameStatus).join(Game.status).join(home, Game.home_team_id == home.id).join(away, Game.away_team_id == away.id).join(Division, home.division_id == Division.id).join(Organization, home.organization_id == Organization.id).outerjoin(GameSlot, GameSlot.assigned_game_id == Game.id).outerjoin(FieldInstance, FieldInstance.id == GameSlot.field_instance_id).outerjoin(HostLocation, HostLocation.id == GameSlot.host_location_id)
+    q = q.filter(GameStatus.code != 'UNSCHEDULED')
     if filters.get('date'): q = q.filter(Game.game_date == filters['date'])
     if filters.get('division_id'): q = q.filter(Division.id == filters['division_id'])
     if filters.get('organization_id'): q = q.filter(home.organization_id == filters['organization_id'])
@@ -1891,7 +1892,11 @@ def unschedule_game(game_id: uuid.UUID, db: Session = Depends(get_db)):
     if not game: raise HTTPException(404, 'Game not found')
     slot = db.query(GameSlot).filter(GameSlot.assigned_game_id == game.id).first()
     if slot: slot.status='OPEN'; slot.assigned_game_id=None
-    db.delete(game)
+    unscheduled_status = db.query(GameStatus).filter(GameStatus.code == 'UNSCHEDULED').first()
+    if unscheduled_status:
+        game.game_status_id = unscheduled_status.id
+    else:
+        db.delete(game)
     db.commit()
     return {'ok': True}
 

@@ -15,6 +15,7 @@ REQUIRED_GAME_STATUSES: tuple[tuple[str, str], ...] = (
     ('CANCELLED', 'Cancelled'),
     ('POSTPONED', 'Postponed'),
     ('FORFEIT', 'Forfeit'),
+    ('UNSCHEDULED', 'Unscheduled'),
 )
 
 
@@ -53,4 +54,3 @@ def seed_required_game_statuses(db: Session) -> None:
     except SQLAlchemyError:
         db.rollback()
         logger.exception('Game status seed failed due to database error.')
-
