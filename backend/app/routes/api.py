@@ -1537,10 +1537,12 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     assigned_games = db.query(Game).join(GameSlot, GameSlot.assigned_game_id == Game.id).filter(
         Game.game_date == week.start_date
     ).all()
-    season_division_games = db.query(Game).join(Game.home_team).filter(
+    season_division_games = db.query(Game).join(Game.home_team).join(Game.status).filter(
         Game.season_id == season_id,
         Team.division_id == division_id,
         Team.is_active.is_(True),
+        GameStatus.code == 'SCHEDULED',
+        GameStatus.is_active.is_(True),
     ).all()
 
     matchup_counts: dict[tuple[uuid.UUID, uuid.UUID], int] = {}
@@ -1800,10 +1802,12 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         if not home_team_id or not away_team_id or home_team_id == away_team_id:
             skipped.append({'reason': 'no valid opponent available (invalid matchup payload)'})
             continue
-        duplicate = db.query(Game).join(Game.home_team).filter(
+        duplicate = db.query(Game).join(Game.home_team).join(Game.status).filter(
             Game.season_id == season_id,
             Game.week_id == week_id,
             Team.division_id == division_id,
+            GameStatus.code == 'SCHEDULED',
+            GameStatus.is_active.is_(True),
             or_(
                 and_(Game.home_team_id == home_team_id, Game.away_team_id == away_team_id),
                 and_(Game.home_team_id == away_team_id, Game.away_team_id == home_team_id),
@@ -2115,15 +2119,57 @@ def move_game_schedule(game_id: uuid.UUID, payload: dict, db: Session = Depends(
 def unschedule_game(game_id: uuid.UUID, db: Session = Depends(get_db)):
     game = db.query(Game).filter(Game.id == game_id).first()
     if not game: raise HTTPException(404, 'Game not found')
+    division_id = db.query(Team.division_id).filter(Team.id == game.home_team_id).scalar()
+    week_id = game.week_id
     slot = db.query(GameSlot).filter(GameSlot.assigned_game_id == game.id).first()
     if slot: slot.status='OPEN'; slot.assigned_game_id=None
-    unscheduled_status = db.query(GameStatus).filter(GameStatus.code == 'UNSCHEDULED').first()
-    if unscheduled_status:
-        game.game_status_id = unscheduled_status.id
-    else:
-        db.delete(game)
+    db.delete(game)
     db.commit()
+    active_remaining = 0
+    if division_id and week_id:
+        active_remaining = db.query(Game).join(Game.home_team).join(Game.status).filter(
+            Game.week_id == week_id,
+            Team.division_id == division_id,
+            Team.is_active.is_(True),
+            GameStatus.code == 'SCHEDULED',
+            GameStatus.is_active.is_(True),
+        ).count()
+    logger.info(
+        'unschedule_game: deleted game_id=%s reopened_slot_id=%s remaining_active_scheduled_games=%s division_id=%s week_id=%s',
+        game_id,
+        slot.id if slot else None,
+        active_remaining,
+        division_id,
+        week_id,
+    )
     return {'ok': True}
+
+
+@router.post('/schedule-management/cleanup-unscheduled-games', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+def cleanup_unscheduled_games(db: Session = Depends(get_db)):
+    unscheduled_status_ids = db.query(GameStatus.id).filter(GameStatus.code == 'UNSCHEDULED').subquery()
+    unscheduled_game_ids = [row[0] for row in db.query(Game.id).filter(Game.game_status_id.in_(unscheduled_status_ids)).all()]
+    reopened_slots = db.query(GameSlot).filter(GameSlot.assigned_game_id.in_(unscheduled_game_ids)).update(
+        {GameSlot.status: 'OPEN', GameSlot.assigned_game_id: None},
+        synchronize_session=False,
+    ) if unscheduled_game_ids else 0
+    deleted_unscheduled_games = db.query(Game).filter(Game.id.in_(unscheduled_game_ids)).delete(synchronize_session=False) if unscheduled_game_ids else 0
+
+    missing_slot_ids = [row[0] for row in db.query(GameSlot.id).filter(
+        GameSlot.assigned_game_id.is_not(None),
+        ~GameSlot.assigned_game_id.in_(db.query(Game.id)),
+    ).all()]
+    reopened_missing_links = db.query(GameSlot).filter(GameSlot.id.in_(missing_slot_ids)).update(
+        {GameSlot.status: 'OPEN', GameSlot.assigned_game_id: None},
+        synchronize_session=False,
+    ) if missing_slot_ids else 0
+    db.commit()
+    return {
+        'ok': True,
+        'deleted_unscheduled_games': deleted_unscheduled_games,
+        'reopened_slots_from_unscheduled_games': reopened_slots,
+        'reopened_slots_from_missing_game_links': reopened_missing_links,
+    }
 
 @router.get('/schedule-management/export.csv', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def export_schedule_management_csv(date: date | None = None, division_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, host_location_id: uuid.UUID | None = None, field_type: str | None = None, field_id: uuid.UUID | None = None, team_id: uuid.UUID | None = None, db: Session = Depends(get_db)):

@@ -223,6 +223,8 @@ export default function ManualScheduleBuilderPage() {
                 <button className='rounded border border-red-300 px-2 py-1 text-xs text-red-700' onClick={async () => {
                   if (!window.confirm('Remove this scheduled game?')) return;
                   setError('');
+                  setAutoFillSkipped([]);
+                  setAutoFillPreview([]);
                   try {
                     setGames((prev) => prev.filter((game: any) => game.id !== g.id));
                     await apiFetch(`/schedule-management/games/${g.id}/unschedule`, { method: 'PATCH' }, token);
