@@ -170,5 +170,33 @@ class AutoFillPreviewTest(unittest.TestCase):
         self.assertEqual(result['proposals'][0]['host_location'], 'Westosha Park')
         self.assertIn('Same-community matchup placed at home field', result['proposals'][0]['reason'])
 
+    def test_apply_ignores_unscheduled_games_for_duplicate_check(self):
+        unscheduled_status = GameStatus(id=uuid.uuid4(), code='UNSCHEDULED', label='Unscheduled', is_active=True)
+        self.db.add(unscheduled_status)
+        self.db.add(Game(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week2.id,
+            home_team_id=self.ab.id,
+            away_team_id=self.wm.id,
+            game_status_id=unscheduled_status.id,
+            game_date=self.week2.start_date,
+            kickoff_time=time(11, 0),
+        ))
+        self.db.commit()
+
+        result = auto_fill_apply({
+            'season_id': self.season.id,
+            'week_id': self.week2.id,
+            'division_id': self.division.id,
+            'proposals': [{
+                'slot_id': str(self.slot.id),
+                'home_team_id': str(self.wm.id),
+                'away_team_id': str(self.ab.id),
+            }],
+        }, db=self.db)
+        self.assertEqual(result['created_count'], 1)
+        self.assertEqual(result['skipped_count'], 0)
+
 if __name__ == '__main__':
     unittest.main()
