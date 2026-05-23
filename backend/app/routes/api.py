@@ -6,7 +6,7 @@ from fastapi.responses import StreamingResponse
 import logging
 from datetime import date, datetime, time, timedelta
 
-from sqlalchemy import and_, func
+from sqlalchemy import and_, func, or_
 from sqlalchemy.exc import ProgrammingError, SQLAlchemyError
 from sqlalchemy.orm import Session, aliased
 
@@ -1512,14 +1512,44 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     assigned_games = db.query(Game).join(GameSlot, GameSlot.assigned_game_id == Game.id).filter(
         Game.game_date == week.start_date
     ).all()
-    matchup_counts: dict[tuple[uuid.UUID, uuid.UUID], int] = {}
-    for game in db.query(Game).join(Game.home_team).filter(
+    season_division_games = db.query(Game).join(Game.home_team).filter(
         Game.season_id == season_id,
         Team.division_id == division_id,
         Team.is_active.is_(True),
-    ).all():
+    ).all()
+
+    matchup_counts: dict[tuple[uuid.UUID, uuid.UUID], int] = {}
+    community_matchup_counts: dict[tuple[uuid.UUID, uuid.UUID], int] = {}
+    for game in season_division_games:
         key = tuple(sorted((game.home_team_id, game.away_team_id)))
         matchup_counts[key] = matchup_counts.get(key, 0) + 1
+        home_org_id = game.home_team.organization_id if game.home_team else None
+        away_org_id = game.away_team.organization_id if game.away_team else None
+        if home_org_id and away_org_id:
+            community_key = tuple(sorted((home_org_id, away_org_id)))
+            community_matchup_counts[community_key] = community_matchup_counts.get(community_key, 0) + 1
+
+    prior_week = db.query(Week).filter(
+        Week.season_id == season_id,
+        or_(
+            Week.week_number < week.week_number,
+            and_(Week.week_number == week.week_number, Week.start_date < week.start_date),
+        ),
+    ).order_by(Week.week_number.desc(), Week.start_date.desc()).first()
+
+    prior_week_team_pairs: set[tuple[uuid.UUID, uuid.UUID]] = set()
+    prior_week_community_pairs: set[tuple[uuid.UUID, uuid.UUID]] = set()
+    if prior_week:
+        prior_week_games = [
+            g for g in season_division_games
+            if g.week_id == prior_week.id
+        ]
+        for game in prior_week_games:
+            prior_week_team_pairs.add(tuple(sorted((game.home_team_id, game.away_team_id))))
+            home_org_id = game.home_team.organization_id if game.home_team else None
+            away_org_id = game.away_team.organization_id if game.away_team else None
+            if home_org_id and away_org_id:
+                prior_week_community_pairs.add(tuple(sorted((home_org_id, away_org_id))))
     plans = []
     skipped = []
     existing_games_count = len(existing_division_games)
@@ -1565,9 +1595,14 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                 same_community = bool(team_a.organization_id and team_a.organization_id == team_b.organization_id)
                 host_pref = bool(host_org_id and host_org_id in {team_a.organization_id, team_b.organization_id})
                 repeat_count = matchup_counts.get(pair, 0)
+                community_pair = tuple(sorted((team_a.organization_id, team_b.organization_id))) if team_a.organization_id and team_b.organization_id else None
+                prior_week_team_repeat = pair in prior_week_team_pairs
+                prior_week_community_repeat = bool(community_pair and community_pair in prior_week_community_pairs)
+                community_repeat_count = community_matchup_counts.get(community_pair, 0) if community_pair else 0
 
                 score = 0
                 reason_bits = []
+                warning_bits = []
                 if not same_community:
                     score += 30
                     reason_bits.append('cross-community matchup')
@@ -1582,6 +1617,18 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                         score -= 50
                 if repeat_count > 0:
                     score -= 40
+                if prior_week_team_repeat:
+                    score -= 75
+                    warning_bits.append('Warning: same matchup occurred last week')
+                else:
+                    reason_bits.append('Avoids prior-week team repeat')
+                if prior_week_community_repeat:
+                    score -= 35
+                    warning_bits.append('Warning: same community pairing occurred last week')
+                else:
+                    reason_bits.append('Avoids prior-week community repeat')
+                if community_repeat_count > 0:
+                    score -= 20
 
                 pair_candidates.append({
                     'home_team_id': a,
@@ -1591,6 +1638,8 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                     'same_community': same_community,
                     'hosted_by_own_community': bool(same_community and host_org_id and host_org_id == team_a.organization_id),
                     'reason_bits': reason_bits,
+                    'warning_bits': warning_bits,
+                    'prior_week_team_repeat': prior_week_team_repeat,
                 })
 
         cross_candidates = [c for c in pair_candidates if not c['same_community']]
@@ -1606,9 +1655,11 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         best = max(valid_candidates, key=lambda c: c['score'])
         if best['same_community'] and 'same-community matchup hosted by own community' not in best['reason_bits']:
             best['reason_bits'].append('same-community matchup allowed because no cross-community alternative remained')
+        if best['prior_week_team_repeat']:
+            best['reason_bits'].append('Selected because no better alternative remained')
         home_team = teams_by_id[best['home_team_id']]
         away_team = teams_by_id[best['away_team_id']]
-        reason_bits = ['single game per team per selected week', *best['reason_bits']]
+        reason_bits = ['single game per team per selected week', *best['reason_bits'], *best['warning_bits']]
         plans.append({
             'slot_id': str(slot.id),
             'proposed_matchup': f'{home_team.name} vs {away_team.name}',
