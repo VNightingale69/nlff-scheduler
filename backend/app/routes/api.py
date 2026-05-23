@@ -1150,11 +1150,11 @@ def _to_game_read(g: Game) -> GameRead:
 
 @router.get('/games', response_model=PagedResponse[GameRead], dependencies=[Depends(get_current_user)])
 def list_games(division_id:uuid.UUID|None=None, week_id:uuid.UUID|None=None, team_id:uuid.UUID|None=None, host_location_id:uuid.UUID|None=None, status_code:str|None=None, page:int=1,page_size:int=50, db:Session=Depends(get_db)):
-    q=db.query(Game).join(Game.status).join(Game.home_team).join(Game.field)
+    q=db.query(Game).join(Game.status).join(Game.home_team).outerjoin(Game.field).outerjoin(GameSlot, GameSlot.assigned_game_id == Game.id)
     if division_id: q=q.filter(Team.division_id==division_id)
     if week_id: q=q.filter(Game.week_id==week_id)
     if team_id: q=q.filter((Game.home_team_id==team_id)|(Game.away_team_id==team_id))
-    if host_location_id: q=q.filter(Field.host_location_id==host_location_id)
+    if host_location_id: q=q.filter((Field.host_location_id==host_location_id) | (GameSlot.host_location_id==host_location_id))
     if status_code: q=q.filter(GameStatus.code==status_code)
     total=q.count(); items=q.order_by(Game.game_date, Game.kickoff_time).offset((page-1)*page_size).limit(page_size).all()
     return PagedResponse(items=[_to_game_read(x) for x in items], total=total, page=page, page_size=page_size)
@@ -1211,19 +1211,26 @@ def assign_generated_slot(payload: dict, db: Session = Depends(get_db)):
         Game.home_team_id == home_team.id,
         Game.away_team_id == away_team.id,
         Game.game_date == slot.slot_date,
+        Game.kickoff_time == slot.start_time,
     ).count()
-    if duplicate and not payload.get('override_duplicate_matchup'):
-        raise HTTPException(400, 'Duplicate matchup exists. Confirm override to continue.')
+    if duplicate:
+        raise HTTPException(400, 'Exact duplicate matchup already exists for this date/time')
     season = db.query(Season).filter(Season.is_active.is_(True)).order_by(Season.start_date.desc()).first()
     week = db.query(Week).filter(Week.start_date <= slot.slot_date, Week.end_date >= slot.slot_date).order_by(Week.week_number).first()
     status = db.query(GameStatus).filter(GameStatus.code == 'SCHEDULED').first()
     if not status:
         logger.error('Manual assignment blocked: missing required SCHEDULED game status.')
         raise HTTPException(400, 'Game status setup is incomplete. Please contact an administrator.')
-    field = db.query(Field).filter(Field.host_location_id == slot.host_location_id, Field.layout_type == division.required_field_layout_type).first() or db.query(Field).filter(Field.host_location_id == slot.host_location_id).first()
-    if not field:
-        raise HTTPException(400, 'No field is configured for the selected host location')
-    game = Game(season_id=season.id if season else None, week_id=week.id if week else None, home_team_id=home_team.id, away_team_id=away_team.id, field_id=field.id, game_status_id=status.id, game_date=slot.slot_date, kickoff_time=slot.start_time)
+    game = Game(
+        season_id=season.id if season else None,
+        week_id=week.id if week else None,
+        home_team_id=home_team.id,
+        away_team_id=away_team.id,
+        field_id=None,
+        game_status_id=status.id,
+        game_date=slot.slot_date,
+        kickoff_time=slot.start_time,
+    )
     db.add(game); db.flush()
     slot.status = 'ASSIGNED'; slot.assigned_game_id = game.id
     db.commit(); db.refresh(game)

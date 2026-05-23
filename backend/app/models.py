@@ -218,7 +218,7 @@ class Game(Base, TimestampMixin):
     week_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('weeks.id'), nullable=True)
     home_team_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('teams.id'), nullable=False)
     away_team_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('teams.id'), nullable=False)
-    field_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('fields.id'), nullable=False)
+    field_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('fields.id'), nullable=True)
     game_status_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('game_statuses.id'), nullable=False)
     game_date: Mapped[Date] = mapped_column(Date, nullable=False)
     kickoff_time: Mapped[Time] = mapped_column(Time, nullable=False)
