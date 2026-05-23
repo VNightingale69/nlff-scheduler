@@ -60,6 +60,36 @@ export default function ScheduleManagementPage() {
     });
   }, [qs]);
 
+
+
+  const exportCsv = async () => {
+    try {
+      const response = await fetch(`${API_URL}/schedule-management/export.csv${qs ? `?${qs}` : ''}`, {
+        method: 'GET',
+        headers: {
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          Accept: 'text/csv',
+        },
+      });
+
+      if (!response.ok) {
+        throw new ApiError('Unable to export CSV.', response.status, await response.text());
+      }
+
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'schedule-export.csv';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : 'Unable to export schedule CSV.');
+    }
+  };
+
   const grouped = useMemo(() => {
     const by: Record<string, any[]> = {};
 
@@ -173,13 +203,9 @@ export default function ScheduleManagementPage() {
         ))}
       </div>
 
-      <a
-        className='inline-block rounded bg-emerald-600 px-3 py-2 text-white'
-        href={`${API_URL}/schedule-management/export.csv${qs ? `?${qs}` : ''}`}
-        target='_blank'
-      >
+      <button className='inline-block rounded bg-emerald-600 px-3 py-2 text-white' onClick={exportCsv}>
         Export CSV
-      </a>
+      </button>
 
       <div className='rounded border p-3'>
         <h2 className='mb-2 font-semibold'>Schedule Conflicts</h2>
