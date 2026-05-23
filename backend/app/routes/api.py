@@ -1721,36 +1721,59 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
     assigned_slots = 0
     skipped: list[str] = []
     existing_games_count = len(existing_division_games)
+    teams_by_id = {str(team.id): team for team in teams}
+
+    def _team_name(team_id: str | None) -> str:
+        if not team_id:
+            return 'Unknown Team'
+        team = teams_by_id.get(str(team_id))
+        return team.name if team else 'Unknown Team'
+
+    def _fmt_duplicate_skip(home_team_id: str, away_team_id: str, slot: GameSlot | None) -> str:
+        home_name = _team_name(home_team_id)
+        away_name = _team_name(away_team_id)
+        week_label = db.query(Week.week_number).filter(Week.id == week_id).scalar()
+        if week_label is None:
+            week_text = 'this selected week'
+        else:
+            week_text = f'Week {week_label}'
+        details = []
+        if slot and slot.slot_date:
+            details.append(f'Date: {slot.slot_date}')
+        if slot and slot.start_time:
+            details.append(f'Time: {slot.start_time}')
+        detail_suffix = f" ({', '.join(details)})" if details else ''
+        return f'Skipped {home_name} vs {away_name} because that matchup is already scheduled in {week_text}.{detail_suffix}'
+
     for proposal in proposals:
         if existing_games_count + created_games >= max_games_for_division_week:
-            skipped.append(
-                f"Weekly game limit reached for selected division/week (division_id={division_id}, week_id={week_id}, "
-                f"active_games_counted={existing_games_count + created_games}, max_games_allowed={max_games_for_division_week}, "
-                f"counted_game_ids={[str(g.id) for g in existing_division_games]})"
-            )
+            skipped.append('Skipped one proposed game because the weekly game limit was reached for this division/week.')
             break
         slot = db.query(GameSlot).join(GameSlot.field_instance).filter(GameSlot.id == proposal.get('slot_id')).first()
         if not slot or slot.status != 'OPEN' or slot.assigned_game_id is not None:
-            skipped.append(f"Slot unavailable: {proposal.get('slot_id')}")
+            skipped.append('Skipped one proposed game because the selected slot is no longer available.')
             continue
         home_team_id = proposal.get('home_team_id')
         away_team_id = proposal.get('away_team_id')
         if not home_team_id or not away_team_id or home_team_id == away_team_id:
-            skipped.append(f"Invalid matchup for slot {proposal.get('slot_id')}")
+            skipped.append('Skipped one proposed game because the matchup was invalid.')
             continue
-        duplicate = db.query(Game).filter(
+        duplicate = db.query(Game).join(Game.home_team).filter(
             Game.season_id == season_id,
             Game.week_id == week_id,
-            Game.home_team_id == home_team_id,
-            Game.away_team_id == away_team_id,
-            Game.game_date == slot.slot_date,
-            Game.kickoff_time == slot.start_time,
+            Team.division_id == division_id,
+            or_(
+                and_(Game.home_team_id == home_team_id, Game.away_team_id == away_team_id),
+                and_(Game.home_team_id == away_team_id, Game.away_team_id == home_team_id),
+            ),
         ).count()
         if duplicate:
-            skipped.append(f"Duplicate matchup exists for slot {proposal.get('slot_id')}")
+            skipped.append(_fmt_duplicate_skip(str(home_team_id), str(away_team_id), slot))
             continue
-        if home_team_id in used_team_ids or away_team_id in used_team_ids:
-            skipped.append(f"Team already has a game this week for slot {proposal.get('slot_id')}")
+        if uuid.UUID(str(home_team_id)) in used_team_ids or uuid.UUID(str(away_team_id)) in used_team_ids:
+            skipped.append(
+                f"Skipped {_team_name(str(home_team_id))} vs {_team_name(str(away_team_id))} because one team already has a game this week."
+            )
             continue
         game = Game(
             season_id=season_id,

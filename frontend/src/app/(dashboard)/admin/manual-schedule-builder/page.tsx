@@ -158,7 +158,9 @@ export default function ManualScheduleBuilderPage() {
               setSuccess('');
               try {
                 const applied: any = await apiFetch('/manual-schedule-builder/auto-fill-apply', { method: 'POST', body: JSON.stringify({ season_id: seasonId, week_id: weekId, division_id: divisionId, proposals: autoFillPreview }) }, token);
-                setSuccess(`Applied auto-fill. Created ${applied.created_games} game(s), assigned ${applied.assigned_slots} slot(s).`);
+                const skippedCount = (applied.skipped || []).length;
+                const skippedLabel = skippedCount === 1 ? '1 proposed game' : `${skippedCount} proposed games`;
+                setSuccess(`Applied auto-fill. Created ${applied.created_games} games, skipped ${skippedLabel}.`);
                 setAutoFillSkipped((applied.skipped || []).map((s: string) => ({ reason: s })));
                 setAutoFillPreview([]);
                 await load();

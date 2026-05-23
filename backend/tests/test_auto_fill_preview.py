@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import Base
 from app.models import Division, FieldInstance, Game, GameSlot, GameStatus, HostLocation, Organization, Season, Team, Week
-from app.routes.api import auto_fill_preview
+from app.routes.api import auto_fill_apply, auto_fill_preview
 
 
 class AutoFillPreviewTest(unittest.TestCase):
@@ -50,6 +50,62 @@ class AutoFillPreviewTest(unittest.TestCase):
         self.assertIn('Avoids prior-week team repeat', result['proposals'][0]['reason'])
         self.assertIn('Avoids prior-week community repeat', result['proposals'][0]['reason'])
 
+
+
+
+    def test_apply_skips_duplicate_matchup_with_friendly_message(self):
+        # existing week 2 scheduled game in reverse order to ensure order-insensitive duplicate detection
+        self.db.add(Game(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week2.id,
+            home_team_id=self.ab.id,
+            away_team_id=self.wm.id,
+            game_status_id=self.status.id,
+            game_date=self.week2.start_date,
+            kickoff_time=time(11, 0),
+        ))
+
+        slot2 = GameSlot(
+            id=uuid.uuid4(),
+            field_instance_id=self.fi.id,
+            host_location_id=self.host.id,
+            slot_date=self.week2.start_date,
+            start_time=time(10, 0),
+            end_time=time(11, 0),
+            field_type='SMALL',
+            status='OPEN',
+        )
+        self.db.add(slot2)
+        self.db.commit()
+
+        payload = {
+            'season_id': self.season.id,
+            'week_id': self.week2.id,
+            'division_id': self.division.id,
+            'proposals': [
+                {
+                    'slot_id': str(self.slot.id),
+                    'home_team_id': str(self.wm.id),
+                    'away_team_id': str(self.ab.id),
+                },
+                {
+                    'slot_id': str(slot2.id),
+                    'home_team_id': str(self.wg.id),
+                    'away_team_id': str(self.as_.id),
+                },
+            ],
+        }
+
+        result = auto_fill_apply(payload, db=self.db)
+
+        self.assertEqual(result['created_games'], 1)
+        self.assertEqual(len(result['skipped']), 1)
+        skipped_message = result['skipped'][0]
+        self.assertIn('Skipped Westosha Maroon vs Antioch Black because that matchup is already scheduled in Week 2.', skipped_message)
+        self.assertIn('Date:', skipped_message)
+        self.assertIn('Time:', skipped_message)
+        self.assertNotIn(str(self.slot.id), skipped_message)
 
 if __name__ == '__main__':
     unittest.main()
