@@ -1408,6 +1408,20 @@ def assign_generated_slot(payload: dict, db: Session = Depends(get_db)):
     if not season or not week:
         raise HTTPException(400, 'Please select a season and week before assigning a game.')
     status = db.query(GameStatus).filter(GameStatus.code == 'SCHEDULED').first()
+    teams = db.query(Team).filter(Team.division_id == division_id, Team.is_active.is_(True)).all()
+    team_ids = {t.id for t in teams}
+    max_games_for_division_week = len(teams) // 2
+    existing_division_games = db.query(Game).join(Game.home_team).filter(
+        Game.season_id == season_id,
+        Game.week_id == week_id,
+        Team.division_id == division_id,
+    ).all()
+    used_team_ids: set[uuid.UUID] = set()
+    for g in existing_division_games:
+        if g.home_team_id in team_ids:
+            used_team_ids.add(g.home_team_id)
+        if g.away_team_id in team_ids:
+            used_team_ids.add(g.away_team_id)
     if not status:
         logger.error('Manual assignment blocked: missing required SCHEDULED game status.')
         raise HTTPException(400, 'Game status setup is incomplete. Please contact an administrator.')
@@ -1440,19 +1454,20 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         raise HTTPException(404, 'Selected season/week/division is invalid')
     required_field_type = _required_field_type_for_division(division)
     teams = db.query(Team).filter(Team.division_id == division_id, Team.is_active.is_(True)).order_by(Team.name).all()
-    team_ids = [t.id for t in teams]
+    teams_by_id = {t.id: t for t in teams}
+    max_games_for_division_week = len(teams) // 2
     existing_division_games = db.query(Game).join(Game.home_team).filter(
         Game.season_id == season_id,
         Game.week_id == week_id,
         Team.division_id == division_id,
     ).all()
-    scheduled_count: dict[uuid.UUID, int] = {t.id: 0 for t in teams}
+    used_team_ids: set[uuid.UUID] = set()
     used_pairs: set[tuple[uuid.UUID, uuid.UUID]] = set()
     for g in existing_division_games:
-        if g.home_team_id in scheduled_count:
-            scheduled_count[g.home_team_id] += 1
-        if g.away_team_id in scheduled_count:
-            scheduled_count[g.away_team_id] += 1
+        if g.home_team_id in teams_by_id:
+            used_team_ids.add(g.home_team_id)
+        if g.away_team_id in teams_by_id:
+            used_team_ids.add(g.away_team_id)
         used_pairs.add(tuple(sorted((g.home_team_id, g.away_team_id))))
     open_slots = db.query(GameSlot).join(GameSlot.field_instance).filter(
         GameSlot.status == 'OPEN',
@@ -1465,42 +1480,42 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     ).all()
     plans = []
     skipped = []
+    existing_games_count = len(existing_division_games)
+    max_new_games = max(0, max_games_for_division_week - existing_games_count)
+    if max_new_games == 0:
+        return {
+            'proposals': plans,
+            'skipped': [{'slot_id': '', 'reason': 'Weekly game limit reached for selected division/week'}],
+            'proposed_game_count': 0,
+            'max_allowed_game_count': max_games_for_division_week,
+            'existing_game_count': existing_games_count,
+            'unused_team_ids': [str(tid) for tid in teams_by_id if tid not in used_team_ids],
+            'unused_teams': [teams_by_id[tid].name for tid in teams_by_id if tid not in used_team_ids],
+        }
     for slot in open_slots:
-        busy_teams = set()
-        for g in assigned_games:
-            slot_row = db.query(GameSlot).filter(GameSlot.assigned_game_id == g.id).first()
-            if not slot_row:
-                continue
-            overlaps = slot_row.start_time < slot.end_time and slot_row.end_time > slot.start_time
-            if overlaps:
-                busy_teams.add(g.home_team_id)
-                busy_teams.add(g.away_team_id)
-        candidates = [tid for tid in team_ids if tid not in busy_teams]
-        if len(candidates) < 2:
-            skipped.append({'slot_id': str(slot.id), 'reason': 'Not enough available teams for this time slot'})
-            continue
+        if len(plans) >= max_new_games:
+            break
+        available_team_ids = [tid for tid in teams_by_id if tid not in used_team_ids]
+        if len(available_team_ids) < 2:
+            break
         best = None
-        for i in range(len(candidates)):
-            for j in range(i + 1, len(candidates)):
-                a = candidates[i]
-                b = candidates[j]
-                if a == b:
-                    continue
+        for i in range(len(available_team_ids)):
+            for j in range(i + 1, len(available_team_ids)):
+                a = available_team_ids[i]
+                b = available_team_ids[j]
                 pair = tuple(sorted((a, b)))
-                repeat_penalty = 30 if pair in used_pairs else 0
-                load_score = max(0, 20 - (scheduled_count.get(a, 0) + scheduled_count.get(b, 0)) * 4)
-                host_pref = 10 if (slot.host_location and (slot.host_location.organization_id in {db.query(Team).filter(Team.id == a).first().organization_id, db.query(Team).filter(Team.id == b).first().organization_id})) else 0
-                score = 50 + load_score + host_pref - repeat_penalty
+                if pair in used_pairs:
+                    continue
+                host_pref = 10 if (slot.host_location and slot.host_location.organization_id in {teams_by_id[a].organization_id, teams_by_id[b].organization_id}) else 0
+                score = 60 + host_pref
                 if best is None or score > best['score']:
-                    best = {'home_team_id': a, 'away_team_id': b, 'score': score, 'repeat': pair in used_pairs, 'host_pref': host_pref > 0}
+                    best = {'home_team_id': a, 'away_team_id': b, 'score': score, 'host_pref': host_pref > 0}
         if not best:
-            skipped.append({'slot_id': str(slot.id), 'reason': 'No valid matchup found for slot'})
+            skipped.append({'slot_id': str(slot.id), 'reason': 'No unused team pairs remain'})
             continue
-        home_team = db.query(Team).filter(Team.id == best['home_team_id']).first()
-        away_team = db.query(Team).filter(Team.id == best['away_team_id']).first()
-        reason_bits = ['prefer fewer scheduled games']
-        if not best['repeat']:
-            reason_bits.append('non-duplicate matchup')
+        home_team = teams_by_id[best['home_team_id']]
+        away_team = teams_by_id[best['away_team_id']]
+        reason_bits = ['single game per team per selected week']
         if best['host_pref']:
             reason_bits.append('host community preference')
         plans.append({
@@ -1516,10 +1531,18 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'reason': ', '.join(reason_bits),
         })
         used_pairs.add(tuple(sorted((best['home_team_id'], best['away_team_id']))))
-        scheduled_count[best['home_team_id']] = scheduled_count.get(best['home_team_id'], 0) + 1
-        scheduled_count[best['away_team_id']] = scheduled_count.get(best['away_team_id'], 0) + 1
-        assigned_games.append(Game(home_team_id=best['home_team_id'], away_team_id=best['away_team_id'], game_date=slot.slot_date))
-    return {'proposals': plans, 'skipped': skipped}
+        used_team_ids.add(best['home_team_id'])
+        used_team_ids.add(best['away_team_id'])
+    unused_team_ids = [str(tid) for tid in teams_by_id if tid not in used_team_ids]
+    return {
+        'proposals': plans,
+        'skipped': skipped,
+        'proposed_game_count': len(plans),
+        'max_allowed_game_count': max_games_for_division_week,
+        'existing_game_count': existing_games_count,
+        'unused_team_ids': unused_team_ids,
+        'unused_teams': [teams_by_id[uuid.UUID(tid)].name for tid in unused_team_ids],
+    }
 
 
 @router.post('/manual-schedule-builder/auto-fill-apply', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
@@ -1532,13 +1555,31 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         raise HTTPException(400, 'season_id, week_id, and division_id are required')
     if not proposals:
         return {'created_games': 0, 'assigned_slots': 0, 'skipped': ['No proposals to apply']}
+    teams = db.query(Team).filter(Team.division_id == division_id, Team.is_active.is_(True)).all()
+    team_ids = {t.id for t in teams}
+    max_games_for_division_week = len(teams) // 2
+    existing_division_games = db.query(Game).join(Game.home_team).filter(
+        Game.season_id == season_id,
+        Game.week_id == week_id,
+        Team.division_id == division_id,
+    ).all()
+    used_team_ids: set[uuid.UUID] = set()
+    for g in existing_division_games:
+        if g.home_team_id in team_ids:
+            used_team_ids.add(g.home_team_id)
+        if g.away_team_id in team_ids:
+            used_team_ids.add(g.away_team_id)
     status = db.query(GameStatus).filter(GameStatus.code == 'SCHEDULED').first()
     if not status:
         raise HTTPException(400, 'Game status setup is incomplete: missing SCHEDULED status')
     created_games = 0
     assigned_slots = 0
     skipped: list[str] = []
+    existing_games_count = len(existing_division_games)
     for proposal in proposals:
+        if existing_games_count + created_games >= max_games_for_division_week:
+            skipped.append('Weekly game limit reached for selected division/week')
+            break
         slot = db.query(GameSlot).join(GameSlot.field_instance).filter(GameSlot.id == proposal.get('slot_id')).first()
         if not slot or slot.status != 'OPEN' or slot.assigned_game_id is not None:
             skipped.append(f"Slot unavailable: {proposal.get('slot_id')}")
@@ -1559,6 +1600,9 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         if duplicate:
             skipped.append(f"Duplicate matchup exists for slot {proposal.get('slot_id')}")
             continue
+        if home_team_id in used_team_ids or away_team_id in used_team_ids:
+            skipped.append(f"Team already has a game this week for slot {proposal.get('slot_id')}")
+            continue
         game = Game(
             season_id=season_id,
             week_id=week_id,
@@ -1573,6 +1617,8 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         db.flush()
         slot.status = 'ASSIGNED'
         slot.assigned_game_id = game.id
+        used_team_ids.add(uuid.UUID(str(home_team_id)))
+        used_team_ids.add(uuid.UUID(str(away_team_id)))
         created_games += 1
         assigned_slots += 1
     db.commit()
