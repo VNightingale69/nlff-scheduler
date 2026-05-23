@@ -1,5 +1,8 @@
+import csv
+import io
 import uuid
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 import logging
 from datetime import date, datetime, time, timedelta
 
@@ -1316,6 +1319,94 @@ def list_public_schedule_filters(db: Session = Depends(get_db)):
     host_locations = {(g.field.host_location.id, g.field.host_location.name) for g in games}; organizations = {(g.field.host_location.organization.id, g.field.host_location.organization.name) for g in games}; divisions = {(g.home_team.division.id, g.home_team.division.name) for g in games}; weeks = {(g.week.id, g.week.week_number) for g in games}; teams = {(g.home_team.id, g.home_team.name) for g in games} | {(g.away_team.id, g.away_team.name) for g in games}; statuses = {(g.status.code, g.status.label) for g in games}
     return {'host_locations': [{'id': item[0], 'name': item[1]} for item in sorted(host_locations, key=lambda x: x[1])], 'organizations': [{'id': item[0], 'name': item[1]} for item in sorted(organizations, key=lambda x: x[1])], 'divisions': [{'id': item[0], 'name': item[1]} for item in sorted(divisions, key=lambda x: x[1])], 'weeks': [{'id': item[0], 'week_number': item[1]} for item in sorted(weeks, key=lambda x: x[1])], 'teams': [{'id': item[0], 'name': item[1]} for item in sorted(teams, key=lambda x: x[1])], 'statuses': [{'code': item[0], 'label': item[1]} for item in sorted(statuses, key=lambda x: x[1])]}
 
+
+
+def _required_field_type_for_division(division: Division | None) -> str:
+    return 'LARGE' if division and '53' in (division.required_field_layout_type or '') else 'SMALL'
+
+
+def _schedule_management_rows(db: Session, filters: dict | None = None):
+    filters = filters or {}
+    q = db.query(Game, GameSlot, FieldInstance, HostLocation, Team, Team, Division, Organization, GameStatus).join(Game.status).join(Team, Game.home_team_id == Team.id).join(Division, Team.division_id == Division.id).join(Organization, Team.organization_id == Organization.id).join(Team, Game.away_team_id == Team.id, isouter=True)
+    home = aliased(Team)
+    away = aliased(Team)
+    q = db.query(Game, GameSlot, FieldInstance, HostLocation, home, away, Division, Organization, GameStatus).join(Game.status).join(home, Game.home_team_id == home.id).join(away, Game.away_team_id == away.id).join(Division, home.division_id == Division.id).join(Organization, home.organization_id == Organization.id).outerjoin(GameSlot, GameSlot.assigned_game_id == Game.id).outerjoin(FieldInstance, FieldInstance.id == GameSlot.field_instance_id).outerjoin(HostLocation, HostLocation.id == GameSlot.host_location_id)
+    if filters.get('date'): q = q.filter(Game.game_date == filters['date'])
+    if filters.get('division_id'): q = q.filter(Division.id == filters['division_id'])
+    if filters.get('organization_id'): q = q.filter(home.organization_id == filters['organization_id'])
+    if filters.get('host_location_id'): q = q.filter(HostLocation.id == filters['host_location_id'])
+    if filters.get('field_type'): q = q.filter(GameSlot.field_type == filters['field_type'])
+    if filters.get('team_id'): q = q.filter((home.id == filters['team_id']) | (away.id == filters['team_id']))
+    return q.order_by(Game.game_date, Game.kickoff_time).all()
+
+
+@router.get('/schedule-management/games', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+def schedule_management_games(date: date | None = None, division_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, host_location_id: uuid.UUID | None = None, field_type: str | None = None, team_id: uuid.UUID | None = None, db: Session = Depends(get_db)):
+    rows = _schedule_management_rows(db, {'date': date, 'division_id': division_id, 'organization_id': organization_id, 'host_location_id': host_location_id, 'field_type': field_type, 'team_id': team_id})
+    return {'items': [{
+        'id': str(g.id), 'date': g.game_date.isoformat(), 'time': g.kickoff_time.strftime('%H:%M:%S'), 'division_id': str(div.id), 'division_name': div.name,
+        'home_team_id': str(home.id), 'home_team_name': home.name, 'away_team_id': str(away.id), 'away_team_name': away.name,
+        'organization_id': str(org.id), 'organization_name': org.name, 'host_location_id': (str(host.id) if host else None), 'host_location_name': (host.name if host else None),
+        'field': (fi.field_name if fi else None), 'field_type': (slot.field_type if slot else None), 'status': status.code, 'slot_id': (str(slot.id) if slot else None), 'is_slot_active': (fi.is_active if fi else False),
+    } for g, slot, fi, host, home, away, div, org, status in rows]}
+
+@router.get('/schedule-management/conflicts', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+def schedule_management_conflicts(db: Session = Depends(get_db)):
+    rows = _schedule_management_rows(db)
+    conflicts=[]
+    team_time={}
+    field_time={}
+    matchup=set()
+    for g, slot, fi, host, home, away, div, org, status in rows:
+        key=(g.game_date,g.kickoff_time)
+        for t in [home,away]:
+            tk=(t.id,key)
+            if tk in team_time: conflicts.append({'type':'TEAM_OVERLAP','message':f'{t.name} scheduled multiple times at same date/time'})
+            team_time[tk]=g.id
+        if slot:
+            fk=(slot.field_instance_id,key)
+            if fk in field_time: conflicts.append({'type':'FIELD_DOUBLE_BOOKED','message':f'{fi.field_name} double-booked at same date/time'})
+            field_time[fk]=g.id
+            if slot.field_type != _required_field_type_for_division(div): conflicts.append({'type':'WRONG_FIELD_TYPE','message':f'{div.name} assigned wrong field type'})
+            if not fi.is_active: conflicts.append({'type':'INACTIVE_SLOT','message':f'Game on inactive slot {fi.field_name}'})
+        mk=(home.id,away.id,g.game_date)
+        if mk in matchup: conflicts.append({'type':'DUPLICATE_MATCHUP','message':f'Duplicate matchup {home.name} vs {away.name}'})
+        matchup.add(mk)
+        if not home.is_active or not away.is_active: conflicts.append({'type':'INACTIVE_TEAM','message':f'Game assigned to inactive team'})
+    return {'conflicts': conflicts}
+
+@router.patch('/schedule-management/games/{game_id}/move', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+def move_game_schedule(game_id: uuid.UUID, payload: dict, db: Session = Depends(get_db)):
+    game = db.query(Game).filter(Game.id == game_id).first()
+    if not game: raise HTTPException(404, 'Game not found')
+    new_slot = db.query(GameSlot).join(GameSlot.field_instance).filter(GameSlot.id == payload.get('generated_slot_id')).first()
+    if not new_slot or new_slot.status != 'OPEN': raise HTTPException(400, 'Selected slot must be OPEN')
+    division = db.query(Division).join(Team, Team.division_id == Division.id).filter(Team.id == game.home_team_id).first()
+    if new_slot.field_type != _required_field_type_for_division(division): raise HTTPException(400, 'Selected slot field type must match division requirement')
+    old_slot = db.query(GameSlot).filter(GameSlot.assigned_game_id == game.id).first()
+    if old_slot: old_slot.status = 'OPEN'; old_slot.assigned_game_id = None
+    new_slot.status = 'ASSIGNED'; new_slot.assigned_game_id = game.id
+    game.game_date = new_slot.slot_date; game.kickoff_time = new_slot.start_time
+    db.commit()
+    return {'ok': True}
+
+@router.patch('/schedule-management/games/{game_id}/unschedule', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+def unschedule_game(game_id: uuid.UUID, db: Session = Depends(get_db)):
+    game = db.query(Game).filter(Game.id == game_id).first()
+    if not game: raise HTTPException(404, 'Game not found')
+    slot = db.query(GameSlot).filter(GameSlot.assigned_game_id == game.id).first()
+    if slot: slot.status='OPEN'; slot.assigned_game_id=None
+    db.delete(game)
+    db.commit()
+    return {'ok': True}
+
+@router.get('/schedule-management/export.csv', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+def export_schedule_management_csv(date: date | None = None, division_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, host_location_id: uuid.UUID | None = None, field_type: str | None = None, team_id: uuid.UUID | None = None, db: Session = Depends(get_db)):
+    rows = _schedule_management_rows(db, {'date': date, 'division_id': division_id, 'organization_id': organization_id, 'host_location_id': host_location_id, 'field_type': field_type, 'team_id': team_id})
+    out = io.StringIO(); w=csv.writer(out); w.writerow(['Date','Time','Division','Home Team','Away Team','Host Location','Field','Status'])
+    for g, slot, fi, host, home, away, div, org, status in rows:
+        w.writerow([g.game_date.isoformat(), g.kickoff_time.strftime('%H:%M'), div.name, home.name, away.name, host.name if host else '', fi.field_name if fi else '', status.code])
+    return StreamingResponse(iter([out.getvalue()]), media_type='text/csv', headers={'Content-Disposition':'attachment; filename=schedule-management.csv'})
 @router.post('/games', response_model=GameSaveResponse, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def create_game(payload:GameCreate, db:Session=Depends(get_db)):
     validation=validate_game(db,payload); status=db.query(GameStatus).filter(GameStatus.id==payload.game_status_id).first()
