@@ -6,7 +6,9 @@ import { getToken } from '@/lib/auth';
 
 export default function ManualScheduleBuilderPage() {
   const token = getToken();
-  const [options, setOptions] = useState<any>({ divisions: [], teams: [], host_locations: [] });
+  const [options, setOptions] = useState<any>({ divisions: [], teams: [], host_locations: [], seasons: [], weeks: [] });
+  const [seasonId, setSeasonId] = useState('');
+  const [weekId, setWeekId] = useState('');
   const [divisionId, setDivisionId] = useState('');
   const [homeTeamId, setHomeTeamId] = useState('');
   const [awayTeamId, setAwayTeamId] = useState('');
@@ -18,7 +20,8 @@ export default function ManualScheduleBuilderPage() {
 
   const division = useMemo(() => options.divisions.find((d: any) => d.id === divisionId), [options, divisionId]);
   const divisionTeams = useMemo(() => options.teams.filter((t: any) => t.division_id === divisionId && t.is_active), [options, divisionId]);
-  const canSave = Boolean(homeTeamId && awayTeamId && slotId);
+  const seasonWeeks = useMemo(() => options.weeks.filter((w: any) => w.season_id === seasonId), [options, seasonId]);
+  const canSave = Boolean(seasonId && weekId && divisionId && homeTeamId && awayTeamId && slotId);
 
   const extractError = (e: unknown) => {
     if (e instanceof ApiError && e.details && typeof e.details === 'object') {
@@ -34,6 +37,8 @@ export default function ManualScheduleBuilderPage() {
   const load = async () => {
     const opts: any = await apiFetch('/manual-schedule-builder/options', {}, token);
     setOptions(opts);
+    const activeSeason = opts.seasons?.find((s: any) => s.is_active);
+    if (!seasonId && activeSeason?.id) setSeasonId(activeSeason.id);
     if (!divisionId && opts.divisions?.length) setDivisionId(opts.divisions[0].id);
     const scheduled: any = await apiFetch('/games?page_size=300', {}, token);
     setGames(scheduled.items || []);
@@ -56,7 +61,15 @@ export default function ManualScheduleBuilderPage() {
       {error ? <div className='rounded border border-red-200 bg-red-50 p-2 text-red-700'>{error}</div> : null}
       {success ? <div className='rounded border border-emerald-200 bg-emerald-50 p-2 text-emerald-700'>{success}</div> : null}
 
-      <div className='grid gap-2 md:grid-cols-4'>
+      <div className='grid gap-2 md:grid-cols-6'>
+        <select className='rounded border p-2' value={seasonId} onChange={(e) => { setSeasonId(e.target.value); setWeekId(''); }}>
+          <option value=''>Season</option>
+          {options.seasons.map((s: any) => <option key={s.id} value={s.id}>{s.name}</option>)}
+        </select>
+        <select className='rounded border p-2' value={weekId} onChange={(e) => setWeekId(e.target.value)}>
+          <option value=''>Week</option>
+          {seasonWeeks.map((w: any) => <option key={w.id} value={w.id}>Week {w.week_number}</option>)}
+        </select>
         <select className='rounded border p-2' value={divisionId} onChange={(e) => setDivisionId(e.target.value)}>
           <option value=''>Division</option>
           {options.divisions.map((d: any) => <option key={d.id} value={d.id}>{d.name}</option>)}
@@ -76,7 +89,7 @@ export default function ManualScheduleBuilderPage() {
             setError('');
             setSuccess('');
             try {
-              await apiFetch('/manual-schedule-builder/assign', { method: 'POST', body: JSON.stringify({ division_id: divisionId, home_team_id: homeTeamId, away_team_id: awayTeamId, generated_slot_id: slotId }) }, token);
+              await apiFetch('/manual-schedule-builder/assign', { method: 'POST', body: JSON.stringify({ season_id: seasonId, week_id: weekId, division_id: divisionId, home_team_id: homeTeamId, away_team_id: awayTeamId, generated_slot_id: slotId }) }, token);
               await load();
               setSlotId('');
               setSuccess('Game successfully scheduled.');

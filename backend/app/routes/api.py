@@ -1145,6 +1145,32 @@ def list_weeks(season_id:uuid.UUID|None=None, page:int=1,page_size:int=100, db:S
     q=q.order_by(Week.week_number)
     return PagedResponse(items=[{"id":x.id,"season_id":x.season_id,"week_number":x.week_number} for x in q.offset((page-1)*page_size).limit(page_size).all()], total=q.count(), page=page, page_size=page_size)
 
+@router.post('/seasons', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+def create_season(payload: dict, db: Session = Depends(get_db)):
+    season = Season(name=payload['name'], start_date=payload['start_date'], end_date=payload['end_date'], is_active=bool(payload.get('is_active', True)))
+    db.add(season); db.commit(); db.refresh(season)
+    return {"id": season.id, "name": season.name}
+
+@router.put('/seasons/{season_id}', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+def update_season(season_id: uuid.UUID, payload: dict, db: Session = Depends(get_db)):
+    season = db.query(Season).filter(Season.id == season_id).first()
+    if not season: raise HTTPException(404, 'Season not found')
+    season.name = payload.get('name', season.name); season.start_date = payload.get('start_date', season.start_date); season.end_date = payload.get('end_date', season.end_date); season.is_active = bool(payload.get('is_active', season.is_active))
+    db.commit(); db.refresh(season); return {"id": season.id, "name": season.name}
+
+@router.post('/weeks', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+def create_week(payload: dict, db: Session = Depends(get_db)):
+    week = Week(season_id=payload['season_id'], week_number=payload['week_number'], start_date=payload['start_date'], end_date=payload['end_date'])
+    db.add(week); db.commit(); db.refresh(week)
+    return {"id": week.id, "week_number": week.week_number, "season_id": week.season_id}
+
+@router.put('/weeks/{week_id}', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+def update_week(week_id: uuid.UUID, payload: dict, db: Session = Depends(get_db)):
+    week = db.query(Week).filter(Week.id == week_id).first()
+    if not week: raise HTTPException(404, 'Week not found')
+    week.season_id = payload.get('season_id', week.season_id); week.week_number = payload.get('week_number', week.week_number); week.start_date = payload.get('start_date', week.start_date); week.end_date = payload.get('end_date', week.end_date)
+    db.commit(); db.refresh(week); return {"id": week.id, "week_number": week.week_number, "season_id": week.season_id}
+
 def _to_game_read(g: Game) -> GameRead:
     return GameRead(id=g.id,created_at=g.created_at,updated_at=g.updated_at,season_id=g.season_id,week_id=g.week_id,division_id=g.home_team.division_id,home_team_id=g.home_team_id,away_team_id=g.away_team_id,field_id=g.field_id,game_status_id=g.game_status_id,game_date=g.game_date,kickoff_time=g.kickoff_time,status_code=g.status.code)
 
@@ -1166,20 +1192,28 @@ def manual_schedule_builder_options(db: Session = Depends(get_db)):
     divisions = db.query(Division).filter(Division.is_active.is_(True)).order_by(Division.sort_order, Division.name).all()
     teams = db.query(Team).filter(Team.is_active.is_(True)).order_by(Team.name).all()
     host_locations = db.query(HostLocation).filter(HostLocation.is_active.is_(True)).order_by(HostLocation.name).all()
+    seasons = db.query(Season).filter(Season.is_active.is_(True)).order_by(Season.start_date.desc()).all()
+    weeks = db.query(Week).order_by(Week.week_number).all()
     return {
         'divisions': [{'id': d.id, 'name': d.name, 'required_field_type': 'LARGE' if '53' in (d.required_field_layout_type or '') else 'SMALL'} for d in divisions],
         'teams': [{'id': t.id, 'name': t.name, 'division_id': t.division_id, 'is_active': t.is_active} for t in teams],
         'host_locations': [{'id': h.id, 'name': h.name} for h in host_locations],
+        'seasons': [{'id': s.id, 'name': s.name, 'start_date': s.start_date, 'end_date': s.end_date, 'is_active': s.is_active} for s in seasons],
+        'weeks': [{'id': w.id, 'season_id': w.season_id, 'week_number': w.week_number, 'start_date': w.start_date, 'end_date': w.end_date} for w in weeks],
     }
 
 
 
 @router.post('/manual-schedule-builder/assign', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def assign_generated_slot(payload: dict, db: Session = Depends(get_db)):
+    season_id = payload.get('season_id')
+    week_id = payload.get('week_id')
     division_id = payload.get('division_id')
     home_team_id = payload.get('home_team_id')
     away_team_id = payload.get('away_team_id')
     generated_slot_id = payload.get('generated_slot_id')
+    if not season_id or not week_id:
+        raise HTTPException(400, 'Please select a season and week before assigning a game.')
     if not home_team_id or not away_team_id:
         raise HTTPException(400, 'Home Team and Away Team are required')
     if home_team_id == away_team_id:
@@ -1215,15 +1249,17 @@ def assign_generated_slot(payload: dict, db: Session = Depends(get_db)):
     ).count()
     if duplicate:
         raise HTTPException(400, 'Exact duplicate matchup already exists for this date/time')
-    season = db.query(Season).filter(Season.is_active.is_(True)).order_by(Season.start_date.desc()).first()
-    week = db.query(Week).filter(Week.start_date <= slot.slot_date, Week.end_date >= slot.slot_date).order_by(Week.week_number).first()
+    season = db.query(Season).filter(Season.id == season_id).first()
+    week = db.query(Week).filter(Week.id == week_id, Week.season_id == season_id).first()
+    if not season or not week:
+        raise HTTPException(400, 'Please select a season and week before assigning a game.')
     status = db.query(GameStatus).filter(GameStatus.code == 'SCHEDULED').first()
     if not status:
         logger.error('Manual assignment blocked: missing required SCHEDULED game status.')
         raise HTTPException(400, 'Game status setup is incomplete. Please contact an administrator.')
     game = Game(
-        season_id=season.id if season else None,
-        week_id=week.id if week else None,
+        season_id=season.id,
+        week_id=week.id,
         home_team_id=home_team.id,
         away_team_id=away_team.id,
         field_id=None,

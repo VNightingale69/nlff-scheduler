@@ -1,4 +1,5 @@
 import logging
+from datetime import date, timedelta
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,7 +11,7 @@ from sqlalchemy.orm import Session
 from app.auth import ROLE_COMMUNITY_SCHEDULER, ROLE_LEAGUE_ADMIN
 from app.config import ADMIN_SEED_EMAIL, ADMIN_SEED_FULL_NAME, ADMIN_SEED_PASSWORD, CORS_ORIGINS
 from app.database import get_db
-from app.models import Role, User
+from app.models import Role, Season, User, Week
 from app.routes.api import ensure_league_defined_divisions, router as api_router
 from app.security import hash_password, validate_password_strength
 from app.services.game_statuses import seed_required_game_statuses
@@ -181,5 +182,31 @@ def seed_game_statuses() -> None:
     db = next(get_db())
     try:
         seed_required_game_statuses(db)
+    finally:
+        db.close()
+
+
+@app.on_event('startup')
+def seed_default_season_and_weeks() -> None:
+    db = next(get_db())
+    try:
+        existing = db.query(Season).count()
+        if existing:
+            return
+        season = Season(
+            name='2026 Fall Flag',
+            start_date=date(2026, 9, 6),
+            end_date=date(2026, 10, 25),
+            is_active=True,
+        )
+        db.add(season)
+        db.flush()
+        starts = [date(2026, 9, 6), date(2026, 9, 13), date(2026, 9, 20), date(2026, 9, 27), date(2026, 10, 4), date(2026, 10, 11), date(2026, 10, 18), date(2026, 10, 25)]
+        for idx, start in enumerate(starts, start=1):
+            db.add(Week(season_id=season.id, week_number=idx, start_date=start, end_date=start + timedelta(days=6)))
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        logger.exception('Season/week seed failed due to database error.')
     finally:
         db.close()
