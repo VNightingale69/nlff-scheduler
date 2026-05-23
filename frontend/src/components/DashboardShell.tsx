@@ -25,6 +25,7 @@ export default function DashboardShell({ children }: { children: React.ReactNode
     'generated-slots',
     'schedule-readiness',
     'manual-schedule-builder',
+    'schedule-management',
     'game-statuses',
     'games',
   ];
