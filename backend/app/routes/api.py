@@ -2058,7 +2058,15 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             layout_key,
         )
         proposed_field_usage_by_host_date_division_layout[proposed_usage_key] = proposed_field_usage_by_host_date_division_layout.get(proposed_usage_key, 0) + 1
-        remaining_slots = [s for s in remaining_slots if s.id != selected_field_slot.id]
+        field_time_occupied[(str(selected_field_slot.field_instance_id), selected_field_slot.slot_date, selected_field_slot.start_time)] = division.name
+        remaining_slots = [
+            s for s in remaining_slots
+            if not (
+                s.field_instance_id == selected_field_slot.field_instance_id
+                and s.slot_date == selected_field_slot.slot_date
+                and s.start_time == selected_field_slot.start_time
+            )
+        ]
     unused_team_ids = [str(tid) for tid in teams_by_id if tid not in used_team_ids]
     projected_counts = dict(week_team_game_counts)
     for plan in plans:
@@ -2232,6 +2240,21 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
             details.append(f'Time: {slot.start_time}')
         detail_suffix = f" ({', '.join(details)})" if details else ''
         return f'Skipped {home_name} vs {away_name} because that matchup is already scheduled in {week_text}.{detail_suffix}'
+
+    preview_field_time_duplicates: dict[tuple[str, str, str], int] = {}
+    for proposal in proposals:
+        slot_id = proposal.get('slot_id')
+        if not slot_id:
+            continue
+        slot = db.query(GameSlot).filter(GameSlot.id == slot_id).first()
+        if not slot or not slot.field_instance_id or not slot.slot_date or not slot.start_time:
+            continue
+        duplicate_key = (str(slot.field_instance_id), str(slot.slot_date), str(slot.start_time))
+        preview_field_time_duplicates[duplicate_key] = preview_field_time_duplicates.get(duplicate_key, 0) + 1
+    conflicting_preview_keys = [k for k, count in preview_field_time_duplicates.items() if count > 1]
+    if conflicting_preview_keys:
+        detail = '; '.join([f"field_instance_id={field_id}, date={slot_date}, time={slot_time}" for field_id, slot_date, slot_time in conflicting_preview_keys])
+        raise HTTPException(status_code=400, detail=f"Invalid preview batch: duplicate date/time/field assignments detected ({detail}).")
 
     for proposal in proposals:
         if existing_games_count + created_games >= max_games_for_division_week:

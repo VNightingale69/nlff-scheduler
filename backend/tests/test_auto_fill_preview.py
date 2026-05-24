@@ -276,6 +276,32 @@ class AutoFillPreviewTest(unittest.TestCase):
         self.assertEqual(result['proposed_game_count'], 0)
         self.assertTrue(any('occupied by existing K/1st game' in s['reason'] for s in result['skipped']))
 
+
+    def test_apply_rejects_preview_batch_with_duplicate_field_time(self):
+        duplicate_proposals = [
+            {
+                'slot_id': str(self.slot.id),
+                'home_team_id': str(self.wm.id),
+                'away_team_id': str(self.ab.id),
+            },
+            {
+                'slot_id': str(self.slot.id),
+                'home_team_id': str(self.wg.id),
+                'away_team_id': str(self.as_.id),
+            },
+        ]
+
+        with self.assertRaises(Exception) as ctx:
+            auto_fill_apply({
+                'season_id': self.season.id,
+                'week_id': self.week2.id,
+                'division_id': self.division.id,
+                'proposals': duplicate_proposals,
+            }, db=self.db)
+
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn('duplicate date/time/field assignments detected', str(ctx.exception.detail))
+
     def test_apply_rejects_slot_occupied_by_other_division_game(self):
         other_division = Division(id=uuid.uuid4(), name='K/1st', required_field_layout_type='THIRTY_YARD_WIDTH', is_active=True)
         other_team_home = Team(id=uuid.uuid4(), organization_id=self.org_w.id, division_id=other_division.id, name='Westosha K2', is_active=True)
