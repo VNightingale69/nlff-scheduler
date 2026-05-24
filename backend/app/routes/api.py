@@ -2371,9 +2371,3 @@ def delete_game(game_id: uuid.UUID, db: Session = Depends(get_db)):
     db.delete(obj)
     db.commit()
     return {'ok': True}
-                    if repeat_count == 0:
-                        score += 40
-                        reason_bits.append('unique matchup')
-                    else:
-                        score -= 50
-                        warning_bits.append('repeat opponent')
