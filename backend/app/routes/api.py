@@ -1926,7 +1926,11 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                     if candidate_host_id and any(p.get('host_location_id') == str(candidate_host_id) for p in plans):
                         score += 25
                         reason_bits.append('adjacent time-slot grouping at same location (+25)')
-                    if candidate_host_id and any(p.get('host_location_id') == str(candidate_host_id) and p.get('field') == (slot.field_instance.field_name if slot.field_instance else '') for p in plans):
+                    if candidate_host_id and any(
+                        p.get('host_location_id') == str(candidate_host_id)
+                        and p.get('field') == (selected_field_slot.field_instance.field_name if selected_field_slot.field_instance else '')
+                        for p in plans
+                    ):
                         score += 10
                         reason_bits.append('light adjacent-field grouping preference (+10)')
                     if is_odd_division and no_byes and selected_double_header_team_id:
@@ -1999,7 +2003,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             break
 
         best = max(valid_candidates, key=lambda c: c['score'])
-        slot = best['selected_field_slot']
+        selected_field_slot = best['selected_field_slot']
         if cross_candidates:
             same_community_rejected = any(c['same_community'] for c in filtered_candidates)
             if same_community_rejected:
@@ -2010,16 +2014,16 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         away_team = teams_by_id[best['away_team_id']]
         reason_bits = ['single game per team per selected week', *best['reason_bits'], *best['warning_bits']]
         plans.append({
-            'slot_id': str(slot.id),
+            'slot_id': str(selected_field_slot.id),
             'proposed_matchup': f'{home_team.name} vs {away_team.name}',
             'home_team_id': str(home_team.id),
             'away_team_id': str(away_team.id),
-            'proposed_date': str(slot.slot_date),
-            'proposed_start_time': str(slot.start_time),
-            'host_location': slot.host_location.name if slot.host_location else '',
-            'host_location_id': str(slot.host_location_id) if slot.host_location_id else None,
-            'field': slot.field_instance.field_name if slot.field_instance else '',
-            'field_instance_id': str(slot.field_instance_id) if slot.field_instance_id else None,
+            'proposed_date': str(selected_field_slot.slot_date),
+            'proposed_start_time': str(selected_field_slot.start_time),
+            'host_location': selected_field_slot.host_location.name if selected_field_slot.host_location else '',
+            'host_location_id': str(selected_field_slot.host_location_id) if selected_field_slot.host_location_id else None,
+            'field': selected_field_slot.field_instance.field_name if selected_field_slot.field_instance else '',
+            'field_instance_id': str(selected_field_slot.field_instance_id) if selected_field_slot.field_instance_id else None,
             'score': int(best['score']),
             'reason': '; '.join(reason_bits + ['deterministic field assignment: least-used compatible open field by host/date/division layout']),
             'warnings': best['warning_bits'],
@@ -2033,13 +2037,18 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         if not (is_odd_division and no_byes):
             used_team_ids.add(best['home_team_id'])
             used_team_ids.add(best['away_team_id'])
-        if slot.host_location_id:
-            used_host_ids.add(slot.host_location_id)
+        if selected_field_slot.host_location_id:
+            used_host_ids.add(selected_field_slot.host_location_id)
             if not preferred_host_id:
-                preferred_host_id = slot.host_location_id
-        proposed_usage_key = (str(slot.host_location_id), str(slot.slot_date), str(slot.field_instance_id), layout_key)
+                preferred_host_id = selected_field_slot.host_location_id
+        proposed_usage_key = (
+            str(selected_field_slot.host_location_id),
+            str(selected_field_slot.slot_date),
+            str(selected_field_slot.field_instance_id),
+            layout_key,
+        )
         proposed_field_usage_by_host_date_division_layout[proposed_usage_key] = proposed_field_usage_by_host_date_division_layout.get(proposed_usage_key, 0) + 1
-        remaining_slots = [s for s in remaining_slots if s.id != slot.id]
+        remaining_slots = [s for s in remaining_slots if s.id != selected_field_slot.id]
     unused_team_ids = [str(tid) for tid in teams_by_id if tid not in used_team_ids]
     projected_counts = dict(week_team_game_counts)
     for plan in plans:
