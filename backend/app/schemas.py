@@ -220,7 +220,10 @@ class SavedAvailabilityRange(BaseModel):
 
 class SavedAvailabilityEntry(BaseModel):
     available_date: date
+    organization_id: uuid.UUID | None = None
+    organization_name: str | None = None
     host_location_name: str
+    host_location_id: uuid.UUID | None = None
     site_type: str
     available_layout: str
     small_field_capacity: int
