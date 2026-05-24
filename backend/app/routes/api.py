@@ -1816,205 +1816,213 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             available_team_ids = [tid for tid in teams_by_id if tid not in used_team_ids]
         if len(available_team_ids) < 2:
             break
-        all_candidates = []
-        seen_host_time_keys: set[tuple[str, object, object]] = set()
         sorted_slots = sorted(remaining_slots, key=lambda s: (s.slot_date, s.start_time, str(s.host_location_id), str(s.id)))
-        earliest_open_time: tuple[object, object] | None = None
+        time_windows: list[tuple[object, object]] = []
+        seen_time_windows: set[tuple[object, object]] = set()
         for slot in sorted_slots:
-            if not slot.host_location_id:
+            window_key = (slot.slot_date, slot.start_time)
+            if window_key in seen_time_windows:
                 continue
-            if _first_compatible_open_slot_by_field_order(slot.host_location_id, slot.slot_date, slot.start_time):
-                earliest_open_time = (slot.slot_date, slot.start_time)
-                break
-        if earliest_open_time is None:
-            break
-        for slot in sorted_slots:
-            if (slot.slot_date, slot.start_time) != earliest_open_time:
-                continue
-            if not slot.host_location_id:
-                continue
-            host_time_key = (str(slot.host_location_id), slot.slot_date, slot.start_time)
-            if host_time_key in seen_host_time_keys:
-                continue
-            seen_host_time_keys.add(host_time_key)
-            selected_field_slot = _first_compatible_open_slot_by_field_order(slot.host_location_id, slot.slot_date, slot.start_time)
-            if not selected_field_slot:
-                skipped.append({
-                    'slot_id': str(slot.id),
-                    'reason': 'Rejected: no compatible open field remains at this host/date/time.',
-                })
-                continue
-            for i in range(len(available_team_ids)):
-                for j in range(i + 1, len(available_team_ids)):
-                    a = available_team_ids[i]
-                    b = available_team_ids[j]
-                    pair = tuple(sorted((a, b)))
-                    if pair in used_pairs:
-                        continue
-                    if (str(a), slot.slot_date, slot.start_time) in team_time_occupied or (str(b), slot.slot_date, slot.start_time) in team_time_occupied:
-                        skipped.append({
-                            'slot_id': str(slot.id),
-                            'reason': 'Rejected: team already scheduled at the same exact time.',
-                        })
-                        continue
-                    if no_simultaneous_games_same_host:
-                        host_time_key = (str(slot.host_location_id), slot.slot_date, slot.start_time)
-                        if host_time_key in host_time_occupied:
+            seen_time_windows.add(window_key)
+            time_windows.append(window_key)
+
+        valid_candidates = []
+        for target_time in time_windows:
+            all_candidates = []
+            seen_host_time_keys: set[tuple[str, object, object]] = set()
+            for slot in sorted_slots:
+                if (slot.slot_date, slot.start_time) != target_time:
+                    continue
+                if not slot.host_location_id:
+                    continue
+                host_time_key = (str(slot.host_location_id), slot.slot_date, slot.start_time)
+                if host_time_key in seen_host_time_keys:
+                    continue
+                seen_host_time_keys.add(host_time_key)
+                selected_field_slot = _first_compatible_open_slot_by_field_order(slot.host_location_id, slot.slot_date, slot.start_time)
+                if not selected_field_slot:
+                    skipped.append({
+                        'slot_id': str(slot.id),
+                        'reason': 'Rejected: no compatible open field remains at this host/date/time.',
+                    })
+                    continue
+                for i in range(len(available_team_ids)):
+                    for j in range(i + 1, len(available_team_ids)):
+                        a = available_team_ids[i]
+                        b = available_team_ids[j]
+                        pair = tuple(sorted((a, b)))
+                        if pair in used_pairs:
+                            continue
+                        if (str(a), slot.slot_date, slot.start_time) in team_time_occupied or (str(b), slot.slot_date, slot.start_time) in team_time_occupied:
                             skipped.append({
                                 'slot_id': str(slot.id),
-                                'reason': f"Rejected: time slot already occupied by existing {host_time_occupied[host_time_key]} game.",
+                                'reason': 'Rejected: team already scheduled at the same exact time.',
                             })
                             continue
-                    team_a = teams_by_id[a]
-                    team_b = teams_by_id[b]
-                    host_org_id = slot.host_location.organization_id if slot.host_location else None
-                    same_community = bool(team_a.organization_id and team_a.organization_id == team_b.organization_id)
-                    hosted_by_own_community = bool(same_community and host_org_id and host_org_id == team_a.organization_id)
-                    host_pref = bool(host_org_id and host_org_id in {team_a.organization_id, team_b.organization_id})
-                    repeat_count = matchup_counts.get(pair, 0)
-                    community_pair = tuple(sorted((team_a.organization_id, team_b.organization_id))) if team_a.organization_id and team_b.organization_id else None
-                    prior_week_team_repeat = pair in prior_week_team_pairs
-                    prior_week_community_repeat = bool(community_pair and community_pair in prior_week_community_pairs)
-                    community_repeat_count = community_matchup_counts.get(community_pair, 0) if community_pair else 0
-
-                    score = 0
-                    reason_bits = []
-                    warning_bits = []
-                    candidate_host_id = slot.host_location_id
-                    if repeat_count == 0:
-                        score += 120
-                        reason_bits.append('new opponent pairing (+120)')
-                    else:
-                        repeat_penalty = 150 * repeat_count
-                        score -= repeat_penalty
-                        warning_bits.append(f'repeat opponent pairing (-{repeat_penalty})')
-                        if same_community:
-                            score -= 50
-                            warning_bits.append('repeat same-community opponent (-50)')
-
-                    if not same_community:
-                        score += 40
-                        reason_bits.append('cross-community opponent (+40)')
-                    else:
-                        cross_options_for_a = cross_community_opponents_by_team.get(a, set())
-                        cross_options_for_b = cross_community_opponents_by_team.get(b, set())
-                        unused_cross_for_a = any(matchup_counts.get(tuple(sorted((a, opponent))), 0) == 0 for opponent in cross_options_for_a)
-                        unused_cross_for_b = any(matchup_counts.get(tuple(sorted((b, opponent))), 0) == 0 for opponent in cross_options_for_b)
-                        same_community_penalty_allowed = unused_cross_for_a or unused_cross_for_b
-                        if repeat_count == 0 and same_community_penalty_allowed and not same_community_operationally_reasonable:
-                            score -= 25
-                            warning_bits.append('first-time same-community opponent while unused cross-community options exist (-25)')
-                        elif repeat_count == 0:
-                            reason_bits.append('Same-community matchup allowed because cross-community options are insufficient')
-
-                    if repeat_count > 0 and not same_community:
-                        warning_bits.append('Repeat avoided because first-time opponent was available' if any(matchup_counts.get(tuple(sorted((a, oid))),0)==0 for oid in teams_by_id if oid!=a) or any(matchup_counts.get(tuple(sorted((b, oid))),0)==0 for oid in teams_by_id if oid!=b) else 'repeat matchup selected because unique options were exhausted')
-                    if same_community_operationally_reasonable:
-                        reason_bits.append('Opponent diversity prioritized because division has limited unique opponents')
-                    if hosted_by_own_community:
-                        score += 60
-                        reason_bits.append('same-community at home host field (+60)')
-                    if host_pref:
-                        score += 40
-                        reason_bits.append('reduced travel via host alignment (+40)')
-                    serialization_required = centralization_requested or staffing_limited
-                    if preferred_host_id and candidate_host_id == preferred_host_id:
-                        consolidation_bonus = consolidation_weight if serialization_required else max(1, consolidation_weight // 2)
-                        score += consolidation_bonus
-                        reason_bits.append(f'host-location consolidation (+{consolidation_bonus})')
-                    elif preferred_host_id and candidate_host_id != preferred_host_id and preferred_host_id in slots_by_host:
-                        preferred_open_slots = [s for s in remaining_slots if s.host_location_id == preferred_host_id]
-                        if preferred_open_slots and serialization_required:
-                            score -= consolidation_weight
-                            warning_bits.append(f'second host used while primary host still has compatible slots (-{consolidation_weight})')
-                    if single_site_possible and primary_host_id and candidate_host_id == primary_host_id and serialization_required:
-                        score += completion_weight
-                        reason_bits.append(f'single-site completion path (+{completion_weight})')
-                    if single_site_possible and primary_host_id and candidate_host_id != primary_host_id and serialization_required:
-                        score -= completion_weight
-                        warning_bits.append(f'avoidable multi-site fragmentation (-{completion_weight})')
-                    if candidate_host_id and any(p.get('host_location_id') == str(candidate_host_id) for p in plans):
-                        score += 25
-                        reason_bits.append('adjacent time-slot grouping at same location (+25)')
-                    if candidate_host_id and any(
-                        p.get('host_location_id') == str(candidate_host_id)
-                        and p.get('field') == (selected_field_slot.field_instance.field_name if selected_field_slot.field_instance else '')
-                        for p in plans
-                    ):
-                        score += 10
-                        reason_bits.append('light adjacent-field grouping preference (+10)')
-                    if is_odd_division and no_byes and selected_double_header_team_id:
-                        includes_dh = selected_double_header_team_id in {a, b}
-                        if week_team_game_counts.get(selected_double_header_team_id, 0) == 0 and not includes_dh:
-                            score -= 200
-                        if includes_dh:
-                            if double_header_counts.get(selected_double_header_team_id, 0) == 0:
-                                score += 75
-                                reason_bits.append('first double-header for selected team (+75)')
-                            else:
+                        if no_simultaneous_games_same_host:
+                            host_time_key = (str(slot.host_location_id), slot.slot_date, slot.start_time)
+                            if host_time_key in host_time_occupied:
+                                skipped.append({
+                                    'slot_id': str(slot.id),
+                                    'reason': f"Rejected: time slot already occupied by existing {host_time_occupied[host_time_key]} game.",
+                                })
+                                continue
+                        team_a = teams_by_id[a]
+                        team_b = teams_by_id[b]
+                        host_org_id = slot.host_location.organization_id if slot.host_location else None
+                        same_community = bool(team_a.organization_id and team_a.organization_id == team_b.organization_id)
+                        hosted_by_own_community = bool(same_community and host_org_id and host_org_id == team_a.organization_id)
+                        host_pref = bool(host_org_id and host_org_id in {team_a.organization_id, team_b.organization_id})
+                        repeat_count = matchup_counts.get(pair, 0)
+                        community_pair = tuple(sorted((team_a.organization_id, team_b.organization_id))) if team_a.organization_id and team_b.organization_id else None
+                        prior_week_team_repeat = pair in prior_week_team_pairs
+                        prior_week_community_repeat = bool(community_pair and community_pair in prior_week_community_pairs)
+                        community_repeat_count = community_matchup_counts.get(community_pair, 0) if community_pair else 0
+    
+                        score = 0
+                        reason_bits = []
+                        warning_bits = []
+                        candidate_host_id = slot.host_location_id
+                        if repeat_count == 0:
+                            score += 120
+                            reason_bits.append('new opponent pairing (+120)')
+                        else:
+                            repeat_penalty = 150 * repeat_count
+                            score -= repeat_penalty
+                            warning_bits.append(f'repeat opponent pairing (-{repeat_penalty})')
+                            if same_community:
+                                score -= 50
+                                warning_bits.append('repeat same-community opponent (-50)')
+    
+                        if not same_community:
+                            score += 40
+                            reason_bits.append('cross-community opponent (+40)')
+                        else:
+                            cross_options_for_a = cross_community_opponents_by_team.get(a, set())
+                            cross_options_for_b = cross_community_opponents_by_team.get(b, set())
+                            unused_cross_for_a = any(matchup_counts.get(tuple(sorted((a, opponent))), 0) == 0 for opponent in cross_options_for_a)
+                            unused_cross_for_b = any(matchup_counts.get(tuple(sorted((b, opponent))), 0) == 0 for opponent in cross_options_for_b)
+                            same_community_penalty_allowed = unused_cross_for_a or unused_cross_for_b
+                            if repeat_count == 0 and same_community_penalty_allowed and not same_community_operationally_reasonable:
+                                score -= 25
+                                warning_bits.append('first-time same-community opponent while unused cross-community options exist (-25)')
+                            elif repeat_count == 0:
+                                reason_bits.append('Same-community matchup allowed because cross-community options are insufficient')
+    
+                        if repeat_count > 0 and not same_community:
+                            warning_bits.append('Repeat avoided because first-time opponent was available' if any(matchup_counts.get(tuple(sorted((a, oid))),0)==0 for oid in teams_by_id if oid!=a) or any(matchup_counts.get(tuple(sorted((b, oid))),0)==0 for oid in teams_by_id if oid!=b) else 'repeat matchup selected because unique options were exhausted')
+                        if same_community_operationally_reasonable:
+                            reason_bits.append('Opponent diversity prioritized because division has limited unique opponents')
+                        if hosted_by_own_community:
+                            score += 60
+                            reason_bits.append('same-community at home host field (+60)')
+                        if host_pref:
+                            score += 40
+                            reason_bits.append('reduced travel via host alignment (+40)')
+                        serialization_required = centralization_requested or staffing_limited
+                        if preferred_host_id and candidate_host_id == preferred_host_id:
+                            consolidation_bonus = consolidation_weight if serialization_required else max(1, consolidation_weight // 2)
+                            score += consolidation_bonus
+                            reason_bits.append(f'host-location consolidation (+{consolidation_bonus})')
+                        elif preferred_host_id and candidate_host_id != preferred_host_id and preferred_host_id in slots_by_host:
+                            preferred_open_slots = [s for s in remaining_slots if s.host_location_id == preferred_host_id]
+                            if preferred_open_slots and serialization_required:
+                                score -= consolidation_weight
+                                warning_bits.append(f'second host used while primary host still has compatible slots (-{consolidation_weight})')
+                        if single_site_possible and primary_host_id and candidate_host_id == primary_host_id and serialization_required:
+                            score += completion_weight
+                            reason_bits.append(f'single-site completion path (+{completion_weight})')
+                        if single_site_possible and primary_host_id and candidate_host_id != primary_host_id and serialization_required:
+                            score -= completion_weight
+                            warning_bits.append(f'avoidable multi-site fragmentation (-{completion_weight})')
+                        if candidate_host_id and any(p.get('host_location_id') == str(candidate_host_id) for p in plans):
+                            score += 25
+                            reason_bits.append('adjacent time-slot grouping at same location (+25)')
+                        if candidate_host_id and any(
+                            p.get('host_location_id') == str(candidate_host_id)
+                            and p.get('field') == (selected_field_slot.field_instance.field_name if selected_field_slot.field_instance else '')
+                            for p in plans
+                        ):
+                            score += 10
+                            reason_bits.append('light adjacent-field grouping preference (+10)')
+                        if is_odd_division and no_byes and selected_double_header_team_id:
+                            includes_dh = selected_double_header_team_id in {a, b}
+                            if week_team_game_counts.get(selected_double_header_team_id, 0) == 0 and not includes_dh:
                                 score -= 200
-                                warning_bits.append('second double-header before full rotation (-200)')
-                    if prior_week_team_repeat:
-                        score -= 75
-                        warning_bits.append('Warning: same matchup occurred last week')
-                    else:
-                        reason_bits.append('Avoids prior-week team repeat')
-                    if prior_week_community_repeat:
-                        score -= 35
-                        warning_bits.append('Warning: same community pairing occurred last week')
-                    else:
-                        reason_bits.append('Avoids prior-week community repeat')
-                    if community_repeat_count > 0:
-                        score -= 20
+                            if includes_dh:
+                                if double_header_counts.get(selected_double_header_team_id, 0) == 0:
+                                    score += 75
+                                    reason_bits.append('first double-header for selected team (+75)')
+                                else:
+                                    score -= 200
+                                    warning_bits.append('second double-header before full rotation (-200)')
+                        if prior_week_team_repeat:
+                            score -= 75
+                            warning_bits.append('Warning: same matchup occurred last week')
+                        else:
+                            reason_bits.append('Avoids prior-week team repeat')
+                        if prior_week_community_repeat:
+                            score -= 35
+                            warning_bits.append('Warning: same community pairing occurred last week')
+                        else:
+                            reason_bits.append('Avoids prior-week community repeat')
+                        if community_repeat_count > 0:
+                            score -= 20
+    
+                        double_header_back_to_back = False
+                        if is_odd_division and no_byes and selected_double_header_team_id and selected_double_header_team_id in {a, b}:
+                            prior_slots = [p for p in plans if p.get('home_team_id') == str(selected_double_header_team_id) or p.get('away_team_id') == str(selected_double_header_team_id)]
+                            if prior_slots:
+                                prev_start = prior_slots[0].get('proposed_start_time')
+                                if prev_start and str(prev_start) != str(slot.start_time):
+                                    try:
+                                        prev_hour = int(str(prev_start).split(':')[0])
+                                        cur_hour = int(str(slot.start_time).split(':')[0])
+                                        if abs(cur_hour - prev_hour) == 1:
+                                            score += 100
+                                            reason_bits.append('double-header back-to-back (+100)')
+                                            double_header_back_to_back = True
+                                        else:
+                                            score -= 150
+                                            warning_bits.append('double-header separated by gap (-150)')
+                                    except Exception:
+                                        pass
+    
+                        all_candidates.append({
+                            'slot': slot,
+                            'selected_field_slot': selected_field_slot,
+                            'home_team_id': a,
+                            'away_team_id': b,
+                            'pair': pair,
+                            'score': score,
+                            'same_community': same_community,
+                            'hosted_by_own_community': hosted_by_own_community,
+                            'reason_bits': reason_bits,
+                            'warning_bits': warning_bits,
+                            'prior_week_team_repeat': prior_week_team_repeat,
+                            'double_header_back_to_back': double_header_back_to_back,
+                        })
 
-                    double_header_back_to_back = False
-                    if is_odd_division and no_byes and selected_double_header_team_id and selected_double_header_team_id in {a, b}:
-                        prior_slots = [p for p in plans if p.get('home_team_id') == str(selected_double_header_team_id) or p.get('away_team_id') == str(selected_double_header_team_id)]
-                        if prior_slots:
-                            prev_start = prior_slots[0].get('proposed_start_time')
-                            if prev_start and str(prev_start) != str(slot.start_time):
-                                try:
-                                    prev_hour = int(str(prev_start).split(':')[0])
-                                    cur_hour = int(str(slot.start_time).split(':')[0])
-                                    if abs(cur_hour - prev_hour) == 1:
-                                        score += 100
-                                        reason_bits.append('double-header back-to-back (+100)')
-                                        double_header_back_to_back = True
-                                    else:
-                                        score -= 150
-                                        warning_bits.append('double-header separated by gap (-150)')
-                                except Exception:
-                                    pass
+            home_same_community_pairs = {c['pair'] for c in all_candidates if c['same_community'] and c['hosted_by_own_community']}
+            filtered_candidates = [
+                c for c in all_candidates
+                if not (c['same_community'] and not c['hosted_by_own_community'] and c['pair'] in home_same_community_pairs)
+            ]
+            cross_candidates = [c for c in filtered_candidates if not c['same_community']]
+            candidate_pool = cross_candidates if cross_candidates else filtered_candidates
 
-                    all_candidates.append({
-                        'slot': slot,
-                        'selected_field_slot': selected_field_slot,
-                        'home_team_id': a,
-                        'away_team_id': b,
-                        'pair': pair,
-                        'score': score,
-                        'same_community': same_community,
-                        'hosted_by_own_community': hosted_by_own_community,
-                        'reason_bits': reason_bits,
-                        'warning_bits': warning_bits,
-                        'prior_week_team_repeat': prior_week_team_repeat,
-                        'double_header_back_to_back': double_header_back_to_back,
-                    })
-
-        home_same_community_pairs = {c['pair'] for c in all_candidates if c['same_community'] and c['hosted_by_own_community']}
-        filtered_candidates = [
-            c for c in all_candidates
-            if not (c['same_community'] and not c['hosted_by_own_community'] and c['pair'] in home_same_community_pairs)
-        ]
-        cross_candidates = [c for c in filtered_candidates if not c['same_community']]
-        valid_candidates = cross_candidates if cross_candidates else filtered_candidates
+            if candidate_pool:
+                for candidate in candidate_pool:
+                    candidate['is_cross_candidate'] = candidate in cross_candidates
+                valid_candidates = candidate_pool
+                break
 
         if not valid_candidates:
             break
 
         best = max(valid_candidates, key=lambda c: c['score'])
         selected_field_slot = best['selected_field_slot']
-        if cross_candidates:
+        if best.get('is_cross_candidate'):
             same_community_rejected = any(c['same_community'] for c in filtered_candidates)
             if same_community_rejected:
                 best['reason_bits'].append('Same-community matchup avoided because cross-community option exists')
