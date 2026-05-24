@@ -33,6 +33,14 @@ const displayHour = (hour: number) => {
 const formatDateLabel = (date: string) => new Date(`${date}T00:00:00`).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
 
 const layoutLabel = (layout: string) => (layout === '2x53' ? 'Two Large Fields' : layout === '1x53_plus_2x30' ? 'One Large Field + Two Small Fields' : layout === '3x30' ? 'Three Small Fields' : 'Custom Layout');
+const weekForDate = (date: string) => HOSTING_DATES.findIndex((d) => d.date === date) + 1;
+
+const STATUS_BADGE: Record<string, string> = {
+  Hosting: 'bg-emerald-100 text-emerald-800',
+  Away: 'bg-slate-100 text-slate-700',
+  Partial: 'bg-amber-100 text-amber-800',
+  Missing: 'bg-rose-100 text-rose-800',
+};
 
 export default function HostingAvailabilityManager() {
   const [message, setMessage] = useState('');
@@ -132,20 +140,20 @@ export default function HostingAvailabilityManager() {
   };
 
   const loadSavedAvailability = async () => {
-    if (!hostId) {
-      setSavedAvailability([]);
-      return;
-    }
     const params = new URLSearchParams();
     if (orgId) params.set('organization_id', orgId);
-    params.set('host_location_id', hostId);
+    if (hostId) params.set('host_location_id', hostId);
     if (savedDateFilter) params.set('available_date', savedDateFilter);
     if (savedSiteTypeFilter) params.set('site_type', savedSiteTypeFilter);
     if (savedLayoutFilter) params.set('layout', savedLayoutFilter);
     const data = await apiFetch(`/hosting-availabilities/saved?${params.toString()}`, {}, token);
     setSavedAvailability(data.items || []);
-    const slots = await apiFetch(`/hosting-availabilities/generated-slots?${params.toString()}`, {}, token);
-    setGeneratedSlots(slots || []);
+    if (hostId) {
+      const slots = await apiFetch(`/hosting-availabilities/generated-slots?${params.toString()}`, {}, token);
+      setGeneratedSlots(slots || []);
+    } else {
+      setGeneratedSlots([]);
+    }
   };
 
   useEffect(() => {
@@ -219,6 +227,80 @@ export default function HostingAvailabilityManager() {
     }
   };
 
+  const summaryRows = useMemo(() => {
+    const rows = savedAvailability.map((entry: any) => {
+      const week = weekForDate(entry.available_date);
+      const starts = (entry.time_ranges || []).map((r: any) => Number(r.start_time.slice(0, 2)));
+      const ends = (entry.time_ranges || []).map((r: any) => Number(r.end_time.slice(0, 2)));
+      const firstStart = starts.length ? Math.min(...starts) : 99;
+      const lastEnd = ends.length ? Math.max(...ends) : 0;
+      const warnings: string[] = [];
+      if ((entry.small_field_capacity || 0) < 2) warnings.push('Insufficient field capacity');
+      if ((entry.large_field_capacity || 0) < 1) warnings.push('No large field available');
+      if ((entry.time_ranges || []).length < 3) warnings.push('Incomplete hosting setup');
+      if (lastEnd > 0 && lastEnd < 14) warnings.push('Game-day coverage ending too early');
+      const hasOverlap = (entry.time_ranges || []).some((r: any, i: number, arr: any[]) => {
+        const start = Number(r.start_time.slice(0, 2));
+        return arr.some((x: any, j: number) => j !== i && start >= Number(x.start_time.slice(0, 2)) && start < Number(x.end_time.slice(0, 2)));
+      });
+      if (hasOverlap) warnings.push('Overlapping slot conflicts');
+      return {
+        ...entry,
+        week,
+        firstStart,
+        lastEnd,
+        readiness: warnings.length ? 'Partial' : 'Hosting',
+        warnings,
+      };
+    });
+    return rows.sort((a: any, b: any) => (a.week - b.week) || (a.firstStart - b.firstStart) || String(a.organization_name || '').localeCompare(String(b.organization_name || '')));
+  }, [savedAvailability]);
+
+  const dashboardMetrics = useMemo(() => {
+    const weeks = new Set(summaryRows.map((r: any) => r.week));
+    const weeksMissingHosts = HOSTING_DATES.map((d) => weekForDate(d.date)).filter((w) => w > 0 && !weeks.has(w));
+    const weeksMissingLarge = HOSTING_DATES.map((d) => weekForDate(d.date)).filter((w) => w > 0 && !summaryRows.some((r: any) => r.week === w && (r.large_field_capacity || 0) > 0));
+    return {
+      totalHostDates: summaryRows.length,
+      totalCommunitiesHosting: new Set(summaryRows.map((r: any) => r.organization_name || r.host_location_name)).size,
+      totalSmallFields: summaryRows.reduce((sum: number, r: any) => sum + (r.small_field_capacity || 0), 0),
+      totalLargeFields: summaryRows.reduce((sum: number, r: any) => sum + (r.large_field_capacity || 0), 0),
+      weeksMissingHosts,
+      weeksMissingLarge,
+    };
+  }, [summaryRows]);
+
+  const weeklyMatrix = useMemo(() => {
+    const communities = Array.from(new Set(hosts.map((h: any) => h.organization_name || h.organization_id))).filter(Boolean);
+    return communities.map((community: any) => {
+      const byWeek: Record<number, string> = {};
+      HOSTING_DATES.forEach((d) => {
+        const w = weekForDate(d.date);
+        const rows = summaryRows.filter((r: any) => (r.organization_name || r.organization_id) === community && r.available_date === d.date);
+        if (!rows.length) byWeek[w] = 'Missing';
+        else if (rows.every((r: any) => r.readiness === 'Hosting')) byWeek[w] = 'Hosting';
+        else byWeek[w] = 'Partial';
+      });
+      if (Object.values(byWeek).every((v) => v === 'Missing')) {
+        HOSTING_DATES.forEach((d) => { byWeek[weekForDate(d.date)] = 'Away'; });
+      }
+      return { community, byWeek };
+    });
+  }, [hosts, summaryRows]);
+
+  const readinessChecks = useMemo(() => {
+    const projectedSmallGames = 12;
+    const projectedLargeGames = 9;
+    const projectedTotalSlots = 40;
+    const totalSlots = summaryRows.reduce((sum: number, row: any) => sum + (row.time_ranges || []).reduce((n: number, r: any) => n + (Number(r.end_time.slice(0, 2)) - Number(r.start_time.slice(0, 2))), 0), 0);
+    return {
+      smallReady: dashboardMetrics.totalSmallFields >= projectedSmallGames,
+      largeReady: dashboardMetrics.totalLargeFields >= projectedLargeGames,
+      slotReady: totalSlots >= projectedTotalSlots,
+      totalSlots,
+    };
+  }, [dashboardMetrics, summaryRows]);
+
   return (
     <div className='space-y-4'>
       <Toast message={message} type={type} />
@@ -243,6 +325,52 @@ export default function HostingAvailabilityManager() {
           ))}
         </select>
       </section>
+
+      {!orgId ? (
+        <section className='space-y-4 rounded border p-4'>
+          <h2 className='font-semibold'>League-wide Hosting Operations Dashboard</h2>
+          <div className='grid gap-2 md:grid-cols-3'>
+            <div className='rounded border bg-slate-50 p-3 text-sm'>Total host dates: <strong>{dashboardMetrics.totalHostDates}</strong></div>
+            <div className='rounded border bg-slate-50 p-3 text-sm'>Total communities hosting: <strong>{dashboardMetrics.totalCommunitiesHosting}</strong></div>
+            <div className='rounded border bg-slate-50 p-3 text-sm'>Total small fields: <strong>{dashboardMetrics.totalSmallFields}</strong></div>
+            <div className='rounded border bg-slate-50 p-3 text-sm'>Total large fields: <strong>{dashboardMetrics.totalLargeFields}</strong></div>
+            <div className='rounded border bg-rose-50 p-3 text-sm'>Weeks missing hosts: <strong>{dashboardMetrics.weeksMissingHosts.join(', ') || 'None'}</strong></div>
+            <div className='rounded border bg-rose-50 p-3 text-sm'>Weeks missing large fields: <strong>{dashboardMetrics.weeksMissingLarge.join(', ') || 'None'}</strong></div>
+          </div>
+          <div className='rounded border p-3 text-sm'>
+            <div className='font-medium'>Scheduling readiness checks</div>
+            <ul className='mt-2 list-disc pl-5'>
+              <li>Small fields (K/1st–4th/5th): {readinessChecks.smallReady ? '✅ Ready' : '⚠️ Not enough capacity'}</li>
+              <li>Large fields (6th/7th, 8th, Girls 6th/7th/8th): {readinessChecks.largeReady ? '✅ Ready' : '⚠️ Not enough capacity'}</li>
+              <li>Total projected slots support: {readinessChecks.slotReady ? `✅ Ready (${readinessChecks.totalSlots} slots)` : `⚠️ Not enough slots (${readinessChecks.totalSlots})`}</li>
+            </ul>
+          </div>
+          <div className='overflow-auto'>
+            <h3 className='mb-2 font-medium'>Hosting summary (week/date/community/site)</h3>
+            <table className='min-w-full text-sm'>
+              <thead><tr className='border-b text-left'><th className='p-2'>Week</th><th className='p-2'>Date</th><th className='p-2'>Community</th><th className='p-2'>Host location</th><th className='p-2'>Small fields</th><th className='p-2'>Large fields</th><th className='p-2'>First slot</th><th className='p-2'>Last slot</th><th className='p-2'>Readiness</th><th className='p-2'>Validation indicators</th></tr></thead>
+              <tbody>
+                {summaryRows.map((row: any, i: number) => (
+                  <tr key={`${row.available_date}-${row.host_location_name}-${i}`} className='border-b'>
+                    <td className='p-2'>Week {row.week}</td><td className='p-2'>{formatDateLabel(row.available_date)}</td><td className='p-2'>{row.organization_name || '—'}</td><td className='p-2'>{row.host_location_name}</td><td className='p-2'>{row.small_field_capacity || 0}</td><td className='p-2'>{row.large_field_capacity || 0}</td><td className='p-2'>{row.firstStart === 99 ? '—' : displayHour(row.firstStart)}</td><td className='p-2'>{row.lastEnd === 0 ? '—' : displayHour(row.lastEnd)}</td><td className='p-2'>{row.readiness}</td><td className='p-2'>{row.warnings.length ? row.warnings.join(', ') : 'None'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className='overflow-auto'>
+            <h3 className='mb-2 font-medium'>Weekly hosting matrix</h3>
+            <table className='min-w-full text-sm'>
+              <thead><tr className='border-b text-left'><th className='p-2'>Community</th>{HOSTING_DATES.map((d) => <th key={d.date} className='p-2'>W{weekForDate(d.date)}</th>)}</tr></thead>
+              <tbody>
+                {weeklyMatrix.map((row: any) => (
+                  <tr key={row.community} className='border-b'><td className='p-2 font-medium'>{row.community}</td>{HOSTING_DATES.map((d) => { const status = row.byWeek[weekForDate(d.date)] || 'Missing'; return <td key={d.date} className='p-2'><span className={`rounded px-2 py-1 text-xs ${STATUS_BADGE[status]}`}>{status}</span></td>; })}</tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ) : null}
 
       <section className='rounded border p-4'>
         <h2 className='mb-2 font-semibold'>3. Hosting Site Setup</h2>
