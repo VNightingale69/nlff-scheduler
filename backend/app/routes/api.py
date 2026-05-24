@@ -1569,8 +1569,46 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     week = db.query(Week).filter(Week.id == week_id, Week.season_id == season_id).first()
     if not division or not week:
         raise HTTPException(404, 'Selected season/week/division is invalid')
+    division_group_key = (division.division_group or '').strip().upper()
+    division_name_key = (division.name or '').strip().upper()
+    selected_division_key = f'{division_group_key}_{division_name_key}' if division_group_key and division_name_key else ''
+    supported_girls_division_keys = {
+        'GIRLS_K/1ST',
+        'GIRLS_2ND/3RD',
+        'GIRLS_4TH/5TH',
+        'GIRLS_6TH/7TH/8TH',
+    }
     required_field_type = _required_field_type_for_division(division)
     teams = db.query(Team).filter(Team.division_id == division_id, Team.is_active.is_(True)).order_by(Team.name).all()
+    if division_group_key == 'GIRLS' and selected_division_key not in supported_girls_division_keys:
+        logger.warning(
+            'auto_fill_preview selected unexpected girls division key division_id=%s division_key=%s',
+            division_id,
+            selected_division_key,
+        )
+    if not teams:
+        logger.info(
+            'auto_fill_preview division_id=%s division_key=%s active_teams=%s eligible_pairings=%s compatible_slots=%s',
+            division_id,
+            selected_division_key,
+            0,
+            0,
+            0,
+        )
+        return {
+            'proposals': [],
+            'skipped': [{'reason': 'No active teams found for this division.'}],
+            'proposed_game_count': 0,
+            'max_allowed_game_count': 0,
+            'existing_game_count': 0,
+            'unused_team_ids': [],
+            'unused_teams': [],
+            'selected_division_id': str(division_id),
+            'selected_division_key': selected_division_key,
+            'active_teams_found': 0,
+            'eligible_pairings_generated': 0,
+            'compatible_slots_found': 0,
+        }
     teams_by_id = {t.id: t for t in teams}
     no_byes = bool(payload.get('no_byes', True))
     team_count = len(teams)
@@ -1601,6 +1639,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         GameSlot.field_type == required_field_type,
         GameSlot.assigned_game_id.is_(None),
     ).order_by(GameSlot.slot_date, GameSlot.start_time).all()
+    compatible_slots_found = len(open_slots)
     assigned_games = db.query(Game).join(GameSlot, GameSlot.assigned_game_id == Game.id).filter(
         Game.game_date == week.start_date
     ).all()
@@ -2120,6 +2159,16 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     } for tid in teams_by_id]
     duplicate_matchups = [p['proposed_matchup'] for p in plans if matchup_counts.get(tuple(sorted((uuid.UUID(p['home_team_id']), uuid.UUID(p['away_team_id'])))), 0) > 0]
     double_header_teams = [row['team_name'] for row in per_team_games if row['games_in_week'] > 1]
+    if len(plans) == 0 and len(teams) > 1:
+        _add_skipped('No eligible matchups available for this division/week.')
+    logger.info(
+        'auto_fill_preview division_id=%s division_key=%s active_teams=%s eligible_pairings=%s compatible_slots=%s',
+        division_id,
+        selected_division_key,
+        len(teams),
+        len(plans),
+        compatible_slots_found,
+    )
     return {
         'proposals': plans,
         'skipped': skipped,
@@ -2138,6 +2187,11 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'single_site_possible': single_site_possible,
             'centralization_requested': centralization_requested,
             'staffing_limited': staffing_limited,
+            'selected_division_id': str(division_id),
+            'selected_division_key': selected_division_key,
+            'active_teams_found': len(teams),
+            'eligible_pairings_generated': len(plans),
+            'compatible_slots_found': compatible_slots_found,
         'field_balancing': {
             'min_concurrent_games_before_balancing': min_concurrent_games_for_balancing,
             'max_consecutive_games_same_field': max_consecutive_games_same_field,
