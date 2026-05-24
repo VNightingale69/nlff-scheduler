@@ -876,9 +876,10 @@ def list_saved_hosting_availability(organization_id: uuid.UUID | None = None, ho
             return 'small'
         if normalized in {'large'} or compact in {'large', '53', '53yard', '53yards', 'fiftythree', 'fiftythreeyard', 'fiftythreeyards'}:
             return 'large'
-        if 'small' in normalized or 'thirty' in normalized or '30' in normalized:
+        tokenized = compact
+        if ('small' in normalized or 'thirty' in normalized or '30' in normalized or 'youth' in normalized or 'k2' in tokenized):
             return 'small'
-        if 'large' in normalized or 'fifty' in normalized or '53' in normalized:
+        if ('large' in normalized or 'fifty' in normalized or '53' in normalized or 'full' in normalized or 'adult' in normalized):
             return 'large'
         return None
 
@@ -919,6 +920,8 @@ def list_saved_hosting_availability(organization_id: uuid.UUID | None = None, ho
                 counts['small'] += 1
             elif normalized_type == 'large':
                 counts['large'] += 1
+            else:
+                counts['unmatched'] += 1
         for host_id in host_ids:
             host_key = str(host_id)
             counts = field_counts_by_host.setdefault(host_key, {'small': 0, 'large': 0, 'total': 0, 'inactive': 0, 'unmatched': 0, 'mismatch': False})
