@@ -866,6 +866,27 @@ def list_saved_hosting_availability(organization_id: uuid.UUID | None = None, ho
         q = q.filter(func.cast(HostingAvailability.available_date, str) == available_date)
 
     rows = q.order_by(HostingAvailability.available_date, HostLocation.name, PhysicalFieldArea.name, HostingAvailability.start_time).all()
+    host_ids = {row.physical_field_area.host_location.id for row in rows if row.physical_field_area and row.physical_field_area.host_location}
+    field_counts_by_host: dict[str, dict[str, int]] = {}
+    if host_ids:
+        field_rows = (
+            db.query(
+                Field.host_location_id.label('host_location_id'),
+                Field.layout_type.label('layout_type'),
+                func.count(Field.id).label('count'),
+            )
+            .filter(Field.host_location_id.in_(host_ids), Field.is_active.is_(True))
+            .group_by(Field.host_location_id, Field.layout_type)
+            .all()
+        )
+        for field_row in field_rows:
+            host_key = str(field_row.host_location_id)
+            layout_value = str(field_row.layout_type or '').upper()
+            counts = field_counts_by_host.setdefault(host_key, {'small': 0, 'large': 0})
+            if ('THIRTY' in layout_value) or ('SMALL' in layout_value):
+                counts['small'] += int(field_row.count or 0)
+            elif ('FIFTY_THREE' in layout_value) or ('53' in layout_value) or ('LARGE' in layout_value):
+                counts['large'] += int(field_row.count or 0)
     grouped: dict[tuple[str, str, str], dict] = {}
     for row in rows:
         if not row.physical_field_area:
@@ -874,15 +895,20 @@ def list_saved_hosting_availability(organization_id: uuid.UUID | None = None, ho
         host = area.host_location
         option = row.field_configuration_option
         layout_name = option.name if option else 'Custom Layout'
+        host_id = str(host.id)
         key = (str(row.available_date), str(area.id), layout_name)
         if key not in grouped:
+            host_field_counts = field_counts_by_host.get(host_id, {'small': 0, 'large': 0})
             grouped[key] = {
                 'available_date': row.available_date,
+                'organization_id': host.organization_id,
+                'organization_name': host.organization.name if host.organization else None,
+                'host_location_id': host.id,
                 'host_location_name': host.name,
                 'site_type': area.field_space_type,
                 'available_layout': layout_name,
-                'small_field_capacity': option.thirty_yard_capacity if option else 0,
-                'large_field_capacity': option.fifty_three_yard_capacity if option else 0,
+                'small_field_capacity': host_field_counts['small'],
+                'large_field_capacity': host_field_counts['large'],
                 'hours': []
             }
         grouped[key]['hours'].append(row.start_time.hour)
@@ -902,6 +928,9 @@ def list_saved_hosting_availability(organization_id: uuid.UUID | None = None, ho
             ranges.append({'start_time': time(start, 0), 'end_time': time(prev + 1, 0)})
         items.append({
             'available_date': data['available_date'],
+            'organization_id': data['organization_id'],
+            'organization_name': data['organization_name'],
+            'host_location_id': data['host_location_id'],
             'host_location_name': data['host_location_name'],
             'site_type': data['site_type'],
             'available_layout': data['available_layout'],
