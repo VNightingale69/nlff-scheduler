@@ -1610,6 +1610,23 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         for row in existing_non_unscheduled_games
         if row.host_location_id and row.game_date and row.kickoff_time
     }
+
+    def _has_compatible_open_field_at_time(host_location_id: uuid.UUID | None, slot_date, slot_time) -> bool:
+        if not host_location_id:
+            return False
+        compatible_open_slots = db.query(GameSlot).join(GameSlot.field_instance).filter(
+            GameSlot.host_location_id == host_location_id,
+            GameSlot.slot_date == slot_date,
+            GameSlot.start_time == slot_time,
+            GameSlot.status == 'OPEN',
+            GameSlot.assigned_game_id.is_(None),
+            GameSlot.field_type == required_field_type,
+        ).all()
+        for open_slot in compatible_open_slots:
+            open_field_key = (str(open_slot.field_instance_id), open_slot.slot_date, open_slot.start_time)
+            if open_field_key not in field_time_occupied:
+                return True
+        return False
     season_division_games = db.query(Game).join(Game.home_team).join(Game.status).filter(
         Game.season_id == season_id,
         Team.division_id == division_id,
@@ -1793,6 +1810,12 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                         })
                         continue
                     if slot.host_location_id and slot.host_location_id not in compatible_fields_by_host:
+                        skipped.append({
+                            'slot_id': str(slot.id),
+                            'reason': 'Rejected: host location does not have an available compatible field at this date/time.',
+                        })
+                        continue
+                    if not _has_compatible_open_field_at_time(slot.host_location_id, slot.slot_date, slot.start_time):
                         skipped.append({
                             'slot_id': str(slot.id),
                             'reason': 'Rejected: host location does not have an available compatible field at this date/time.',
@@ -2132,6 +2155,10 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
             'skipped': [],
         }
     teams = db.query(Team).filter(Team.division_id == division_id, Team.is_active.is_(True)).all()
+    division = db.query(Division).filter(Division.id == division_id).first()
+    if not division:
+        raise HTTPException(404, 'Selected division is invalid')
+    required_field_type = _required_field_type_for_division(division)
     team_ids = {t.id for t in teams}
     no_byes = bool(payload.get('no_byes', True))
     is_odd_division = len(teams) % 2 == 1
@@ -2197,6 +2224,23 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         if row.host_location_id and row.game_date and row.kickoff_time
     }
 
+    def _has_compatible_open_field_at_time(host_location_id: uuid.UUID | None, slot_date, slot_time) -> bool:
+        if not host_location_id:
+            return False
+        compatible_open_slots = db.query(GameSlot).join(GameSlot.field_instance).filter(
+            GameSlot.host_location_id == host_location_id,
+            GameSlot.slot_date == slot_date,
+            GameSlot.start_time == slot_time,
+            GameSlot.status == 'OPEN',
+            GameSlot.assigned_game_id.is_(None),
+            GameSlot.field_type == required_field_type,
+        ).all()
+        for open_slot in compatible_open_slots:
+            open_field_key = (str(open_slot.field_instance_id), open_slot.slot_date, open_slot.start_time)
+            if open_field_key not in field_time_occupied:
+                return True
+        return False
+
     def _team_name(team_id: str | None) -> str:
         if not team_id:
             return 'Unknown Team'
@@ -2236,10 +2280,16 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         if field_time_key in field_time_occupied:
             skipped.append({'reason': f"Rejected: time slot already occupied by existing {field_time_occupied[field_time_key]} game."})
             continue
+        if slot.field_type != required_field_type:
+            skipped.append({'reason': 'Rejected: selected slot is not compatible with division layout requirements.'})
+            continue
         if (str(home_team_id), slot.slot_date, slot.start_time) in team_time_occupied or (str(away_team_id), slot.slot_date, slot.start_time) in team_time_occupied:
             skipped.append({'reason': 'Rejected: one team is already scheduled at this date/time.'})
             continue
         if slot.host_location_id is None or slot.field_instance_id is None:
+            skipped.append({'reason': 'Rejected: host location does not have an available compatible field at this date/time.'})
+            continue
+        if not _has_compatible_open_field_at_time(slot.host_location_id, slot.slot_date, slot.start_time):
             skipped.append({'reason': 'Rejected: host location does not have an available compatible field at this date/time.'})
             continue
         if no_simultaneous_games_same_host:
