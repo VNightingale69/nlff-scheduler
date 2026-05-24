@@ -867,69 +867,74 @@ def list_saved_hosting_availability(organization_id: uuid.UUID | None = None, ho
 
     rows = q.order_by(HostingAvailability.available_date, HostLocation.name, PhysicalFieldArea.name, HostingAvailability.start_time).all()
     host_ids = {row.physical_field_area.host_location.id for row in rows if row.physical_field_area and row.physical_field_area.host_location}
+    def _normalize_field_type(raw_layout_type: str | None) -> str | None:
+        normalized = str(raw_layout_type or '').strip().lower()
+        if not normalized:
+            return None
+        compact = normalized.replace('_', '').replace('-', '').replace(' ', '')
+        if normalized in {'small'} or compact in {'small', '30', '30yard', '30yards', 'thirtyyard', 'thirtyyards', 'thirty'}:
+            return 'small'
+        if normalized in {'large'} or compact in {'large', '53', '53yard', '53yards', 'fiftythree', 'fiftythreeyard', 'fiftythreeyards'}:
+            return 'large'
+        if 'small' in normalized or 'thirty' in normalized or '30' in normalized:
+            return 'small'
+        if 'large' in normalized or 'fifty' in normalized or '53' in normalized:
+            return 'large'
+        return None
+
     field_counts_by_host: dict[str, dict[str, int]] = {}
     if host_ids:
-        schedulable_rows = (
+        host_lookup = {
+            str(host.id): host.name
+            for host in db.query(HostLocation).filter(HostLocation.id.in_(host_ids)).all()
+        }
+        field_rows = (
             db.query(
                 Field.host_location_id.label('host_location_id'),
+                Field.name.label('field_name'),
                 Field.layout_type.label('layout_type'),
-                func.count(Field.id).label('count'),
+                Field.is_active.label('is_active'),
+                PhysicalFieldArea.is_active.label('area_is_active'),
             )
             .join(HostLocation, HostLocation.id == Field.host_location_id)
             .outerjoin(PhysicalFieldArea, PhysicalFieldArea.id == Field.physical_field_area_id)
-            .filter(
-                Field.host_location_id.in_(host_ids),
-                Field.is_active.is_(True),
-                HostLocation.is_active.is_(True),
-                or_(Field.physical_field_area_id.is_(None), PhysicalFieldArea.is_active.is_(True)),
-            )
-            .group_by(Field.host_location_id, Field.layout_type)
-            .all()
-        )
-        debug_totals = dict(
-            db.query(Field.host_location_id, func.count(Field.id))
             .filter(Field.host_location_id.in_(host_ids))
-            .group_by(Field.host_location_id)
             .all()
         )
-        debug_inactive = dict(
-            db.query(Field.host_location_id, func.count(Field.id))
-            .filter(Field.host_location_id.in_(host_ids), Field.is_active.is_(False))
-            .group_by(Field.host_location_id)
-            .all()
-        )
-        unmatched_count = (
-            db.query(func.count(Field.id))
-            .outerjoin(HostLocation, HostLocation.id == Field.host_location_id)
-            .filter(Field.host_location_id.in_(host_ids), HostLocation.id.is_(None))
-            .scalar()
-            or 0
-        )
-        for field_row in schedulable_rows:
+        debug_by_host: dict[str, dict[str, list[str] | int]] = {}
+        for field_row in field_rows:
             host_key = str(field_row.host_location_id)
-            layout_value = str(field_row.layout_type or '').upper()
-            counts = field_counts_by_host.setdefault(host_key, {'small': 0, 'large': 0})
-            if ('THIRTY' in layout_value) or ('SMALL' in layout_value):
-                counts['small'] += int(field_row.count or 0)
-            elif ('FIFTY_THREE' in layout_value) or ('53' in layout_value) or ('LARGE' in layout_value):
-                counts['large'] += int(field_row.count or 0)
+            raw_type = str(field_row.layout_type or '')
+            normalized_type = _normalize_field_type(field_row.layout_type)
+            host_debug = debug_by_host.setdefault(host_key, {'names': [], 'types': []})
+            host_debug['names'].append(str(field_row.field_name or ''))
+            host_debug['types'].append(raw_type)
+
+            counts = field_counts_by_host.setdefault(host_key, {'small': 0, 'large': 0, 'total': 0, 'inactive': 0, 'unmatched': 0, 'mismatch': False})
+            counts['total'] += 1
+            if not field_row.is_active or (field_row.area_is_active is False):
+                counts['inactive'] += 1
+                continue
+            if normalized_type == 'small':
+                counts['small'] += 1
+            elif normalized_type == 'large':
+                counts['large'] += 1
         for host_id in host_ids:
             host_key = str(host_id)
-            counts = field_counts_by_host.setdefault(host_key, {'small': 0, 'large': 0})
-            total_fields = int(debug_totals.get(host_id, 0) or 0)
-            inactive_fields = int(debug_inactive.get(host_id, 0) or 0)
-            counts['total'] = total_fields
-            counts['inactive'] = inactive_fields
-            counts['unmatched'] = int(unmatched_count or 0)
-            counts['mismatch'] = total_fields > 0 and (counts['small'] + counts['large'] == 0)
+            counts = field_counts_by_host.setdefault(host_key, {'small': 0, 'large': 0, 'total': 0, 'inactive': 0, 'unmatched': 0, 'mismatch': False})
+            counts['mismatch'] = counts['total'] > 0 and (counts['small'] + counts['large'] == 0)
+            host_debug = debug_by_host.get(host_key, {'names': [], 'types': []})
             logger.info(
-                'Hosting field inventory validation host_location_id=%s total_fields_found=%s small_field_count=%s large_field_count=%s inactive_field_count=%s unmatched_field_records=%s',
+                'Hosting field inventory validation host_location_id=%s host_location_name=%s total_fields_found=%s field_names=%s raw_field_type_values=%s small_field_count=%s large_field_count=%s inactive_field_count=%s unmatched_field_records=%s',
                 host_key,
-                total_fields,
+                host_lookup.get(host_key, ''),
+                counts['total'],
+                host_debug['names'],
+                host_debug['types'],
                 counts['small'],
                 counts['large'],
-                inactive_fields,
-                unmatched_count,
+                counts['inactive'],
+                counts['unmatched'],
             )
     grouped: dict[tuple[str, str, str], dict] = {}
     for row in rows:
