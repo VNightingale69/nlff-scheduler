@@ -42,6 +42,22 @@ const STATUS_BADGE: Record<string, string> = {
   Missing: 'bg-rose-100 text-rose-800',
 };
 
+const READINESS_DEFINITIONS: Record<string, string> = {
+  READY: 'Hosting community assigned, fields configured, slots generated, no blocking conflicts, and scheduler-ready.',
+  PARTIAL: 'Some hosting data exists, but setup is incomplete and scheduling may fail for some divisions.',
+  'NOT READY': 'Insufficient data to schedule games.',
+};
+
+const INDICATOR_DEFINITIONS: Record<string, string> = {
+  'incomplete hosting setup': 'Core setup exists, but at least one required part (community, field setup, or slots) is missing or incomplete.',
+  'no large field available': 'No large-field capacity is configured for this host week.',
+  'insufficient small fields': 'Small-field capacity is below the expected minimum for reliable scheduling.',
+  'insufficient total slots': 'Total playable slot hours are below the minimum needed for expected games.',
+  'overlapping slot conflicts': 'Two or more slot ranges overlap and create conflicting start times.',
+  'host assignment missing': 'No valid hosting community assignment is attached to this availability row.',
+  'scheduling window too short': 'The playable window is too short for a full game-day schedule.',
+};
+
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export default function HostingAvailabilityManager() {
@@ -236,23 +252,37 @@ export default function HostingAvailabilityManager() {
       const ends = (entry.time_ranges || []).map((r: any) => Number(r.end_time.slice(0, 2)));
       const firstStart = starts.length ? Math.min(...starts) : 99;
       const lastEnd = ends.length ? Math.max(...ends) : 0;
-      const warnings: string[] = [];
-      if ((entry.small_field_capacity || 0) < 2) warnings.push('Insufficient field capacity');
-      if ((entry.large_field_capacity || 0) < 1) warnings.push('No large field available');
-      if ((entry.time_ranges || []).length < 3) warnings.push('Incomplete hosting setup');
-      if (lastEnd > 0 && lastEnd < 14) warnings.push('Game-day coverage ending too early');
+      const indicators: string[] = [];
+      const totalSlotHours = (entry.time_ranges || []).reduce((n: number, r: any) => n + (Number(r.end_time.slice(0, 2)) - Number(r.start_time.slice(0, 2))), 0);
+      const hasHostAssignment = Boolean(entry.organization_id || (String(entry.organization_name || '').trim() && !UUID_PATTERN.test(String(entry.organization_name || '').trim())));
+      const hasSlots = (entry.time_ranges || []).length > 0;
+      const hasFieldConfig = (entry.small_field_capacity || 0) + (entry.large_field_capacity || 0) > 0;
+
+      if (!hasHostAssignment) indicators.push('host assignment missing');
+      if (!hasFieldConfig || !hasSlots) indicators.push('incomplete hosting setup');
+      if ((entry.large_field_capacity || 0) < 1) indicators.push('no large field available');
+      if ((entry.small_field_capacity || 0) < 2) indicators.push('insufficient small fields');
+      if (totalSlotHours < 4) indicators.push('insufficient total slots');
+      if (lastEnd > 0 && lastEnd < 14) indicators.push('scheduling window too short');
       const hasOverlap = (entry.time_ranges || []).some((r: any, i: number, arr: any[]) => {
         const start = Number(r.start_time.slice(0, 2));
         return arr.some((x: any, j: number) => j !== i && start >= Number(x.start_time.slice(0, 2)) && start < Number(x.end_time.slice(0, 2)));
       });
-      if (hasOverlap) warnings.push('Overlapping slot conflicts');
+      if (hasOverlap) indicators.push('overlapping slot conflicts');
+
+      const readiness = !hasHostAssignment || !hasFieldConfig || !hasSlots
+        ? 'NOT READY'
+        : indicators.length
+          ? 'PARTIAL'
+          : 'READY';
+
       return {
         ...entry,
         week,
         firstStart,
         lastEnd,
-        readiness: warnings.length ? 'Partial' : 'Hosting',
-        warnings,
+        readiness,
+        indicators,
       };
     });
     return rows.sort((a: any, b: any) => (a.week - b.week) || (a.firstStart - b.firstStart) || String(a.organization_name || '').localeCompare(String(b.organization_name || '')));
@@ -298,7 +328,7 @@ export default function HostingAvailabilityManager() {
         const w = weekForDate(d.date);
         const rows = summaryRows.filter((r: any) => r.organization_id === organizationId && r.available_date === d.date);
         if (!rows.length) byWeek[w] = 'Missing';
-        else if (rows.every((r: any) => r.readiness === 'Hosting')) byWeek[w] = 'Hosting';
+        else if (rows.every((r: any) => r.readiness === 'READY')) byWeek[w] = 'Hosting';
         else byWeek[w] = 'Partial';
       });
       if (Object.values(byWeek).every((v) => v === 'Missing')) {
@@ -367,12 +397,20 @@ export default function HostingAvailabilityManager() {
           </div>
           <div className='overflow-auto'>
             <h3 className='mb-2 font-medium'>Hosting summary (week/date/community/site)</h3>
-            <table className='min-w-full text-sm'>
+            <div className='mb-2 rounded border bg-slate-50 p-2 text-xs text-slate-700'>
+              <div className='font-medium'>Readiness definitions</div>
+              <ul className='list-disc pl-5'>
+                {Object.entries(READINESS_DEFINITIONS).map(([state, definition]) => (
+                  <li key={state}><strong>{state}</strong>: {definition}</li>
+                ))}
+              </ul>
+            </div>
+              <table className='min-w-full text-sm'>
               <thead><tr className='border-b text-left'><th className='p-2'>Week</th><th className='p-2'>Date</th><th className='p-2'>Community</th><th className='p-2'>Host location</th><th className='p-2'>Small fields</th><th className='p-2'>Large fields</th><th className='p-2'>First slot</th><th className='p-2'>Last slot</th><th className='p-2'>Readiness</th><th className='p-2'>Validation indicators</th></tr></thead>
               <tbody>
                 {summaryRows.map((row: any, i: number) => (
                   <tr key={`${row.available_date}-${row.host_location_name}-${i}`} className='border-b'>
-                    <td className='p-2'>Week {row.week}</td><td className='p-2'>{formatDateLabel(row.available_date)}</td><td className='p-2'>{resolveCommunityName(row.organization_id, row.organization_name)}</td><td className='p-2'>{row.host_location_name}</td><td className='p-2'>{row.small_field_capacity || 0}</td><td className='p-2'>{row.large_field_capacity || 0}</td><td className='p-2'>{row.firstStart === 99 ? '—' : displayHour(row.firstStart)}</td><td className='p-2'>{row.lastEnd === 0 ? '—' : displayHour(row.lastEnd)}</td><td className='p-2'>{row.readiness}</td><td className='p-2'>{row.warnings.length ? row.warnings.join(', ') : 'None'}</td>
+                    <td className='p-2'>Week {row.week}</td><td className='p-2'>{formatDateLabel(row.available_date)}</td><td className='p-2'>{resolveCommunityName(row.organization_id, row.organization_name)}</td><td className='p-2'>{row.host_location_name}</td><td className='p-2'>{row.small_field_capacity || 0}</td><td className='p-2'>{row.large_field_capacity || 0}</td><td className='p-2'>{row.firstStart === 99 ? '—' : displayHour(row.firstStart)}</td><td className='p-2'>{row.lastEnd === 0 ? '—' : displayHour(row.lastEnd)}</td><td className='p-2'><span title={READINESS_DEFINITIONS[row.readiness]} className='cursor-help underline decoration-dotted'>{row.readiness}</span></td><td className='p-2'>{row.indicators.length ? <ul className='space-y-1'>{row.indicators.map((indicator: string) => <li key={`${row.available_date}-${row.host_location_name}-${indicator}`} title={INDICATOR_DEFINITIONS[indicator]} className='cursor-help underline decoration-dotted'>• {indicator}</li>)}</ul> : 'None'}</td>
                   </tr>
                 ))}
               </tbody>
