@@ -50,6 +50,7 @@ const READINESS_DEFINITIONS: Record<string, string> = {
 
 const INDICATOR_DEFINITIONS: Record<string, string> = {
   'incomplete hosting setup': 'Core setup exists, but at least one required part (community, field setup, or slots) is missing or incomplete.',
+  'field inventory mismatch': 'Fields are configured but could not be resolved into schedulable small/large inventory for this host location.',
   'no large field available': 'No large-field capacity is configured for this host week.',
   'insufficient small fields': 'Small-field capacity is below the expected minimum for reliable scheduling.',
   'insufficient total slots': 'Total playable slot hours are below the minimum needed for expected games.',
@@ -260,8 +261,10 @@ export default function HostingAvailabilityManager() {
 
       if (!hasHostAssignment) indicators.push('host assignment missing');
       if (!hasFieldConfig || !hasSlots) indicators.push('incomplete hosting setup');
-      if ((entry.large_field_capacity || 0) < 1) indicators.push('no large field available');
-      if ((entry.small_field_capacity || 0) < 2) indicators.push('insufficient small fields');
+      const hasInventoryMismatch = Boolean(entry.has_field_inventory_mismatch);
+      if (hasInventoryMismatch) indicators.push('field inventory mismatch');
+      if (!hasInventoryMismatch && (entry.large_field_capacity || 0) < 1) indicators.push('no large field available');
+      if (!hasInventoryMismatch && (entry.small_field_capacity || 0) < 2) indicators.push('insufficient small fields');
       if (totalSlotHours < 4) indicators.push('insufficient total slots');
       if (lastEnd > 0 && lastEnd < 14) indicators.push('scheduling window too short');
       const hasOverlap = (entry.time_ranges || []).some((r: any, i: number, arr: any[]) => {
