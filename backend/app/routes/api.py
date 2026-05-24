@@ -1762,8 +1762,9 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         GameSlot.slot_date,
         GameSlot.field_instance_id,
         func.count(GameSlot.id),
-    ).join(Game, Game.id == GameSlot.assigned_game_id).filter(
-        Game.division_id == division_id,
+    ).join(Game, Game.id == GameSlot.assigned_game_id).join(Game.home_team).filter(
+        Team.division_id == division_id,
+        Team.is_active.is_(True),
         GameSlot.field_type == required_field_type,
         GameSlot.assigned_game_id.isnot(None),
     ).group_by(
