@@ -3,6 +3,31 @@ import { useEffect, useMemo, useState } from 'react';
 import { apiFetch } from '@/lib/api';
 import { getAuthUser, getToken } from '@/lib/auth';
 
+type FieldType = 'SMALL' | 'LARGE';
+
+const DIVISION_SORT_ORDER = ['K/1st', '2nd/3rd', '4th/5th', '6th/7th', '8th'];
+
+const resolveDivisionLabel = (division: any) => `${division.division_group === 'COED' ? 'Coed' : 'Girls'} ${division.name}`;
+
+const resolveFieldType = (division: any): FieldType => {
+  const divisionName = String(division?.name || '').trim();
+  const group = String(division?.division_group || '').toUpperCase();
+  if (group === 'COED') {
+    return ['K/1st', '2nd/3rd', '4th/5th'].includes(divisionName) ? 'SMALL' : 'LARGE';
+  }
+  if (group === 'GIRLS') {
+    return ['K/1st', '2nd/3rd', '4th/5th'].includes(divisionName) ? 'SMALL' : 'LARGE';
+  }
+  return 'LARGE';
+};
+
+const divisionSortRank = (division: any) => {
+  const group = String(division?.division_group || '').toUpperCase();
+  const idx = DIVISION_SORT_ORDER.indexOf(String(division?.name || ''));
+  const orderWithinGroup = idx === -1 ? 99 : idx;
+  return `${group === 'COED' ? '0' : '1'}-${String(orderWithinGroup).padStart(2, '0')}`;
+};
+
 export default function TeamsByParticipationManager() {
   const [orgs, setOrgs] = useState<any[]>([]);
   const [orgId, setOrgId] = useState('');
@@ -26,16 +51,78 @@ export default function TeamsByParticipationManager() {
     setTeams((teamResp.items || []).filter((t: any) => t.is_active));
   };
 
+  const loadLeagueSummary = async () => {
+    const token = getToken();
+    const [divResp, teamResp] = await Promise.all([
+      apiFetch('/divisions?page_size=500', {}, token),
+      apiFetch('/teams?page_size=500', {}, token),
+    ]);
+    setDivisions(divResp.items || []);
+    setTeams((teamResp.items || []).filter((t: any) => t.is_active));
+  };
+
   useEffect(() => { (async () => {
     const user = getAuthUser();
     const token = getToken();
     const orgResp = await apiFetch('/organizations?page_size=500', {}, token);
-    setOrgs(orgResp.items || []);
+    setOrgs((orgResp.items || []).filter((o: any) => o.is_active));
     const initialOrg = user?.role_name === 'community_scheduler' ? user.organization_id : '';
     if (initialOrg) { setOrgId(initialOrg); load(initialOrg); }
+    else { loadLeagueSummary(); }
   })(); }, []);
 
   const grouped = useMemo(() => Object.fromEntries(divisions.map((d) => [d.id, teams.filter((t) => t.division_id === d.id)])), [divisions, teams]);
+
+  const leagueSummary = useMemo(() => {
+    const divisionsById = Object.fromEntries(divisions.map((d: any) => [d.id, d]));
+    const coedTeams = teams.filter((t: any) => divisionsById[t.division_id]?.division_group === 'COED').length;
+    const girlsTeams = teams.filter((t: any) => divisionsById[t.division_id]?.division_group === 'GIRLS').length;
+    const smallFieldTeams = teams.filter((t: any) => resolveFieldType(divisionsById[t.division_id]) === 'SMALL').length;
+    const largeFieldTeams = teams.filter((t: any) => resolveFieldType(divisionsById[t.division_id]) === 'LARGE').length;
+    return {
+      totalOrganizations: orgs.length,
+      totalTeams: teams.length,
+      totalCoedTeams: coedTeams,
+      totalGirlsTeams: girlsTeams,
+      smallFieldTeams,
+      largeFieldTeams,
+    };
+  }, [divisions, teams, orgs]);
+
+  const leagueTableRows = useMemo(() => {
+    const divisionsById = Object.fromEntries(divisions.map((d: any) => [d.id, d]));
+    const orgById = Object.fromEntries(orgs.map((o: any) => [o.id, o.name]));
+    const rowMap = new Map<string, any>();
+    teams.forEach((team: any) => {
+      const div = divisionsById[team.division_id];
+      if (!div) return;
+      const key = `${div.id}::${team.organization_id}`;
+      if (!rowMap.has(key)) {
+        rowMap.set(key, {
+          divisionLabel: resolveDivisionLabel(div),
+          divisionSort: divisionSortRank(div),
+          organizationName: orgById[team.organization_id] || 'Unknown',
+          teamCount: 0,
+          teamNames: [],
+          fieldType: resolveFieldType(div),
+        });
+      }
+      const row = rowMap.get(key);
+      row.teamCount += 1;
+      row.teamNames.push(team.name);
+    });
+
+    return Array.from(rowMap.values()).sort((a, b) => {
+      if (a.divisionSort !== b.divisionSort) return a.divisionSort.localeCompare(b.divisionSort);
+      return a.organizationName.localeCompare(b.organizationName);
+    });
+  }, [divisions, teams, orgs]);
+
+  const quickIndicators = useMemo(() => {
+    const oddRows = leagueTableRows.filter((row) => row.teamCount % 2 === 1);
+    const doubleHeaderDivisions = Array.from(new Set(oddRows.map((row) => row.divisionLabel)));
+    return { oddRows, doubleHeaderDivisions };
+  }, [leagueTableRows]);
 
   const addTeam = async (divisionId: string, expectedCount: number, activeCount: number) => {
     if (activeCount >= expectedCount) return;
@@ -73,8 +160,48 @@ export default function TeamsByParticipationManager() {
 
   return <div className='space-y-4'>
     <h1 className='text-2xl font-bold'>Teams</h1>
-    <select className='rounded border p-2' value={orgId} onChange={(e) => { setOrgId(e.target.value); load(e.target.value); }}><option value=''>Select Organization</option>{orgs.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select>
-    {divisions.map((d) => {
+    <select className='rounded border p-2' value={orgId} onChange={(e) => { const value = e.target.value; setOrgId(value); if (value) load(value); else loadLeagueSummary(); }}><option value=''>League-wide view</option>{orgs.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select>
+
+    {!orgId && <>
+      <div className='grid grid-cols-1 gap-3 md:grid-cols-3'>
+        <div className='rounded border bg-white p-3'><div className='text-xs text-slate-500'>Total organizations</div><div className='text-xl font-semibold'>{leagueSummary.totalOrganizations}</div></div>
+        <div className='rounded border bg-white p-3'><div className='text-xs text-slate-500'>Total teams</div><div className='text-xl font-semibold'>{leagueSummary.totalTeams}</div></div>
+        <div className='rounded border bg-white p-3'><div className='text-xs text-slate-500'>Total coed teams</div><div className='text-xl font-semibold'>{leagueSummary.totalCoedTeams}</div></div>
+        <div className='rounded border bg-white p-3'><div className='text-xs text-slate-500'>Total girls teams</div><div className='text-xl font-semibold'>{leagueSummary.totalGirlsTeams}</div></div>
+        <div className='rounded border bg-white p-3'><div className='text-xs text-slate-500'>Small-field teams</div><div className='text-xl font-semibold'>{leagueSummary.smallFieldTeams}</div></div>
+        <div className='rounded border bg-white p-3'><div className='text-xs text-slate-500'>Large-field teams</div><div className='text-xl font-semibold'>{leagueSummary.largeFieldTeams}</div></div>
+      </div>
+
+      <div className='rounded border bg-amber-50 p-3 text-sm'>
+        <div><span className='font-semibold'>Odd team count warnings:</span> {quickIndicators.oddRows.length === 0 ? 'None' : `${quickIndicators.oddRows.length} organization/division group(s)`}</div>
+        <div><span className='font-semibold'>Divisions requiring weekly double headers:</span> {quickIndicators.doubleHeaderDivisions.length === 0 ? 'None' : quickIndicators.doubleHeaderDivisions.join(', ')}</div>
+      </div>
+
+      <div className='overflow-x-auto rounded border bg-white'>
+        <table className='w-full text-left text-sm'>
+          <thead className='bg-slate-100'>
+            <tr>
+              <th className='p-2'>Division</th>
+              <th className='p-2'>Organization/Community</th>
+              <th className='p-2'>Team Count</th>
+              <th className='p-2'>Team Names</th>
+              <th className='p-2'>Field Type Requirement</th>
+            </tr>
+          </thead>
+          <tbody>
+            {leagueTableRows.map((row, idx) => <tr key={`${row.divisionLabel}-${row.organizationName}-${idx}`} className='border-t'>
+              <td className='p-2'>{row.divisionLabel}</td>
+              <td className='p-2'>{row.organizationName}</td>
+              <td className='p-2'>{row.teamCount}{row.teamCount % 2 === 1 ? <span className='ml-2 text-amber-700'>⚠ odd</span> : null}</td>
+              <td className='p-2'>{row.teamNames.sort((a: string, b: string) => a.localeCompare(b)).join(', ')}</td>
+              <td className='p-2'>{row.fieldType}</td>
+            </tr>)}
+          </tbody>
+        </table>
+      </div>
+    </>}
+
+    {orgId && divisions.map((d) => {
       const existing = grouped[d.id] || [];
       const atLimit = existing.length >= d.expected_count;
       return <div key={d.id} className='rounded border p-3 space-y-2'>
