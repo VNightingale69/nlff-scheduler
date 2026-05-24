@@ -166,7 +166,19 @@ export default function HostingAvailabilityManager() {
     if (savedSiteTypeFilter) params.set('site_type', savedSiteTypeFilter);
     if (savedLayoutFilter) params.set('layout', savedLayoutFilter);
     const data = await apiFetch(`/hosting-availabilities/saved?${params.toString()}`, {}, token);
-    setSavedAvailability(data.items || []);
+    const items = data.items || [];
+    items.forEach((row: any, index: number) => {
+      console.log('[Hosting Summary] raw saved availability row', {
+        index,
+        row,
+        hostLocationId: row?.hostLocationId ?? row?.host_location_id,
+        hostLocationName: row?.hostLocationName ?? row?.host_location_name,
+        fields: row?.fields,
+        smallFieldCount: row?.smallFieldCount ?? row?.small_field_count ?? row?.small_field_capacity,
+        largeFieldCount: row?.largeFieldCount ?? row?.large_field_count ?? row?.large_field_capacity,
+      });
+    });
+    setSavedAvailability(items);
     if (hostId) {
       const slots = await apiFetch(`/hosting-availabilities/generated-slots?${params.toString()}`, {}, token);
       setGeneratedSlots(slots || []);
@@ -249,6 +261,8 @@ export default function HostingAvailabilityManager() {
   const summaryRows = useMemo(() => {
     const rows = savedAvailability.map((entry: any) => {
       const week = weekForDate(entry.available_date);
+      const smallFieldCount = entry.smallFieldCount ?? entry.small_field_count ?? entry.small_field_capacity ?? 0;
+      const largeFieldCount = entry.largeFieldCount ?? entry.large_field_count ?? entry.large_field_capacity ?? 0;
       const starts = (entry.time_ranges || []).map((r: any) => Number(r.start_time.slice(0, 2)));
       const ends = (entry.time_ranges || []).map((r: any) => Number(r.end_time.slice(0, 2)));
       const firstStart = starts.length ? Math.min(...starts) : 99;
@@ -257,14 +271,14 @@ export default function HostingAvailabilityManager() {
       const totalSlotHours = (entry.time_ranges || []).reduce((n: number, r: any) => n + (Number(r.end_time.slice(0, 2)) - Number(r.start_time.slice(0, 2))), 0);
       const hasHostAssignment = Boolean(entry.organization_id || (String(entry.organization_name || '').trim() && !UUID_PATTERN.test(String(entry.organization_name || '').trim())));
       const hasSlots = (entry.time_ranges || []).length > 0;
-      const hasFieldConfig = (entry.small_field_capacity || 0) + (entry.large_field_capacity || 0) > 0;
+      const hasFieldConfig = smallFieldCount + largeFieldCount > 0;
 
       if (!hasHostAssignment) indicators.push('host assignment missing');
       if (!hasFieldConfig || !hasSlots) indicators.push('incomplete hosting setup');
       const hasInventoryMismatch = Boolean(entry.has_field_inventory_mismatch);
       if (hasInventoryMismatch) indicators.push('field inventory mismatch');
-      if (!hasInventoryMismatch && (entry.large_field_capacity || 0) < 1) indicators.push('no large field available');
-      if (!hasInventoryMismatch && (entry.small_field_capacity || 0) < 2) indicators.push('insufficient small fields');
+      if (!hasInventoryMismatch && largeFieldCount < 1) indicators.push('no large field available');
+      if (!hasInventoryMismatch && smallFieldCount < 2) indicators.push('insufficient small fields');
       if (totalSlotHours < 4) indicators.push('insufficient total slots');
       if (lastEnd > 0 && lastEnd < 14) indicators.push('scheduling window too short');
       const hasOverlap = (entry.time_ranges || []).some((r: any, i: number, arr: any[]) => {
@@ -281,6 +295,8 @@ export default function HostingAvailabilityManager() {
 
       return {
         ...entry,
+        small_field_capacity: smallFieldCount,
+        large_field_capacity: largeFieldCount,
         week,
         firstStart,
         lastEnd,
@@ -413,7 +429,7 @@ export default function HostingAvailabilityManager() {
               <tbody>
                 {summaryRows.map((row: any, i: number) => (
                   <tr key={`${row.available_date}-${row.host_location_name}-${i}`} className='border-b'>
-                    <td className='p-2'>Week {row.week}</td><td className='p-2'>{formatDateLabel(row.available_date)}</td><td className='p-2'>{resolveCommunityName(row.organization_id, row.organization_name)}</td><td className='p-2'>{row.host_location_name}</td><td className='p-2'>{row.small_field_capacity || 0}</td><td className='p-2'>{row.large_field_capacity || 0}</td><td className='p-2'>{row.firstStart === 99 ? '—' : displayHour(row.firstStart)}</td><td className='p-2'>{row.lastEnd === 0 ? '—' : displayHour(row.lastEnd)}</td><td className='p-2'><span title={READINESS_DEFINITIONS[row.readiness]} className='cursor-help underline decoration-dotted'>{row.readiness}</span></td><td className='p-2'>{row.indicators.length ? <ul className='space-y-1'>{row.indicators.map((indicator: string) => <li key={`${row.available_date}-${row.host_location_name}-${indicator}`} title={INDICATOR_DEFINITIONS[indicator]} className='cursor-help underline decoration-dotted'>• {indicator}</li>)}</ul> : 'None'}</td>
+                    <td className='p-2'>Week {row.week}</td><td className='p-2'>{formatDateLabel(row.available_date)}</td><td className='p-2'>{resolveCommunityName(row.organization_id, row.organization_name)}</td><td className='p-2'>{row.host_location_name}</td><td className='p-2'>{row.smallFieldCount ?? row.small_field_count ?? row.small_field_capacity ?? 0}</td><td className='p-2'>{row.largeFieldCount ?? row.large_field_count ?? row.large_field_capacity ?? 0}</td><td className='p-2'>{row.firstStart === 99 ? '—' : displayHour(row.firstStart)}</td><td className='p-2'>{row.lastEnd === 0 ? '—' : displayHour(row.lastEnd)}</td><td className='p-2'><span title={READINESS_DEFINITIONS[row.readiness]} className='cursor-help underline decoration-dotted'>{row.readiness}</span></td><td className='p-2'>{row.indicators.length ? <ul className='space-y-1'>{row.indicators.map((indicator: string) => <li key={`${row.available_date}-${row.host_location_name}-${indicator}`} title={INDICATOR_DEFINITIONS[indicator]} className='cursor-help underline decoration-dotted'>• {indicator}</li>)}</ul> : 'None'}</td>
                   </tr>
                 ))}
               </tbody>
