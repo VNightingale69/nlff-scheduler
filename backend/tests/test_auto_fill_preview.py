@@ -227,6 +227,20 @@ class AutoFillPreviewTest(unittest.TestCase):
         result = auto_fill_preview({'season_id': self.season.id, 'week_id': self.week2.id, 'division_id': self.division.id, 'centralized_scheduling_requested': True}, db=self.db)
         self.assertTrue(result['audit']['centralization_requested'])
         self.assertGreaterEqual(result['proposed_game_count'], 1)
+
+    def test_odd_division_accepts_required_double_header(self):
+        odd_team = Team(id=uuid.uuid4(), organization_id=self.org_w.id, division_id=self.division.id, name='Westosha White', is_active=True)
+        self.db.add(odd_team)
+        for hour in (10, 11):
+            fi = FieldInstance(id=uuid.uuid4(), host_location_id=self.host.id, hosting_availability_id=uuid.uuid4(), instance_date=self.week2.start_date, field_name=f'Odd Field {hour}', field_type='SMALL', is_active=True)
+            slot = GameSlot(id=uuid.uuid4(), field_instance_id=fi.id, host_location_id=self.host.id, slot_date=self.week2.start_date, start_time=time(hour, 0), end_time=time(hour + 1, 0), field_type='SMALL', status='OPEN')
+            self.db.add_all([fi, slot])
+        self.db.commit()
+
+        result = auto_fill_preview({'season_id': self.season.id, 'week_id': self.week2.id, 'division_id': self.division.id}, db=self.db)
+        self.assertEqual(result['max_allowed_game_count'], 3)
+        self.assertEqual(result['proposed_game_count'], 3)
+        self.assertTrue(any('Accepted as required double header due to odd team count' in row['reason'] for row in result['proposals']))
     def test_apply_ignores_unscheduled_games_for_duplicate_check(self):
         unscheduled_status = GameStatus(id=uuid.uuid4(), code='UNSCHEDULED', label='Unscheduled', is_active=True)
         self.db.add(unscheduled_status)
