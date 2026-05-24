@@ -228,6 +228,58 @@ class AutoFillPreviewTest(unittest.TestCase):
         self.assertEqual(result['created_count'], 1)
         self.assertEqual(result['skipped_count'], 0)
 
+    def test_preview_rejects_slot_occupied_by_other_division_game(self):
+        other_division = Division(id=uuid.uuid4(), name='K/1st', required_field_layout_type='THIRTY_YARD_WIDTH', is_active=True)
+        other_team_home = Team(id=uuid.uuid4(), organization_id=self.org_w.id, division_id=other_division.id, name='Westosha K', is_active=True)
+        other_team_away = Team(id=uuid.uuid4(), organization_id=self.org_a.id, division_id=other_division.id, name='Antioch K', is_active=True)
+        self.db.add_all([other_division, other_team_home, other_team_away])
+        self.db.add(Game(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week2.id,
+            home_team_id=other_team_home.id,
+            away_team_id=other_team_away.id,
+            game_status_id=self.status.id,
+            game_date=self.week2.start_date,
+            kickoff_time=time(9, 0),
+        ))
+        self.db.commit()
+
+        result = auto_fill_preview({'season_id': self.season.id, 'week_id': self.week2.id, 'division_id': self.division.id}, db=self.db)
+        self.assertEqual(result['proposed_game_count'], 0)
+        self.assertTrue(any('occupied by existing K/1st game' in s['reason'] for s in result['skipped']))
+
+    def test_apply_rejects_slot_occupied_by_other_division_game(self):
+        other_division = Division(id=uuid.uuid4(), name='K/1st', required_field_layout_type='THIRTY_YARD_WIDTH', is_active=True)
+        other_team_home = Team(id=uuid.uuid4(), organization_id=self.org_w.id, division_id=other_division.id, name='Westosha K2', is_active=True)
+        other_team_away = Team(id=uuid.uuid4(), organization_id=self.org_a.id, division_id=other_division.id, name='Antioch K2', is_active=True)
+        self.db.add_all([other_division, other_team_home, other_team_away])
+        self.db.add(Game(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week2.id,
+            home_team_id=other_team_home.id,
+            away_team_id=other_team_away.id,
+            game_status_id=self.status.id,
+            game_date=self.week2.start_date,
+            kickoff_time=time(9, 0),
+        ))
+        self.db.commit()
+
+        result = auto_fill_apply({
+            'season_id': self.season.id,
+            'week_id': self.week2.id,
+            'division_id': self.division.id,
+            'proposals': [{
+                'slot_id': str(self.slot.id),
+                'home_team_id': str(self.wm.id),
+                'away_team_id': str(self.ab.id),
+            }],
+        }, db=self.db)
+        self.assertEqual(result['created_count'], 0)
+        self.assertEqual(result['skipped_count'], 1)
+        self.assertIn('occupied by existing K/1st game', result['skipped'][0]['reason'])
+
     def test_nine_team_week_creates_five_games_with_one_double_header_team(self):
         org_c = Organization(id=uuid.uuid4(), name='Bristol', is_active=True)
         org_d = Organization(id=uuid.uuid4(), name='Salem', is_active=True)
