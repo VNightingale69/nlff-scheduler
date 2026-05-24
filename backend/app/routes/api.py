@@ -1777,7 +1777,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
 
     proposed_field_usage_by_host_date_division_layout: dict[tuple[str, str, str, str], int] = {}
 
-    def _least_used_compatible_open_slot(host_location_id: uuid.UUID | None, slot_date, slot_time) -> GameSlot | None:
+    def _first_compatible_open_slot_by_field_order(host_location_id: uuid.UUID | None, slot_date, slot_time) -> GameSlot | None:
         if not host_location_id:
             return None
         candidate_slots = db.query(GameSlot).join(GameSlot.field_instance).filter(
@@ -1798,13 +1798,10 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         return min(
             open_compatible_candidates,
             key=lambda c: (
-                existing_field_usage_by_host_date_division_layout.get((str(c.host_location_id), str(c.slot_date), str(c.field_instance_id), layout_key), 0)
-                + proposed_field_usage_by_host_date_division_layout.get((str(c.host_location_id), str(c.slot_date), str(c.field_instance_id), layout_key), 0),
                 c.field_instance.field_name if c.field_instance and c.field_instance.field_name else '',
                 str(c.id),
             ),
         )
-        return None
     if is_odd_division and no_byes:
         min_dh = min(double_header_counts.values() or [0])
         candidates = [tid for tid, count in double_header_counts.items() if count == min_dh]
@@ -1821,14 +1818,26 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             break
         all_candidates = []
         seen_host_time_keys: set[tuple[str, object, object]] = set()
-        for slot in remaining_slots:
+        sorted_slots = sorted(remaining_slots, key=lambda s: (s.slot_date, s.start_time, str(s.host_location_id), str(s.id)))
+        earliest_open_time: tuple[object, object] | None = None
+        for slot in sorted_slots:
+            if not slot.host_location_id:
+                continue
+            if _first_compatible_open_slot_by_field_order(slot.host_location_id, slot.slot_date, slot.start_time):
+                earliest_open_time = (slot.slot_date, slot.start_time)
+                break
+        if earliest_open_time is None:
+            break
+        for slot in sorted_slots:
+            if (slot.slot_date, slot.start_time) != earliest_open_time:
+                continue
             if not slot.host_location_id:
                 continue
             host_time_key = (str(slot.host_location_id), slot.slot_date, slot.start_time)
             if host_time_key in seen_host_time_keys:
                 continue
             seen_host_time_keys.add(host_time_key)
-            selected_field_slot = _least_used_compatible_open_slot(slot.host_location_id, slot.slot_date, slot.start_time)
+            selected_field_slot = _first_compatible_open_slot_by_field_order(slot.host_location_id, slot.slot_date, slot.start_time)
             if not selected_field_slot:
                 skipped.append({
                     'slot_id': str(slot.id),
@@ -2026,7 +2035,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'field': selected_field_slot.field_instance.field_name if selected_field_slot.field_instance else '',
             'field_instance_id': str(selected_field_slot.field_instance_id) if selected_field_slot.field_instance_id else None,
             'score': int(best['score']),
-            'reason': '; '.join(reason_bits + ['deterministic field assignment: least-used compatible open field by host/date/division layout']),
+            'reason': '; '.join(reason_bits + ['deterministic field assignment: earliest available time then first compatible open field by host order']),
             'warnings': best['warning_bits'],
             'rules_relaxed': [],
             'week': week.week_number,

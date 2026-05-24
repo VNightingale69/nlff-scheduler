@@ -170,6 +170,33 @@ class AutoFillPreviewTest(unittest.TestCase):
         self.assertEqual(result['proposals'][0]['host_location'], 'Westosha Park')
         self.assertIn('same-community at home host field (+60)', result['proposals'][0]['reason'])
 
+
+    def test_preview_fills_parallel_fields_before_later_times(self):
+        org_c = Organization(id=uuid.uuid4(), name='Bristol', is_active=True)
+        org_d = Organization(id=uuid.uuid4(), name='Salem', is_active=True)
+        self.db.add_all([org_c, org_d])
+        extra_teams = [
+            Team(id=uuid.uuid4(), organization_id=org_c.id, division_id=self.division.id, name='Bristol Blue', is_active=True),
+            Team(id=uuid.uuid4(), organization_id=org_c.id, division_id=self.division.id, name='Bristol White', is_active=True),
+            Team(id=uuid.uuid4(), organization_id=org_d.id, division_id=self.division.id, name='Salem Green', is_active=True),
+            Team(id=uuid.uuid4(), organization_id=org_d.id, division_id=self.division.id, name='Salem Orange', is_active=True),
+        ]
+        self.db.add_all(extra_teams)
+
+        fi2 = FieldInstance(id=uuid.uuid4(), host_location_id=self.host.id, hosting_availability_id=uuid.uuid4(), instance_date=self.week2.start_date, field_name='Small Field 2', field_type='SMALL', is_active=True)
+        slot2 = GameSlot(id=uuid.uuid4(), field_instance_id=fi2.id, host_location_id=self.host.id, slot_date=self.week2.start_date, start_time=time(9, 0), end_time=time(10, 0), field_type='SMALL', status='OPEN')
+        fi3 = FieldInstance(id=uuid.uuid4(), host_location_id=self.host.id, hosting_availability_id=uuid.uuid4(), instance_date=self.week2.start_date, field_name='Small Field 3', field_type='SMALL', is_active=True)
+        slot3 = GameSlot(id=uuid.uuid4(), field_instance_id=fi3.id, host_location_id=self.host.id, slot_date=self.week2.start_date, start_time=time(10, 0), end_time=time(11, 0), field_type='SMALL', status='OPEN')
+        self.db.add_all([fi2, slot2, fi3, slot3])
+        self.db.commit()
+
+        result = auto_fill_preview({'season_id': self.season.id, 'week_id': self.week2.id, 'division_id': self.division.id}, db=self.db)
+        self.assertGreaterEqual(result['proposed_game_count'], 2)
+        first_two = result['proposals'][:2]
+        self.assertEqual(first_two[0]['proposed_start_time'], '09:00:00')
+        self.assertEqual(first_two[1]['proposed_start_time'], '09:00:00')
+        self.assertEqual(first_two[0]['field'], 'Small Field 1')
+        self.assertEqual(first_two[1]['field'], 'Small Field 2')
     def test_uses_multiple_fields_when_parallel_capacity_exists(self):
         away_host = HostLocation(id=uuid.uuid4(), organization_id=self.org_a.id, name='Antioch Park', is_active=True)
         away_fi = FieldInstance(id=uuid.uuid4(), host_location_id=away_host.id, hosting_availability_id=uuid.uuid4(), instance_date=self.week2.start_date, field_name='Away Field 1', field_type='SMALL', is_active=True)
