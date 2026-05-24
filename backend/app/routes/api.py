@@ -1531,6 +1531,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     preferred_utilization_spread = _float_cfg('preferred_utilization_spread', 0.35, 0.0, 1.0)
     centralization_requested = bool(payload.get('centralized_scheduling_requested', False))
     staffing_limited = bool(payload.get('staffing_limited', False))
+    no_simultaneous_games_same_host = bool(payload.get('no_simultaneous_games_same_host', False))
     season_id = payload.get('season_id')
     week_id = payload.get('week_id')
     division_id = payload.get('division_id')
@@ -1575,6 +1576,40 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     assigned_games = db.query(Game).join(GameSlot, GameSlot.assigned_game_id == Game.id).filter(
         Game.game_date == week.start_date
     ).all()
+    existing_non_unscheduled_games = db.query(
+        Game.home_team_id,
+        Game.away_team_id,
+        Game.game_date,
+        Game.kickoff_time,
+        GameSlot.host_location_id,
+        GameSlot.field_instance_id,
+        Division.name,
+    ).join(Game.status).join(Game.home_team).join(Team.division).outerjoin(
+        GameSlot, GameSlot.assigned_game_id == Game.id
+    ).filter(
+        Game.game_date == week.start_date,
+        GameStatus.code != 'UNSCHEDULED',
+        GameStatus.is_active.is_(True),
+    ).all()
+    team_time_occupied = {
+        (str(team_id), game_date, kickoff_time)
+        for row in existing_non_unscheduled_games
+        for team_id, game_date, kickoff_time in (
+            (row.home_team_id, row.game_date, row.kickoff_time),
+            (row.away_team_id, row.game_date, row.kickoff_time),
+        )
+        if team_id and game_date and kickoff_time
+    }
+    field_time_occupied = {
+        (str(row.field_instance_id), row.game_date, row.kickoff_time): row.name
+        for row in existing_non_unscheduled_games
+        if row.field_instance_id and row.game_date and row.kickoff_time
+    }
+    host_time_occupied = {
+        (str(row.host_location_id), row.game_date, row.kickoff_time): row.name
+        for row in existing_non_unscheduled_games
+        if row.host_location_id and row.game_date and row.kickoff_time
+    }
     season_division_games = db.query(Game).join(Game.home_team).join(Game.status).filter(
         Game.season_id == season_id,
         Team.division_id == division_id,
@@ -1744,6 +1779,33 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                     pair = tuple(sorted((a, b)))
                     if pair in used_pairs:
                         continue
+                    field_time_key = (str(slot.field_instance_id), slot.slot_date, slot.start_time)
+                    if field_time_key in field_time_occupied:
+                        skipped.append({
+                            'slot_id': str(slot.id),
+                            'reason': f"Rejected: time slot already occupied by existing {field_time_occupied[field_time_key]} game.",
+                        })
+                        continue
+                    if (str(a), slot.slot_date, slot.start_time) in team_time_occupied or (str(b), slot.slot_date, slot.start_time) in team_time_occupied:
+                        skipped.append({
+                            'slot_id': str(slot.id),
+                            'reason': 'Rejected: one team is already scheduled at this date/time.',
+                        })
+                        continue
+                    if slot.host_location_id and slot.host_location_id not in compatible_fields_by_host:
+                        skipped.append({
+                            'slot_id': str(slot.id),
+                            'reason': 'Rejected: host location does not have an available compatible field at this date/time.',
+                        })
+                        continue
+                    if no_simultaneous_games_same_host:
+                        host_time_key = (str(slot.host_location_id), slot.slot_date, slot.start_time)
+                        if host_time_key in host_time_occupied:
+                            skipped.append({
+                                'slot_id': str(slot.id),
+                                'reason': f"Rejected: time slot already occupied by existing {host_time_occupied[host_time_key]} game.",
+                            })
+                            continue
                     team_a = teams_by_id[a]
                     team_b = teams_by_id[b]
                     host_org_id = slot.host_location.organization_id if slot.host_location else None
@@ -2056,6 +2118,7 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
     week_id = payload.get('week_id')
     division_id = payload.get('division_id')
     proposals = payload.get('proposals') or []
+    no_simultaneous_games_same_host = bool(payload.get('no_simultaneous_games_same_host', False))
     if not season_id or not week_id or not division_id:
         raise HTTPException(400, 'season_id, week_id, and division_id are required')
     if not proposals:
@@ -2098,6 +2161,41 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
     skipped: list[dict[str, str]] = []
     existing_games_count = len(existing_division_games)
     teams_by_id = {str(team.id): team for team in teams}
+    existing_non_unscheduled_games = db.query(
+        Game.id,
+        Game.home_team_id,
+        Game.away_team_id,
+        Game.game_date,
+        Game.kickoff_time,
+        GameSlot.host_location_id,
+        GameSlot.field_instance_id,
+        Division.name,
+    ).join(Game.status).join(Game.home_team).join(Team.division).outerjoin(
+        GameSlot, GameSlot.assigned_game_id == Game.id
+    ).filter(
+        Game.game_date == db.query(Week.start_date).filter(Week.id == week_id).scalar_subquery(),
+        GameStatus.code != 'UNSCHEDULED',
+        GameStatus.is_active.is_(True),
+    ).all()
+    team_time_occupied = {
+        (str(team_id), game_date, kickoff_time)
+        for row in existing_non_unscheduled_games
+        for team_id, game_date, kickoff_time in (
+            (row.home_team_id, row.game_date, row.kickoff_time),
+            (row.away_team_id, row.game_date, row.kickoff_time),
+        )
+        if team_id and game_date and kickoff_time
+    }
+    field_time_occupied = {
+        (str(row.field_instance_id), row.game_date, row.kickoff_time): row.name
+        for row in existing_non_unscheduled_games
+        if row.field_instance_id and row.game_date and row.kickoff_time
+    }
+    host_time_occupied = {
+        (str(row.host_location_id), row.game_date, row.kickoff_time): row.name
+        for row in existing_non_unscheduled_games
+        if row.host_location_id and row.game_date and row.kickoff_time
+    }
 
     def _team_name(team_id: str | None) -> str:
         if not team_id:
@@ -2134,6 +2232,21 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         if not home_team_id or not away_team_id or home_team_id == away_team_id:
             skipped.append({'reason': 'no valid opponent available (invalid matchup payload)'})
             continue
+        field_time_key = (str(slot.field_instance_id), slot.slot_date, slot.start_time)
+        if field_time_key in field_time_occupied:
+            skipped.append({'reason': f"Rejected: time slot already occupied by existing {field_time_occupied[field_time_key]} game."})
+            continue
+        if (str(home_team_id), slot.slot_date, slot.start_time) in team_time_occupied or (str(away_team_id), slot.slot_date, slot.start_time) in team_time_occupied:
+            skipped.append({'reason': 'Rejected: one team is already scheduled at this date/time.'})
+            continue
+        if slot.host_location_id is None or slot.field_instance_id is None:
+            skipped.append({'reason': 'Rejected: host location does not have an available compatible field at this date/time.'})
+            continue
+        if no_simultaneous_games_same_host:
+            host_time_key = (str(slot.host_location_id), slot.slot_date, slot.start_time)
+            if host_time_key in host_time_occupied:
+                skipped.append({'reason': f"Rejected: time slot already occupied by existing {host_time_occupied[host_time_key]} game."})
+                continue
         duplicate = db.query(Game).join(Game.home_team).join(Game.status).filter(
             Game.season_id == season_id,
             Game.week_id == week_id,
@@ -2174,6 +2287,11 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         db.flush()
         slot.status = 'ASSIGNED'
         slot.assigned_game_id = game.id
+        team_time_occupied.add((str(home_team_id), slot.slot_date, slot.start_time))
+        team_time_occupied.add((str(away_team_id), slot.slot_date, slot.start_time))
+        field_time_occupied[(str(slot.field_instance_id), slot.slot_date, slot.start_time)] = teams_by_id.get(str(home_team_id)).division.name if teams_by_id.get(str(home_team_id)) and teams_by_id.get(str(home_team_id)).division else 'another division'
+        if slot.host_location_id:
+            host_time_occupied[(str(slot.host_location_id), slot.slot_date, slot.start_time)] = teams_by_id.get(str(home_team_id)).division.name if teams_by_id.get(str(home_team_id)) and teams_by_id.get(str(home_team_id)).division else 'another division'
         used_team_ids.add(home_uuid)
         used_team_ids.add(away_uuid)
         week_team_game_counts[home_uuid] = week_team_game_counts.get(home_uuid, 0) + 1
