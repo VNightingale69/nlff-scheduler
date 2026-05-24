@@ -869,17 +869,43 @@ def list_saved_hosting_availability(organization_id: uuid.UUID | None = None, ho
     host_ids = {row.physical_field_area.host_location.id for row in rows if row.physical_field_area and row.physical_field_area.host_location}
     field_counts_by_host: dict[str, dict[str, int]] = {}
     if host_ids:
-        field_rows = (
+        schedulable_rows = (
             db.query(
                 Field.host_location_id.label('host_location_id'),
                 Field.layout_type.label('layout_type'),
                 func.count(Field.id).label('count'),
             )
-            .filter(Field.host_location_id.in_(host_ids), Field.is_active.is_(True))
+            .join(HostLocation, HostLocation.id == Field.host_location_id)
+            .outerjoin(PhysicalFieldArea, PhysicalFieldArea.id == Field.physical_field_area_id)
+            .filter(
+                Field.host_location_id.in_(host_ids),
+                Field.is_active.is_(True),
+                HostLocation.is_active.is_(True),
+                or_(Field.physical_field_area_id.is_(None), PhysicalFieldArea.is_active.is_(True)),
+            )
             .group_by(Field.host_location_id, Field.layout_type)
             .all()
         )
-        for field_row in field_rows:
+        debug_totals = dict(
+            db.query(Field.host_location_id, func.count(Field.id))
+            .filter(Field.host_location_id.in_(host_ids))
+            .group_by(Field.host_location_id)
+            .all()
+        )
+        debug_inactive = dict(
+            db.query(Field.host_location_id, func.count(Field.id))
+            .filter(Field.host_location_id.in_(host_ids), Field.is_active.is_(False))
+            .group_by(Field.host_location_id)
+            .all()
+        )
+        unmatched_count = (
+            db.query(func.count(Field.id))
+            .outerjoin(HostLocation, HostLocation.id == Field.host_location_id)
+            .filter(Field.host_location_id.in_(host_ids), HostLocation.id.is_(None))
+            .scalar()
+            or 0
+        )
+        for field_row in schedulable_rows:
             host_key = str(field_row.host_location_id)
             layout_value = str(field_row.layout_type or '').upper()
             counts = field_counts_by_host.setdefault(host_key, {'small': 0, 'large': 0})
@@ -887,6 +913,24 @@ def list_saved_hosting_availability(organization_id: uuid.UUID | None = None, ho
                 counts['small'] += int(field_row.count or 0)
             elif ('FIFTY_THREE' in layout_value) or ('53' in layout_value) or ('LARGE' in layout_value):
                 counts['large'] += int(field_row.count or 0)
+        for host_id in host_ids:
+            host_key = str(host_id)
+            counts = field_counts_by_host.setdefault(host_key, {'small': 0, 'large': 0})
+            total_fields = int(debug_totals.get(host_id, 0) or 0)
+            inactive_fields = int(debug_inactive.get(host_id, 0) or 0)
+            counts['total'] = total_fields
+            counts['inactive'] = inactive_fields
+            counts['unmatched'] = int(unmatched_count or 0)
+            counts['mismatch'] = total_fields > 0 and (counts['small'] + counts['large'] == 0)
+            logger.info(
+                'Hosting field inventory validation host_location_id=%s total_fields_found=%s small_field_count=%s large_field_count=%s inactive_field_count=%s unmatched_field_records=%s',
+                host_key,
+                total_fields,
+                counts['small'],
+                counts['large'],
+                inactive_fields,
+                unmatched_count,
+            )
     grouped: dict[tuple[str, str, str], dict] = {}
     for row in rows:
         if not row.physical_field_area:
@@ -898,7 +942,7 @@ def list_saved_hosting_availability(organization_id: uuid.UUID | None = None, ho
         host_id = str(host.id)
         key = (str(row.available_date), str(area.id), layout_name)
         if key not in grouped:
-            host_field_counts = field_counts_by_host.get(host_id, {'small': 0, 'large': 0})
+            host_field_counts = field_counts_by_host.get(host_id, {'small': 0, 'large': 0, 'total': 0, 'inactive': 0, 'unmatched': 0, 'mismatch': False})
             grouped[key] = {
                 'available_date': row.available_date,
                 'organization_id': host.organization_id,
@@ -909,6 +953,10 @@ def list_saved_hosting_availability(organization_id: uuid.UUID | None = None, ho
                 'available_layout': layout_name,
                 'small_field_capacity': host_field_counts['small'],
                 'large_field_capacity': host_field_counts['large'],
+                'total_fields_found': host_field_counts['total'],
+                'inactive_field_count': host_field_counts['inactive'],
+                'unmatched_field_records': host_field_counts['unmatched'],
+                'has_field_inventory_mismatch': host_field_counts['mismatch'],
                 'hours': []
             }
         grouped[key]['hours'].append(row.start_time.hour)
@@ -936,6 +984,10 @@ def list_saved_hosting_availability(organization_id: uuid.UUID | None = None, ho
             'available_layout': data['available_layout'],
             'small_field_capacity': data['small_field_capacity'],
             'large_field_capacity': data['large_field_capacity'],
+            'total_fields_found': data['total_fields_found'],
+            'inactive_field_count': data['inactive_field_count'],
+            'unmatched_field_records': data['unmatched_field_records'],
+            'has_field_inventory_mismatch': data['has_field_inventory_mismatch'],
             'time_ranges': ranges,
         })
     items.sort(key=lambda x: (x['available_date'], x['host_location_name']))

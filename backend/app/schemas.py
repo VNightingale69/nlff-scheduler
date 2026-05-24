@@ -228,6 +228,10 @@ class SavedAvailabilityEntry(BaseModel):
     available_layout: str
     small_field_capacity: int
     large_field_capacity: int
+    total_fields_found: int = 0
+    inactive_field_count: int = 0
+    unmatched_field_records: int = 0
+    has_field_inventory_mismatch: bool = False
     time_ranges: list[SavedAvailabilityRange]
 
 
