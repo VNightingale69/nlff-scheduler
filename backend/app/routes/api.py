@@ -1663,27 +1663,37 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                     score = 0
                     reason_bits = []
                     warning_bits = []
-                    if not same_community:
-                        score += 30
-                        reason_bits.append('cross-community matchup')
+                    if matchup_counts.get(pair, 0) == 0:
+                        score += 100
+                        reason_bits.append('new opponent pairing (+100)')
                     else:
-                        score -= 40
+                        all_unique_exhausted = len(matchup_counts) >= max(1, (team_count * (team_count - 1)) // 2)
+                        if all_unique_exhausted:
+                            score -= 50
+                            warning_bits.append('repeat matchup after unique options were limited (-50)')
+                        else:
+                            score -= 150
+                            warning_bits.append('repeat matchup before unique options exhausted (-150)')
                     if hosted_by_own_community:
-                        score += 35
-                        reason_bits.append('Same-community matchup placed at home field')
+                        score += 60
+                        reason_bits.append('same-community at home host field (+60)')
                     elif same_community:
-                        score -= 75
-                        warning_bits.append('Warning: same-community matchup not at home field because no eligible home slot was available')
+                        score -= 80
+                        warning_bits.append('same-community away from host field (-80)')
                     if host_pref:
-                        score += 20
-                        reason_bits.append('host community preference')
+                        score += 40
+                        reason_bits.append('reduced travel via host alignment (+40)')
                     if is_odd_division and no_byes and selected_double_header_team_id:
                         includes_dh = selected_double_header_team_id in {a, b}
                         if week_team_game_counts.get(selected_double_header_team_id, 0) == 0 and not includes_dh:
-                            score -= 120
+                            score -= 200
                         if includes_dh:
-                            score += 20
-                            reason_bits.append('double-header fairness rotation')
+                            if double_header_counts.get(selected_double_header_team_id, 0) == 0:
+                                score += 75
+                                reason_bits.append('first double-header for selected team (+75)')
+                            else:
+                                score -= 200
+                                warning_bits.append('second double-header before full rotation (-200)')
                     if prior_week_team_repeat:
                         score -= 75
                         warning_bits.append('Warning: same matchup occurred last week')
@@ -1707,12 +1717,12 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                                     prev_hour = int(str(prev_start).split(':')[0])
                                     cur_hour = int(str(slot.start_time).split(':')[0])
                                     if abs(cur_hour - prev_hour) == 1:
-                                        score += 30
-                                        reason_bits.append('double header back-to-back')
+                                        score += 100
+                                        reason_bits.append('double-header back-to-back (+100)')
                                         double_header_back_to_back = True
                                     else:
-                                        score -= 60
-                                        warning_bits.append('double header with gap')
+                                        score -= 150
+                                        warning_bits.append('double-header separated by gap (-150)')
                                 except Exception:
                                     pass
 
@@ -1761,8 +1771,12 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'proposed_start_time': str(slot.start_time),
             'host_location': slot.host_location.name if slot.host_location else '',
             'field': slot.field_instance.field_name if slot.field_instance else '',
-            'score': max(0, min(100, int(best['score']))),
-            'reason': ', '.join(reason_bits),
+            'score': int(best['score']),
+            'reason': '; '.join(reason_bits),
+            'warnings': best['warning_bits'],
+            'rules_relaxed': [],
+            'week': week.week_number,
+            'division': division.name,
         })
         used_pairs.add(tuple(sorted((best['home_team_id'], best['away_team_id']))))
         week_team_game_counts[best['home_team_id']] = week_team_game_counts.get(best['home_team_id'], 0) + 1
@@ -1772,6 +1786,17 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             used_team_ids.add(best['away_team_id'])
         remaining_slots = [s for s in remaining_slots if s.id != slot.id]
     unused_team_ids = [str(tid) for tid in teams_by_id if tid not in used_team_ids]
+    projected_counts = dict(week_team_game_counts)
+    for plan in plans:
+        projected_counts[uuid.UUID(plan['home_team_id'])] = projected_counts.get(uuid.UUID(plan['home_team_id']), 0) + 0
+        projected_counts[uuid.UUID(plan['away_team_id'])] = projected_counts.get(uuid.UUID(plan['away_team_id']), 0) + 0
+    per_team_games = [{
+        'team_id': str(tid),
+        'team_name': teams_by_id[tid].name,
+        'games_in_week': projected_counts.get(tid, 0),
+    } for tid in teams_by_id]
+    duplicate_matchups = [p['proposed_matchup'] for p in plans if matchup_counts.get(tuple(sorted((uuid.UUID(p['home_team_id']), uuid.UUID(p['away_team_id'])))), 0) > 0]
+    double_header_teams = [row['team_name'] for row in per_team_games if row['games_in_week'] > 1]
     return {
         'proposals': plans,
         'skipped': skipped,
@@ -1781,6 +1806,13 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         'unused_team_ids': unused_team_ids,
         'unused_teams': [teams_by_id[uuid.UUID(tid)].name for tid in unused_team_ids],
         'double_header_team_id': str(selected_double_header_team_id) if selected_double_header_team_id else None,
+        'audit': {
+            'total_games_per_team': per_team_games,
+            'duplicate_matchups': duplicate_matchups,
+            'double_header_teams_by_week': double_header_teams,
+            'rules_relaxed': [],
+            'unresolved_conflicts': [],
+        },
     }
 
 
