@@ -1511,7 +1511,10 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     required_field_type = _required_field_type_for_division(division)
     teams = db.query(Team).filter(Team.division_id == division_id, Team.is_active.is_(True)).order_by(Team.name).all()
     teams_by_id = {t.id: t for t in teams}
-    max_games_for_division_week = len(teams) // 2
+    no_byes = bool(payload.get('no_byes', True))
+    team_count = len(teams)
+    is_odd_division = team_count % 2 == 1
+    max_games_for_division_week = (team_count + 1) // 2 if (is_odd_division and no_byes) else team_count // 2
     existing_division_games = db.query(Game).join(Game.home_team).join(Game.status).filter(
         Game.season_id == season_id,
         Game.week_id == week_id,
@@ -1521,12 +1524,15 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         GameStatus.is_active.is_(True),
     ).all()
     used_team_ids: set[uuid.UUID] = set()
+    week_team_game_counts: dict[uuid.UUID, int] = {tid: 0 for tid in teams_by_id}
     used_pairs: set[tuple[uuid.UUID, uuid.UUID]] = set()
     for g in existing_division_games:
         if g.home_team_id in teams_by_id:
             used_team_ids.add(g.home_team_id)
+            week_team_game_counts[g.home_team_id] = week_team_game_counts.get(g.home_team_id, 0) + 1
         if g.away_team_id in teams_by_id:
             used_team_ids.add(g.away_team_id)
+            week_team_game_counts[g.away_team_id] = week_team_game_counts.get(g.away_team_id, 0) + 1
         used_pairs.add(tuple(sorted((g.home_team_id, g.away_team_id))))
     open_slots = db.query(GameSlot).join(GameSlot.field_instance).filter(
         GameSlot.status == 'OPEN',
@@ -1544,6 +1550,21 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         GameStatus.code == 'SCHEDULED',
         GameStatus.is_active.is_(True),
     ).all()
+    double_header_counts: dict[uuid.UUID, int] = {tid: 0 for tid in teams_by_id}
+    for game in season_division_games:
+        if game.week_id == week_id:
+            continue
+        double_header_counts[game.home_team_id] = double_header_counts.get(game.home_team_id, 0)
+        double_header_counts[game.away_team_id] = double_header_counts.get(game.away_team_id, 0)
+    team_week_counts: dict[tuple[uuid.UUID, uuid.UUID], int] = {}
+    for game in season_division_games:
+        key_home = (game.home_team_id, game.week_id)
+        key_away = (game.away_team_id, game.week_id)
+        team_week_counts[key_home] = team_week_counts.get(key_home, 0) + 1
+        team_week_counts[key_away] = team_week_counts.get(key_away, 0) + 1
+    for (team_id, _wk_id), count in team_week_counts.items():
+        if count > 1:
+            double_header_counts[team_id] = double_header_counts.get(team_id, 0) + 1
 
     matchup_counts: dict[tuple[uuid.UUID, uuid.UUID], int] = {}
     community_matchup_counts: dict[tuple[uuid.UUID, uuid.UUID], int] = {}
@@ -1603,8 +1624,19 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'unused_teams': [teams_by_id[tid].name for tid in teams_by_id if tid not in used_team_ids],
         }
     remaining_slots = list(open_slots)
+    selected_double_header_team_id: uuid.UUID | None = None
+    if is_odd_division and no_byes:
+        min_dh = min(double_header_counts.values() or [0])
+        candidates = [tid for tid, count in double_header_counts.items() if count == min_dh]
+        candidates.sort(key=lambda tid: teams_by_id[tid].name)
+        selected_double_header_team_id = candidates[0] if candidates else None
     while remaining_slots and len(plans) < max_new_games:
-        available_team_ids = [tid for tid in teams_by_id if tid not in used_team_ids]
+        if is_odd_division and no_byes and selected_double_header_team_id:
+            available_team_ids = [tid for tid in teams_by_id if week_team_game_counts.get(tid, 0) < 1]
+            if week_team_game_counts.get(selected_double_header_team_id, 0) < 2 and selected_double_header_team_id not in available_team_ids:
+                available_team_ids.append(selected_double_header_team_id)
+        else:
+            available_team_ids = [tid for tid in teams_by_id if tid not in used_team_ids]
         if len(available_team_ids) < 2:
             break
         all_candidates = []
@@ -1645,8 +1677,13 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                     if host_pref:
                         score += 20
                         reason_bits.append('host community preference')
-                    if repeat_count > 0:
-                        score -= 40
+                    if is_odd_division and no_byes and selected_double_header_team_id:
+                        includes_dh = selected_double_header_team_id in {a, b}
+                        if week_team_game_counts.get(selected_double_header_team_id, 0) == 0 and not includes_dh:
+                            score -= 120
+                        if includes_dh:
+                            score += 20
+                            reason_bits.append('double-header fairness rotation')
                     if prior_week_team_repeat:
                         score -= 75
                         warning_bits.append('Warning: same matchup occurred last week')
@@ -1660,6 +1697,25 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                     if community_repeat_count > 0:
                         score -= 20
 
+                    double_header_back_to_back = False
+                    if is_odd_division and no_byes and selected_double_header_team_id and selected_double_header_team_id in {a, b}:
+                        prior_slots = [p for p in plans if p.get('home_team_id') == str(selected_double_header_team_id) or p.get('away_team_id') == str(selected_double_header_team_id)]
+                        if prior_slots:
+                            prev_start = prior_slots[0].get('proposed_start_time')
+                            if prev_start and str(prev_start) != str(slot.start_time):
+                                try:
+                                    prev_hour = int(str(prev_start).split(':')[0])
+                                    cur_hour = int(str(slot.start_time).split(':')[0])
+                                    if abs(cur_hour - prev_hour) == 1:
+                                        score += 30
+                                        reason_bits.append('double header back-to-back')
+                                        double_header_back_to_back = True
+                                    else:
+                                        score -= 60
+                                        warning_bits.append('double header with gap')
+                                except Exception:
+                                    pass
+
                     all_candidates.append({
                         'slot': slot,
                         'home_team_id': a,
@@ -1671,6 +1727,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                         'reason_bits': reason_bits,
                         'warning_bits': warning_bits,
                         'prior_week_team_repeat': prior_week_team_repeat,
+                        'double_header_back_to_back': double_header_back_to_back,
                     })
 
         home_same_community_pairs = {c['pair'] for c in all_candidates if c['same_community'] and c['hosted_by_own_community']}
@@ -1708,8 +1765,11 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'reason': ', '.join(reason_bits),
         })
         used_pairs.add(tuple(sorted((best['home_team_id'], best['away_team_id']))))
-        used_team_ids.add(best['home_team_id'])
-        used_team_ids.add(best['away_team_id'])
+        week_team_game_counts[best['home_team_id']] = week_team_game_counts.get(best['home_team_id'], 0) + 1
+        week_team_game_counts[best['away_team_id']] = week_team_game_counts.get(best['away_team_id'], 0) + 1
+        if not (is_odd_division and no_byes):
+            used_team_ids.add(best['home_team_id'])
+            used_team_ids.add(best['away_team_id'])
         remaining_slots = [s for s in remaining_slots if s.id != slot.id]
     unused_team_ids = [str(tid) for tid in teams_by_id if tid not in used_team_ids]
     return {
@@ -1720,6 +1780,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         'existing_game_count': existing_games_count,
         'unused_team_ids': unused_team_ids,
         'unused_teams': [teams_by_id[uuid.UUID(tid)].name for tid in unused_team_ids],
+        'double_header_team_id': str(selected_double_header_team_id) if selected_double_header_team_id else None,
     }
 
 
@@ -1743,7 +1804,9 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         }
     teams = db.query(Team).filter(Team.division_id == division_id, Team.is_active.is_(True)).all()
     team_ids = {t.id for t in teams}
-    max_games_for_division_week = len(teams) // 2
+    no_byes = bool(payload.get('no_byes', True))
+    is_odd_division = len(teams) % 2 == 1
+    max_games_for_division_week = (len(teams) + 1) // 2 if (is_odd_division and no_byes) else len(teams) // 2
     existing_division_games = db.query(Game).join(Game.home_team).join(Game.status).filter(
         Game.season_id == season_id,
         Game.week_id == week_id,
@@ -1753,11 +1816,14 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         GameStatus.is_active.is_(True),
     ).all()
     used_team_ids: set[uuid.UUID] = set()
+    week_team_game_counts: dict[uuid.UUID, int] = {t.id: 0 for t in teams}
     for g in existing_division_games:
         if g.home_team_id in team_ids:
             used_team_ids.add(g.home_team_id)
+            week_team_game_counts[g.home_team_id] = week_team_game_counts.get(g.home_team_id, 0) + 1
         if g.away_team_id in team_ids:
             used_team_ids.add(g.away_team_id)
+            week_team_game_counts[g.away_team_id] = week_team_game_counts.get(g.away_team_id, 0) + 1
     status = db.query(GameStatus).filter(GameStatus.code == 'SCHEDULED').first()
     if not status:
         raise HTTPException(400, 'Game status setup is incomplete: missing SCHEDULED status')
@@ -1816,7 +1882,11 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         if duplicate:
             skipped.append({'reason': _fmt_duplicate_skip(str(home_team_id), str(away_team_id), slot)})
             continue
-        if uuid.UUID(str(home_team_id)) in used_team_ids or uuid.UUID(str(away_team_id)) in used_team_ids:
+        home_uuid = uuid.UUID(str(home_team_id))
+        away_uuid = uuid.UUID(str(away_team_id))
+        home_limit = 2 if (is_odd_division and no_byes) else 1
+        away_limit = 2 if (is_odd_division and no_byes) else 1
+        if week_team_game_counts.get(home_uuid, 0) >= home_limit or week_team_game_counts.get(away_uuid, 0) >= away_limit:
             skipped.append({
                 'reason': (
                     f"Skipped {_team_name(str(home_team_id))} vs {_team_name(str(away_team_id))} "
@@ -1838,8 +1908,10 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         db.flush()
         slot.status = 'ASSIGNED'
         slot.assigned_game_id = game.id
-        used_team_ids.add(uuid.UUID(str(home_team_id)))
-        used_team_ids.add(uuid.UUID(str(away_team_id)))
+        used_team_ids.add(home_uuid)
+        used_team_ids.add(away_uuid)
+        week_team_game_counts[home_uuid] = week_team_game_counts.get(home_uuid, 0) + 1
+        week_team_game_counts[away_uuid] = week_team_game_counts.get(away_uuid, 0) + 1
         created_games += 1
         assigned_slots += 1
     db.commit()
@@ -2215,3 +2287,9 @@ def delete_game(game_id: uuid.UUID, db: Session = Depends(get_db)):
     db.delete(obj)
     db.commit()
     return {'ok': True}
+                    if repeat_count == 0:
+                        score += 40
+                        reason_bits.append('unique matchup')
+                    else:
+                        score -= 50
+                        warning_bits.append('repeat opponent')

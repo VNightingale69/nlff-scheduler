@@ -198,5 +198,37 @@ class AutoFillPreviewTest(unittest.TestCase):
         self.assertEqual(result['created_count'], 1)
         self.assertEqual(result['skipped_count'], 0)
 
+    def test_nine_team_week_creates_five_games_with_one_double_header_team(self):
+        org_c = Organization(id=uuid.uuid4(), name='Bristol', is_active=True)
+        org_d = Organization(id=uuid.uuid4(), name='Salem', is_active=True)
+        org_e = Organization(id=uuid.uuid4(), name='Kenosha', is_active=True)
+        self.db.add_all([org_c, org_d, org_e])
+        extra_teams = [
+            Team(id=uuid.uuid4(), organization_id=org_c.id, division_id=self.division.id, name='Bristol Blue', is_active=True),
+            Team(id=uuid.uuid4(), organization_id=org_c.id, division_id=self.division.id, name='Bristol White', is_active=True),
+            Team(id=uuid.uuid4(), organization_id=org_d.id, division_id=self.division.id, name='Salem Green', is_active=True),
+            Team(id=uuid.uuid4(), organization_id=org_d.id, division_id=self.division.id, name='Salem Orange', is_active=True),
+            Team(id=uuid.uuid4(), organization_id=org_e.id, division_id=self.division.id, name='Kenosha Red', is_active=True),
+        ]
+        self.db.add_all(extra_teams)
+        slots = []
+        for hour in (10, 11, 12, 13):
+            fi = FieldInstance(id=uuid.uuid4(), host_location_id=self.host.id, hosting_availability_id=uuid.uuid4(), instance_date=self.week2.start_date, field_name=f'Small Field {hour}', field_type='SMALL', is_active=True)
+            slot = GameSlot(id=uuid.uuid4(), field_instance_id=fi.id, host_location_id=self.host.id, slot_date=self.week2.start_date, start_time=time(hour, 0), end_time=time(hour + 1, 0), field_type='SMALL', status='OPEN')
+            slots.extend([fi, slot])
+        self.db.add_all(slots)
+        self.db.commit()
+
+        preview = auto_fill_preview({'season_id': self.season.id, 'week_id': self.week2.id, 'division_id': self.division.id, 'no_byes': True}, db=self.db)
+        self.assertEqual(preview['max_allowed_game_count'], 5)
+        self.assertEqual(preview['proposed_game_count'], 5)
+        team_counts: dict[str, int] = {}
+        for row in preview['proposals']:
+            team_counts[row['home_team_id']] = team_counts.get(row['home_team_id'], 0) + 1
+            team_counts[row['away_team_id']] = team_counts.get(row['away_team_id'], 0) + 1
+        doubles = [tid for tid, count in team_counts.items() if count == 2]
+        self.assertEqual(len(doubles), 1)
+        self.assertEqual(sum(team_counts.values()), 10)
+
 if __name__ == '__main__':
     unittest.main()
