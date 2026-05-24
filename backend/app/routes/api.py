@@ -1756,25 +1756,27 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             compatible_fields_by_host.setdefault(slot.host_location_id, set()).add(slot.field_instance_id)
     layout_key = required_field_type.value if hasattr(required_field_type, 'value') else str(required_field_type)
 
-    def _planned_field_usage_snapshot() -> tuple[dict[tuple[str, str, str], int], dict[tuple[str, str], int], dict[tuple[str, str, str, str], int], dict[tuple[str, str, str], int]]:
-        usage_by_field_division_layout: dict[tuple[str, str, str], int] = {}
-        usage_by_host_field: dict[tuple[str, str], int] = {}
-        usage_by_host_slot_field: dict[tuple[str, str, str, str], int] = {}
-        usage_by_host_field_layout: dict[tuple[str, str, str], int] = {}
-        for p in plans:
-            host_id = p.get('host_location_id')
-            field_id = p.get('field_instance_id')
-            slot_time = p.get('proposed_start_time')
-            if not host_id or not field_id:
-                continue
-            usage_by_field_division_layout[(field_id, str(division_id), layout_key)] = usage_by_field_division_layout.get((field_id, str(division_id), layout_key), 0) + 1
-            usage_by_host_field[(host_id, field_id)] = usage_by_host_field.get((host_id, field_id), 0) + 1
-            usage_by_host_field_layout[(host_id, field_id, layout_key)] = usage_by_host_field_layout.get((host_id, field_id, layout_key), 0) + 1
-            if slot_time:
-                usage_by_host_slot_field[(host_id, str(slot_time), field_id, layout_key)] = usage_by_host_slot_field.get((host_id, str(slot_time), field_id, layout_key), 0) + 1
-        return usage_by_field_division_layout, usage_by_host_field, usage_by_host_slot_field, usage_by_host_field_layout
+    existing_field_usage_by_host_date_division_layout: dict[tuple[str, str, str, str], int] = {}
+    existing_usage_rows = db.query(
+        GameSlot.host_location_id,
+        GameSlot.slot_date,
+        GameSlot.field_instance_id,
+        func.count(GameSlot.id),
+    ).join(Game, Game.id == GameSlot.assigned_game_id).filter(
+        Game.division_id == division_id,
+        GameSlot.field_type == required_field_type,
+        GameSlot.assigned_game_id.isnot(None),
+    ).group_by(
+        GameSlot.host_location_id,
+        GameSlot.slot_date,
+        GameSlot.field_instance_id,
+    ).all()
+    for host_id, slot_date, field_id, usage_count in existing_usage_rows:
+        existing_field_usage_by_host_date_division_layout[(str(host_id), str(slot_date), str(field_id), layout_key)] = int(usage_count or 0)
 
-    def _first_compatible_open_slot(host_location_id: uuid.UUID | None, slot_date, slot_time) -> GameSlot | None:
+    proposed_field_usage_by_host_date_division_layout: dict[tuple[str, str, str, str], int] = {}
+
+    def _least_used_compatible_open_slot(host_location_id: uuid.UUID | None, slot_date, slot_time) -> GameSlot | None:
         if not host_location_id:
             return None
         candidate_slots = db.query(GameSlot).join(GameSlot.field_instance).filter(
@@ -1784,11 +1786,23 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             GameSlot.status == 'OPEN',
             GameSlot.assigned_game_id.is_(None),
             GameSlot.field_type == required_field_type,
-        ).order_by(FieldInstance.field_name.asc(), GameSlot.id.asc()).all()
+        ).all()
+        open_compatible_candidates: list[GameSlot] = []
         for candidate in candidate_slots:
             field_time_key = (str(candidate.field_instance_id), candidate.slot_date, candidate.start_time)
             if field_time_key not in field_time_occupied:
-                return candidate
+                open_compatible_candidates.append(candidate)
+        if not open_compatible_candidates:
+            return None
+        return min(
+            open_compatible_candidates,
+            key=lambda c: (
+                existing_field_usage_by_host_date_division_layout.get((str(c.host_location_id), str(c.slot_date), str(c.field_instance_id), layout_key), 0)
+                + proposed_field_usage_by_host_date_division_layout.get((str(c.host_location_id), str(c.slot_date), str(c.field_instance_id), layout_key), 0),
+                c.field_instance.field_name if c.field_instance and c.field_instance.field_name else '',
+                str(c.id),
+            ),
+        )
         return None
     if is_odd_division and no_byes:
         min_dh = min(double_header_counts.values() or [0])
@@ -1813,7 +1827,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             if host_time_key in seen_host_time_keys:
                 continue
             seen_host_time_keys.add(host_time_key)
-            selected_field_slot = _first_compatible_open_slot(slot.host_location_id, slot.slot_date, slot.start_time)
+            selected_field_slot = _least_used_compatible_open_slot(slot.host_location_id, slot.slot_date, slot.start_time)
             if not selected_field_slot:
                 skipped.append({
                     'slot_id': str(slot.id),
@@ -2007,7 +2021,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'field': slot.field_instance.field_name if slot.field_instance else '',
             'field_instance_id': str(slot.field_instance_id) if slot.field_instance_id else None,
             'score': int(best['score']),
-            'reason': '; '.join(reason_bits + ['deterministic field assignment: first compatible open field by configured order']),
+            'reason': '; '.join(reason_bits + ['deterministic field assignment: least-used compatible open field by host/date/division layout']),
             'warnings': best['warning_bits'],
             'rules_relaxed': [],
             'week': week.week_number,
@@ -2023,6 +2037,8 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             used_host_ids.add(slot.host_location_id)
             if not preferred_host_id:
                 preferred_host_id = slot.host_location_id
+        proposed_usage_key = (str(slot.host_location_id), str(slot.slot_date), str(slot.field_instance_id), layout_key)
+        proposed_field_usage_by_host_date_division_layout[proposed_usage_key] = proposed_field_usage_by_host_date_division_layout.get(proposed_usage_key, 0) + 1
         remaining_slots = [s for s in remaining_slots if s.id != slot.id]
     unused_team_ids = [str(tid) for tid in teams_by_id if tid not in used_team_ids]
     projected_counts = dict(week_team_game_counts)
