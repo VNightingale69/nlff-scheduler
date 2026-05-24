@@ -21,6 +21,7 @@ export default function ManualScheduleBuilderPage() {
   const [suggestedMatchups, setSuggestedMatchups] = useState<any[]>([]);
   const [suggestedSlots, setSuggestedSlots] = useState<any[]>([]);
   const [allWeeklyMatchupsScheduled, setAllWeeklyMatchupsScheduled] = useState(false);
+  const [noEligibleTeamMatchups, setNoEligibleTeamMatchups] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [autoFillPreview, setAutoFillPreview] = useState<any[]>([]);
@@ -78,6 +79,7 @@ export default function ManualScheduleBuilderPage() {
     setSuggestedSlots(r.suggested_slots || []);
     setSlots(r.suggested_slots || []);
     setAllWeeklyMatchupsScheduled(Boolean(r.all_available_weekly_matchups_scheduled));
+    setNoEligibleTeamMatchups(Boolean(r.no_eligible_team_matchups));
   };
 
   useEffect(() => { load().catch((e) => setError(extractError(e))); }, []);
@@ -184,7 +186,12 @@ export default function ManualScheduleBuilderPage() {
 
       <div className='rounded border p-3'>
         <h2 className='mb-2 text-lg font-semibold'>Suggested Matchups</h2>
-        {allWeeklyMatchupsScheduled && suggestedMatchups.length === 0 ? (
+        {noEligibleTeamMatchups && suggestedMatchups.length === 0 ? (
+          <div className='mb-2 rounded border border-amber-200 bg-amber-50 p-2 text-sm text-amber-800'>
+            No eligible team matchups could be generated.
+          </div>
+        ) : null}
+        {allWeeklyMatchupsScheduled && suggestedMatchups.length === 0 && !noEligibleTeamMatchups ? (
           <div className='mb-2 rounded border border-blue-200 bg-blue-50 p-2 text-sm text-blue-800'>
             All available weekly matchups have been scheduled for this division/week.
           </div>
