@@ -1624,6 +1624,24 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'unused_teams': [teams_by_id[tid].name for tid in teams_by_id if tid not in used_team_ids],
         }
     remaining_slots = list(open_slots)
+    slots_by_host: dict[uuid.UUID, list[GameSlot]] = {}
+    for slot in open_slots:
+        if slot.host_location_id:
+            slots_by_host.setdefault(slot.host_location_id, []).append(slot)
+    games_required = max_new_games
+    host_capacity = []
+    for host_id, host_slots in slots_by_host.items():
+        host_capacity.append({
+            'host_id': host_id,
+            'slot_count': len(host_slots),
+            'field_count': len({s.field_instance_id for s in host_slots}),
+            'continuity': len({(s.slot_date, s.start_time) for s in host_slots}),
+        })
+    host_capacity.sort(key=lambda x: (x['slot_count'] >= games_required, x['slot_count'], x['field_count'], x['continuity']), reverse=True)
+    primary_host_id: uuid.UUID | None = host_capacity[0]['host_id'] if host_capacity else None
+    single_site_possible = bool(host_capacity and host_capacity[0]['slot_count'] >= games_required)
+    preferred_host_id: uuid.UUID | None = primary_host_id
+    used_host_ids: set[uuid.UUID] = set()
     selected_double_header_team_id: uuid.UUID | None = None
     if is_odd_division and no_byes:
         min_dh = min(double_header_counts.values() or [0])
@@ -1663,6 +1681,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                     score = 0
                     reason_bits = []
                     warning_bits = []
+                    candidate_host_id = slot.host_location_id
                     if matchup_counts.get(pair, 0) == 0:
                         score += 100
                         reason_bits.append('new opponent pairing (+100)')
@@ -1683,6 +1702,26 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                     if host_pref:
                         score += 40
                         reason_bits.append('reduced travel via host alignment (+40)')
+                    if preferred_host_id and candidate_host_id == preferred_host_id:
+                        score += 150
+                        reason_bits.append('host-location consolidation (+150)')
+                    elif preferred_host_id and candidate_host_id != preferred_host_id and preferred_host_id in slots_by_host:
+                        preferred_open_slots = [s for s in remaining_slots if s.host_location_id == preferred_host_id]
+                        if preferred_open_slots:
+                            score -= 120
+                            warning_bits.append('second host used while primary host still has compatible slots (-120)')
+                    if single_site_possible and primary_host_id and candidate_host_id == primary_host_id:
+                        score += 200
+                        reason_bits.append('single-site completion path (+200)')
+                    if single_site_possible and primary_host_id and candidate_host_id != primary_host_id:
+                        score -= 200
+                        warning_bits.append('avoidable multi-site fragmentation (-200)')
+                    if candidate_host_id and any(p.get('host_location_id') == str(candidate_host_id) for p in plans):
+                        score += 25
+                        reason_bits.append('adjacent time-slot grouping at same location (+25)')
+                    if candidate_host_id and any(p.get('host_location_id') == str(candidate_host_id) and p.get('field') == (slot.field_instance.field_name if slot.field_instance else '') for p in plans):
+                        score += 50
+                        reason_bits.append('adjacent-field grouping within complex (+50)')
                     if is_odd_division and no_byes and selected_double_header_team_id:
                         includes_dh = selected_double_header_team_id in {a, b}
                         if week_team_game_counts.get(selected_double_header_team_id, 0) == 0 and not includes_dh:
@@ -1770,6 +1809,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'proposed_date': str(slot.slot_date),
             'proposed_start_time': str(slot.start_time),
             'host_location': slot.host_location.name if slot.host_location else '',
+            'host_location_id': str(slot.host_location_id) if slot.host_location_id else None,
             'field': slot.field_instance.field_name if slot.field_instance else '',
             'score': int(best['score']),
             'reason': '; '.join(reason_bits),
@@ -1784,6 +1824,10 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         if not (is_odd_division and no_byes):
             used_team_ids.add(best['home_team_id'])
             used_team_ids.add(best['away_team_id'])
+        if slot.host_location_id:
+            used_host_ids.add(slot.host_location_id)
+            if not preferred_host_id:
+                preferred_host_id = slot.host_location_id
         remaining_slots = [s for s in remaining_slots if s.id != slot.id]
     unused_team_ids = [str(tid) for tid in teams_by_id if tid not in used_team_ids]
     projected_counts = dict(week_team_game_counts)
@@ -1810,6 +1854,14 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'total_games_per_team': per_team_games,
             'duplicate_matchups': duplicate_matchups,
             'double_header_teams_by_week': double_header_teams,
+            'host_locations_used_count': len(used_host_ids),
+            'host_locations_used': [str(hid) for hid in used_host_ids],
+            'single_site_possible': single_site_possible,
+            'consolidation_achieved': len(used_host_ids) <= 1 if plans else True,
+            'fragmentation_necessary': (not single_site_possible and len(used_host_ids) > 1),
+            'fragmentation_avoidable': (single_site_possible and len(used_host_ids) > 1),
+            'primary_host_location_id': str(primary_host_id) if primary_host_id else None,
+            'games_outside_primary_host': len([p for p in plans if p.get('host_location_id') and primary_host_id and p.get('host_location_id') != str(primary_host_id)]),
             'rules_relaxed': [],
             'unresolved_conflicts': [],
         },
