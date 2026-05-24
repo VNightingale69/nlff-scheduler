@@ -1854,7 +1854,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                     if (str(a), slot.slot_date, slot.start_time) in team_time_occupied or (str(b), slot.slot_date, slot.start_time) in team_time_occupied:
                         skipped.append({
                             'slot_id': str(slot.id),
-                            'reason': 'Rejected: one team is already scheduled at this date/time.',
+                            'reason': 'Rejected: team already scheduled at the same exact time.',
                         })
                         continue
                     if no_simultaneous_games_same_host:
@@ -2022,7 +2022,12 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             best['reason_bits'].append('Selected because no better alternative remained')
         home_team = teams_by_id[best['home_team_id']]
         away_team = teams_by_id[best['away_team_id']]
-        reason_bits = ['single game per team per selected week', *best['reason_bits'], *best['warning_bits']]
+        baseline_reason = 'single game per team per selected week'
+        if is_odd_division and no_byes:
+            baseline_reason = 'maximize one game per team first; allow one required double header for odd team count'
+        reason_bits = [baseline_reason, *best['reason_bits'], *best['warning_bits']]
+        if is_odd_division and no_byes and selected_double_header_team_id and selected_double_header_team_id in {best['home_team_id'], best['away_team_id']}:
+            reason_bits.insert(0, 'Accepted as required double header due to odd team count')
         plans.append({
             'slot_id': str(selected_field_slot.id),
             'proposed_matchup': f'{home_team.name} vs {away_team.name}',
@@ -2277,7 +2282,7 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
             skipped.append({'reason': 'Rejected: selected slot is not compatible with division layout requirements.'})
             continue
         if (str(home_team_id), slot.slot_date, slot.start_time) in team_time_occupied or (str(away_team_id), slot.slot_date, slot.start_time) in team_time_occupied:
-            skipped.append({'reason': 'Rejected: one team is already scheduled at this date/time.'})
+            skipped.append({'reason': 'Rejected: team already scheduled at the same exact time.'})
             continue
         if slot.host_location_id is None or slot.field_instance_id is None:
             skipped.append({'reason': 'Rejected: host location does not have an available compatible field at this date/time.'})
