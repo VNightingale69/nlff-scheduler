@@ -1510,8 +1510,25 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     balance_weight = _weight('field_utilization_balance', 90)
     completion_weight = _weight('projected_completion_time', 110)
     parallel_weight = _weight('parallel_scheduling_efficiency', 100)
-    idle_fields_weight = _weight('maximum_idle_compatible_fields', 80)
     consolidation_weight = _weight('host_location_consolidation', 45)
+    balancing_config = payload.get('field_balancing') or {}
+
+    def _int_cfg(name: str, default: int, minimum: int = 0) -> int:
+        try:
+            return max(minimum, int(balancing_config.get(name, default)))
+        except (TypeError, ValueError):
+            return default
+
+    def _float_cfg(name: str, default: float, minimum: float = 0.0, maximum: float = 1.0) -> float:
+        try:
+            value = float(balancing_config.get(name, default))
+        except (TypeError, ValueError):
+            return default
+        return max(minimum, min(maximum, value))
+
+    min_concurrent_games_for_balancing = _int_cfg('min_concurrent_games_before_balancing', 2, 1)
+    max_consecutive_games_same_field = _int_cfg('max_consecutive_games_same_field', 3, 1)
+    preferred_utilization_spread = _float_cfg('preferred_utilization_spread', 0.35, 0.0, 1.0)
     centralization_requested = bool(payload.get('centralized_scheduling_requested', False))
     staffing_limited = bool(payload.get('staffing_limited', False))
     season_id = payload.get('season_id')
@@ -1757,11 +1774,39 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                             projected_used = set(used_fields)
                             if slot_field_id:
                                 projected_used.add(slot_field_id)
-                            idle_fields = max(0, len(compatible_fields) - len(projected_used))
-                            score += parallel_weight * len(projected_used)
-                            score -= idle_fields_weight * idle_fields
-                            if idle_fields > 0:
-                                warning_bits.append(f'{idle_fields} compatible field(s) projected idle (-{idle_fields_weight * idle_fields})')
+
+                            same_host_same_time_slots = [
+                                s for s in remaining_slots
+                                if s.host_location_id == candidate_host_id and s.start_time == slot.start_time
+                            ]
+                            concurrent_capacity = len({str(s.field_instance_id) for s in same_host_same_time_slots if s.field_instance_id})
+                            projected_concurrent_load = len(projected_used)
+                            if concurrent_capacity >= min_concurrent_games_for_balancing and projected_concurrent_load >= min_concurrent_games_for_balancing:
+                                utilization_ratio = projected_concurrent_load / max(1, concurrent_capacity)
+                                spread_gap = max(0.0, preferred_utilization_spread - utilization_ratio)
+                                saturation_bonus = round(parallel_weight * utilization_ratio)
+                                spread_penalty = round(parallel_weight * spread_gap)
+                                score += saturation_bonus
+                                if spread_penalty > 0:
+                                    score -= spread_penalty
+                                    warning_bits.append(f'concurrent field saturation below preferred spread (-{spread_penalty})')
+                                reason_bits.append(f'concurrent field utilization {projected_concurrent_load}/{concurrent_capacity} (+{saturation_bonus})')
+
+                            recent_host_fields = [
+                                p.get('field_instance_id') for p in plans
+                                if p.get('host_location_id') == str(candidate_host_id)
+                            ]
+                            consecutive_same_field = 0
+                            if slot_field_id:
+                                for planned_field in reversed(recent_host_fields):
+                                    if planned_field == slot_field_id:
+                                        consecutive_same_field += 1
+                                    else:
+                                        break
+                            if consecutive_same_field >= max_consecutive_games_same_field:
+                                overload_penalty = balance_weight * (consecutive_same_field - max_consecutive_games_same_field + 1)
+                                score -= overload_penalty
+                                warning_bits.append(f'field overused consecutively at host site (-{overload_penalty})')
                     if is_odd_division and no_byes and selected_double_header_team_id:
                         includes_dh = selected_double_header_team_id in {a, b}
                         if week_team_game_counts.get(selected_double_header_team_id, 0) == 0 and not includes_dh:
@@ -1900,6 +1945,11 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'single_site_possible': single_site_possible,
             'centralization_requested': centralization_requested,
             'staffing_limited': staffing_limited,
+        'field_balancing': {
+            'min_concurrent_games_before_balancing': min_concurrent_games_for_balancing,
+            'max_consecutive_games_same_field': max_consecutive_games_same_field,
+            'preferred_utilization_spread': preferred_utilization_spread,
+        },
             'consolidation_achieved': len(used_host_ids) <= 1 if plans else True,
             'fragmentation_necessary': (not single_site_possible and len(used_host_ids) > 1),
             'fragmentation_avoidable': (single_site_possible and len(used_host_ids) > 1),
