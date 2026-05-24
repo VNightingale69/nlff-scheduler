@@ -1,5 +1,6 @@
 import csv
 import io
+import math
 import uuid
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -1321,7 +1322,7 @@ def manual_schedule_builder_recommendations(payload: dict, db: Session = Depends
             already_scheduled_team_ids.add(g.away_team_id)
         already_scheduled_pairs.add(tuple(sorted((g.home_team_id, g.away_team_id))))
 
-    max_games_for_division_week = len(team_list) // 2 if division_id and week_id else None
+    max_games_for_division_week = math.ceil(len(team_list) / 2) if division_id and week_id else None
     all_available_weekly_matchups_scheduled = (
         max_games_for_division_week is not None
         and len(already_scheduled_team_ids) >= (max_games_for_division_week * 2)
@@ -1466,7 +1467,7 @@ def assign_generated_slot(payload: dict, db: Session = Depends(get_db)):
     status = db.query(GameStatus).filter(GameStatus.code == 'SCHEDULED').first()
     teams = db.query(Team).filter(Team.division_id == division_id, Team.is_active.is_(True)).all()
     team_ids = {t.id for t in teams}
-    max_games_for_division_week = len(teams) // 2
+    max_games_for_division_week = math.ceil(len(teams) / 2)
     existing_division_games = db.query(Game).join(Game.home_team).filter(
         Game.season_id == season_id,
         Game.week_id == week_id,
@@ -2072,6 +2073,8 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         )
         proposed_field_usage_by_host_date_division_layout[proposed_usage_key] = proposed_field_usage_by_host_date_division_layout.get(proposed_usage_key, 0) + 1
         field_time_occupied[(str(selected_field_slot.field_instance_id), selected_field_slot.slot_date, selected_field_slot.start_time)] = division.name
+        team_time_occupied.add((str(best['home_team_id']), selected_field_slot.slot_date, selected_field_slot.start_time))
+        team_time_occupied.add((str(best['away_team_id']), selected_field_slot.slot_date, selected_field_slot.start_time))
         remaining_slots = [
             s for s in remaining_slots
             if not (
