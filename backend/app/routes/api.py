@@ -2430,6 +2430,8 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         week_team_game_counts[away_uuid] = week_team_game_counts.get(away_uuid, 0) + 1
         created_games += 1
         assigned_slots += 1
+    if created_games >= max_games_for_division_week:
+        skipped = []
     db.commit()
     return {
         'proposed_count': len(proposals),
