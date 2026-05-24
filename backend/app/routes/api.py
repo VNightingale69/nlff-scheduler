@@ -1441,7 +1441,7 @@ def assign_generated_slot(payload: dict, db: Session = Depends(get_db)):
     division = db.query(Division).filter(Division.id == division_id).first()
     if not division:
         raise HTTPException(404, 'Division not found')
-    expected_field_type = 'LARGE' if '53' in (division.required_field_layout_type or '') else 'SMALL'
+    expected_field_type = _required_field_type_for_division(division)
     if slot.field_type != expected_field_type:
         raise HTTPException(400, 'Selected slot field type must match division requirement')
     overlap = db.query(Game).join(GameSlot, GameSlot.assigned_game_id == Game.id).filter(
@@ -2345,18 +2345,18 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
             continue
         slot = db.query(GameSlot).join(GameSlot.field_instance).filter(GameSlot.id == proposal.get('slot_id')).first()
         if not slot:
-            _add_skipped('not enough open matching slots')
+            _add_skipped('No compatible large field available for this division.' if required_field_type == 'LARGE' else 'not enough open matching slots')
             continue
         selected_slot_unavailable = slot.status != 'OPEN' or slot.assigned_game_id is not None
         if selected_slot_unavailable:
             if is_odd_division and no_byes:
                 adjacent_slot = _find_adjacent_double_header_slot(slot, str(home_team_id), str(away_team_id))
                 if adjacent_slot is None:
-                    _add_skipped('not enough open matching slots')
+                    _add_skipped('No compatible large field available for this division.' if required_field_type == 'LARGE' else 'not enough open matching slots')
                     continue
                 slot = adjacent_slot
             else:
-                _add_skipped('not enough open matching slots')
+                _add_skipped('No compatible large field available for this division.' if required_field_type == 'LARGE' else 'not enough open matching slots')
                 continue
         field_time_key = (str(slot.field_instance_id), slot.slot_date, slot.start_time)
         if field_time_key in field_time_occupied:
@@ -2471,7 +2471,11 @@ def list_public_schedule_filters(db: Session = Depends(get_db)):
 
 
 def _required_field_type_for_division(division: Division | None) -> str:
-    return 'LARGE' if division and '53' in (division.required_field_layout_type or '') else 'SMALL'
+    if not division:
+        return 'SMALL'
+    layout_type = (division.required_field_layout_type or '').strip().upper()
+    large_layout_tokens = ('FIFTY_THREE', '53', 'LARGE', 'FULL')
+    return 'LARGE' if any(token in layout_type for token in large_layout_tokens) else 'SMALL'
 
 
 def _schedule_management_rows(db: Session, filters: dict | None = None):
