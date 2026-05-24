@@ -2238,6 +2238,63 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         team = teams_by_id.get(str(team_id))
         return team.name if team else 'Unknown Team'
 
+    def _minutes_from_time(value: time | None) -> int:
+        if not value:
+            return 0
+        return (value.hour * 60) + value.minute
+
+    def _find_adjacent_double_header_slot(
+        requested_slot: GameSlot,
+        home_team_id: str,
+        away_team_id: str,
+    ) -> GameSlot | None:
+        team_ids = {str(home_team_id), str(away_team_id)}
+        occupied_times_by_team: dict[str, set[time]] = {team_id: set() for team_id in team_ids}
+        for team_id, game_date, kickoff_time in team_time_occupied:
+            if team_id in team_ids and game_date == requested_slot.slot_date and kickoff_time:
+                occupied_times_by_team.setdefault(team_id, set()).add(kickoff_time)
+        target_team_id = next((team_id for team_id, times in occupied_times_by_team.items() if requested_slot.start_time in times), None)
+        if not target_team_id:
+            return None
+        target_time_minutes = _minutes_from_time(requested_slot.start_time)
+        target_team_times = occupied_times_by_team.get(target_team_id, set())
+        open_slots = db.query(GameSlot).join(GameSlot.field_instance).filter(
+            GameSlot.slot_date == requested_slot.slot_date,
+            GameSlot.status == 'OPEN',
+            GameSlot.assigned_game_id.is_(None),
+            GameSlot.field_type == required_field_type,
+            GameSlot.id != requested_slot.id,
+        ).all()
+        ranked: list[tuple[int, int, GameSlot]] = []
+        for candidate_slot in open_slots:
+            if not candidate_slot.start_time or not candidate_slot.field_instance_id:
+                continue
+            if (str(home_team_id), candidate_slot.slot_date, candidate_slot.start_time) in team_time_occupied:
+                continue
+            if (str(away_team_id), candidate_slot.slot_date, candidate_slot.start_time) in team_time_occupied:
+                continue
+            candidate_field_time_key = (str(candidate_slot.field_instance_id), candidate_slot.slot_date, candidate_slot.start_time)
+            if candidate_field_time_key in field_time_occupied:
+                continue
+            if no_simultaneous_games_same_host and candidate_slot.host_location_id is not None:
+                candidate_host_time_key = (str(candidate_slot.host_location_id), candidate_slot.slot_date, candidate_slot.start_time)
+                if candidate_host_time_key in host_time_occupied:
+                    continue
+            if candidate_slot.host_location_id is None:
+                continue
+            if not _has_compatible_open_field_at_time(candidate_slot.host_location_id, candidate_slot.slot_date, candidate_slot.start_time):
+                continue
+            distance = abs(_minutes_from_time(candidate_slot.start_time) - target_time_minutes)
+            back_to_back_priority = 0 if candidate_slot.start_time in {
+                time((requested_slot.start_time.hour - 1) % 24, requested_slot.start_time.minute),
+                time((requested_slot.start_time.hour + 1) % 24, requested_slot.start_time.minute),
+            } else 1
+            if candidate_slot.start_time in target_team_times:
+                continue
+            ranked.append((back_to_back_priority, distance, candidate_slot))
+        ranked.sort(key=lambda item: (item[0], item[1], _minutes_from_time(item[2].start_time)))
+        return ranked[0][2] if ranked else None
+
     def _fmt_duplicate_skip(home_team_id: str, away_team_id: str, slot: GameSlot | None) -> str:
         home_name = _team_name(home_team_id)
         away_name = _team_name(away_team_id)
@@ -2290,8 +2347,16 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
             skipped.append({'reason': 'Rejected: selected slot is not compatible with division layout requirements.'})
             continue
         if (str(home_team_id), slot.slot_date, slot.start_time) in team_time_occupied or (str(away_team_id), slot.slot_date, slot.start_time) in team_time_occupied:
-            skipped.append({'reason': 'Rejected: team already scheduled at the same exact time.'})
-            continue
+            if is_odd_division and no_byes:
+                adjacent_slot = _find_adjacent_double_header_slot(slot, str(home_team_id), str(away_team_id))
+                if adjacent_slot is None:
+                    skipped.append({'reason': 'Rejected: team already scheduled at the same exact time.'})
+                    continue
+                slot = adjacent_slot
+                field_time_key = (str(slot.field_instance_id), slot.slot_date, slot.start_time)
+            else:
+                skipped.append({'reason': 'Rejected: team already scheduled at the same exact time.'})
+                continue
         if slot.host_location_id is None or slot.field_instance_id is None:
             skipped.append({'reason': 'Rejected: host location does not have an available compatible field at this date/time.'})
             continue

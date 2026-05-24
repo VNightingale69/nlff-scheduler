@@ -379,5 +379,58 @@ class AutoFillPreviewTest(unittest.TestCase):
         self.assertEqual(len(doubles), 1)
         self.assertEqual(sum(team_counts.values()), 10)
 
+    def test_apply_rehomes_required_double_header_to_adjacent_slot_when_same_time_conflict(self):
+        org_c = Organization(id=uuid.uuid4(), name='Bristol', is_active=True)
+        org_d = Organization(id=uuid.uuid4(), name='Salem', is_active=True)
+        org_e = Organization(id=uuid.uuid4(), name='Kenosha', is_active=True)
+        self.db.add_all([org_c, org_d, org_e])
+        extra_teams = [
+            Team(id=uuid.uuid4(), organization_id=org_c.id, division_id=self.division.id, name='Bristol Blue', is_active=True),
+            Team(id=uuid.uuid4(), organization_id=org_c.id, division_id=self.division.id, name='Bristol White', is_active=True),
+            Team(id=uuid.uuid4(), organization_id=org_d.id, division_id=self.division.id, name='Salem Green', is_active=True),
+            Team(id=uuid.uuid4(), organization_id=org_d.id, division_id=self.division.id, name='Salem Orange', is_active=True),
+            Team(id=uuid.uuid4(), organization_id=org_e.id, division_id=self.division.id, name='Kenosha Red', is_active=True),
+        ]
+        self.db.add_all(extra_teams)
+        for hour in (10, 11, 12, 13):
+            fi = FieldInstance(id=uuid.uuid4(), host_location_id=self.host.id, hosting_availability_id=uuid.uuid4(), instance_date=self.week2.start_date, field_name=f'Small Field {hour}', field_type='SMALL', is_active=True)
+            slot = GameSlot(id=uuid.uuid4(), field_instance_id=fi.id, host_location_id=self.host.id, slot_date=self.week2.start_date, start_time=time(hour, 0), end_time=time(hour + 1, 0), field_type='SMALL', status='OPEN')
+            self.db.add_all([fi, slot])
+        self.db.commit()
+
+        preview = auto_fill_preview({'season_id': self.season.id, 'week_id': self.week2.id, 'division_id': self.division.id, 'no_byes': True}, db=self.db)
+        self.assertEqual(preview['proposed_game_count'], 5)
+
+        double_team_id = None
+        for team_id in {p['home_team_id'] for p in preview['proposals']} | {p['away_team_id'] for p in preview['proposals']}:
+            appearances = sum(1 for p in preview['proposals'] if team_id in {p['home_team_id'], p['away_team_id']})
+            if appearances == 2:
+                double_team_id = team_id
+                break
+        self.assertIsNotNone(double_team_id)
+
+        first_dh_game = next(p for p in preview['proposals'] if double_team_id in {p['home_team_id'], p['away_team_id']})
+        conflict_game = Game(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week2.id,
+            home_team_id=uuid.UUID(double_team_id),
+            away_team_id=extra_teams[0].id,
+            game_status_id=self.status.id,
+            game_date=self.week2.start_date,
+            kickoff_time=time.fromisoformat(first_dh_game['proposed_start_time']),
+        )
+        self.db.add(conflict_game)
+        self.db.commit()
+
+        applied = auto_fill_apply({
+            'season_id': self.season.id,
+            'week_id': self.week2.id,
+            'division_id': self.division.id,
+            'proposals': preview['proposals'],
+            'no_byes': True,
+        }, db=self.db)
+        self.assertEqual(applied['created_count'], 5)
+
 if __name__ == '__main__':
     unittest.main()
