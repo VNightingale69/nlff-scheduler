@@ -2330,15 +2330,26 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         if existing_games_count + created_games >= max_games_for_division_week:
             skipped.append({'reason': 'weekly game limit reached for selected division/week'})
             break
-        slot = db.query(GameSlot).join(GameSlot.field_instance).filter(GameSlot.id == proposal.get('slot_id')).first()
-        if not slot or slot.status != 'OPEN' or slot.assigned_game_id is not None:
-            skipped.append({'reason': 'not enough open matching slots (selected slot is no longer available)'})
-            continue
         home_team_id = proposal.get('home_team_id')
         away_team_id = proposal.get('away_team_id')
         if not home_team_id or not away_team_id or home_team_id == away_team_id:
             skipped.append({'reason': 'no valid opponent available (invalid matchup payload)'})
             continue
+        slot = db.query(GameSlot).join(GameSlot.field_instance).filter(GameSlot.id == proposal.get('slot_id')).first()
+        if not slot:
+            skipped.append({'reason': 'not enough open matching slots'})
+            continue
+        selected_slot_unavailable = slot.status != 'OPEN' or slot.assigned_game_id is not None
+        if selected_slot_unavailable:
+            if is_odd_division and no_byes:
+                adjacent_slot = _find_adjacent_double_header_slot(slot, str(home_team_id), str(away_team_id))
+                if adjacent_slot is None:
+                    skipped.append({'reason': 'not enough open matching slots'})
+                    continue
+                slot = adjacent_slot
+            else:
+                skipped.append({'reason': 'not enough open matching slots'})
+                continue
         field_time_key = (str(slot.field_instance_id), slot.slot_date, slot.start_time)
         if field_time_key in field_time_occupied:
             skipped.append({'reason': f"Rejected: time slot already occupied by existing {field_time_occupied[field_time_key]} game."})
