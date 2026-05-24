@@ -42,6 +42,8 @@ const STATUS_BADGE: Record<string, string> = {
   Missing: 'bg-rose-100 text-rose-800',
 };
 
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 export default function HostingAvailabilityManager() {
   const [message, setMessage] = useState('');
   const [type, setType] = useState<'ok' | 'err'>('ok');
@@ -270,13 +272,31 @@ export default function HostingAvailabilityManager() {
     };
   }, [summaryRows]);
 
+  const organizationsById = useMemo(() => new Map(orgs.map((o: any) => [o.id, o.name])), [orgs]);
+
+  const resolveCommunityName = (organizationId?: string, organizationName?: string) => {
+    const normalizedName = String(organizationName || '').trim();
+    if (normalizedName && !UUID_PATTERN.test(normalizedName)) return normalizedName;
+    if (organizationId) {
+      const mappedName = organizationsById.get(organizationId);
+      if (mappedName && !UUID_PATTERN.test(mappedName)) return mappedName;
+    }
+    return 'Unknown Community';
+  };
+
   const weeklyMatrix = useMemo(() => {
-    const communities = Array.from(new Set(hosts.map((h: any) => h.organization_name || h.organization_id))).filter(Boolean);
-    return communities.map((community: any) => {
+    const communities = Array.from(new Set(hosts.map((h: any) => h.organization_id).filter(Boolean)))
+      .map((organizationId: string) => ({
+        organizationId,
+        communityName: resolveCommunityName(organizationId, hosts.find((h: any) => h.organization_id === organizationId)?.organization_name),
+      }))
+      .sort((a: any, b: any) => a.communityName.localeCompare(b.communityName));
+
+    return communities.map(({ organizationId, communityName }: any) => {
       const byWeek: Record<number, string> = {};
       HOSTING_DATES.forEach((d) => {
         const w = weekForDate(d.date);
-        const rows = summaryRows.filter((r: any) => (r.organization_name || r.organization_id) === community && r.available_date === d.date);
+        const rows = summaryRows.filter((r: any) => r.organization_id === organizationId && r.available_date === d.date);
         if (!rows.length) byWeek[w] = 'Missing';
         else if (rows.every((r: any) => r.readiness === 'Hosting')) byWeek[w] = 'Hosting';
         else byWeek[w] = 'Partial';
@@ -284,9 +304,9 @@ export default function HostingAvailabilityManager() {
       if (Object.values(byWeek).every((v) => v === 'Missing')) {
         HOSTING_DATES.forEach((d) => { byWeek[weekForDate(d.date)] = 'Away'; });
       }
-      return { community, byWeek };
+      return { community: communityName, byWeek };
     });
-  }, [hosts, summaryRows]);
+  }, [hosts, summaryRows, organizationsById]);
 
   const readinessChecks = useMemo(() => {
     const projectedSmallGames = 12;
@@ -352,7 +372,7 @@ export default function HostingAvailabilityManager() {
               <tbody>
                 {summaryRows.map((row: any, i: number) => (
                   <tr key={`${row.available_date}-${row.host_location_name}-${i}`} className='border-b'>
-                    <td className='p-2'>Week {row.week}</td><td className='p-2'>{formatDateLabel(row.available_date)}</td><td className='p-2'>{row.organization_name || '—'}</td><td className='p-2'>{row.host_location_name}</td><td className='p-2'>{row.small_field_capacity || 0}</td><td className='p-2'>{row.large_field_capacity || 0}</td><td className='p-2'>{row.firstStart === 99 ? '—' : displayHour(row.firstStart)}</td><td className='p-2'>{row.lastEnd === 0 ? '—' : displayHour(row.lastEnd)}</td><td className='p-2'>{row.readiness}</td><td className='p-2'>{row.warnings.length ? row.warnings.join(', ') : 'None'}</td>
+                    <td className='p-2'>Week {row.week}</td><td className='p-2'>{formatDateLabel(row.available_date)}</td><td className='p-2'>{resolveCommunityName(row.organization_id, row.organization_name)}</td><td className='p-2'>{row.host_location_name}</td><td className='p-2'>{row.small_field_capacity || 0}</td><td className='p-2'>{row.large_field_capacity || 0}</td><td className='p-2'>{row.firstStart === 99 ? '—' : displayHour(row.firstStart)}</td><td className='p-2'>{row.lastEnd === 0 ? '—' : displayHour(row.lastEnd)}</td><td className='p-2'>{row.readiness}</td><td className='p-2'>{row.warnings.length ? row.warnings.join(', ') : 'None'}</td>
                   </tr>
                 ))}
               </tbody>
