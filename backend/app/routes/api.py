@@ -1655,6 +1655,29 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'unused_team_ids': [str(tid) for tid in teams_by_id if tid not in used_team_ids],
             'unused_teams': [teams_by_id[tid].name for tid in teams_by_id if tid not in used_team_ids],
         }
+    total_unique_pairs_in_division = max(0, (team_count * (team_count - 1)) // 2)
+    unique_opponents_per_team = max(0, team_count - 1)
+    team_org_ids: dict[uuid.UUID, uuid.UUID | None] = {tid: team.organization_id for tid, team in teams_by_id.items()}
+    cross_community_opponents_by_team: dict[uuid.UUID, set[uuid.UUID]] = {}
+    for team_id, team in teams_by_id.items():
+        cross_community_opponents_by_team[team_id] = {
+            other_id for other_id, other_team in teams_by_id.items()
+            if other_id != team_id and team.organization_id and other_team.organization_id and team.organization_id != other_team.organization_id
+        }
+    cross_community_opponents_per_team = min((len(v) for v in cross_community_opponents_by_team.values()), default=0)
+    required_games_per_team = min(unique_opponents_per_team, max_games_for_division_week)
+    repeats_mathematically_unavoidable = required_games_per_team > unique_opponents_per_team
+    same_community_mathematically_necessary = any(
+        team.organization_id and len(cross_community_opponents_by_team.get(team_id, set())) == 0
+        for team_id, team in teams_by_id.items()
+    )
+    same_community_operationally_reasonable = (
+        cross_community_opponents_per_team < required_games_per_team
+        or team_count <= 4
+        or repeats_mathematically_unavoidable
+        or same_community_mathematically_necessary
+    )
+
     remaining_slots = list(open_slots)
     slots_by_host: dict[uuid.UUID, list[GameSlot]] = {}
     for slot in open_slots:
@@ -1737,23 +1760,39 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                     reason_bits = []
                     warning_bits = []
                     candidate_host_id = slot.host_location_id
-                    if matchup_counts.get(pair, 0) == 0:
-                        score += 100
-                        reason_bits.append('new opponent pairing (+100)')
+                    if repeat_count == 0:
+                        score += 120
+                        reason_bits.append('new opponent pairing (+120)')
                     else:
-                        all_unique_exhausted = len(matchup_counts) >= max(1, (team_count * (team_count - 1)) // 2)
-                        if all_unique_exhausted:
+                        repeat_penalty = 150 * repeat_count
+                        score -= repeat_penalty
+                        warning_bits.append(f'repeat opponent pairing (-{repeat_penalty})')
+                        if same_community:
                             score -= 50
-                            warning_bits.append('repeat matchup after unique options were limited (-50)')
-                        else:
-                            score -= 150
-                            warning_bits.append('repeat matchup before unique options exhausted (-150)')
+                            warning_bits.append('repeat same-community opponent (-50)')
+
+                    if not same_community:
+                        score += 40
+                        reason_bits.append('cross-community opponent (+40)')
+                    else:
+                        cross_options_for_a = cross_community_opponents_by_team.get(a, set())
+                        cross_options_for_b = cross_community_opponents_by_team.get(b, set())
+                        unused_cross_for_a = any(matchup_counts.get(tuple(sorted((a, opponent))), 0) == 0 for opponent in cross_options_for_a)
+                        unused_cross_for_b = any(matchup_counts.get(tuple(sorted((b, opponent))), 0) == 0 for opponent in cross_options_for_b)
+                        same_community_penalty_allowed = unused_cross_for_a or unused_cross_for_b
+                        if repeat_count == 0 and same_community_penalty_allowed and not same_community_operationally_reasonable:
+                            score -= 25
+                            warning_bits.append('first-time same-community opponent while unused cross-community options exist (-25)')
+                        elif repeat_count == 0:
+                            reason_bits.append('Same-community matchup allowed because cross-community options are insufficient')
+
+                    if repeat_count > 0 and not same_community:
+                        warning_bits.append('Repeat avoided because first-time opponent was available' if any(matchup_counts.get(tuple(sorted((a, oid))),0)==0 for oid in teams_by_id if oid!=a) or any(matchup_counts.get(tuple(sorted((b, oid))),0)==0 for oid in teams_by_id if oid!=b) else 'repeat matchup selected because unique options were exhausted')
+                    if same_community_operationally_reasonable:
+                        reason_bits.append('Opponent diversity prioritized because division has limited unique opponents')
                     if hosted_by_own_community:
                         score += 60
                         reason_bits.append('same-community at home host field (+60)')
-                    elif same_community:
-                        score -= 80
-                        warning_bits.append('same-community away from host field (-80)')
                     if host_pref:
                         score += 40
                         reason_bits.append('reduced travel via host alignment (+40)')
