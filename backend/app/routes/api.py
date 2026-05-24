@@ -1684,7 +1684,17 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             if home_org_id and away_org_id:
                 prior_week_community_pairs.add(tuple(sorted((home_org_id, away_org_id))))
     plans = []
-    skipped = []
+    skipped: list[dict[str, str]] = []
+    skipped_seen: set[str] = set()
+
+    def _add_skipped(reason: str, slot_id: str | None = None) -> None:
+        if reason in skipped_seen:
+            return
+        skipped_seen.add(reason)
+        payload = {'reason': reason}
+        if slot_id:
+            payload['slot_id'] = slot_id
+        skipped.append(payload)
     existing_games_count = len(existing_division_games)
     max_new_games = max(0, max_games_for_division_week - existing_games_count)
     if max_new_games == 0:
@@ -1842,10 +1852,6 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                 seen_host_time_keys.add(host_time_key)
                 selected_field_slot = _first_compatible_open_slot_by_field_order(slot.host_location_id, slot.slot_date, slot.start_time)
                 if not selected_field_slot:
-                    skipped.append({
-                        'slot_id': str(slot.id),
-                        'reason': 'Rejected: no compatible open field remains at this host/date/time.',
-                    })
                     continue
                 for i in range(len(available_team_ids)):
                     for j in range(i + 1, len(available_team_ids)):
@@ -1855,18 +1861,10 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                         if pair in used_pairs:
                             continue
                         if (str(a), slot.slot_date, slot.start_time) in team_time_occupied or (str(b), slot.slot_date, slot.start_time) in team_time_occupied:
-                            skipped.append({
-                                'slot_id': str(slot.id),
-                                'reason': 'Rejected: team already scheduled at the same exact time.',
-                            })
                             continue
                         if no_simultaneous_games_same_host:
                             host_time_key = (str(slot.host_location_id), slot.slot_date, slot.start_time)
                             if host_time_key in host_time_occupied:
-                                skipped.append({
-                                    'slot_id': str(slot.id),
-                                    'reason': f"Rejected: time slot already occupied by existing {host_time_occupied[host_time_key]} game.",
-                                })
                                 continue
                         team_a = teams_by_id[a]
                         team_b = teams_by_id[b]
@@ -2180,6 +2178,13 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
     created_games = 0
     assigned_slots = 0
     skipped: list[dict[str, str]] = []
+    skipped_seen: set[str] = set()
+
+    def _add_skipped(reason: str) -> None:
+        if reason in skipped_seen:
+            return
+        skipped_seen.add(reason)
+        skipped.append({'reason': reason})
     existing_games_count = len(existing_division_games)
     teams_by_id = {str(team.id): team for team in teams}
     existing_non_unscheduled_games = db.query(
@@ -2331,56 +2336,56 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
 
     for proposal in proposals:
         if existing_games_count + created_games >= max_games_for_division_week:
-            skipped.append({'reason': 'weekly game limit reached for selected division/week'})
+            _add_skipped('weekly game limit reached for selected division/week')
             break
         home_team_id = proposal.get('home_team_id')
         away_team_id = proposal.get('away_team_id')
         if not home_team_id or not away_team_id or home_team_id == away_team_id:
-            skipped.append({'reason': 'no valid opponent available (invalid matchup payload)'})
+            _add_skipped('no valid opponent available (invalid matchup payload)')
             continue
         slot = db.query(GameSlot).join(GameSlot.field_instance).filter(GameSlot.id == proposal.get('slot_id')).first()
         if not slot:
-            skipped.append({'reason': 'not enough open matching slots'})
+            _add_skipped('not enough open matching slots')
             continue
         selected_slot_unavailable = slot.status != 'OPEN' or slot.assigned_game_id is not None
         if selected_slot_unavailable:
             if is_odd_division and no_byes:
                 adjacent_slot = _find_adjacent_double_header_slot(slot, str(home_team_id), str(away_team_id))
                 if adjacent_slot is None:
-                    skipped.append({'reason': 'not enough open matching slots'})
+                    _add_skipped('not enough open matching slots')
                     continue
                 slot = adjacent_slot
             else:
-                skipped.append({'reason': 'not enough open matching slots'})
+                _add_skipped('not enough open matching slots')
                 continue
         field_time_key = (str(slot.field_instance_id), slot.slot_date, slot.start_time)
         if field_time_key in field_time_occupied:
-            skipped.append({'reason': f"Rejected: time slot already occupied by existing {field_time_occupied[field_time_key]} game."})
+            _add_skipped(f"Rejected: time slot already occupied by existing {field_time_occupied[field_time_key]} game.")
             continue
         if slot.field_type != required_field_type:
-            skipped.append({'reason': 'Rejected: selected slot is not compatible with division layout requirements.'})
+            _add_skipped('Rejected: selected slot is not compatible with division layout requirements.')
             continue
         if (str(home_team_id), slot.slot_date, slot.start_time) in team_time_occupied or (str(away_team_id), slot.slot_date, slot.start_time) in team_time_occupied:
             if is_odd_division and no_byes:
                 adjacent_slot = _find_adjacent_double_header_slot(slot, str(home_team_id), str(away_team_id))
                 if adjacent_slot is None:
-                    skipped.append({'reason': 'Rejected: team already scheduled at the same exact time.'})
+                    _add_skipped('Rejected: team already scheduled at the same exact time.')
                     continue
                 slot = adjacent_slot
                 field_time_key = (str(slot.field_instance_id), slot.slot_date, slot.start_time)
             else:
-                skipped.append({'reason': 'Rejected: team already scheduled at the same exact time.'})
+                _add_skipped('Rejected: team already scheduled at the same exact time.')
                 continue
         if slot.host_location_id is None or slot.field_instance_id is None:
-            skipped.append({'reason': 'Rejected: host location does not have an available compatible field at this date/time.'})
+            _add_skipped('Rejected: host location does not have an available compatible field at this date/time.')
             continue
         if not _has_compatible_open_field_at_time(slot.host_location_id, slot.slot_date, slot.start_time):
-            skipped.append({'reason': 'Rejected: host location does not have an available compatible field at this date/time.'})
+            _add_skipped('Rejected: host location does not have an available compatible field at this date/time.')
             continue
         if no_simultaneous_games_same_host:
             host_time_key = (str(slot.host_location_id), slot.slot_date, slot.start_time)
             if host_time_key in host_time_occupied:
-                skipped.append({'reason': f"Rejected: time slot already occupied by existing {host_time_occupied[host_time_key]} game."})
+                _add_skipped(f"Rejected: time slot already occupied by existing {host_time_occupied[host_time_key]} game.")
                 continue
         duplicate = db.query(Game).join(Game.home_team).join(Game.status).filter(
             Game.season_id == season_id,
@@ -2394,19 +2399,17 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
             ),
         ).count()
         if duplicate:
-            skipped.append({'reason': _fmt_duplicate_skip(str(home_team_id), str(away_team_id), slot)})
+            _add_skipped(_fmt_duplicate_skip(str(home_team_id), str(away_team_id), slot))
             continue
         home_uuid = uuid.UUID(str(home_team_id))
         away_uuid = uuid.UUID(str(away_team_id))
         home_limit = 2 if (is_odd_division and no_byes) else 1
         away_limit = 2 if (is_odd_division and no_byes) else 1
         if week_team_game_counts.get(home_uuid, 0) >= home_limit or week_team_game_counts.get(away_uuid, 0) >= away_limit:
-            skipped.append({
-                'reason': (
-                    f"Skipped {_team_name(str(home_team_id))} vs {_team_name(str(away_team_id))} "
-                    'because one team already has a game this week.'
-                )
-            })
+            _add_skipped(
+                f"Skipped {_team_name(str(home_team_id))} vs {_team_name(str(away_team_id))} "
+                'because one team already has a game this week.'
+            )
             continue
         game = Game(
             season_id=season_id,
