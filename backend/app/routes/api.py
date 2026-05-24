@@ -1679,6 +1679,25 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     for slot in open_slots:
         if slot.host_location_id and slot.field_instance_id:
             compatible_fields_by_host.setdefault(slot.host_location_id, set()).add(slot.field_instance_id)
+    layout_key = required_field_type.value if hasattr(required_field_type, 'value') else str(required_field_type)
+
+    def _planned_field_usage_snapshot() -> tuple[dict[tuple[str, str, str], int], dict[tuple[str, str], int], dict[tuple[str, str, str, str], int], dict[tuple[str, str, str], int]]:
+        usage_by_field_division_layout: dict[tuple[str, str, str], int] = {}
+        usage_by_host_field: dict[tuple[str, str], int] = {}
+        usage_by_host_slot_field: dict[tuple[str, str, str, str], int] = {}
+        usage_by_host_field_layout: dict[tuple[str, str, str], int] = {}
+        for p in plans:
+            host_id = p.get('host_location_id')
+            field_id = p.get('field_instance_id')
+            slot_time = p.get('proposed_start_time')
+            if not host_id or not field_id:
+                continue
+            usage_by_field_division_layout[(field_id, str(division_id), layout_key)] = usage_by_field_division_layout.get((field_id, str(division_id), layout_key), 0) + 1
+            usage_by_host_field[(host_id, field_id)] = usage_by_host_field.get((host_id, field_id), 0) + 1
+            usage_by_host_field_layout[(host_id, field_id, layout_key)] = usage_by_host_field_layout.get((host_id, field_id, layout_key), 0) + 1
+            if slot_time:
+                usage_by_host_slot_field[(host_id, str(slot_time), field_id, layout_key)] = usage_by_host_slot_field.get((host_id, str(slot_time), field_id, layout_key), 0) + 1
+        return usage_by_field_division_layout, usage_by_host_field, usage_by_host_slot_field, usage_by_host_field_layout
     if is_odd_division and no_byes:
         min_dh = min(double_header_counts.values() or [0])
         candidates = [tid for tid, count in double_header_counts.items() if count == min_dh]
@@ -1758,19 +1777,35 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                         score += 25
                         reason_bits.append('adjacent time-slot grouping at same location (+25)')
                     if candidate_host_id and any(p.get('host_location_id') == str(candidate_host_id) and p.get('field') == (slot.field_instance.field_name if slot.field_instance else '') for p in plans):
-                        score += 50
-                        reason_bits.append('adjacent-field grouping within complex (+50)')
+                        score += 10
+                        reason_bits.append('light adjacent-field grouping preference (+10)')
                     if candidate_host_id:
                         compatible_fields = compatible_fields_by_host.get(candidate_host_id, set())
                         if len(compatible_fields) > 1:
+                            usage_by_field_division_layout, usage_by_host_field, usage_by_host_slot_field, usage_by_host_field_layout = _planned_field_usage_snapshot()
+                            candidate_host_key = str(candidate_host_id)
+                            slot_field_id = str(slot.field_instance_id) if slot.field_instance_id else None
+                            host_layout_loads = [
+                                usage_by_host_field_layout.get((candidate_host_key, str(fid), layout_key), 0)
+                                for fid in compatible_fields
+                            ]
+                            min_host_layout_load = min(host_layout_loads) if host_layout_loads else 0
                             used_fields = {
                                 p.get('field_instance_id') for p in plans
                                 if p.get('host_location_id') == str(candidate_host_id) and p.get('field_instance_id')
                             }
-                            slot_field_id = str(slot.field_instance_id) if slot.field_instance_id else None
                             if slot_field_id and slot_field_id not in used_fields:
                                 score += balance_weight
                                 reason_bits.append(f'field utilization balance via new compatible field (+{balance_weight})')
+                            if slot_field_id:
+                                division_layout_load = usage_by_field_division_layout.get((slot_field_id, str(division_id), layout_key), 0)
+                                if division_layout_load == min_host_layout_load:
+                                    score += balance_weight
+                                    reason_bits.append(f'least-used compatible field for this division/layout (+{balance_weight})')
+                                else:
+                                    imbalance_penalty = max(1, balance_weight // 2) * (division_layout_load - min_host_layout_load)
+                                    score -= imbalance_penalty
+                                    warning_bits.append(f'compatible field has higher current load than alternatives (-{imbalance_penalty})')
                             projected_used = set(used_fields)
                             if slot_field_id:
                                 projected_used.add(slot_field_id)
@@ -1807,6 +1842,21 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                                 overload_penalty = balance_weight * (consecutive_same_field - max_consecutive_games_same_field + 1)
                                 score -= overload_penalty
                                 warning_bits.append(f'field overused consecutively at host site (-{overload_penalty})')
+                            if slot_field_id:
+                                selected_field_total = usage_by_host_field.get((candidate_host_key, slot_field_id), 0)
+                                less_used_exists = any(
+                                    usage_by_host_field.get((candidate_host_key, str(other_field_id)), 0) < selected_field_total
+                                    for other_field_id in compatible_fields
+                                    if str(other_field_id) != slot_field_id
+                                )
+                                if consecutive_same_field > 0 and less_used_exists:
+                                    reuse_penalty = max(1, balance_weight // 2) * consecutive_same_field
+                                    score -= reuse_penalty
+                                    warning_bits.append(f'excess consecutive reuse while other compatible fields are less used (-{reuse_penalty})')
+                                slot_collision_count = usage_by_host_slot_field.get((candidate_host_key, str(slot.start_time), slot_field_id, layout_key), 0)
+                                if slot_collision_count > 0:
+                                    score -= 1000
+                                    warning_bits.append('field already has assigned game at this host/time/layout (-1000)')
                     if is_odd_division and no_byes and selected_double_header_team_id:
                         includes_dh = selected_double_header_team_id in {a, b}
                         if week_team_game_counts.get(selected_double_header_team_id, 0) == 0 and not includes_dh:
