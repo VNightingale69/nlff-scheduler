@@ -431,6 +431,8 @@ class AutoFillPreviewTest(unittest.TestCase):
             'no_byes': True,
         }, db=self.db)
         self.assertEqual(applied['created_count'], 5)
+        self.assertEqual(applied['skipped_count'], 0)
+        self.assertEqual(applied['skipped'], [])
 
 if __name__ == '__main__':
     unittest.main()
