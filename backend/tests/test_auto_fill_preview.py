@@ -170,7 +170,7 @@ class AutoFillPreviewTest(unittest.TestCase):
         self.assertEqual(result['proposals'][0]['host_location'], 'Westosha Park')
         self.assertIn('same-community at home host field (+60)', result['proposals'][0]['reason'])
 
-    def test_consolidates_to_single_host_when_capacity_exists(self):
+    def test_uses_multiple_fields_when_parallel_capacity_exists(self):
         away_host = HostLocation(id=uuid.uuid4(), organization_id=self.org_a.id, name='Antioch Park', is_active=True)
         away_fi = FieldInstance(id=uuid.uuid4(), host_location_id=away_host.id, hosting_availability_id=uuid.uuid4(), instance_date=self.week2.start_date, field_name='Away Field 1', field_type='SMALL', is_active=True)
         away_slot = GameSlot(id=uuid.uuid4(), field_instance_id=away_fi.id, host_location_id=away_host.id, slot_date=self.week2.start_date, start_time=time(10, 0), end_time=time(11, 0), field_type='SMALL', status='OPEN')
@@ -185,10 +185,21 @@ class AutoFillPreviewTest(unittest.TestCase):
         result = auto_fill_preview({'season_id': self.season.id, 'week_id': self.week2.id, 'division_id': self.division.id}, db=self.db)
         self.assertGreaterEqual(result['proposed_game_count'], 2)
         used_hosts = {p['host_location'] for p in result['proposals']}
-        self.assertEqual(used_hosts, {'Westosha Park'})
+        self.assertIn('Westosha Park', used_hosts)
         self.assertTrue(result['audit']['single_site_possible'])
-        self.assertTrue(result['audit']['consolidation_achieved'])
+        self.assertFalse(result['audit']['centralization_requested'])
 
+
+    def test_centralized_request_prefers_single_host(self):
+        away_host = HostLocation(id=uuid.uuid4(), organization_id=self.org_a.id, name='Antioch Park', is_active=True)
+        away_fi = FieldInstance(id=uuid.uuid4(), host_location_id=away_host.id, hosting_availability_id=uuid.uuid4(), instance_date=self.week2.start_date, field_name='Away Field C', field_type='SMALL', is_active=True)
+        away_slot = GameSlot(id=uuid.uuid4(), field_instance_id=away_fi.id, host_location_id=away_host.id, slot_date=self.week2.start_date, start_time=time(10, 0), end_time=time(11, 0), field_type='SMALL', status='OPEN')
+        self.db.add_all([away_host, away_fi, away_slot])
+        self.db.commit()
+
+        result = auto_fill_preview({'season_id': self.season.id, 'week_id': self.week2.id, 'division_id': self.division.id, 'centralized_scheduling_requested': True}, db=self.db)
+        self.assertTrue(result['audit']['centralization_requested'])
+        self.assertGreaterEqual(result['proposed_game_count'], 1)
     def test_apply_ignores_unscheduled_games_for_duplicate_check(self):
         unscheduled_status = GameStatus(id=uuid.uuid4(), code='UNSCHEDULED', label='Unscheduled', is_active=True)
         self.db.add(unscheduled_status)

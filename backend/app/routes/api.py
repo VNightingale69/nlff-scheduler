@@ -1499,6 +1499,21 @@ def assign_generated_slot(payload: dict, db: Session = Depends(get_db)):
 
 @router.post('/manual-schedule-builder/auto-fill-preview', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
+    scoring_weights = payload.get('scoring_weights') or {}
+
+    def _weight(name: str, default: int) -> int:
+        try:
+            return int(scoring_weights.get(name, default))
+        except (TypeError, ValueError):
+            return default
+
+    balance_weight = _weight('field_utilization_balance', 90)
+    completion_weight = _weight('projected_completion_time', 110)
+    parallel_weight = _weight('parallel_scheduling_efficiency', 100)
+    idle_fields_weight = _weight('maximum_idle_compatible_fields', 80)
+    consolidation_weight = _weight('host_location_consolidation', 45)
+    centralization_requested = bool(payload.get('centralized_scheduling_requested', False))
+    staffing_limited = bool(payload.get('staffing_limited', False))
     season_id = payload.get('season_id')
     week_id = payload.get('week_id')
     division_id = payload.get('division_id')
@@ -1643,6 +1658,10 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     preferred_host_id: uuid.UUID | None = primary_host_id
     used_host_ids: set[uuid.UUID] = set()
     selected_double_header_team_id: uuid.UUID | None = None
+    compatible_fields_by_host: dict[uuid.UUID, set[uuid.UUID]] = {}
+    for slot in open_slots:
+        if slot.host_location_id and slot.field_instance_id:
+            compatible_fields_by_host.setdefault(slot.host_location_id, set()).add(slot.field_instance_id)
     if is_odd_division and no_byes:
         min_dh = min(double_header_counts.values() or [0])
         candidates = [tid for tid, count in double_header_counts.items() if count == min_dh]
@@ -1702,26 +1721,47 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                     if host_pref:
                         score += 40
                         reason_bits.append('reduced travel via host alignment (+40)')
+                    serialization_required = centralization_requested or staffing_limited
                     if preferred_host_id and candidate_host_id == preferred_host_id:
-                        score += 150
-                        reason_bits.append('host-location consolidation (+150)')
+                        consolidation_bonus = consolidation_weight if serialization_required else max(1, consolidation_weight // 2)
+                        score += consolidation_bonus
+                        reason_bits.append(f'host-location consolidation (+{consolidation_bonus})')
                     elif preferred_host_id and candidate_host_id != preferred_host_id and preferred_host_id in slots_by_host:
                         preferred_open_slots = [s for s in remaining_slots if s.host_location_id == preferred_host_id]
-                        if preferred_open_slots:
-                            score -= 120
-                            warning_bits.append('second host used while primary host still has compatible slots (-120)')
-                    if single_site_possible and primary_host_id and candidate_host_id == primary_host_id:
-                        score += 200
-                        reason_bits.append('single-site completion path (+200)')
-                    if single_site_possible and primary_host_id and candidate_host_id != primary_host_id:
-                        score -= 200
-                        warning_bits.append('avoidable multi-site fragmentation (-200)')
+                        if preferred_open_slots and serialization_required:
+                            score -= consolidation_weight
+                            warning_bits.append(f'second host used while primary host still has compatible slots (-{consolidation_weight})')
+                    if single_site_possible and primary_host_id and candidate_host_id == primary_host_id and serialization_required:
+                        score += completion_weight
+                        reason_bits.append(f'single-site completion path (+{completion_weight})')
+                    if single_site_possible and primary_host_id and candidate_host_id != primary_host_id and serialization_required:
+                        score -= completion_weight
+                        warning_bits.append(f'avoidable multi-site fragmentation (-{completion_weight})')
                     if candidate_host_id and any(p.get('host_location_id') == str(candidate_host_id) for p in plans):
                         score += 25
                         reason_bits.append('adjacent time-slot grouping at same location (+25)')
                     if candidate_host_id and any(p.get('host_location_id') == str(candidate_host_id) and p.get('field') == (slot.field_instance.field_name if slot.field_instance else '') for p in plans):
                         score += 50
                         reason_bits.append('adjacent-field grouping within complex (+50)')
+                    if candidate_host_id:
+                        compatible_fields = compatible_fields_by_host.get(candidate_host_id, set())
+                        if len(compatible_fields) > 1:
+                            used_fields = {
+                                p.get('field_instance_id') for p in plans
+                                if p.get('host_location_id') == str(candidate_host_id) and p.get('field_instance_id')
+                            }
+                            slot_field_id = str(slot.field_instance_id) if slot.field_instance_id else None
+                            if slot_field_id and slot_field_id not in used_fields:
+                                score += balance_weight
+                                reason_bits.append(f'field utilization balance via new compatible field (+{balance_weight})')
+                            projected_used = set(used_fields)
+                            if slot_field_id:
+                                projected_used.add(slot_field_id)
+                            idle_fields = max(0, len(compatible_fields) - len(projected_used))
+                            score += parallel_weight * len(projected_used)
+                            score -= idle_fields_weight * idle_fields
+                            if idle_fields > 0:
+                                warning_bits.append(f'{idle_fields} compatible field(s) projected idle (-{idle_fields_weight * idle_fields})')
                     if is_odd_division and no_byes and selected_double_header_team_id:
                         includes_dh = selected_double_header_team_id in {a, b}
                         if week_team_game_counts.get(selected_double_header_team_id, 0) == 0 and not includes_dh:
@@ -1811,6 +1851,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'host_location': slot.host_location.name if slot.host_location else '',
             'host_location_id': str(slot.host_location_id) if slot.host_location_id else None,
             'field': slot.field_instance.field_name if slot.field_instance else '',
+            'field_instance_id': str(slot.field_instance_id) if slot.field_instance_id else None,
             'score': int(best['score']),
             'reason': '; '.join(reason_bits),
             'warnings': best['warning_bits'],
@@ -1857,6 +1898,8 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'host_locations_used_count': len(used_host_ids),
             'host_locations_used': [str(hid) for hid in used_host_ids],
             'single_site_possible': single_site_possible,
+            'centralization_requested': centralization_requested,
+            'staffing_limited': staffing_limited,
             'consolidation_achieved': len(used_host_ids) <= 1 if plans else True,
             'fragmentation_necessary': (not single_site_possible and len(used_host_ids) > 1),
             'fragmentation_avoidable': (single_site_possible and len(used_host_ids) > 1),
