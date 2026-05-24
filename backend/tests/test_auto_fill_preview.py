@@ -50,6 +50,14 @@ class AutoFillPreviewTest(unittest.TestCase):
         self.assertIn('Avoids prior-week team repeat', result['proposals'][0]['reason'])
         self.assertIn('Avoids prior-week community repeat', result['proposals'][0]['reason'])
 
+    def test_large_field_division_only_uses_large_slots(self):
+        self.division.required_field_layout_type = 'FIFTY_THREE_YARD_WIDTH'
+        self.db.commit()
+
+        preview = auto_fill_preview({'season_id': self.season.id, 'week_id': self.week2.id, 'division_id': self.division.id}, db=self.db)
+        self.assertEqual(preview['proposed_game_count'], 0)
+        self.assertIn('No compatible large field available for this division.', [row['reason'] for row in preview['skipped']])
+
 
 
 
