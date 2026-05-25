@@ -311,6 +311,36 @@ class AutoFillPreviewTest(unittest.TestCase):
         self.assertEqual(result['max_allowed_game_count'], 3)
         self.assertEqual(result['proposed_game_count'], 3)
         self.assertTrue(any('Accepted as required double header due to odd team count' in row['reason'] for row in result['proposals']))
+
+    def test_apply_odd_division_uses_later_compatible_slot_when_adjacent_unavailable(self):
+        odd_team = Team(id=uuid.uuid4(), organization_id=self.org_w.id, division_id=self.division.id, name='Westosha White', is_active=True)
+        self.db.add(odd_team)
+
+        slot_10_fi = FieldInstance(id=uuid.uuid4(), host_location_id=self.host.id, hosting_availability_id=uuid.uuid4(), instance_date=self.week2.start_date, field_name='Odd 10', field_type='SMALL', is_active=True)
+        slot_10 = GameSlot(id=uuid.uuid4(), field_instance_id=slot_10_fi.id, host_location_id=self.host.id, slot_date=self.week2.start_date, start_time=time(10, 0), end_time=time(11, 0), field_type='SMALL', status='OPEN')
+        slot_12_fi = FieldInstance(id=uuid.uuid4(), host_location_id=self.host.id, hosting_availability_id=uuid.uuid4(), instance_date=self.week2.start_date, field_name='Odd 12', field_type='SMALL', is_active=True)
+        slot_12 = GameSlot(id=uuid.uuid4(), field_instance_id=slot_12_fi.id, host_location_id=self.host.id, slot_date=self.week2.start_date, start_time=time(12, 0), end_time=time(13, 0), field_type='SMALL', status='OPEN')
+        self.db.add_all([slot_10_fi, slot_10, slot_12_fi, slot_12])
+        self.db.commit()
+
+        result = auto_fill_apply({
+            'season_id': self.season.id,
+            'week_id': self.week2.id,
+            'division_id': self.division.id,
+            'proposals': [
+                {'slot_id': str(self.slot.id), 'home_team_id': str(self.wm.id), 'away_team_id': str(self.ab.id)},
+                {'slot_id': str(slot_10.id), 'home_team_id': str(self.wg.id), 'away_team_id': str(self.as_.id)},
+                # conflict: wm already plays at 9:00, so this proposal must fallback to 12:00
+                {'slot_id': str(self.slot.id), 'home_team_id': str(self.wm.id), 'away_team_id': str(odd_team.id)},
+            ],
+            'no_byes': True,
+        }, db=self.db)
+
+        self.assertEqual(result['final_validation']['required_game_count'], 3)
+        self.assertEqual(result['final_validation']['created_game_count'], 3)
+        self.assertEqual(result['created_count'], 3)
+        self.assertEqual(result['final_validation']['unscheduled_teams'], [])
+        self.assertTrue(any('non-back-to-back' in row['reason'] for row in result['skipped']))
     def test_apply_ignores_unscheduled_games_for_duplicate_check(self):
         unscheduled_status = GameStatus(id=uuid.uuid4(), code='UNSCHEDULED', label='Unscheduled', is_active=True)
         self.db.add(unscheduled_status)
