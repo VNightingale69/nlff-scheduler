@@ -58,6 +58,53 @@ class SchedulingValidationTest(unittest.TestCase):
         result = validate_game(self.db, self.base_payload())
         self.assertTrue(any(c.code == 'team_overlap' for c in result.hard_conflicts))
 
+    def test_same_time_different_host_locations_is_allowed(self):
+        other_host = HostLocation(id=uuid.uuid4(), organization_id=self.org.id, name='North Complex', is_active=True)
+        other_field = Field(id=uuid.uuid4(), host_location_id=other_host.id, name='Field N1', layout_type='THIRTY_YARD_WIDTH', is_active=True)
+        other_home = Team(id=uuid.uuid4(), organization_id=self.org.id, division_id=self.division.id, name='C', is_active=True)
+        other_away = Team(id=uuid.uuid4(), organization_id=self.org.id, division_id=self.division.id, name='D', is_active=True)
+        self.db.add_all([other_host, other_field, other_home, other_away])
+        self.db.add(
+            Game(
+                id=uuid.uuid4(),
+                season_id=self.season.id,
+                week_id=self.week.id,
+                home_team_id=other_home.id,
+                away_team_id=other_away.id,
+                field_id=other_field.id,
+                game_status_id=self.status.id,
+                game_date=date(2026, 5, 3),
+                kickoff_time=time(10, 0),
+            )
+        )
+        self.db.commit()
+        result = validate_game(self.db, self.base_payload())
+        self.assertFalse(any(c.code == 'field_overlap' for c in result.hard_conflicts))
+        self.assertFalse(any(c.code == 'team_overlap' for c in result.hard_conflicts))
+
+    def test_same_time_different_fields_same_host_is_allowed(self):
+        second_field = Field(id=uuid.uuid4(), host_location_id=self.host.id, name='Field B', layout_type='THIRTY_YARD_WIDTH', is_active=True)
+        other_home = Team(id=uuid.uuid4(), organization_id=self.org.id, division_id=self.division.id, name='C', is_active=True)
+        other_away = Team(id=uuid.uuid4(), organization_id=self.org.id, division_id=self.division.id, name='D', is_active=True)
+        self.db.add_all([second_field, other_home, other_away])
+        self.db.add(
+            Game(
+                id=uuid.uuid4(),
+                season_id=self.season.id,
+                week_id=self.week.id,
+                home_team_id=other_home.id,
+                away_team_id=other_away.id,
+                field_id=second_field.id,
+                game_status_id=self.status.id,
+                game_date=date(2026, 5, 3),
+                kickoff_time=time(10, 0),
+            )
+        )
+        self.db.commit()
+        result = validate_game(self.db, self.base_payload())
+        self.assertFalse(any(c.code == 'field_overlap' for c in result.hard_conflicts))
+        self.assertFalse(any(c.code == 'team_overlap' for c in result.hard_conflicts))
+
     def test_create_game_blocks_published_with_hard_conflicts(self):
         published = GameStatus(id=uuid.uuid4(), code='published', label='Published', is_active=True)
         self.db.add(published)
