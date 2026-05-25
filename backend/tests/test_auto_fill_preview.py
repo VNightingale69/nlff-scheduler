@@ -178,6 +178,47 @@ class AutoFillPreviewTest(unittest.TestCase):
         self.assertEqual(result['proposals'][0]['host_location'], 'Westosha Park')
         self.assertIn('same-community at home host field (+60)', result['proposals'][0]['reason'])
 
+    def test_split_host_week_prefers_existing_community_host_assignment(self):
+        lake_org = Organization(id=uuid.uuid4(), name='Lake County', is_active=True)
+        self.db.add(lake_org)
+        lake_red = Team(id=uuid.uuid4(), organization_id=lake_org.id, division_id=self.division.id, name='Lake County Red', is_active=True)
+        lake_silver = Team(id=uuid.uuid4(), organization_id=lake_org.id, division_id=self.division.id, name='Lake County Silver', is_active=True)
+        self.db.add_all([lake_red, lake_silver])
+
+        hiller_host = HostLocation(id=uuid.uuid4(), organization_id=lake_org.id, name='Hiller Park', is_active=True)
+        hiller_fi_existing = FieldInstance(id=uuid.uuid4(), host_location_id=hiller_host.id, hosting_availability_id=uuid.uuid4(), instance_date=self.week2.start_date, field_name='Hiller Existing', field_type='SMALL', is_active=True)
+        hiller_slot_existing = GameSlot(id=uuid.uuid4(), field_instance_id=hiller_fi_existing.id, host_location_id=hiller_host.id, slot_date=self.week2.start_date, start_time=time(9, 0), end_time=time(10, 0), field_type='SMALL', status='OPEN')
+        hiller_fi_open = FieldInstance(id=uuid.uuid4(), host_location_id=hiller_host.id, hosting_availability_id=uuid.uuid4(), instance_date=self.week2.start_date, field_name='Hiller Open', field_type='SMALL', is_active=True)
+        hiller_slot_open = GameSlot(id=uuid.uuid4(), field_instance_id=hiller_fi_open.id, host_location_id=hiller_host.id, slot_date=self.week2.start_date, start_time=time(10, 0), end_time=time(11, 0), field_type='SMALL', status='OPEN')
+
+        osmond_host = HostLocation(id=uuid.uuid4(), organization_id=self.org_a.id, name='Tim Osmond Sports Complex', is_active=True)
+        osmond_fi = FieldInstance(id=uuid.uuid4(), host_location_id=osmond_host.id, hosting_availability_id=uuid.uuid4(), instance_date=self.week2.start_date, field_name='Osmond Open', field_type='SMALL', is_active=True)
+        osmond_slot = GameSlot(id=uuid.uuid4(), field_instance_id=osmond_fi.id, host_location_id=osmond_host.id, slot_date=self.week2.start_date, start_time=time(10, 0), end_time=time(11, 0), field_type='SMALL', status='OPEN')
+        self.db.add_all([hiller_host, hiller_fi_existing, hiller_slot_existing, hiller_fi_open, hiller_slot_open, osmond_host, osmond_fi, osmond_slot])
+        self.db.commit()
+
+        scheduled_game = Game(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week2.id,
+            home_team_id=lake_red.id,
+            away_team_id=self.ab.id,
+            game_status_id=self.status.id,
+            game_date=self.week2.start_date,
+            kickoff_time=time(9, 0),
+        )
+        self.db.add(scheduled_game)
+        self.db.commit()
+        hiller_slot_existing.status = 'BOOKED'
+        hiller_slot_existing.assigned_game_id = scheduled_game.id
+        self.db.commit()
+
+        result = auto_fill_preview({'season_id': self.season.id, 'week_id': self.week2.id, 'division_id': self.division.id}, db=self.db)
+        target = next((p for p in result['proposals'] if set([p['home_team_id'], p['away_team_id']]) == {str(lake_silver.id), str(self.as_.id)}), None)
+        self.assertIsNotNone(target)
+        self.assertEqual(target['host_location'], 'Hiller Park')
+        self.assertIn('community remains at assigned split-host site (+200)', target['reason'])
+
 
     def test_preview_fills_parallel_fields_before_later_times(self):
         org_c = Organization(id=uuid.uuid4(), name='Bristol', is_active=True)
