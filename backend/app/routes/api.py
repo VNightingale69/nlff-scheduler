@@ -1897,8 +1897,16 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'continuity': len({(s.slot_date, s.start_time) for s in host_slots}),
         })
     host_capacity.sort(key=lambda x: (x['slot_count'] >= games_required, x['slot_count'], x['field_count'], x['continuity']), reverse=True)
+    host_ids_by_org: dict[uuid.UUID, set[uuid.UUID]] = {}
+    for host_id in slots_by_host.keys():
+        host_row = db.query(HostLocation.id, HostLocation.organization_id).filter(HostLocation.id == host_id).first()
+        if host_row and host_row.organization_id:
+            host_ids_by_org.setdefault(host_row.organization_id, set()).add(host_row.id)
     primary_host_id: uuid.UUID | None = host_capacity[0]['host_id'] if host_capacity else None
     single_site_possible = bool(host_capacity and host_capacity[0]['slot_count'] >= games_required)
+    split_host_week = len(host_capacity) > 1
+    host_capacity_by_id: dict[uuid.UUID, int] = {row['host_id']: int(row['slot_count']) for row in host_capacity}
+    projected_games_by_host: dict[uuid.UUID, int] = {}
     preferred_host_id: uuid.UUID | None = primary_host_id
     used_host_ids: set[uuid.UUID] = set()
     selected_double_header_team_id: uuid.UUID | None = None
@@ -2059,6 +2067,34 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                         if host_pref:
                             score += 40
                             reason_bits.append('reduced travel via host alignment (+40)')
+                        if split_host_week and candidate_host_id:
+                            candidate_host_capacity = max(1, host_capacity_by_id.get(candidate_host_id, 0))
+                            current_host_projection = projected_games_by_host.get(candidate_host_id, 0)
+                            host_load_ratio = current_host_projection / candidate_host_capacity
+                            # Encourage balancing game allocation across active host pools.
+                            score += int(balance_weight * (1.0 - min(1.0, host_load_ratio)))
+                            reason_bits.append('split-host balancing across active sites')
+
+                            teams_at_host_home = int(team_a.organization_id == host_org_id) + int(team_b.organization_id == host_org_id)
+                            if teams_at_host_home > 0:
+                                affinity_bonus = 35 if teams_at_host_home == 1 else 75
+                                score += affinity_bonus
+                                reason_bits.append(f'host-site affinity (+{affinity_bonus})')
+                            else:
+                                away_penalty = 30
+                                compatible_home_for_a = any(
+                                    _has_compatible_open_field_at_time(home_host_id, slot.slot_date, slot.start_time)
+                                    for home_host_id in host_ids_by_org.get(team_a.organization_id, set())
+                                ) if team_a.organization_id else False
+                                compatible_home_for_b = any(
+                                    _has_compatible_open_field_at_time(home_host_id, slot.slot_date, slot.start_time)
+                                    for home_host_id in host_ids_by_org.get(team_b.organization_id, set())
+                                ) if team_b.organization_id else False
+                                if compatible_home_for_a or compatible_home_for_b:
+                                    away_penalty += 40
+                                    warning_bits.append('host-community team scheduled away while home-compatible slot remains (-40)')
+                                score -= away_penalty
+                                warning_bits.append(f'away-host assignment in split-host week (-{away_penalty})')
                         serialization_required = centralization_requested or staffing_limited
                         if preferred_host_id and candidate_host_id == preferred_host_id:
                             consolidation_bonus = consolidation_weight if serialization_required else max(1, consolidation_weight // 2)
@@ -2202,6 +2238,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             used_team_ids.add(best['away_team_id'])
         if selected_field_slot.host_location_id:
             used_host_ids.add(selected_field_slot.host_location_id)
+            projected_games_by_host[selected_field_slot.host_location_id] = projected_games_by_host.get(selected_field_slot.host_location_id, 0) + 1
             if not preferred_host_id:
                 preferred_host_id = selected_field_slot.host_location_id
         proposed_usage_key = (
@@ -2259,6 +2296,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'double_header_teams_by_week': double_header_teams,
             'host_locations_used_count': len(used_host_ids),
             'host_locations_used': [str(hid) for hid in used_host_ids],
+            'split_host_week': split_host_week,
             'single_site_possible': single_site_possible,
             'centralization_requested': centralization_requested,
             'staffing_limited': staffing_limited,

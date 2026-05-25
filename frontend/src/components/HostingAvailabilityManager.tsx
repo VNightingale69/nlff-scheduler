@@ -388,6 +388,23 @@ export default function HostingAvailabilityManager() {
             return { community: communityName, byWeek };
     });
   }, [hosts, summaryRows, organizationsById]);
+  const splitHostWeeks = useMemo(() => {
+    const byWeek = new Map<number, Set<string>>();
+    summaryRows.forEach((row: any) => {
+      const week = Number(row.week || 0);
+      if (!week) return;
+      const orgKey = String(row.organization_id || row.organization_name || row.host_location_id || '').trim();
+      if (!orgKey) return;
+      if (!byWeek.has(week)) byWeek.set(week, new Set<string>());
+      byWeek.get(week)!.add(orgKey);
+    });
+    const result: Record<number, boolean> = {};
+    HOSTING_DATES.forEach((d) => {
+      const w = weekForDate(d.date);
+      result[w] = (byWeek.get(w)?.size || 0) > 1;
+    });
+    return result;
+  }, [summaryRows]);
 
   const readinessChecks = useMemo(() => {
     const projectedSmallGames = 12;
@@ -477,13 +494,14 @@ export default function HostingAvailabilityManager() {
           <div className='overflow-auto'>
             <h3 className='mb-2 font-medium'>Weekly hosting matrix</h3>
             <table className='min-w-full text-sm'>
-              <thead><tr className='border-b text-left'><th className='p-2'>Community</th>{HOSTING_DATES.map((d) => <th key={d.date} className='p-2'>W{weekForDate(d.date)}</th>)}</tr></thead>
+              <thead><tr className='border-b text-left'><th className='p-2'>Community</th>{HOSTING_DATES.map((d) => <th key={d.date} className='p-2'>W{weekForDate(d.date)}</th>)}<th className='p-2'>Split Host Week</th></tr></thead>
               <tbody>
                 {weeklyMatrix.map((row: any) => (
-                  <tr key={row.community} className='border-b'><td className='p-2 font-medium'>{row.community}</td>{HOSTING_DATES.map((d) => { const status = row.byWeek[weekForDate(d.date)] || 'Away'; return <td key={d.date} className='p-2'><span className={`rounded px-2 py-1 text-xs ${STATUS_BADGE[status]}`}>{status}</span></td>; })}</tr>
+                  <tr key={row.community} className='border-b'><td className='p-2 font-medium'>{row.community}</td>{HOSTING_DATES.map((d) => { const status = row.byWeek[weekForDate(d.date)] || 'Away'; return <td key={d.date} className='p-2'><span className={`rounded px-2 py-1 text-xs ${STATUS_BADGE[status]}`}>{status}</span></td>; })}<td className='p-2 text-xs text-slate-700'><ul className='space-y-1'>{HOSTING_DATES.map((d) => { const week = weekForDate(d.date); if (!splitHostWeeks[week]) return null; return <li key={`split-${row.community}-${week}`}>W{week}: Split Host Week: Yes</li>; })}</ul></td></tr>
                 ))}
               </tbody>
             </table>
+            <div className='mt-2 text-xs text-slate-600'>Dual Host Configuration is active for weeks where two or more communities host.</div>
           </div>
         </section>
       ) : null}

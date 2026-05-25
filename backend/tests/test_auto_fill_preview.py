@@ -236,6 +236,27 @@ class AutoFillPreviewTest(unittest.TestCase):
         self.assertTrue(result['audit']['centralization_requested'])
         self.assertGreaterEqual(result['proposed_game_count'], 1)
 
+    def test_split_host_week_keeps_host_teams_on_home_sites_when_capacity_exists(self):
+        away_host = HostLocation(id=uuid.uuid4(), organization_id=self.org_a.id, name='Antioch Park', is_active=True)
+        away_fi_1 = FieldInstance(id=uuid.uuid4(), host_location_id=away_host.id, hosting_availability_id=uuid.uuid4(), instance_date=self.week2.start_date, field_name='Away Field 1', field_type='SMALL', is_active=True)
+        away_slot_1 = GameSlot(id=uuid.uuid4(), field_instance_id=away_fi_1.id, host_location_id=away_host.id, slot_date=self.week2.start_date, start_time=time(9, 0), end_time=time(10, 0), field_type='SMALL', status='OPEN')
+        away_fi_2 = FieldInstance(id=uuid.uuid4(), host_location_id=away_host.id, hosting_availability_id=uuid.uuid4(), instance_date=self.week2.start_date, field_name='Away Field 2', field_type='SMALL', is_active=True)
+        away_slot_2 = GameSlot(id=uuid.uuid4(), field_instance_id=away_fi_2.id, host_location_id=away_host.id, slot_date=self.week2.start_date, start_time=time(10, 0), end_time=time(11, 0), field_type='SMALL', status='OPEN')
+        self.db.add_all([away_host, away_fi_1, away_slot_1, away_fi_2, away_slot_2])
+        self.db.commit()
+
+        result = auto_fill_preview({'season_id': self.season.id, 'week_id': self.week2.id, 'division_id': self.division.id}, db=self.db)
+        self.assertTrue(result['audit']['split_host_week'])
+        self.assertGreaterEqual(result['proposed_game_count'], 2)
+        for proposal in result['proposals']:
+            home_team = self.db.query(Team).filter(Team.id == uuid.UUID(proposal['home_team_id'])).first()
+            away_team = self.db.query(Team).filter(Team.id == uuid.UUID(proposal['away_team_id'])).first()
+            host = self.db.query(HostLocation).filter(HostLocation.id == uuid.UUID(proposal['host_location_id'])).first()
+            self.assertIsNotNone(home_team)
+            self.assertIsNotNone(away_team)
+            self.assertIsNotNone(host)
+            self.assertIn(host.organization_id, {home_team.organization_id, away_team.organization_id})
+
     def test_odd_division_accepts_required_double_header(self):
         odd_team = Team(id=uuid.uuid4(), organization_id=self.org_w.id, division_id=self.division.id, name='Westosha White', is_active=True)
         self.db.add(odd_team)
