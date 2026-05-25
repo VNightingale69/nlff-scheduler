@@ -52,6 +52,7 @@ export default function HostLocationsAdminPage() {
   const [checkingDelete, setCheckingDelete] = useState(false);
   const [cascadeConfirmed, setCascadeConfirmed] = useState(false);
   const [siteTypeByHostId, setSiteTypeByHostId] = useState<Record<string, string>>({});
+  const [zipCodeError, setZipCodeError] = useState('');
 
   const orgNameById = useMemo(() => Object.fromEntries(organizations.map((x) => [x.id, x.name])), [organizations]);
   const displayItems = useMemo(
@@ -131,23 +132,25 @@ export default function HostLocationsAdminPage() {
     if (!form.address_line1?.trim() && !form.address?.trim()) missing.push('Street Address');
     if (!form.city?.trim()) missing.push('City');
     if (!form.state?.trim()) missing.push('State');
-    if (!form.zip_code?.trim()) missing.push('Zip Code');
     return missing;
   }, [form]);
-  const zipCodeError = useMemo(() => {
+
+  const getZipCodeError = () => {
     const zip = form.zip_code?.trim() || '';
     if (!zip) return 'Zip Code is required.';
     if (!/^\d{5}$/.test(zip)) return 'Zip Code must be 5 digits.';
     return '';
-  }, [form.zip_code]);
+  };
 
   const save = async () => {
-    if (missingRequired.length || zipCodeError) {
-      if (zipCodeError) {
-        setMessage(zipCodeError);
-      } else {
-        setMessage(`Missing: ${missingRequired.join(', ')}`);
-      }
+    const nextZipCodeError = getZipCodeError();
+    if (nextZipCodeError) {
+      setZipCodeError(nextZipCodeError);
+      return;
+    }
+
+    if (missingRequired.length) {
+      setMessage(`Missing: ${missingRequired.join(', ')}`);
       setType('err');
       return;
     }
@@ -176,6 +179,7 @@ export default function HostLocationsAdminPage() {
       setType('ok');
       setForm({ is_active: true, state: 'WI' });
       setEditingId(null);
+      setZipCodeError('');
       load();
     } catch (e: any) {
       setMessage(e?.message || 'Save failed');
@@ -188,6 +192,7 @@ export default function HostLocationsAdminPage() {
   const edit = (item: HostLocation) => {
     setForm({ ...item, address_line1: item.address_line1 || item.address || '', state: item.state || 'WI' });
     setEditingId(item.id);
+    setZipCodeError('');
   };
 
   const openDeleteModal = async (item: HostLocation) => {
@@ -280,7 +285,18 @@ export default function HostLocationsAdminPage() {
         <FormField label='Address Line 2 (Optional)' type='text' value={form.address_line2 ?? ''} onChange={(value) => setForm({ ...form, address_line2: String(value) })} />
         <FormField label='City' type='text' value={form.city ?? ''} onChange={(value) => setForm({ ...form, city: String(value) })} />
         <FormField label='State' type='text' value={form.state ?? 'WI'} onChange={(value) => setForm({ ...form, state: String(value) })} />
-        <FormField label='Zip Code' type='text' value={form.zip_code ?? ''} onChange={(value) => setForm({ ...form, zip_code: String(value).replace(/\D/g, '').slice(0, 5) })} />
+        <div className='flex flex-col gap-1'>
+          <FormField
+            label='Zip Code'
+            type='text'
+            value={form.zip_code ?? ''}
+            onChange={(value) => {
+              setForm({ ...form, zip_code: String(value).replace(/\D/g, '').slice(0, 5) });
+              if (zipCodeError) setZipCodeError('');
+            }}
+          />
+          {zipCodeError && <p className='text-sm text-rose-700'>{zipCodeError}</p>}
+        </div>
         <FormField label='Active' type='checkbox' value={form.is_active ?? true} onChange={(value) => setForm({ ...form, is_active: Boolean(value) })} />
 
         <div className='flex gap-2 md:col-span-2'>
@@ -288,14 +304,13 @@ export default function HostLocationsAdminPage() {
             {saving ? 'Saving…' : editingId ? 'Update' : 'Create'}
           </button>
           {editingId && (
-            <button className='rounded border px-4 py-2 disabled:cursor-not-allowed disabled:opacity-50' onClick={() => { setForm({ is_active: true, state: 'WI' }); setEditingId(null); }} disabled={saving}>
+            <button className='rounded border px-4 py-2 disabled:cursor-not-allowed disabled:opacity-50' onClick={() => { setForm({ is_active: true, state: 'WI' }); setEditingId(null); setZipCodeError(''); }} disabled={saving}>
               Cancel
             </button>
           )}
         </div>
       </div>
 
-      {zipCodeError && <p className='text-sm text-rose-700'>{zipCodeError}</p>}
 
       {loading ? <p>Loading records...</p> : items.length === 0 ? <div className='rounded border border-dashed p-6 text-center text-slate-500'>No records yet.</div> : (
         <div className='overflow-x-auto rounded border'>
