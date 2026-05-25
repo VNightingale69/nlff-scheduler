@@ -318,6 +318,44 @@ class AutoFillPreviewTest(unittest.TestCase):
         self.assertLessEqual(len(proposal_hosts), 2)
         self.assertTrue(proposal_hosts.issubset(locked_hosts))
 
+    def test_large_week_prefers_two_hosts_when_threshold_exceeded(self):
+        org_c = Organization(id=uuid.uuid4(), name='Bristol', is_active=True)
+        org_d = Organization(id=uuid.uuid4(), name='Salem', is_active=True)
+        self.db.add_all([org_c, org_d])
+        self.db.add_all([
+            Team(id=uuid.uuid4(), organization_id=org_c.id, division_id=self.division.id, name='Bristol Blue', is_active=True),
+            Team(id=uuid.uuid4(), organization_id=org_c.id, division_id=self.division.id, name='Bristol White', is_active=True),
+            Team(id=uuid.uuid4(), organization_id=org_d.id, division_id=self.division.id, name='Salem Green', is_active=True),
+            Team(id=uuid.uuid4(), organization_id=org_d.id, division_id=self.division.id, name='Salem Orange', is_active=True),
+        ])
+        away_host = HostLocation(id=uuid.uuid4(), organization_id=self.org_a.id, name='Antioch Park', is_active=True)
+        self.db.add(away_host)
+        for idx, start_hour in enumerate((9, 10, 11), start=1):
+            fi = FieldInstance(id=uuid.uuid4(), host_location_id=away_host.id, hosting_availability_id=uuid.uuid4(), instance_date=self.week2.start_date, field_name=f'Away {idx}', field_type='SMALL', is_active=True)
+            slot = GameSlot(id=uuid.uuid4(), field_instance_id=fi.id, host_location_id=away_host.id, slot_date=self.week2.start_date, start_time=time(start_hour, 0), end_time=time(start_hour + 1, 0), field_type='SMALL', status='OPEN')
+            self.db.add_all([fi, slot])
+        for idx, start_hour in enumerate((10, 11, 12, 13), start=1):
+            fi = FieldInstance(id=uuid.uuid4(), host_location_id=self.host.id, hosting_availability_id=uuid.uuid4(), instance_date=self.week2.start_date, field_name=f'Home {idx}', field_type='SMALL', is_active=True)
+            slot = GameSlot(id=uuid.uuid4(), field_instance_id=fi.id, host_location_id=self.host.id, slot_date=self.week2.start_date, start_time=time(start_hour, 0), end_time=time(start_hour + 1, 0), field_type='SMALL', status='OPEN')
+            self.db.add_all([fi, slot])
+        self.db.commit()
+
+        result = auto_fill_preview(
+            {'season_id': self.season.id, 'week_id': self.week2.id, 'division_id': self.division.id, 'single_site_game_limit': 4},
+            db=self.db,
+        )
+        self.assertEqual(result['max_allowed_game_count'], 4)
+        self.assertEqual(result['audit']['locked_host_mode'], 'single')
+
+        result = auto_fill_preview(
+            {'season_id': self.season.id, 'week_id': self.week2.id, 'division_id': self.division.id, 'single_site_game_limit': 3},
+            db=self.db,
+        )
+        self.assertEqual(result['max_allowed_game_count'], 4)
+        self.assertEqual(result['audit']['locked_host_mode'], 'dual')
+        self.assertEqual(len(result['audit']['locked_host_locations']), 2)
+        self.assertIn('exceed single-site game limit', result['audit']['host_selection_reason'])
+
     def test_preview_returns_error_when_more_than_two_hosts_would_be_required(self):
         self.db.query(GameSlot).filter(GameSlot.id == self.slot.id).delete()
         self.db.query(FieldInstance).filter(FieldInstance.id == self.fi.id).delete()

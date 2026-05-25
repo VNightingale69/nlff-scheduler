@@ -1684,6 +1684,10 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     centralization_requested = bool(payload.get('centralized_scheduling_requested', False))
     staffing_limited = bool(payload.get('staffing_limited', False))
     no_simultaneous_games_same_host = bool(payload.get('no_simultaneous_games_same_host', False))
+    try:
+        single_site_game_limit = max(0, int(payload.get('single_site_game_limit', 4)))
+    except (TypeError, ValueError):
+        single_site_game_limit = 4
 
     def _log_query_on_error(query, label: str, exc: Exception) -> None:
         try:
@@ -2015,12 +2019,48 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             host_ids_by_org.setdefault(host_row.organization_id, set()).add(host_row.id)
     primary_host_id: uuid.UUID | None = host_capacity[0]['host_id'] if host_capacity else None
     single_site_possible = bool(host_capacity and host_capacity[0]['slot_count'] >= games_required)
+    prefer_two_sites = games_required > single_site_game_limit and len(host_capacity) >= 2
     locked_host_ids: set[uuid.UUID] = set()
     locked_host_mode = 'none'
+    host_lock_reason = 'No compatible host locations found.'
     if host_capacity:
-        if single_site_possible and primary_host_id:
+        if prefer_two_sites:
+            best_two_host_combo: tuple[uuid.UUID, uuid.UUID] | None = None
+            best_two_host_score = -1
+            for i in range(len(host_capacity)):
+                for j in range(i + 1, len(host_capacity)):
+                    host_a = host_capacity[i]
+                    host_b = host_capacity[j]
+                    host_a_id = host_a['host_id']
+                    host_b_id = host_b['host_id']
+                    combo_capacity = int(host_a['slot_count']) + int(host_b['slot_count'])
+                    if combo_capacity < games_required:
+                        continue
+                    host_a_orgs = {
+                        team_id for team_id, team_org in team_org_ids.items()
+                        if team_org and host_a_id in host_ids_by_org.get(team_org, set())
+                    }
+                    host_b_orgs = {
+                        team_id for team_id, team_org in team_org_ids.items()
+                        if team_org and host_b_id in host_ids_by_org.get(team_org, set())
+                    }
+                    represented_teams = len(host_a_orgs | host_b_orgs)
+                    combo_score = (
+                        represented_teams * 10_000
+                        + combo_capacity * 100
+                        + int(host_a['field_count']) + int(host_b['field_count'])
+                    )
+                    if combo_score > best_two_host_score:
+                        best_two_host_score = combo_score
+                        best_two_host_combo = (host_a_id, host_b_id)
+            if best_two_host_combo:
+                locked_host_ids = {best_two_host_combo[0], best_two_host_combo[1]}
+                locked_host_mode = 'dual'
+                host_lock_reason = f'required games ({games_required}) exceed single-site game limit ({single_site_game_limit}); selected two hosts'
+        if not locked_host_ids and single_site_possible and primary_host_id:
             locked_host_ids = {primary_host_id}
             locked_host_mode = 'single'
+            host_lock_reason = 'single host has enough compatible slots for required games'
         else:
             best_two_host_combo: tuple[uuid.UUID, uuid.UUID] | None = None
             best_two_host_capacity = -1
@@ -2037,6 +2077,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             if best_two_host_combo:
                 locked_host_ids = {best_two_host_combo[0], best_two_host_combo[1]}
                 locked_host_mode = 'dual'
+                host_lock_reason = 'single host insufficient; selected two hosts to satisfy required games'
     if not locked_host_ids and not admin_override_third_host and games_required > 0:
         _add_skipped('More than 2 host locations required. Admin override needed.')
         _add_skipped('This division/week cannot be scheduled within the two-location limit based on available slots.')
@@ -2355,6 +2396,9 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                         if locked_host_mode == 'dual' and candidate_host_id in locked_host_ids:
                             score += 150
                             reason_bits.append('two-host locked scheduling (+150)')
+                        if prefer_two_sites and len(locked_host_ids) == 2 and candidate_host_id in locked_host_ids:
+                            score += 250
+                            reason_bits.append('large division/week prefers two selected host locations (+250)')
                         if candidate_host_id and any(p.get('host_location_id') == str(candidate_host_id) for p in plans):
                             score += 25
                             reason_bits.append('adjacent time-slot grouping at same location (+25)')
@@ -2388,6 +2432,16 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                             reason_bits.append('Avoids prior-week community repeat')
                         if community_repeat_count > 0:
                             score -= 20
+                        if (
+                            len(locked_host_ids) == 2
+                            and candidate_host_id in locked_host_ids
+                            and host_org_id
+                        ):
+                            team_a_home_host = candidate_host_id in host_ids_by_org.get(team_a.organization_id, set()) if team_a.organization_id else False
+                            team_b_home_host = candidate_host_id in host_ids_by_org.get(team_b.organization_id, set()) if team_b.organization_id else False
+                            if team_a_home_host or team_b_home_host:
+                                score += 200
+                                reason_bits.append('team scheduled at own selected host location (+200)')
     
                         double_header_back_to_back = False
                         if is_odd_division and no_byes and selected_double_header_team_id and selected_double_header_team_id in {a, b}:
@@ -2485,6 +2539,10 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             and not admin_override_third_host
         ):
             plans[-1]['warnings'] = list(plans[-1]['warnings']) + ['Division/week scheduled across 2 host locations.']
+        selected_host_org_id = selected_field_slot.host_location.organization_id if selected_field_slot.host_location else None
+        if selected_host_org_id and home_team.organization_id == selected_host_org_id:
+            plans[-1]['score'] = int(plans[-1]['score']) + 150
+            plans[-1]['reason'] = f"{plans[-1]['reason']}; home team aligned to own selected host location (+150)"
         if admin_override_third_host and selected_field_slot.host_location_id and locked_host_ids and selected_field_slot.host_location_id not in locked_host_ids:
             plans[-1]['warnings'] = list(plans[-1]['warnings']) + ['Admin override: third host location required.']
         used_pairs.add(tuple(sorted((best['home_team_id'], best['away_team_id']))))
@@ -2592,6 +2650,8 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'host_locations_used': [str(hid) for hid in used_host_ids],
             'locked_host_locations': [str(hid) for hid in locked_host_ids],
             'locked_host_mode': locked_host_mode,
+            'host_selection_reason': host_lock_reason,
+            'single_site_game_limit': single_site_game_limit,
             'admin_override_third_host_locations': admin_override_third_host,
             'split_host_week': split_host_week,
             'single_site_possible': single_site_possible,
