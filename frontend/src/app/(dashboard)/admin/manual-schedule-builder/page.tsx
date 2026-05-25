@@ -32,6 +32,9 @@ export default function ManualScheduleBuilderPage() {
   const [showClearScheduleModal, setShowClearScheduleModal] = useState(false);
   const [clearScheduleInput, setClearScheduleInput] = useState('');
   const [clearScheduleLoading, setClearScheduleLoading] = useState(false);
+  const [showAutoScheduleSeasonModal, setShowAutoScheduleSeasonModal] = useState(false);
+  const [clearExistingBeforeAutoSchedule, setClearExistingBeforeAutoSchedule] = useState(false);
+  const [autoScheduleSeasonLoading, setAutoScheduleSeasonLoading] = useState(false);
 
   const division = useMemo(() => options.divisions.find((d: any) => d.id === divisionId), [options, divisionId]);
   const divisionTeams = useMemo(() => options.teams.filter((t: any) => t.division_id === divisionId && t.is_active), [options, divisionId]);
@@ -189,6 +192,18 @@ export default function ManualScheduleBuilderPage() {
       <div className='rounded border border-red-200 bg-red-50 p-3'>
         <h2 className='text-lg font-semibold text-red-800'>Administrative Management</h2>
         <p className='mt-1 text-sm text-red-700'>Use this only when you need to reset generated schedules for the selected season.</p>
+        <button
+          className='mt-3 mr-2 rounded border border-indigo-700 bg-indigo-700 px-3 py-2 text-white disabled:cursor-not-allowed disabled:bg-slate-300 disabled:border-slate-300'
+          disabled={!seasonId}
+          onClick={() => {
+            setError('');
+            setSuccess('');
+            setClearExistingBeforeAutoSchedule(false);
+            setShowAutoScheduleSeasonModal(true);
+          }}
+        >
+          Auto-Schedule Entire Season
+        </button>
         <button
           className='mt-3 rounded border border-red-600 bg-red-600 px-3 py-2 text-white disabled:cursor-not-allowed disabled:bg-slate-300 disabled:border-slate-300'
           disabled={!seasonId}
@@ -360,6 +375,43 @@ export default function ManualScheduleBuilderPage() {
               }}
             >
               {clearScheduleLoading ? 'Clearing...' : 'Confirm Clear Schedule'}
+            </button>
+          </div>
+        </div>
+      </div> : null}
+      {showAutoScheduleSeasonModal ? <div className='fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4'>
+        <div className='w-full max-w-xl rounded-lg bg-white p-4 shadow-xl'>
+          <h3 className='text-lg font-semibold text-indigo-700'>Confirm Full-Season Auto-Schedule</h3>
+          <p className='mt-2 text-sm text-slate-700'>
+            This will attempt to auto-schedule all unscheduled games for the selected season across all divisions and weeks.
+          </p>
+          <label className='mt-4 flex items-center gap-2 text-sm'>
+            <input type='checkbox' checked={clearExistingBeforeAutoSchedule} onChange={(e) => setClearExistingBeforeAutoSchedule(e.target.checked)} />
+            Clear existing scheduled games before running
+          </label>
+          <div className='mt-4 flex justify-end gap-2'>
+            <button className='rounded border px-3 py-2' disabled={autoScheduleSeasonLoading} onClick={() => setShowAutoScheduleSeasonModal(false)}>Cancel</button>
+            <button
+              className='rounded border border-indigo-700 bg-indigo-700 px-3 py-2 text-white disabled:cursor-not-allowed disabled:border-slate-300 disabled:bg-slate-300'
+              disabled={autoScheduleSeasonLoading || !seasonId}
+              onClick={async () => {
+                setError('');
+                setSuccess('');
+                setAutoScheduleSeasonLoading(true);
+                try {
+                  const res: any = await apiFetch('/manual-schedule-builder/auto-schedule-season', { method: 'POST', body: JSON.stringify({ season_id: seasonId, clear_existing: clearExistingBeforeAutoSchedule }) }, token);
+                  setShowAutoScheduleSeasonModal(false);
+                  await load();
+                  await loadRecommendations();
+                  setSuccess(`Auto-schedule completed: ${Number(res.total_games_created || 0)} games created, ${Number(res.games_skipped || 0)} skipped, ${(res.warnings || []).length} warnings.`);
+                } catch (e: unknown) {
+                  setError(extractError(e));
+                } finally {
+                  setAutoScheduleSeasonLoading(false);
+                }
+              }}
+            >
+              {autoScheduleSeasonLoading ? 'Running...' : 'Run Auto-Schedule'}
             </button>
           </div>
         </div>

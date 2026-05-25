@@ -2794,6 +2794,77 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         'assigned_slots': assigned_slots,
         'skipped': skipped,
     }
+
+
+@router.post('/manual-schedule-builder/auto-schedule-season', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
+    season_id = payload.get('season_id')
+    clear_existing = bool(payload.get('clear_existing', False))
+    if not season_id:
+        raise HTTPException(400, 'season_id is required')
+    season = db.query(Season).filter(Season.id == season_id).first()
+    if not season:
+        raise HTTPException(404, 'Season not found')
+
+    if clear_existing:
+        game_ids_to_delete = [row[0] for row in db.query(Game.id).join(Game.status).filter(Game.season_id == season_id, GameStatus.code != 'UNSCHEDULED').all()]
+        if game_ids_to_delete:
+            db.query(GameSlot).filter(GameSlot.assigned_game_id.in_(game_ids_to_delete)).update({'assigned_game_id': None, 'status': 'OPEN'}, synchronize_session=False)
+            db.query(Game).filter(Game.id.in_(game_ids_to_delete)).delete(synchronize_session=False)
+            db.commit()
+
+    division_order = [
+        ('COED', 'K/1ST'), ('GIRLS', 'K/1ST'),
+        ('COED', '2ND/3RD'), ('GIRLS', '2ND/3RD'),
+        ('COED', '4TH/5TH'), ('GIRLS', '4TH/5TH'),
+        ('COED', '6TH/7TH'), ('COED', '8TH'),
+        ('GIRLS', '6TH/7TH/8TH'),
+    ]
+    divisions_by_key = {((d.division_group or '').strip().upper(), (d.name or '').strip().upper()): d for d in db.query(Division).all()}
+    weeks = db.query(Week).filter(Week.season_id == season_id).order_by(Week.week_number.asc(), Week.start_date.asc()).all()
+
+    total_games_created = 0
+    games_skipped = 0
+    warnings: list[str] = []
+    divisions_completed: list[str] = []
+    divisions_with_unresolved_games: list[str] = []
+
+    for group, name in division_order:
+        division = divisions_by_key.get((group, name))
+        division_label = f'{group.title()} {name}'
+        if not division:
+            warnings.append(f'Division not found: {division_label}')
+            continue
+        division_created = 0
+        division_unresolved = False
+        for week in weeks:
+            preview = auto_fill_preview({'season_id': season_id, 'week_id': week.id, 'division_id': division.id}, db)
+            proposals = preview.get('proposals') or []
+            games_skipped += len(preview.get('skipped') or [])
+            if not proposals:
+                continue
+            applied = auto_fill_apply({'season_id': season_id, 'week_id': week.id, 'division_id': division.id, 'proposals': proposals}, db)
+            created_count = int(applied.get('created_count') or 0)
+            skipped_count = int(applied.get('skipped_count') or 0)
+            division_created += created_count
+            total_games_created += created_count
+            games_skipped += skipped_count
+            if skipped_count > 0:
+                division_unresolved = True
+        if division_created > 0 and not division_unresolved:
+            divisions_completed.append(division_label)
+        else:
+            divisions_with_unresolved_games.append(division_label)
+
+    return {
+        'total_games_created': total_games_created,
+        'games_skipped': games_skipped,
+        'warnings': warnings,
+        'validation_errors': [],
+        'divisions_completed': divisions_completed,
+        'divisions_with_unresolved_games': divisions_with_unresolved_games,
+    }
+
 @router.get('/public/games', response_model=PagedResponse[PublicGameRead])
 def list_public_games(host_location_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, division_id: uuid.UUID | None = None, week_id: uuid.UUID | None = None, team_id: uuid.UUID | None = None, status_code: str | None = None, page: int = 1, page_size: int = 50, db: Session = Depends(get_db)):
     home_team = aliased(Team); away_team = aliased(Team)
