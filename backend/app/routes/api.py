@@ -2744,6 +2744,37 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         if improved:
             continue
 
+    def _can_place_matchup(home_team_id: str, away_team_id: str, slot: GameSlot) -> tuple[bool, str]:
+        if slot.field_type != required_field_type:
+            return False, 'incompatible field type'
+        if not slot.field_instance_id or not slot.host_location_id:
+            return False, 'missing field or host'
+        if slot.status != 'OPEN' or slot.assigned_game_id is not None:
+            return False, 'slot not open'
+        field_time_key = (str(slot.field_instance_id), slot.slot_date, slot.start_time)
+        if field_time_key in field_time_occupied:
+            return False, 'field overlap'
+        if (str(home_team_id), slot.slot_date, slot.start_time) in team_time_occupied or (str(away_team_id), slot.slot_date, slot.start_time) in team_time_occupied:
+            return False, 'team overlap'
+        if no_simultaneous_games_same_host:
+            host_time_key = (str(slot.host_location_id), slot.slot_date, slot.start_time)
+            if host_time_key in host_time_occupied:
+                return False, 'host overlap'
+        duplicate = db.query(Game).join(Game.home_team).join(Game.status).filter(
+            Game.season_id == season_id,
+            Game.week_id == week_id,
+            Team.division_id == division_id,
+            GameStatus.code == 'SCHEDULED',
+            GameStatus.is_active.is_(True),
+            or_(
+                and_(Game.home_team_id == home_team_id, Game.away_team_id == away_team_id),
+                and_(Game.home_team_id == away_team_id, Game.away_team_id == home_team_id),
+            ),
+        ).count()
+        if duplicate:
+            return False, 'duplicate opponent'
+        return True, ''
+
     for proposal in proposals:
         if existing_games_count + created_games >= required_games_for_division_week:
             _add_skipped('weekly game limit reached for selected division/week')
@@ -2860,6 +2891,61 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         created_games += 1
         assigned_slots += 1
     total_created_for_week = existing_games_count + created_games
+
+    recovery_diagnostics: list[dict[str, object]] = []
+    if is_odd_division and no_byes and total_created_for_week < required_games_for_division_week:
+        remaining_needed = required_games_for_division_week - total_created_for_week
+        division_team_ids = [str(team.id) for team in teams]
+        unscheduled_ids = [tid for tid in division_team_ids if week_team_game_counts.get(uuid.UUID(tid), 0) == 0]
+        double_header_team_ids = [str(tid) for tid, count in week_team_game_counts.items() if count >= 2]
+        if not double_header_team_ids:
+            double_header_team_ids = [tid for tid in division_team_ids if week_team_game_counts.get(uuid.UUID(tid), 0) == 1]
+        open_slots = db.query(GameSlot).join(GameSlot.field_instance).filter(
+            GameSlot.slot_date == db.query(Week.start_date).filter(Week.id == week_id).scalar_subquery(),
+            GameSlot.status == 'OPEN',
+            GameSlot.assigned_game_id.is_(None),
+            GameSlot.field_type == required_field_type,
+        ).order_by(GameSlot.start_time.asc()).all()
+        while remaining_needed > 0:
+            placed = False
+            candidate_teams = sorted(division_team_ids, key=lambda tid: week_team_game_counts.get(uuid.UUID(tid), 0))
+            for home_tid in candidate_teams:
+                for away_tid in candidate_teams:
+                    if home_tid == away_tid:
+                        continue
+                    home_count = week_team_game_counts.get(uuid.UUID(home_tid), 0)
+                    away_count = week_team_game_counts.get(uuid.UUID(away_tid), 0)
+                    if home_count >= 2 or away_count >= 2:
+                        continue
+                    projected_double_headers = len([tid for tid, cnt in week_team_game_counts.items() if cnt >= 2])
+                    if home_count == 1 or away_count == 1:
+                        if projected_double_headers >= 1 and home_count == 1 and away_count == 1:
+                            continue
+                    for slot in open_slots:
+                        ok, reason = _can_place_matchup(home_tid, away_tid, slot)
+                        if not ok:
+                            recovery_diagnostics.append({'slot': f"{slot.start_time} {slot.field_type}", 'home': _team_name(home_tid), 'away': _team_name(away_tid), 'reason': reason})
+                            continue
+                        game = Game(season_id=season_id, week_id=week_id, home_team_id=home_tid, away_team_id=away_tid, field_id=None, game_status_id=status.id, game_date=slot.slot_date, kickoff_time=slot.start_time)
+                        db.add(game); db.flush()
+                        slot.status = 'ASSIGNED'; slot.assigned_game_id = game.id
+                        team_time_occupied.add((home_tid, slot.slot_date, slot.start_time)); team_time_occupied.add((away_tid, slot.slot_date, slot.start_time))
+                        field_time_occupied[(str(slot.field_instance_id), slot.slot_date, slot.start_time)] = division.name if division else 'another division'
+                        host_time_occupied[(str(slot.host_location_id), slot.slot_date, slot.start_time)] = division.name if division else 'another division'
+                        week_team_game_counts[uuid.UUID(home_tid)] = home_count + 1
+                        week_team_game_counts[uuid.UUID(away_tid)] = away_count + 1
+                        created_games += 1; assigned_slots += 1; remaining_needed -= 1; placed = True
+                        break
+                    if placed:
+                        break
+                if placed:
+                    break
+            if not placed:
+                break
+        total_created_for_week = existing_games_count + created_games
+        if total_created_for_week < required_games_for_division_week:
+            _add_skipped(f"RECOVERY PASS FAILED Division: {division.name if division else 'Unknown'} Week: {db.query(Week.week_number).filter(Week.id == week_id).scalar()} Unscheduled Teams: {', '.join([_team_name(tid) for tid in unscheduled_ids]) or 'None'}")
+
     if total_created_for_week >= required_games_for_division_week:
         skipped = []
     elif is_odd_division and no_byes:
@@ -2886,6 +2972,7 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
             'created_game_count': total_created_for_week,
             'unscheduled_teams': unscheduled_teams,
             'double_header_team': teams_by_id[double_header_team_id].name if double_header_team_id and double_header_team_id in teams_by_id else None,
+            'recovery_diagnostics': recovery_diagnostics[-25:],
         },
     }
 
