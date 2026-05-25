@@ -1718,6 +1718,14 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     assigned_games = db.query(Game).join(GameSlot, GameSlot.assigned_game_id == Game.id).filter(
         Game.game_date == week.start_date
     ).all()
+    community_assigned_hosts: dict[uuid.UUID, set[uuid.UUID]] = {}
+    for game in assigned_games:
+        game_slot = game.game_slot
+        if not game_slot or not game_slot.host_location_id:
+            continue
+        for team in (game.home_team, game.away_team):
+            if team and team.organization_id:
+                community_assigned_hosts.setdefault(team.organization_id, set()).add(game_slot.host_location_id)
     existing_non_unscheduled_games = db.query(
         Game.home_team_id,
         Game.away_team_id,
@@ -2095,6 +2103,27 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                                     warning_bits.append('host-community team scheduled away while home-compatible slot remains (-40)')
                                 score -= away_penalty
                                 warning_bits.append(f'away-host assignment in split-host week (-{away_penalty})')
+                            same_site_bonus = 200
+                            split_site_penalty = 300
+                            for team_org_id in (team_a.organization_id, team_b.organization_id):
+                                if not team_org_id:
+                                    continue
+                                assigned_hosts = community_assigned_hosts.get(team_org_id, set())
+                                if not assigned_hosts:
+                                    continue
+                                if candidate_host_id in assigned_hosts:
+                                    score += same_site_bonus
+                                    reason_bits.append(f'community remains at assigned split-host site (+{same_site_bonus})')
+                                    continue
+                                compatible_existing_site = any(
+                                    _has_compatible_open_field_at_time(assigned_host_id, slot.slot_date, slot.start_time)
+                                    for assigned_host_id in assigned_hosts
+                                )
+                                if compatible_existing_site:
+                                    score -= split_site_penalty
+                                    warning_bits.append(f'avoidable community split across active host sites (-{split_site_penalty})')
+                                else:
+                                    warning_bits.append('community split allowed: no compatible capacity at already-used host site')
                         serialization_required = centralization_requested or staffing_limited
                         if preferred_host_id and candidate_host_id == preferred_host_id:
                             consolidation_bonus = consolidation_weight if serialization_required else max(1, consolidation_weight // 2)
@@ -2241,6 +2270,10 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             projected_games_by_host[selected_field_slot.host_location_id] = projected_games_by_host.get(selected_field_slot.host_location_id, 0) + 1
             if not preferred_host_id:
                 preferred_host_id = selected_field_slot.host_location_id
+            for team_id in (best['home_team_id'], best['away_team_id']):
+                team = teams_by_id.get(team_id)
+                if team and team.organization_id:
+                    community_assigned_hosts.setdefault(team.organization_id, set()).add(selected_field_slot.host_location_id)
         proposed_usage_key = (
             str(selected_field_slot.host_location_id),
             str(selected_field_slot.slot_date),
