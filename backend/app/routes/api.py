@@ -2141,6 +2141,10 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                         reason_bits = []
                         warning_bits = []
                         candidate_host_id = slot.host_location_id
+                        candidate_host = slot.host_location if candidate_host_id else None
+                        if candidate_host_id and not candidate_host:
+                            logger.warning(f"Missing host location for slot {slot.id}; skipping candidate during auto-fill preview")
+                            continue
                         if repeat_count == 0:
                             score += 120
                             reason_bits.append('new opponent pairing (+120)')
