@@ -1731,7 +1731,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     no_byes = bool(payload.get('no_byes', True))
     team_count = len(teams)
     is_odd_division = team_count % 2 == 1
-    max_games_for_division_week = (team_count + 1) // 2 if (is_odd_division and no_byes) else team_count // 2
+    required_games_for_division_week = (team_count + 1) // 2 if (is_odd_division and no_byes) else team_count // 2
     existing_division_games = db.query(Game).join(Game.home_team).join(Game.status).filter(
         Game.season_id == season_id,
         Game.week_id == week_id,
@@ -1887,7 +1887,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             payload['slot_id'] = slot_id
         skipped.append(payload)
     existing_games_count = len(existing_division_games)
-    max_new_games = max(0, max_games_for_division_week - existing_games_count)
+    max_new_games = max(0, required_games_for_division_week - existing_games_count)
     if max_new_games == 0:
         counted_game_ids = [str(g.id) for g in existing_division_games]
         return {
@@ -1898,11 +1898,11 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                 'selected_division_id': str(division_id),
                 'selected_week_id': str(week_id),
                 'active_games_counted': existing_games_count,
-                'max_games_allowed': max_games_for_division_week,
+                'max_games_allowed': required_games_for_division_week,
                 'counted_game_ids': counted_game_ids,
             }],
             'proposed_game_count': 0,
-            'max_allowed_game_count': max_games_for_division_week,
+            'max_allowed_game_count': required_games_for_division_week,
             'existing_game_count': existing_games_count,
             'active_games_counted': existing_games_count,
             'counted_game_ids': counted_game_ids,
@@ -1919,7 +1919,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             if other_id != team_id and team.organization_id and other_team.organization_id and team.organization_id != other_team.organization_id
         }
     cross_community_opponents_per_team = min((len(v) for v in cross_community_opponents_by_team.values()), default=0)
-    required_games_per_team = min(unique_opponents_per_team, max_games_for_division_week)
+    required_games_per_team = min(unique_opponents_per_team, required_games_for_division_week)
     repeats_mathematically_unavoidable = required_games_per_team > unique_opponents_per_team
     same_community_mathematically_necessary = any(
         team.organization_id and len(cross_community_opponents_by_team.get(team_id, set())) == 0
@@ -2348,6 +2348,13 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     double_header_teams = [row['team_name'] for row in per_team_games if row['games_in_week'] > 1]
     if len(plans) == 0 and len(teams) > 1:
         _add_skipped('No eligible matchups available for this division/week.')
+    total_created_games = existing_games_count + len(plans)
+    if total_created_games < required_games_for_division_week:
+        if is_odd_division and no_byes:
+            _add_skipped('Unable to schedule required odd-team double header due to no compatible adjacent slot.')
+        else:
+            _add_skipped('Unable to schedule required games due to hard scheduling constraints.')
+    unscheduled_team_ids = [str(tid) for tid, count in week_team_game_counts.items() if count == 0]
     logger.info(
         'auto_fill_preview division_id=%s division_key=%s active_teams=%s eligible_pairings=%s compatible_slots=%s',
         division_id,
@@ -2360,11 +2367,18 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         'proposals': plans,
         'skipped': skipped,
         'proposed_game_count': len(plans),
-        'max_allowed_game_count': max_games_for_division_week,
+        'max_allowed_game_count': required_games_for_division_week,
         'existing_game_count': existing_games_count,
         'unused_team_ids': unused_team_ids,
         'unused_teams': [teams_by_id[uuid.UUID(tid)].name for tid in unused_team_ids],
         'double_header_team_id': str(selected_double_header_team_id) if selected_double_header_team_id else None,
+        'final_validation': {
+            'active_team_count': team_count,
+            'required_game_count': required_games_for_division_week,
+            'created_game_count': total_created_games,
+            'unscheduled_teams': [teams_by_id[uuid.UUID(tid)].name for tid in unscheduled_team_ids],
+            'double_header_team': teams_by_id[selected_double_header_team_id].name if selected_double_header_team_id else None,
+        },
         'audit': {
             'total_games_per_team': per_team_games,
             'duplicate_matchups': duplicate_matchups,
@@ -2423,7 +2437,7 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
     team_ids = {t.id for t in teams}
     no_byes = bool(payload.get('no_byes', True))
     is_odd_division = len(teams) % 2 == 1
-    max_games_for_division_week = (len(teams) + 1) // 2 if (is_odd_division and no_byes) else len(teams) // 2
+    required_games_for_division_week = (len(teams) + 1) // 2 if (is_odd_division and no_byes) else len(teams) // 2
     existing_division_games = db.query(Game).join(Game.home_team).join(Game.status).filter(
         Game.season_id == season_id,
         Game.week_id == week_id,
@@ -2681,7 +2695,7 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
             continue
 
     for proposal in proposals:
-        if existing_games_count + created_games >= max_games_for_division_week:
+        if existing_games_count + created_games >= required_games_for_division_week:
             _add_skipped('weekly game limit reached for selected division/week')
             break
         home_team_id = proposal.get('home_team_id')
@@ -2782,17 +2796,34 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         week_team_game_counts[away_uuid] = week_team_game_counts.get(away_uuid, 0) + 1
         created_games += 1
         assigned_slots += 1
-    if created_games >= max_games_for_division_week:
+    total_created_for_week = existing_games_count + created_games
+    if total_created_for_week >= required_games_for_division_week:
         skipped = []
+    elif is_odd_division and no_byes:
+        _add_skipped('Unable to schedule required odd-team double header due to no compatible adjacent slot.')
+    else:
+        _add_skipped('Unable to schedule required games due to hard scheduling constraints.')
+    unscheduled_teams = [
+        t.name for t in teams
+        if week_team_game_counts.get(t.id, 0) == 0
+    ]
+    double_header_team_id = next((str(team_id) for team_id, count in week_team_game_counts.items() if count > 1), None)
     db.commit()
     return {
         'proposed_count': len(proposals),
         'created_count': created_games,
         'skipped_count': len(skipped),
-        'max_games': max_games_for_division_week,
+        'max_games': required_games_for_division_week,
         'created_games': created_games,
         'assigned_slots': assigned_slots,
         'skipped': skipped,
+        'final_validation': {
+            'active_team_count': len(teams),
+            'required_game_count': required_games_for_division_week,
+            'created_game_count': total_created_for_week,
+            'unscheduled_teams': unscheduled_teams,
+            'double_header_team': teams_by_id[double_header_team_id].name if double_header_team_id and double_header_team_id in teams_by_id else None,
+        },
     }
 
 
@@ -2841,6 +2872,9 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
             preview = auto_fill_preview({'season_id': season_id, 'week_id': week.id, 'division_id': division.id}, db)
             proposals = preview.get('proposals') or []
             games_skipped += len(preview.get('skipped') or [])
+            preview_validation = preview.get('final_validation') or {}
+            if int(preview_validation.get('created_game_count') or 0) < int(preview_validation.get('required_game_count') or 0):
+                division_unresolved = True
             if not proposals:
                 continue
             applied = auto_fill_apply({'season_id': season_id, 'week_id': week.id, 'division_id': division.id, 'proposals': proposals}, db)
@@ -2849,6 +2883,9 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
             division_created += created_count
             total_games_created += created_count
             games_skipped += skipped_count
+            apply_validation = applied.get('final_validation') or {}
+            if int(apply_validation.get('created_game_count') or 0) < int(apply_validation.get('required_game_count') or 0):
+                division_unresolved = True
             if skipped_count > 0:
                 division_unresolved = True
         if division_created > 0 and not division_unresolved:
