@@ -2468,6 +2468,15 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'unscheduled_teams': [teams_by_id[uuid.UUID(tid)].name for tid in unscheduled_team_ids],
             'double_header_team': teams_by_id[selected_double_header_team_id].name if selected_double_header_team_id else None,
         },
+        'diagnostics': {
+            'teams_evaluated': team_count,
+            'slots_evaluated': compatible_slots_found,
+            'valid_matchups_found': len(plans),
+            'valid_slot_combinations_found': len(plans),
+            'rules_relaxed': len(host_limit_relaxation_reasons),
+            'conflicts_avoided': len(skipped),
+            'final_games_created': len(plans),
+        },
         'audit': {
             'total_games_per_team': per_team_games,
             'duplicate_matchups': duplicate_matchups,
@@ -2545,11 +2554,40 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
             'assigned_slots': 0,
             'skipped': [],
         }
+    season = db.query(Season).filter(Season.id == season_id).first()
+    if not season:
+        raise HTTPException(404, 'Selected season is invalid')
+    week = db.query(Week).filter(Week.id == week_id, Week.season_id == season_id).first()
+    if not week:
+        raise HTTPException(404, 'Selected week is invalid for this season')
     teams = db.query(Team).filter(Team.division_id == division_id, Team.is_active.is_(True)).all()
     division = db.query(Division).filter(Division.id == division_id).first()
     if not division:
         raise HTTPException(404, 'Selected division is invalid')
+    if not teams:
+        raise HTTPException(400, 'Division/week produced zero valid schedule candidates.')
     required_field_type = _required_field_type_for_division(division)
+    open_slots_count = db.query(GameSlot).filter(
+        GameSlot.slot_date == week.start_date,
+        GameSlot.status == 'OPEN',
+        GameSlot.assigned_game_id.is_(None),
+        GameSlot.field_type == required_field_type,
+    ).count()
+    if open_slots_count <= 0:
+        raise HTTPException(400, 'No valid slot combinations available.')
+    host_locations_count = db.query(GameSlot.host_location_id).filter(
+        GameSlot.slot_date == week.start_date,
+        GameSlot.status == 'OPEN',
+        GameSlot.assigned_game_id.is_(None),
+        GameSlot.field_type == required_field_type,
+        GameSlot.host_location_id.is_not(None),
+    ).distinct().count()
+    if host_locations_count <= 0:
+        raise HTTPException(400, 'No compatible host locations found.')
+    logger.info(
+        'auto_fill_apply_start season_id=%s week_id=%s division_id=%s active_team_count=%s open_slot_count=%s host_location_count=%s valid_matchup_count=%s',
+        season_id, week_id, division_id, len(teams), open_slots_count, host_locations_count, len(proposals),
+    )
     team_ids = {t.id for t in teams}
     no_byes = bool(payload.get('no_byes', True))
     is_odd_division = len(teams) % 2 == 1
@@ -3065,7 +3103,22 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         if week_team_game_counts.get(t.id, 0) == 0
     ]
     double_header_team_id = next((str(team_id) for team_id, count in week_team_game_counts.items() if count > 1), None)
-    db.commit()
+    if created_games == 0:
+        db.rollback()
+        raise HTTPException(400, 'No valid scheduling combinations were found for the selected division/week.')
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception(
+            'auto_fill_apply_failed season_id=%s week_id=%s division_id=%s created_games=%s assigned_slots=%s skipped_candidates=%s',
+            season_id, week_id, division_id, created_games, assigned_slots, len(skipped),
+        )
+        raise HTTPException(400, 'No valid slot combinations available.')
+    logger.info(
+        'auto_fill_apply_complete season_id=%s week_id=%s division_id=%s final_games_created=%s skipped_candidates=%s transaction_status=committed',
+        season_id, week_id, division_id, created_games, len(skipped),
+    )
     return {
         'proposed_count': len(proposals),
         'created_count': created_games,
@@ -3081,6 +3134,15 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
             'unscheduled_teams': unscheduled_teams,
             'double_header_team': teams_by_id[double_header_team_id].name if double_header_team_id and double_header_team_id in teams_by_id else None,
             'recovery_diagnostics': recovery_diagnostics[-25:],
+        },
+        'diagnostics': {
+            'teams_evaluated': len(teams),
+            'slots_evaluated': open_slots_count,
+            'valid_matchups_found': len(proposals),
+            'valid_slot_combinations_found': len(proposals),
+            'rules_relaxed': len([s for s in skipped if 'non-back-to-back' in str(s.get('reason', '')).lower()]),
+            'conflicts_avoided': len(skipped),
+            'final_games_created': created_games,
         },
     }
 

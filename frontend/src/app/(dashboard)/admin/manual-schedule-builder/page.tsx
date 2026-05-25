@@ -27,6 +27,7 @@ export default function ManualScheduleBuilderPage() {
   const [autoFillPreview, setAutoFillPreview] = useState<any[]>([]);
   const [autoFillSkipped, setAutoFillSkipped] = useState<any[]>([]);
   const [autoFillLoading, setAutoFillLoading] = useState(false);
+  const [schedulerDiagnostics, setSchedulerDiagnostics] = useState<any | null>(null);
   const [editGame, setEditGame] = useState<any | null>(null);
   const [moveGame, setMoveGame] = useState<any | null>(null);
   const [showClearScheduleModal, setShowClearScheduleModal] = useState(false);
@@ -127,6 +128,7 @@ export default function ManualScheduleBuilderPage() {
               try {
                 const res: any = await apiFetch('/manual-schedule-builder/auto-fill-preview', { method: 'POST', body: JSON.stringify({ season_id: seasonId, week_id: weekId, division_id: divisionId }) }, token);
                 setAutoFillPreview(res.proposals || []);
+                setSchedulerDiagnostics(res.diagnostics || null);
                 const normalizedSkipped = (res.skipped || []).filter((s: any) => {
                   if ((s.reason || '').includes('Weekly game limit reached') && Number(s.active_games_counted || 0) === 0) return false;
                   return true;
@@ -173,6 +175,7 @@ export default function ManualScheduleBuilderPage() {
                 const createdCount = Number(applied.created_count ?? applied.created_games ?? 0);
                 setSuccess(`Applied auto-fill. Created ${createdCount} of ${maxGames} possible games.`);
                 setAutoFillSkipped((applied.skipped || []).map((s: any) => ({ reason: s.reason || String(s) })));
+                setSchedulerDiagnostics(applied.diagnostics || schedulerDiagnostics);
                 setAutoFillPreview([]);
                 await load();
                 await loadRecommendations();
@@ -187,6 +190,18 @@ export default function ManualScheduleBuilderPage() {
           <div className='font-semibold'>Skipped teams/matchups</div>
           <ul className='list-inside list-disc'>
             {autoFillSkipped.map((s: any, idx: number) => <li key={idx}>{s.reason || JSON.stringify(s)}</li>)}
+          </ul>
+        </div> : null}
+        {schedulerDiagnostics ? <div className='mt-3 rounded border bg-slate-50 p-3 text-sm'>
+          <div className='font-semibold'>Scheduler Diagnostics</div>
+          <ul className='mt-1 list-inside list-disc'>
+            <li>Teams evaluated: {schedulerDiagnostics.teams_evaluated ?? 0}</li>
+            <li>Slots evaluated: {schedulerDiagnostics.slots_evaluated ?? 0}</li>
+            <li>Valid matchups found: {schedulerDiagnostics.valid_matchups_found ?? 0}</li>
+            <li>Valid slot combinations found: {schedulerDiagnostics.valid_slot_combinations_found ?? 0}</li>
+            <li>Rules relaxed: {schedulerDiagnostics.rules_relaxed ?? 0}</li>
+            <li>Conflicts avoided: {schedulerDiagnostics.conflicts_avoided ?? 0}</li>
+            <li>Final games created: {schedulerDiagnostics.final_games_created ?? 0}</li>
           </ul>
         </div> : null}
       </div>
