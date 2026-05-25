@@ -504,5 +504,62 @@ class AutoFillPreviewTest(unittest.TestCase):
         self.assertEqual(applied['skipped_count'], 0)
         self.assertEqual(applied['skipped'], [])
 
+    def test_apply_locally_reshuffles_site_day_slots_to_make_adjacent_double_header(self):
+        org_c = Organization(id=uuid.uuid4(), name='Bristol', is_active=True)
+        org_d = Organization(id=uuid.uuid4(), name='Salem', is_active=True)
+        org_e = Organization(id=uuid.uuid4(), name='Kenosha', is_active=True)
+        self.db.add_all([org_c, org_d, org_e])
+        extra_teams = [
+            Team(id=uuid.uuid4(), organization_id=org_c.id, division_id=self.division.id, name='Bristol Blue', is_active=True),
+            Team(id=uuid.uuid4(), organization_id=org_c.id, division_id=self.division.id, name='Bristol White', is_active=True),
+            Team(id=uuid.uuid4(), organization_id=org_d.id, division_id=self.division.id, name='Salem Green', is_active=True),
+            Team(id=uuid.uuid4(), organization_id=org_d.id, division_id=self.division.id, name='Salem Orange', is_active=True),
+            Team(id=uuid.uuid4(), organization_id=org_e.id, division_id=self.division.id, name='Kenosha Red', is_active=True),
+        ]
+        self.db.add_all(extra_teams)
+        for hour in (10, 11, 12, 13):
+            fi = FieldInstance(id=uuid.uuid4(), host_location_id=self.host.id, hosting_availability_id=uuid.uuid4(), instance_date=self.week2.start_date, field_name=f'Small Field {hour}', field_type='SMALL', is_active=True)
+            slot = GameSlot(id=uuid.uuid4(), field_instance_id=fi.id, host_location_id=self.host.id, slot_date=self.week2.start_date, start_time=time(hour, 0), end_time=time(hour + 1, 0), field_type='SMALL', status='OPEN')
+            self.db.add_all([fi, slot])
+        self.db.commit()
+
+        preview = auto_fill_preview({'season_id': self.season.id, 'week_id': self.week2.id, 'division_id': self.division.id, 'no_byes': True}, db=self.db)
+        self.assertEqual(preview['proposed_game_count'], 5)
+        team_counts: dict[str, int] = {}
+        for row in preview['proposals']:
+            team_counts[row['home_team_id']] = team_counts.get(row['home_team_id'], 0) + 1
+            team_counts[row['away_team_id']] = team_counts.get(row['away_team_id'], 0) + 1
+        double_team_id = next(tid for tid, count in team_counts.items() if count == 2)
+        dh_rows = [row for row in preview['proposals'] if double_team_id in {row['home_team_id'], row['away_team_id']}]
+        self.assertEqual(len(dh_rows), 2)
+
+        # Force a gap (10 and 12) for the double-header team while a same-site/day non-DH game is at 11.
+        by_time = {row['proposed_start_time']: row for row in preview['proposals']}
+        if {'10:00:00', '11:00:00', '12:00:00'}.issubset(by_time.keys()):
+            ten = by_time['10:00:00']
+            eleven = by_time['11:00:00']
+            twelve = by_time['12:00:00']
+            if double_team_id in {eleven['home_team_id'], eleven['away_team_id']}:
+                eleven = by_time['13:00:00']
+            dh_row = next(row for row in (ten, twelve) if double_team_id in {row['home_team_id'], row['away_team_id']})
+            other_dh_row = twelve if dh_row is ten else ten
+            non_dh_row = eleven
+            non_dh_row['slot_id'], other_dh_row['slot_id'] = other_dh_row['slot_id'], non_dh_row['slot_id']
+
+        applied = auto_fill_apply({
+            'season_id': self.season.id,
+            'week_id': self.week2.id,
+            'division_id': self.division.id,
+            'proposals': preview['proposals'],
+            'no_byes': True,
+        }, db=self.db)
+        self.assertEqual(applied['created_count'], 5)
+        self.assertEqual(applied['skipped_count'], 0)
+
+        created = self.db.query(Game).filter(Game.week_id == self.week2.id).all()
+        starts = sorted(g.kickoff_time for g in created if str(double_team_id) in {str(g.home_team_id), str(g.away_team_id)})
+        self.assertEqual(len(starts), 2)
+        self.assertEqual(abs((starts[1].hour * 60 + starts[1].minute) - (starts[0].hour * 60 + starts[0].minute)), 60)
+
 if __name__ == '__main__':
     unittest.main()
