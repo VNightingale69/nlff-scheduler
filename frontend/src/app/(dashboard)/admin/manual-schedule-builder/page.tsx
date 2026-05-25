@@ -35,6 +35,7 @@ export default function ManualScheduleBuilderPage() {
   const [showAutoScheduleSeasonModal, setShowAutoScheduleSeasonModal] = useState(false);
   const [clearExistingBeforeAutoSchedule, setClearExistingBeforeAutoSchedule] = useState(false);
   const [autoScheduleSeasonLoading, setAutoScheduleSeasonLoading] = useState(false);
+  const [autoScheduleDiagnostics, setAutoScheduleDiagnostics] = useState<any | null>(null);
 
   const division = useMemo(() => options.divisions.find((d: any) => d.id === divisionId), [options, divisionId]);
   const divisionTeams = useMemo(() => options.teams.filter((t: any) => t.division_id === divisionId && t.is_active), [options, divisionId]);
@@ -397,13 +398,17 @@ export default function ManualScheduleBuilderPage() {
               onClick={async () => {
                 setError('');
                 setSuccess('');
+                setAutoScheduleDiagnostics(null);
                 setAutoScheduleSeasonLoading(true);
                 try {
                   const res: any = await apiFetch('/manual-schedule-builder/auto-schedule-season', { method: 'POST', body: JSON.stringify({ season_id: seasonId, clear_existing: clearExistingBeforeAutoSchedule }) }, token);
                   setShowAutoScheduleSeasonModal(false);
                   await load();
                   await loadRecommendations();
-                  setSuccess(`Auto-schedule completed: ${Number(res.total_games_created || 0)} games created, ${Number(res.games_skipped || 0)} skipped, ${(res.warnings || []).length} warnings.`);
+                  setAutoScheduleDiagnostics(res);
+                  const missing = (res.required_games_still_missing || []).length;
+                  const warningCount = (res.warnings || []).length + (res.validation_errors || []).length;
+                  setSuccess(`Auto-schedule completed: ${Number(res.total_games_created || 0)} games scheduled, ${Number(res.games_skipped || 0)} placement attempts skipped, ${missing} required game groups still missing, ${warningCount} warnings/errors.`);
                 } catch (e: unknown) {
                   setError(extractError(e));
                 } finally {
@@ -416,6 +421,30 @@ export default function ManualScheduleBuilderPage() {
           </div>
         </div>
       </div> : null}
+      {autoScheduleDiagnostics ? <details className='rounded border border-slate-300 bg-slate-50 p-3'>
+        <summary className='cursor-pointer font-semibold text-slate-800'>Scheduling Diagnostics</summary>
+        <div className='mt-3 space-y-3 text-sm'>
+          <div><span className='font-semibold'>1. Games successfully scheduled:</span> {Number(autoScheduleDiagnostics.total_games_created || 0)}</div>
+          <div>
+            <div className='font-semibold'>2. Placement attempts skipped: {Number(autoScheduleDiagnostics.games_skipped || 0)}</div>
+            <ul className='list-inside list-disc'>
+              {Object.entries(autoScheduleDiagnostics.skipped_attempts_by_reason || {}).map(([reason, count]: any) => <li key={reason}>{reason}: {count}</li>)}
+            </ul>
+          </div>
+          <div>
+            <div className='font-semibold'>3. Required games still missing: {(autoScheduleDiagnostics.required_games_still_missing || []).length}</div>
+            {(autoScheduleDiagnostics.required_games_still_missing || []).map((row: any, idx: number) => <div key={`${row.division}-${row.week}-${idx}`} className='ml-3'>{row.division} Week {row.week} — Required: {row.required_games}, Created: {row.created_games}, Missing: {row.missing_games}</div>)}
+          </div>
+          <div>
+            <div className='font-semibold'>4. Warnings</div>
+            <ul className='list-inside list-disc'>{(autoScheduleDiagnostics.warnings || []).map((w: string, i: number) => <li key={i}>{w}</li>)}</ul>
+          </div>
+          <div>
+            <div className='font-semibold'>5. Validation failures</div>
+            <ul className='list-inside list-disc'>{(autoScheduleDiagnostics.validation_errors || []).map((w: string, i: number) => <li key={i}>{w}</li>)}</ul>
+          </div>
+        </div>
+      </details> : null}
     </div>
   );
 }
