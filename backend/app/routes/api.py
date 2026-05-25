@@ -1649,6 +1649,7 @@ def clear_manual_schedule_builder_scheduled_games(
 
 @router.post('/manual-schedule-builder/auto-fill-preview', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
+    regular_season_host_limit = 2
     scoring_weights = payload.get('scoring_weights') or {}
 
     def _weight(name: str, default: int) -> int:
@@ -1823,6 +1824,12 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             if open_field_key not in field_time_occupied:
                 return True
         return False
+    postseason_week = bool(
+        payload.get('is_postseason')
+        or payload.get('is_playoff_week')
+        or payload.get('is_tournament_week')
+        or payload.get('is_championship_week')
+    )
     season_division_games = db.query(Game).join(Game.home_team).join(Game.status).filter(
         Game.season_id == season_id,
         Team.division_id == division_id,
@@ -1878,6 +1885,29 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             away_org_id = game.away_team.organization_id if game.away_team else None
             if home_org_id and away_org_id:
                 prior_week_community_pairs.add(tuple(sorted((home_org_id, away_org_id))))
+    regular_season_host_occurrences_by_community: dict[uuid.UUID, set[tuple[uuid.UUID, date]]] = {}
+    regular_season_host_occurrences_by_location: dict[uuid.UUID, set[date]] = {}
+    if not postseason_week:
+        season_scheduled_rows = db.query(
+            Week.week_number,
+            GameSlot.slot_date,
+            GameSlot.host_location_id,
+            HostLocation.organization_id,
+        ).join(GameSlot, GameSlot.assigned_game_id == Game.id).join(Week, Week.id == Game.week_id).join(
+            HostLocation, HostLocation.id == GameSlot.host_location_id
+        ).join(Game.status).filter(
+            Game.season_id == season_id,
+            GameStatus.code == 'SCHEDULED',
+            GameStatus.is_active.is_(True),
+        ).all()
+        for week_number, slot_date, host_location_id, host_org_id in season_scheduled_rows:
+            if week_number > 99:
+                continue
+            if not host_location_id or not slot_date:
+                continue
+            regular_season_host_occurrences_by_location.setdefault(host_location_id, set()).add(slot_date)
+            if host_org_id:
+                regular_season_host_occurrences_by_community.setdefault(host_org_id, set()).add((host_location_id, slot_date))
     plans = []
     skipped: list[dict[str, str]] = []
     skipped_seen: set[str] = set()
@@ -2121,6 +2151,47 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                         if host_pref:
                             score += 40
                             reason_bits.append('reduced travel via host alignment (+40)')
+                        if candidate_host_id and not postseason_week:
+                            candidate_host_org_id = candidate_host.organization_id if candidate_host else None
+                            location_host_count = len(regular_season_host_occurrences_by_location.get(candidate_host_id, set()))
+                            community_host_count = len(regular_season_host_occurrences_by_community.get(candidate_host_org_id, set())) if candidate_host_org_id else 0
+                            min_location_host_count = min((len(v) for v in regular_season_host_occurrences_by_location.values()), default=0)
+                            min_community_host_count = min((len(v) for v in regular_season_host_occurrences_by_community.values()), default=0)
+                            if location_host_count == min_location_host_count or community_host_count == min_community_host_count:
+                                score += 120
+                                reason_bits.append('fewest season host assignments (+120)')
+                            projected_location_count = location_host_count + (0 if slot.slot_date in regular_season_host_occurrences_by_location.get(candidate_host_id, set()) else 1)
+                            projected_community_count = community_host_count + (0 if (candidate_host_org_id and (candidate_host_id, slot.slot_date) in regular_season_host_occurrences_by_community.get(candidate_host_org_id, set())) else 1)
+                            all_projected_location_counts = [len(v) for v in regular_season_host_occurrences_by_location.values()]
+                            all_projected_community_counts = [len(v) for v in regular_season_host_occurrences_by_community.values()]
+                            all_projected_location_counts.append(projected_location_count)
+                            all_projected_community_counts.append(projected_community_count)
+                            if all_projected_location_counts and all_projected_community_counts:
+                                loc_spread = max(all_projected_location_counts) - min(all_projected_location_counts)
+                                comm_spread = max(all_projected_community_counts) - min(all_projected_community_counts)
+                                if loc_spread <= 1 and comm_spread <= 1:
+                                    score += 80
+                                    reason_bits.append('balanced host distribution (+80)')
+                            if projected_location_count > regular_season_host_limit or projected_community_count > regular_season_host_limit:
+                                alternative_under_limit_exists = False
+                                for alternative_slot in remaining_slots:
+                                    alt_host_id = alternative_slot.host_location_id
+                                    if not alt_host_id or alt_host_id == candidate_host_id:
+                                        continue
+                                    alt_host = alternative_slot.host_location
+                                    alt_org_id = alt_host.organization_id if alt_host else None
+                                    alt_loc_count = len(regular_season_host_occurrences_by_location.get(alt_host_id, set()))
+                                    alt_comm_count = len(regular_season_host_occurrences_by_community.get(alt_org_id, set())) if alt_org_id else 0
+                                    alt_projected_loc = alt_loc_count + (0 if alternative_slot.slot_date in regular_season_host_occurrences_by_location.get(alt_host_id, set()) else 1)
+                                    alt_projected_comm = alt_comm_count + (0 if (alt_org_id and (alt_host_id, alternative_slot.slot_date) in regular_season_host_occurrences_by_community.get(alt_org_id, set())) else 1)
+                                    if alt_projected_loc <= regular_season_host_limit and alt_projected_comm <= regular_season_host_limit:
+                                        alternative_under_limit_exists = True
+                                        break
+                                if alternative_under_limit_exists:
+                                    score -= 150
+                                    warning_bits.append('third regular-season host occurrence while alternatives exist (-150)')
+                                else:
+                                    reason_bits.append('host rotation limit relaxed: no valid under-limit alternative for this slot')
                         if split_host_week and candidate_host_id:
                             candidate_host_capacity = max(1, host_capacity_by_id.get(candidate_host_id, 0))
                             current_host_projection = projected_games_by_host.get(candidate_host_id, 0)
@@ -2318,6 +2389,11 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         if selected_field_slot.host_location_id:
             used_host_ids.add(selected_field_slot.host_location_id)
             projected_games_by_host[selected_field_slot.host_location_id] = projected_games_by_host.get(selected_field_slot.host_location_id, 0) + 1
+            if not postseason_week and selected_field_slot.slot_date:
+                regular_season_host_occurrences_by_location.setdefault(selected_field_slot.host_location_id, set()).add(selected_field_slot.slot_date)
+                selected_host_org_id = selected_field_slot.host_location.organization_id if selected_field_slot.host_location else None
+                if selected_host_org_id:
+                    regular_season_host_occurrences_by_community.setdefault(selected_host_org_id, set()).add((selected_field_slot.host_location_id, selected_field_slot.slot_date))
             if not preferred_host_id:
                 preferred_host_id = selected_field_slot.host_location_id
             for team_id in (best['home_team_id'], best['away_team_id']):
@@ -2371,6 +2447,11 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         len(plans),
         compatible_slots_found,
     )
+    host_limit_relaxation_reasons = [
+        plan.get('reason', '')
+        for plan in plans
+        if 'host rotation limit relaxed' in str(plan.get('reason', '')).lower()
+    ]
     return {
         'proposals': plans,
         'skipped': skipped,
@@ -2402,6 +2483,32 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'active_teams_found': len(teams),
             'eligible_pairings_generated': len(plans),
             'compatible_slots_found': compatible_slots_found,
+            'postseason_host_limit_exempt': postseason_week,
+            'total_host_occurrences_by_community': [
+                {'community_id': str(org_id), 'host_occurrences': len(occurrences)}
+                for org_id, occurrences in regular_season_host_occurrences_by_community.items()
+            ],
+            'total_host_occurrences_by_location': [
+                {'host_location_id': str(host_id), 'host_occurrences': len(occurrences)}
+                for host_id, occurrences in regular_season_host_occurrences_by_location.items()
+            ],
+            'communities_exceeding_recommended_hosting_limits': [
+                str(org_id)
+                for org_id, occurrences in regular_season_host_occurrences_by_community.items()
+                if len(occurrences) > regular_season_host_limit
+            ],
+            'host_locations_exceeding_recommended_hosting_limits': [
+                str(host_id)
+                for host_id, occurrences in regular_season_host_occurrences_by_location.items()
+                if len(occurrences) > regular_season_host_limit
+            ],
+            'balanced_hosting_achieved': (
+                not regular_season_host_occurrences_by_location
+                or (
+                    max(len(v) for v in regular_season_host_occurrences_by_location.values())
+                    - min(len(v) for v in regular_season_host_occurrences_by_location.values())
+                ) <= 1
+            ),
         'field_balancing': {
             'min_concurrent_games_before_balancing': min_concurrent_games_for_balancing,
             'max_consecutive_games_same_field': max_consecutive_games_same_field,
@@ -2413,6 +2520,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'primary_host_location_id': str(primary_host_id) if primary_host_id else None,
             'games_outside_primary_host': len([p for p in plans if p.get('host_location_id') and primary_host_id and p.get('host_location_id') != str(primary_host_id)]),
             'rules_relaxed': [],
+            'host_limit_relaxation_reasons': host_limit_relaxation_reasons,
             'unresolved_conflicts': [],
         },
     }

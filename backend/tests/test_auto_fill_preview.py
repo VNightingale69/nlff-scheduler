@@ -617,5 +617,21 @@ class AutoFillPreviewTest(unittest.TestCase):
         self.assertEqual(len(starts), 2)
         self.assertEqual(abs((starts[1].hour * 60 + starts[1].minute) - (starts[0].hour * 60 + starts[0].minute)), 60)
 
+    def test_host_rotation_audit_tracks_occurrences(self):
+        preview = auto_fill_preview({'season_id': self.season.id, 'week_id': self.week2.id, 'division_id': self.division.id}, db=self.db)
+        self.assertIn('total_host_occurrences_by_community', preview['audit'])
+        self.assertIn('total_host_occurrences_by_location', preview['audit'])
+        self.assertIn('balanced_hosting_achieved', preview['audit'])
+        self.assertFalse(preview['audit']['postseason_host_limit_exempt'])
+
+    def test_postseason_exempts_host_rotation_limits(self):
+        preview = auto_fill_preview({
+            'season_id': self.season.id,
+            'week_id': self.week2.id,
+            'division_id': self.division.id,
+            'is_playoff_week': True,
+        }, db=self.db)
+        self.assertTrue(preview['audit']['postseason_host_limit_exempt'])
+
 if __name__ == '__main__':
     unittest.main()
