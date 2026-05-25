@@ -134,6 +134,11 @@ def validate_game(db: Session, payload: GameCreate, game_id: uuid.UUID | None = 
                 if used >= supported_count:
                     hard_conflicts.append(ValidationMessage(code='physical_field_area_capacity_exceeded', message='Selected physical field area capacity is exceeded for this layout and time block.'))
 
+    # Overlap policy:
+    # - Allowed: same kickoff window across different host locations.
+    # - Allowed: same kickoff window on different fields at the same host location.
+    # - Rejected: same team overlap and same field overlap.
+    # Shared-resource and officiating-crew overlap checks are intentionally not enforced yet.
     game_filters = [Game.game_date == payload.game_date]
     if game_id:
         game_filters.append(Game.id != game_id)
