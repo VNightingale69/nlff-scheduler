@@ -1600,6 +1600,49 @@ def assign_generated_slot(payload: dict, db: Session = Depends(get_db)):
     return {'game': _to_game_read(game), 'generated_slot_id': slot.id, 'status': 'SCHEDULED'}
 
 
+@router.delete('/manual-schedule-builder/scheduled-games', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+def clear_manual_schedule_builder_scheduled_games(
+    season_id: uuid.UUID = Query(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    season = db.query(Season).filter(Season.id == season_id).first()
+    if not season:
+        raise HTTPException(404, 'Season not found')
+
+    game_ids_to_delete = [
+        row[0]
+        for row in db.query(Game.id).join(Game.status).filter(
+            Game.season_id == season_id,
+            GameStatus.code != 'UNSCHEDULED',
+        ).all()
+    ]
+
+    if not game_ids_to_delete:
+        logger.info(
+            'manual_schedule_builder_clear season_id=%s deleted_games=0 actor_user_id=%s actor_email=%s',
+            season_id,
+            current_user.id,
+            current_user.email,
+        )
+        return {'deleted_count': 0}
+
+    db.query(GameSlot).filter(GameSlot.assigned_game_id.in_(game_ids_to_delete)).update(
+        {'assigned_game_id': None, 'status': 'OPEN'},
+        synchronize_session=False,
+    )
+    deleted_count = db.query(Game).filter(Game.id.in_(game_ids_to_delete)).delete(synchronize_session=False)
+    db.commit()
+    logger.info(
+        'manual_schedule_builder_clear season_id=%s deleted_games=%s actor_user_id=%s actor_email=%s',
+        season_id,
+        deleted_count,
+        current_user.id,
+        current_user.email,
+    )
+    return {'deleted_count': deleted_count}
+
+
 @router.post('/manual-schedule-builder/auto-fill-preview', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     scoring_weights = payload.get('scoring_weights') or {}
