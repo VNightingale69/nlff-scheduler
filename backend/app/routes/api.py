@@ -1715,13 +1715,12 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         GameSlot.assigned_game_id.is_(None),
     ).order_by(GameSlot.slot_date, GameSlot.start_time).all()
     compatible_slots_found = len(open_slots)
-    assigned_games = db.query(Game).join(GameSlot, GameSlot.assigned_game_id == Game.id).filter(
+    assigned_game_slots = db.query(Game, GameSlot).join(GameSlot, GameSlot.assigned_game_id == Game.id).filter(
         Game.game_date == week.start_date
     ).all()
     community_assigned_hosts: dict[uuid.UUID, set[uuid.UUID]] = {}
-    for game in assigned_games:
-        game_slot = game.game_slot
-        if not game_slot or not game_slot.host_location_id:
+    for game, game_slot in assigned_game_slots:
+        if not game_slot.host_location_id:
             continue
         for team in (game.home_team, game.away_team):
             if team and team.organization_id:
