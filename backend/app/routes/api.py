@@ -1746,6 +1746,24 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'compatible_slots_found': 0,
         }
     teams_by_id = {t.id: t for t in teams}
+    league_active_teams = db.query(Team).join(Division, Team.division_id == Division.id).filter(Team.is_active.is_(True)).all()
+    league_total_active_teams = len(league_active_teams)
+    league_teams_by_division: dict[str, int] = {}
+    league_small_field_teams = 0
+    league_large_field_teams = 0
+    league_games_required_by_division_week: dict[str, int] = {}
+    for league_team in league_active_teams:
+        div = league_team.division
+        div_key = f"{(div.division_group or '').strip()} {(div.name or '').strip()}".strip() if div else 'UNKNOWN'
+        league_teams_by_division[div_key] = league_teams_by_division.get(div_key, 0) + 1
+    for div_key, div_team_count in league_teams_by_division.items():
+        league_games_required_by_division_week[div_key] = div_team_count // 2
+    for league_team in league_active_teams:
+        req = _required_field_type_for_division(league_team.division) if league_team.division else None
+        if str(req) == 'FieldType.SMALL' or getattr(req, 'value', req) == 'SMALL':
+            league_small_field_teams += 1
+        elif str(req) == 'FieldType.LARGE' or getattr(req, 'value', req) == 'LARGE':
+            league_large_field_teams += 1
     no_byes = bool(payload.get('no_byes', True))
     team_count = len(teams)
     is_odd_division = team_count % 2 == 1
@@ -2003,6 +2021,36 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         if slot.host_location_id:
             slots_by_host.setdefault(slot.host_location_id, []).append(slot)
     games_required = max_new_games
+    all_open_slots_for_week = db.query(GameSlot).join(GameSlot.field_instance).filter(
+        GameSlot.status == 'OPEN',
+        GameSlot.slot_date == week.start_date,
+        GameSlot.assigned_game_id.is_(None),
+    ).all()
+    weekly_host_capacity_report: dict[uuid.UUID, dict[str, object]] = {}
+    for slot in all_open_slots_for_week:
+        if not slot.host_location_id:
+            continue
+        row = weekly_host_capacity_report.setdefault(slot.host_location_id, {
+            'host_location_id': str(slot.host_location_id),
+            'host_location_name': slot.host_location.name if slot.host_location else '',
+            'owning_community_id': str(slot.host_location.organization_id) if slot.host_location and slot.host_location.organization_id else None,
+            'small_field_capacity': 0,
+            'large_field_capacity': 0,
+            'total_game_capacity': 0,
+            'remaining_unused_capacity': 0,
+            'small_fields': set(),
+            'large_fields': set(),
+            'current_season_host_count_location': len(regular_season_host_occurrences_by_location.get(slot.host_location_id, set())),
+            'current_season_host_count_community': len(regular_season_host_occurrences_by_community.get(slot.host_location.organization_id, set())) if slot.host_location and slot.host_location.organization_id else 0,
+        })
+        row['total_game_capacity'] += 1
+        row['remaining_unused_capacity'] += 1
+        if slot.field_type == 'SMALL':
+            row['small_field_capacity'] += 1
+            row['small_fields'].add(str(slot.field_instance_id))
+        elif slot.field_type == 'LARGE':
+            row['large_field_capacity'] += 1
+            row['large_fields'].add(str(slot.field_instance_id))
     host_capacity = []
     for host_id, host_slots in slots_by_host.items():
         host_capacity.append({
@@ -2012,7 +2060,14 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'continuity': len({(s.slot_date, s.start_time) for s in host_slots}),
         })
     host_capacity_by_id: dict[uuid.UUID, int] = {row['host_id']: int(row['slot_count']) for row in host_capacity}
-    host_capacity.sort(key=lambda x: (x['slot_count'] >= games_required, x['slot_count'], x['field_count'], x['continuity']), reverse=True)
+    host_capacity.sort(key=lambda x: (
+        x['slot_count'] >= games_required,
+        -(weekly_host_capacity_report.get(x['host_id'], {}).get('current_season_host_count_community', 0) or 0),
+        -(weekly_host_capacity_report.get(x['host_id'], {}).get('current_season_host_count_location', 0) or 0),
+        x['slot_count'],
+        x['field_count'],
+        x['continuity'],
+    ), reverse=True)
     host_ids_by_org: dict[uuid.UUID, set[uuid.UUID]] = {}
     for host_id in slots_by_host.keys():
         host_row = db.query(HostLocation.id, HostLocation.organization_id).filter(HostLocation.id == host_id).first()
@@ -2676,6 +2731,28 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'double_header_team': teams_by_id[selected_double_header_team_id].name if selected_double_header_team_id else None,
         },
         'diagnostics': {
+            'weekly_host_planning_report': {
+                'selected_host_sites': [str(hid) for hid in locked_host_ids],
+                'overflow_sites_used': [str(hid) for hid in used_host_ids if hid not in locked_host_ids],
+                'host_limit_exceptions': host_limit_relaxation_reasons,
+                'league_team_demand': {
+                    'total_active_teams': league_total_active_teams,
+                    'teams_by_division': league_teams_by_division,
+                    'small_field_teams': league_small_field_teams,
+                    'large_field_teams': league_large_field_teams,
+                    'games_required_per_division_week': league_games_required_by_division_week,
+                    'total_games_required_week': sum(league_games_required_by_division_week.values()),
+                },
+                'host_capacities': [
+                    {
+                        **{k: v for k, v in row.items() if k not in {'small_fields', 'large_fields'}},
+                        'number_of_small_fields': len(row.get('small_fields', set())),
+                        'number_of_large_fields': len(row.get('large_fields', set())),
+                        'projected_host_count_after_scheduling_location': (row.get('current_season_host_count_location', 0) + (1 if uuid.UUID(row['host_location_id']) in used_host_ids else 0)),
+                    }
+                    for row in weekly_host_capacity_report.values()
+                ],
+            },
             'teams_evaluated': team_count,
             'slots_evaluated': compatible_slots_found,
             'valid_matchups_found': len(plans),
@@ -3352,6 +3429,28 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
             'recovery_diagnostics': recovery_diagnostics[-25:],
         },
         'diagnostics': {
+            'weekly_host_planning_report': {
+                'selected_host_sites': [str(hid) for hid in locked_host_ids],
+                'overflow_sites_used': [str(hid) for hid in used_host_ids if hid not in locked_host_ids],
+                'host_limit_exceptions': host_limit_relaxation_reasons,
+                'league_team_demand': {
+                    'total_active_teams': league_total_active_teams,
+                    'teams_by_division': league_teams_by_division,
+                    'small_field_teams': league_small_field_teams,
+                    'large_field_teams': league_large_field_teams,
+                    'games_required_per_division_week': league_games_required_by_division_week,
+                    'total_games_required_week': sum(league_games_required_by_division_week.values()),
+                },
+                'host_capacities': [
+                    {
+                        **{k: v for k, v in row.items() if k not in {'small_fields', 'large_fields'}},
+                        'number_of_small_fields': len(row.get('small_fields', set())),
+                        'number_of_large_fields': len(row.get('large_fields', set())),
+                        'projected_host_count_after_scheduling_location': (row.get('current_season_host_count_location', 0) + (1 if uuid.UUID(row['host_location_id']) in used_host_ids else 0)),
+                    }
+                    for row in weekly_host_capacity_report.values()
+                ],
+            },
             'teams_evaluated': len(teams),
             'slots_evaluated': open_slots_count,
             'valid_matchups_found': len(proposals),
