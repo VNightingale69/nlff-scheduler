@@ -341,6 +341,32 @@ class AutoFillPreviewTest(unittest.TestCase):
         self.assertEqual(result['created_count'], 3)
         self.assertEqual(result['final_validation']['unscheduled_teams'], [])
         self.assertTrue(any('non-back-to-back' in row['reason'] for row in result['skipped']))
+
+    def test_apply_odd_division_recovery_pass_fills_late_slot(self):
+        odd_team = Team(id=uuid.uuid4(), organization_id=self.org_w.id, division_id=self.division.id, name='Westosha White', is_active=True)
+        late_fi = FieldInstance(id=uuid.uuid4(), host_location_id=self.host.id, hosting_availability_id=uuid.uuid4(), instance_date=self.week2.start_date, field_name='Late Field', field_type='SMALL', is_active=True)
+        late_slot = GameSlot(id=uuid.uuid4(), field_instance_id=late_fi.id, host_location_id=self.host.id, slot_date=self.week2.start_date, start_time=time(16, 0), end_time=time(17, 0), field_type='SMALL', status='OPEN')
+        slot_10_fi = FieldInstance(id=uuid.uuid4(), host_location_id=self.host.id, hosting_availability_id=uuid.uuid4(), instance_date=self.week2.start_date, field_name='Odd 10', field_type='SMALL', is_active=True)
+        slot_10 = GameSlot(id=uuid.uuid4(), field_instance_id=slot_10_fi.id, host_location_id=self.host.id, slot_date=self.week2.start_date, start_time=time(10, 0), end_time=time(11, 0), field_type='SMALL', status='OPEN')
+        self.db.add_all([odd_team, late_fi, late_slot, slot_10_fi, slot_10])
+        self.db.commit()
+
+        result = auto_fill_apply({
+            'season_id': self.season.id,
+            'week_id': self.week2.id,
+            'division_id': self.division.id,
+            'proposals': [
+                {'slot_id': str(self.slot.id), 'home_team_id': str(self.wm.id), 'away_team_id': str(self.ab.id)},
+                {'slot_id': str(slot_10.id), 'home_team_id': str(self.wg.id), 'away_team_id': str(self.as_.id)},
+            ],
+            'no_byes': True,
+        }, db=self.db)
+
+        self.assertEqual(result['final_validation']['required_game_count'], 3)
+        self.assertEqual(result['final_validation']['created_game_count'], 3)
+        self.assertEqual(result['created_count'], 3)
+        self.assertEqual(result['final_validation']['unscheduled_teams'], [])
+
     def test_apply_ignores_unscheduled_games_for_duplicate_check(self):
         unscheduled_status = GameStatus(id=uuid.uuid4(), code='UNSCHEDULED', label='Unscheduled', is_active=True)
         self.db.add(unscheduled_status)
