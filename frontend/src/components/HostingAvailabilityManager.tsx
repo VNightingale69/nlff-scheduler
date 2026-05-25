@@ -54,7 +54,7 @@ const WEEKLY_CAPACITY_REQUIREMENTS: Record<number, { projectedSmallGames: number
 
 const READINESS_DEFINITIONS: Record<string, string> = {
   READY: 'Hosting community assigned, host location assigned, fields configured, slots generated, no slot overlaps, required field sizes present, and projected games supported.',
-  PARTIAL: 'Some hosting setup exists, but one or more validation checks still block full scheduling capacity.',
+  PARTIAL: 'Host site exists, but projected division demand may exceed compatible field capacity.',
   'NOT READY': 'Core hosting setup is missing (community, site, fields, or generated slots).',
 };
 
@@ -64,15 +64,15 @@ const INDICATOR_DEFINITIONS: Record<string, string> = {
   'field inventory mismatch': 'Fields are configured but could not be resolved into schedulable small/large inventory for this host location.',
   'no large field available': 'At least one large field is required for this week based on scheduled divisions.',
   'no small field available': 'At least one small field is required for this week based on scheduled divisions.',
-  'insufficient total slots': 'Total playable slot hours are below the projected requirement for this week.',
+  'insufficient total slots': 'Combined compatible field slots are below projected total games for this week.',
+  'insufficient small field slots': 'Small-field projected games exceed small-field slot capacity for this host week.',
+  'insufficient large field slots': 'Large-field projected games exceed large-field slot capacity for this host week.',
   'overlapping slot conflicts': 'Two or more slot ranges overlap and create conflicting start times.',
   'host assignment missing': 'No valid hosting community assignment is attached to this availability row.',
   'scheduling window too short': 'The playable window is too short for a full game-day schedule.',
 };
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const SMALL_FIELD_DIVISIONS = ['Coed K/1st', 'Coed 2nd/3rd', 'Coed 4th/5th', 'Girls K/1st', 'Girls 2nd/3rd', 'Girls 4th/5th'] as const;
-const LARGE_FIELD_DIVISIONS = ['Coed 6th/7th', 'Coed 8th', 'Girls 6th/7th/8th'] as const;
 
 export default function HostingAvailabilityManager() {
   const [message, setMessage] = useState('');
@@ -287,7 +287,9 @@ export default function HostingAvailabilityManager() {
       const largeFieldSlots = largeFieldCount * totalSlotHours;
       const projectedGames = requirements.projectedSmallGames + requirements.projectedLargeGames;
       const compatibleAvailableSlots = smallFieldSlots + largeFieldSlots;
-      const capacityUtilizationPct = compatibleAvailableSlots > 0 ? (projectedGames / compatibleAvailableSlots) * 100 : 0;
+      const smallFieldUtilizationPct = smallFieldSlots > 0 ? (requirements.projectedSmallGames / smallFieldSlots) * 100 : 0;
+      const largeFieldUtilizationPct = largeFieldSlots > 0 ? (requirements.projectedLargeGames / largeFieldSlots) * 100 : 0;
+      const overallUtilizationPct = compatibleAvailableSlots > 0 ? (projectedGames / compatibleAvailableSlots) * 100 : 0;
       const needsSmallField = requirements.projectedSmallGames > 0;
       const needsLargeField = requirements.projectedLargeGames > 0;
       const hasHostAssignment = Boolean(entry.organization_id || (String(entry.organization_name || '').trim() && !UUID_PATTERN.test(String(entry.organization_name || '').trim())));
@@ -302,7 +304,9 @@ export default function HostingAvailabilityManager() {
       if (hasInventoryMismatch) indicators.push('field inventory mismatch');
       if (!hasInventoryMismatch && needsLargeField && largeFieldCount < 1) indicators.push('no large field available');
       if (!hasInventoryMismatch && needsSmallField && smallFieldCount < 1) indicators.push('no small field available');
-      if (totalSlotHours < requirements.projectedTotalSlots) indicators.push('insufficient total slots');
+      if (!hasInventoryMismatch && requirements.projectedSmallGames > smallFieldSlots) indicators.push('insufficient small field slots');
+      if (!hasInventoryMismatch && requirements.projectedLargeGames > largeFieldSlots) indicators.push('insufficient large field slots');
+      if (compatibleAvailableSlots < projectedGames) indicators.push('insufficient total slots');
       if (lastEnd > 0 && lastEnd < 14) indicators.push('scheduling window too short');
       const hasOverlap = (entry.time_ranges || []).some((r: any, i: number, arr: any[]) => {
         const start = Number(r.start_time.slice(0, 2));
@@ -310,9 +314,11 @@ export default function HostingAvailabilityManager() {
       });
       if (hasOverlap) indicators.push('overlapping slot conflicts');
 
-      const readiness = !hasHostAssignment || !hasHostLocation || !hasFieldConfig || !hasSlots
+      const capacityMissing = compatibleAvailableSlots <= 0;
+      const capacityShortByType = indicators.includes('insufficient small field slots') || indicators.includes('insufficient large field slots');
+      const readiness = !hasHostAssignment || !hasHostLocation || !hasFieldConfig || !hasSlots || capacityMissing
         ? 'NOT READY'
-        : indicators.length
+        : capacityShortByType || indicators.length
           ? 'PARTIAL'
           : 'READY';
 
@@ -328,7 +334,9 @@ export default function HostingAvailabilityManager() {
         smallFieldSlots,
         largeFieldSlots,
         projectedGames,
-        capacityUtilizationPct,
+        smallFieldUtilizationPct,
+        largeFieldUtilizationPct,
+        overallUtilizationPct,
       };
     });
     return rows.sort((a: any, b: any) => (a.week - b.week) || (a.firstStart - b.firstStart) || String(a.organization_name || '').localeCompare(String(b.organization_name || '')));
@@ -395,10 +403,10 @@ export default function HostingAvailabilityManager() {
   }, [dashboardMetrics, summaryRows]);
 
   const supportedDivisionsLabel = (smallFieldCount: number, largeFieldCount: number) => {
-    const supported: string[] = [];
-    if (smallFieldCount > 0) supported.push(...SMALL_FIELD_DIVISIONS);
-    if (largeFieldCount > 0) supported.push(...LARGE_FIELD_DIVISIONS);
-    return supported.length ? supported.join(', ') : 'None';
+    if (smallFieldCount > 0 && largeFieldCount > 0) return 'Small + Large';
+    if (smallFieldCount > 0) return 'Small Only';
+    if (largeFieldCount > 0) return 'Large Only';
+    return 'None';
   };
 
   return (
@@ -456,11 +464,11 @@ export default function HostingAvailabilityManager() {
               </ul>
             </div>
               <table className='min-w-full text-sm'>
-              <thead><tr className='border-b text-left'><th className='p-2'>Week</th><th className='p-2'>Date</th><th className='p-2'>Community</th><th className='p-2'>Host location</th><th className='p-2'>Small fields</th><th className='p-2'>Large fields</th><th className='p-2'>Supported Divisions</th><th className='p-2'>Small Field Slots</th><th className='p-2'>Large Field Slots</th><th className='p-2'>Projected Games</th><th className='p-2'>Capacity Utilization %</th><th className='p-2'>First slot</th><th className='p-2'>Last slot</th><th className='p-2'>Readiness</th><th className='p-2'>Validation indicators</th></tr></thead>
+              <thead><tr className='border-b text-left'><th className='p-2'>Week</th><th className='p-2'>Date</th><th className='p-2'>Community</th><th className='p-2'>Host location</th><th className='p-2'>Small fields</th><th className='p-2'>Large fields</th><th className='p-2'>Supported Divisions</th><th className='p-2'>Small Field Slots</th><th className='p-2'>Large Field Slots</th><th className='p-2'>Projected Games</th><th className='p-2'>Small Field Utilization %</th><th className='p-2'>Large Field Utilization %</th><th className='p-2'>Overall Utilization %</th><th className='p-2'>First slot</th><th className='p-2'>Last slot</th><th className='p-2'>Readiness</th><th className='p-2'>Validation indicators</th></tr></thead>
               <tbody>
                 {summaryRows.map((row: any, i: number) => (
                   <tr key={`${row.available_date}-${row.host_location_name}-${i}`} className='border-b'>
-                    <td className='p-2'>Week {row.week}</td><td className='p-2'>{formatDateLabel(row.available_date)}</td><td className='p-2'>{resolveCommunityName(row.organization_id, row.organization_name)}</td><td className='p-2'>{row.host_location_name}</td><td className='p-2'>{row.smallFieldCount ?? row.small_field_count ?? row.small_field_capacity ?? 0}</td><td className='p-2'>{row.largeFieldCount ?? row.large_field_count ?? row.large_field_capacity ?? 0}</td><td className='p-2'>{supportedDivisionsLabel(row.smallFieldCount ?? row.small_field_count ?? row.small_field_capacity ?? 0, row.largeFieldCount ?? row.large_field_count ?? row.large_field_capacity ?? 0)}</td><td className='p-2'>{row.smallFieldSlots}</td><td className='p-2'>{row.largeFieldSlots}</td><td className='p-2'>{row.projectedGames}</td><td className='p-2'>{row.capacityUtilizationPct.toFixed(1)}%</td><td className='p-2'>{row.firstStart === 99 ? '—' : displayHour(row.firstStart)}</td><td className='p-2'>{row.lastEnd === 0 ? '—' : displayHour(row.lastEnd)}</td><td className='p-2'><span title={READINESS_DEFINITIONS[row.readiness]} className='cursor-help underline decoration-dotted'>{row.readiness}</span></td><td className='p-2'>{row.indicators.length ? <ul className='space-y-1'>{row.indicators.map((indicator: string) => <li key={`${row.available_date}-${row.host_location_name}-${indicator}`} title={INDICATOR_DEFINITIONS[indicator]} className='cursor-help underline decoration-dotted'>• {indicator}</li>)}</ul> : 'None'}</td>
+                    <td className='p-2'>Week {row.week}</td><td className='p-2'>{formatDateLabel(row.available_date)}</td><td className='p-2'>{resolveCommunityName(row.organization_id, row.organization_name)}</td><td className='p-2'>{row.host_location_name}</td><td className='p-2'>{row.smallFieldCount ?? row.small_field_count ?? row.small_field_capacity ?? 0}</td><td className='p-2'>{row.largeFieldCount ?? row.large_field_count ?? row.large_field_capacity ?? 0}</td><td className='p-2'>{supportedDivisionsLabel(row.smallFieldCount ?? row.small_field_count ?? row.small_field_capacity ?? 0, row.largeFieldCount ?? row.large_field_count ?? row.large_field_capacity ?? 0)}</td><td className='p-2'>{row.smallFieldSlots}</td><td className='p-2'>{row.largeFieldSlots}</td><td className='p-2'>{row.projectedGames}</td><td className='p-2'>{row.smallFieldUtilizationPct.toFixed(1)}%</td><td className='p-2'>{row.largeFieldUtilizationPct.toFixed(1)}%</td><td className='p-2'>{row.overallUtilizationPct.toFixed(1)}%</td><td className='p-2'>{row.firstStart === 99 ? '—' : displayHour(row.firstStart)}</td><td className='p-2'>{row.lastEnd === 0 ? '—' : displayHour(row.lastEnd)}</td><td className='p-2'><span title={READINESS_DEFINITIONS[row.readiness]} className={`cursor-help rounded px-2 py-1 text-xs font-medium ${row.readiness === 'READY' ? 'bg-emerald-100 text-emerald-800' : row.readiness === 'PARTIAL' ? 'bg-amber-100 text-amber-800' : 'bg-rose-100 text-rose-800'}`}>{row.readiness}</span></td><td className='p-2'>{row.indicators.length ? <ul className='space-y-1'>{row.indicators.map((indicator: string) => <li key={`${row.available_date}-${row.host_location_name}-${indicator}`} title={INDICATOR_DEFINITIONS[indicator]} className='cursor-help underline decoration-dotted'>• {indicator}</li>)}</ul> : 'None'}</td>
                   </tr>
                 ))}
               </tbody>
