@@ -39,7 +39,6 @@ const STATUS_BADGE: Record<string, string> = {
   Hosting: 'bg-emerald-100 text-emerald-800',
   Away: 'bg-slate-100 text-slate-700',
   Partial: 'bg-amber-100 text-amber-800',
-  Missing: 'bg-rose-100 text-rose-800',
 };
 
 const READINESS_DEFINITIONS: Record<string, string> = {
@@ -346,14 +345,11 @@ export default function HostingAvailabilityManager() {
       HOSTING_DATES.forEach((d) => {
         const w = weekForDate(d.date);
         const rows = summaryRows.filter((r: any) => r.organization_id === organizationId && r.available_date === d.date);
-        if (!rows.length) byWeek[w] = 'Missing';
+        if (!rows.length) byWeek[w] = 'Away';
         else if (rows.every((r: any) => r.readiness === 'READY')) byWeek[w] = 'Hosting';
         else byWeek[w] = 'Partial';
       });
-      if (Object.values(byWeek).every((v) => v === 'Missing')) {
-        HOSTING_DATES.forEach((d) => { byWeek[weekForDate(d.date)] = 'Away'; });
-      }
-      return { community: communityName, byWeek };
+            return { community: communityName, byWeek };
     });
   }, [hosts, summaryRows, organizationsById]);
 
@@ -441,7 +437,7 @@ export default function HostingAvailabilityManager() {
               <thead><tr className='border-b text-left'><th className='p-2'>Community</th>{HOSTING_DATES.map((d) => <th key={d.date} className='p-2'>W{weekForDate(d.date)}</th>)}</tr></thead>
               <tbody>
                 {weeklyMatrix.map((row: any) => (
-                  <tr key={row.community} className='border-b'><td className='p-2 font-medium'>{row.community}</td>{HOSTING_DATES.map((d) => { const status = row.byWeek[weekForDate(d.date)] || 'Missing'; return <td key={d.date} className='p-2'><span className={`rounded px-2 py-1 text-xs ${STATUS_BADGE[status]}`}>{status}</span></td>; })}</tr>
+                  <tr key={row.community} className='border-b'><td className='p-2 font-medium'>{row.community}</td>{HOSTING_DATES.map((d) => { const status = row.byWeek[weekForDate(d.date)] || 'Away'; return <td key={d.date} className='p-2'><span className={`rounded px-2 py-1 text-xs ${STATUS_BADGE[status]}`}>{status}</span></td>; })}</tr>
                 ))}
               </tbody>
             </table>
