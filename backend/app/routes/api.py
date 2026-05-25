@@ -2011,12 +2011,29 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'field_count': len({s.field_instance_id for s in host_slots}),
             'continuity': len({(s.slot_date, s.start_time) for s in host_slots}),
         })
+    host_capacity_by_id: dict[uuid.UUID, int] = {row['host_id']: int(row['slot_count']) for row in host_capacity}
     host_capacity.sort(key=lambda x: (x['slot_count'] >= games_required, x['slot_count'], x['field_count'], x['continuity']), reverse=True)
     host_ids_by_org: dict[uuid.UUID, set[uuid.UUID]] = {}
     for host_id in slots_by_host.keys():
         host_row = db.query(HostLocation.id, HostLocation.organization_id).filter(HostLocation.id == host_id).first()
         if host_row and host_row.organization_id:
             host_ids_by_org.setdefault(host_row.organization_id, set()).add(host_row.id)
+    existing_week_host_counts: dict[uuid.UUID, int] = {}
+    existing_week_host_divisions: dict[uuid.UUID, set[str]] = {}
+    for row in existing_non_unscheduled_games:
+        if not row.host_location_id:
+            continue
+        existing_week_host_counts[row.host_location_id] = existing_week_host_counts.get(row.host_location_id, 0) + 1
+        if row.name:
+            existing_week_host_divisions.setdefault(row.host_location_id, set()).add(row.name)
+    prior_active_hosts = sorted(
+        existing_week_host_counts.keys(),
+        key=lambda hid: (
+            existing_week_host_counts.get(hid, 0),
+            host_capacity_by_id.get(hid, 0),
+        ),
+        reverse=True,
+    )
     primary_host_id: uuid.UUID | None = host_capacity[0]['host_id'] if host_capacity else None
     single_site_possible = bool(host_capacity and host_capacity[0]['slot_count'] >= games_required)
     prefer_two_sites = games_required > single_site_game_limit and len(host_capacity) >= 2
@@ -2024,7 +2041,13 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     locked_host_mode = 'none'
     host_lock_reason = 'No compatible host locations found.'
     if host_capacity:
-        if prefer_two_sites:
+        reusable_prior_hosts = [hid for hid in prior_active_hosts if hid in slots_by_host]
+        reusable_prior_capacity = sum(len(slots_by_host.get(hid, [])) for hid in reusable_prior_hosts)
+        if reusable_prior_hosts and reusable_prior_capacity > 0:
+            locked_host_ids = set(reusable_prior_hosts[:2])
+            locked_host_mode = 'week_active_reuse'
+            host_lock_reason = 'reusing week/day active host sites from earlier divisions'
+        if prefer_two_sites and not locked_host_ids:
             best_two_host_combo: tuple[uuid.UUID, uuid.UUID] | None = None
             best_two_host_score = -1
             for i in range(len(host_capacity)):
@@ -2061,7 +2084,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             locked_host_ids = {primary_host_id}
             locked_host_mode = 'single'
             host_lock_reason = 'single host has enough compatible slots for required games'
-        else:
+        elif not locked_host_ids:
             best_two_host_combo: tuple[uuid.UUID, uuid.UUID] | None = None
             best_two_host_capacity = -1
             for i in range(len(host_capacity)):
@@ -2102,7 +2125,6 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         open_slots = [slot for slot in open_slots if slot.host_location_id in locked_host_ids]
         slots_by_host = {host_id: host_slots for host_id, host_slots in slots_by_host.items() if host_id in locked_host_ids}
     split_host_week = len(host_capacity) > 1
-    host_capacity_by_id: dict[uuid.UUID, int] = {row['host_id']: int(row['slot_count']) for row in host_capacity}
     projected_games_by_host: dict[uuid.UUID, int] = {}
     preferred_host_id: uuid.UUID | None = primary_host_id
     used_host_ids: set[uuid.UUID] = set()
@@ -2228,6 +2250,10 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                         reason_bits = []
                         warning_bits = []
                         candidate_host_id = slot.host_location_id
+                        active_host_has_compatible_capacity = bool(
+                            locked_host_ids
+                            and any(s.host_location_id in locked_host_ids for s in remaining_slots)
+                        )
                         if (
                             locked_host_ids
                             and candidate_host_id
@@ -2235,6 +2261,9 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                             and not admin_override_third_host
                         ):
                             continue
+                        if candidate_host_id and locked_host_ids and candidate_host_id not in locked_host_ids and active_host_has_compatible_capacity:
+                            score -= 400
+                            warning_bits.append('new host introduced while active host sites still have compatible capacity (-400)')
                         candidate_host = None
                         if candidate_host_id:
                             candidate_host = (
@@ -2393,9 +2422,15 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                         if single_site_possible and primary_host_id and candidate_host_id != primary_host_id and serialization_required:
                             score -= completion_weight
                             warning_bits.append(f'avoidable multi-site fragmentation (-{completion_weight})')
-                        if locked_host_mode == 'dual' and candidate_host_id in locked_host_ids:
+                        if locked_host_mode in {'dual', 'week_active_reuse'} and candidate_host_id in locked_host_ids:
                             score += 150
                             reason_bits.append('two-host locked scheduling (+150)')
+                        if candidate_host_id and candidate_host_id in locked_host_ids and len(locked_host_ids) > 0:
+                            score += 400
+                            reason_bits.append('continues previously selected active host sites (+400)')
+                        if candidate_host_id and candidate_host_id in locked_host_ids and len(existing_week_host_counts) > 0:
+                            score += 150
+                            reason_bits.append('host-site continuity preserved across divisions (+150)')
                         if prefer_two_sites and len(locked_host_ids) == 2 and candidate_host_id in locked_host_ids:
                             score += 250
                             reason_bits.append('large division/week prefers two selected host locations (+250)')
@@ -2617,6 +2652,13 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         for plan in plans
         if 'host rotation limit relaxed' in str(plan.get('reason', '')).lower()
     ]
+    week_host_site_usage = []
+    for host_id in locked_host_ids:
+        week_host_site_usage.append({
+            'host_location_id': str(host_id),
+            'remaining_compatible_slots': len([s for s in remaining_slots if s.host_location_id == host_id]),
+            'divisions_scheduled': sorted(existing_week_host_divisions.get(host_id, set()) | {division.name}),
+        })
     return {
         'proposals': plans,
         'skipped': skipped,
@@ -2641,6 +2683,10 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'rules_relaxed': len(host_limit_relaxation_reasons),
             'conflicts_avoided': len(skipped),
             'final_games_created': len(plans),
+            'week_host_site_usage': {
+                'active_host_sites': week_host_site_usage,
+                'overflow_sites': [],
+            },
         },
         'audit': {
             'total_games_per_team': per_team_games,
