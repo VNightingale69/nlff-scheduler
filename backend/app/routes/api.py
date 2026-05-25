@@ -2586,6 +2586,48 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         ranked.sort(key=lambda item: (item[0], item[1], _minutes_from_time(item[2].start_time)))
         return ranked[0][2] if ranked else None
 
+    def _find_best_compatible_slot(
+        requested_slot: GameSlot,
+        home_team_id: str,
+        away_team_id: str,
+    ) -> tuple[GameSlot | None, bool]:
+        open_slots = db.query(GameSlot).join(GameSlot.field_instance).filter(
+            GameSlot.slot_date == requested_slot.slot_date,
+            GameSlot.status == 'OPEN',
+            GameSlot.assigned_game_id.is_(None),
+            GameSlot.field_type == required_field_type,
+        ).all()
+        requested_minutes = _minutes_from_time(requested_slot.start_time)
+        ranked: list[tuple[int, int, int, GameSlot]] = []
+        for candidate_slot in open_slots:
+            if not candidate_slot.start_time or not candidate_slot.field_instance_id:
+                continue
+            if (str(home_team_id), candidate_slot.slot_date, candidate_slot.start_time) in team_time_occupied:
+                continue
+            if (str(away_team_id), candidate_slot.slot_date, candidate_slot.start_time) in team_time_occupied:
+                continue
+            candidate_field_time_key = (str(candidate_slot.field_instance_id), candidate_slot.slot_date, candidate_slot.start_time)
+            if candidate_field_time_key in field_time_occupied:
+                continue
+            if no_simultaneous_games_same_host and candidate_slot.host_location_id is not None:
+                candidate_host_time_key = (str(candidate_slot.host_location_id), candidate_slot.slot_date, candidate_slot.start_time)
+                if candidate_host_time_key in host_time_occupied:
+                    continue
+            if candidate_slot.host_location_id is None:
+                continue
+            if not _has_compatible_open_field_at_time(candidate_slot.host_location_id, candidate_slot.slot_date, candidate_slot.start_time):
+                continue
+            distance = abs(_minutes_from_time(candidate_slot.start_time) - requested_minutes)
+            adjacency_priority = 0 if distance == 60 else 1
+            is_later = 0 if _minutes_from_time(candidate_slot.start_time) >= requested_minutes else 1
+            ranked.append((adjacency_priority, is_later, distance, candidate_slot))
+        ranked.sort(key=lambda item: (item[0], item[1], item[2], _minutes_from_time(item[3].start_time)))
+        if not ranked:
+            return None, False
+        selected = ranked[0][3]
+        selected_is_non_adjacent = ranked[0][0] == 1
+        return selected, selected_is_non_adjacent
+
     def _fmt_duplicate_skip(home_team_id: str, away_team_id: str, slot: GameSlot | None) -> str:
         home_name = _team_name(home_team_id)
         away_name = _team_name(away_team_id)
@@ -2710,11 +2752,13 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         selected_slot_unavailable = slot.status != 'OPEN' or slot.assigned_game_id is not None
         if selected_slot_unavailable:
             if is_odd_division and no_byes:
-                adjacent_slot = _find_adjacent_double_header_slot(slot, str(home_team_id), str(away_team_id))
-                if adjacent_slot is None:
+                fallback_slot, non_adjacent = _find_best_compatible_slot(slot, str(home_team_id), str(away_team_id))
+                if fallback_slot is None:
                     _add_skipped('No compatible large field available for this division.' if required_field_type == 'LARGE' else 'not enough open matching slots')
                     continue
-                slot = adjacent_slot
+                slot = fallback_slot
+                if non_adjacent:
+                    _add_skipped('Double header scheduled non-back-to-back because no adjacent compatible slot was available.')
             else:
                 _add_skipped('No compatible large field available for this division.' if required_field_type == 'LARGE' else 'not enough open matching slots')
                 continue
@@ -2727,12 +2771,14 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
             continue
         if (str(home_team_id), slot.slot_date, slot.start_time) in team_time_occupied or (str(away_team_id), slot.slot_date, slot.start_time) in team_time_occupied:
             if is_odd_division and no_byes:
-                adjacent_slot = _find_adjacent_double_header_slot(slot, str(home_team_id), str(away_team_id))
-                if adjacent_slot is None:
+                fallback_slot, non_adjacent = _find_best_compatible_slot(slot, str(home_team_id), str(away_team_id))
+                if fallback_slot is None:
                     _add_skipped('Rejected: team already scheduled at the same exact time.')
                     continue
-                slot = adjacent_slot
+                slot = fallback_slot
                 field_time_key = (str(slot.field_instance_id), slot.slot_date, slot.start_time)
+                if non_adjacent:
+                    _add_skipped('Double header scheduled non-back-to-back because no adjacent compatible slot was available.')
             else:
                 _add_skipped('Rejected: team already scheduled at the same exact time.')
                 continue
@@ -2800,7 +2846,7 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
     if total_created_for_week >= required_games_for_division_week:
         skipped = []
     elif is_odd_division and no_byes:
-        _add_skipped('Unable to schedule required odd-team double header due to no compatible adjacent slot.')
+        _add_skipped('Unable to schedule required odd-team double header because no compatible slot was available after evaluating all options.')
     else:
         _add_skipped('Unable to schedule required games due to hard scheduling constraints.')
     unscheduled_teams = [
