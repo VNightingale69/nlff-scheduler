@@ -298,6 +298,41 @@ class AutoFillPreviewTest(unittest.TestCase):
             self.assertIsNotNone(host)
             self.assertIn(host.organization_id, {home_team.organization_id, away_team.organization_id})
 
+    def test_preview_locks_to_two_hosts_when_one_host_is_insufficient(self):
+        second_host = HostLocation(id=uuid.uuid4(), organization_id=self.org_a.id, name='Antioch Park', is_active=True)
+        third_host = HostLocation(id=uuid.uuid4(), organization_id=self.org_w.id, name='Wilmot Stadium', is_active=True)
+        self.db.add_all([second_host, third_host])
+        for hour in (10,):
+            fi = FieldInstance(id=uuid.uuid4(), host_location_id=second_host.id, hosting_availability_id=uuid.uuid4(), instance_date=self.week2.start_date, field_name=f'Antioch {hour}', field_type='SMALL', is_active=True)
+            slot = GameSlot(id=uuid.uuid4(), field_instance_id=fi.id, host_location_id=second_host.id, slot_date=self.week2.start_date, start_time=time(hour, 0), end_time=time(hour + 1, 0), field_type='SMALL', status='OPEN')
+            self.db.add_all([fi, slot])
+        for hour in (11,):
+            fi = FieldInstance(id=uuid.uuid4(), host_location_id=third_host.id, hosting_availability_id=uuid.uuid4(), instance_date=self.week2.start_date, field_name=f'Wilmot {hour}', field_type='SMALL', is_active=True)
+            slot = GameSlot(id=uuid.uuid4(), field_instance_id=fi.id, host_location_id=third_host.id, slot_date=self.week2.start_date, start_time=time(hour, 0), end_time=time(hour + 1, 0), field_type='SMALL', status='OPEN')
+            self.db.add_all([fi, slot])
+        self.db.commit()
+
+        result = auto_fill_preview({'season_id': self.season.id, 'week_id': self.week2.id, 'division_id': self.division.id}, db=self.db)
+        locked_hosts = set(result['audit']['locked_host_locations'])
+        proposal_hosts = {p['host_location_id'] for p in result['proposals']}
+        self.assertLessEqual(len(proposal_hosts), 2)
+        self.assertTrue(proposal_hosts.issubset(locked_hosts))
+
+    def test_preview_returns_error_when_more_than_two_hosts_would_be_required(self):
+        self.db.query(GameSlot).filter(GameSlot.id == self.slot.id).delete()
+        self.db.query(FieldInstance).filter(FieldInstance.id == self.fi.id).delete()
+        host_2 = HostLocation(id=uuid.uuid4(), organization_id=self.org_a.id, name='Host 2', is_active=True)
+        host_3 = HostLocation(id=uuid.uuid4(), organization_id=self.org_w.id, name='Host 3', is_active=True)
+        self.db.add_all([host_2, host_3])
+        for idx, host in enumerate((self.host, host_2, host_3), start=1):
+            fi = FieldInstance(id=uuid.uuid4(), host_location_id=host.id, hosting_availability_id=uuid.uuid4(), instance_date=self.week2.start_date, field_name=f'H{idx}', field_type='SMALL', is_active=True)
+            slot = GameSlot(id=uuid.uuid4(), field_instance_id=fi.id, host_location_id=host.id, slot_date=self.week2.start_date, start_time=time(9 + idx, 0), end_time=time(10 + idx, 0), field_type='SMALL', status='OPEN')
+            self.db.add_all([fi, slot])
+        self.db.commit()
+        result = auto_fill_preview({'season_id': self.season.id, 'week_id': self.week2.id, 'division_id': self.division.id}, db=self.db)
+        reasons = [row['reason'] for row in result['skipped']]
+        self.assertIn('More than 2 host locations required. Admin override needed.', reasons)
+
     def test_odd_division_accepts_required_double_header(self):
         odd_team = Team(id=uuid.uuid4(), organization_id=self.org_w.id, division_id=self.division.id, name='Westosha White', is_active=True)
         self.db.add(odd_team)
