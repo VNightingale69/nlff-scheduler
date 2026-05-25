@@ -1584,6 +1584,10 @@ def assign_generated_slot(payload: dict, db: Session = Depends(get_db)):
     if not status:
         logger.error('Manual assignment blocked: missing required SCHEDULED game status.')
         raise HTTPException(400, 'Game status setup is incomplete. Please contact an administrator.')
+    host_location = db.query(HostLocation).filter(HostLocation.id == slot.host_location_id).first() if slot.host_location_id else None
+    home_team, away_team, adjustment_reason = _enforce_host_owner_home_team(home_team, away_team, host_location)
+    if adjustment_reason:
+        logger.info(adjustment_reason)
     game = Game(
         season_id=season.id,
         week_id=week.id,
@@ -1597,7 +1601,7 @@ def assign_generated_slot(payload: dict, db: Session = Depends(get_db)):
     db.add(game); db.flush()
     slot.status = 'ASSIGNED'; slot.assigned_game_id = game.id
     db.commit(); db.refresh(game)
-    return {'game': _to_game_read(game), 'generated_slot_id': slot.id, 'status': 'SCHEDULED'}
+    return {'game': _to_game_read(game), 'generated_slot_id': slot.id, 'status': 'SCHEDULED', 'adjustment_reason': adjustment_reason}
 
 
 @router.delete('/manual-schedule-builder/scheduled-games', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
@@ -2277,12 +2281,16 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             best['reason_bits'].append('Selected because no better alternative remained')
         home_team = teams_by_id[best['home_team_id']]
         away_team = teams_by_id[best['away_team_id']]
+        host_location = selected_field_slot.host_location if selected_field_slot else None
+        home_team, away_team, adjustment_reason = _enforce_host_owner_home_team(home_team, away_team, host_location)
         baseline_reason = 'single game per team per selected week'
         if is_odd_division and no_byes:
             baseline_reason = 'maximize one game per team first; allow one required double header for odd team count'
         reason_bits = [baseline_reason, *best['reason_bits'], *best['warning_bits']]
         if is_odd_division and no_byes and selected_double_header_team_id and selected_double_header_team_id in {best['home_team_id'], best['away_team_id']}:
             reason_bits.insert(0, 'Accepted as required double header due to odd team count')
+        if adjustment_reason:
+            reason_bits.append(adjustment_reason)
         plans.append({
             'slot_id': str(selected_field_slot.id),
             'proposed_matchup': f'{home_team.name} vs {away_team.name}',
@@ -2817,6 +2825,15 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
                 'because one team already has a game this week.'
             )
             continue
+        home_team_row = teams_by_id.get(str(home_team_id))
+        away_team_row = teams_by_id.get(str(away_team_id))
+        host_location = slot.host_location
+        adj_home, adj_away, adjustment_reason = _enforce_host_owner_home_team(home_team_row, away_team_row, host_location)
+        if adj_home and adj_away:
+            home_team_id = str(adj_home.id)
+            away_team_id = str(adj_away.id)
+            if adjustment_reason:
+                logger.info(adjustment_reason)
         game = Game(
             season_id=season_id,
             week_id=week_id,
@@ -3041,6 +3058,24 @@ def _required_field_type_for_division(division: Division | None) -> str:
     layout_type = (division.required_field_layout_type or '').strip().upper()
     large_layout_tokens = ('FIFTY_THREE', '53', 'LARGE', 'FULL')
     return 'LARGE' if any(token in layout_type for token in large_layout_tokens) else 'SMALL'
+
+
+def _enforce_host_owner_home_team(
+    home_team: Team | None,
+    away_team: Team | None,
+    host_location: HostLocation | None,
+) -> tuple[Team | None, Team | None, str | None]:
+    if not home_team or not away_team or not host_location or not host_location.organization_id:
+        return home_team, away_team, None
+    host_org_id = host_location.organization_id
+    home_matches = home_team.organization_id == host_org_id
+    away_matches = away_team.organization_id == host_org_id
+    if home_matches == away_matches:
+        return home_team, away_team, None
+    if away_matches and not home_matches:
+        reason = f'Home/away adjusted because {away_team.organization.name if away_team.organization else "host community"} owns {host_location.name}.'
+        return away_team, home_team, reason
+    return home_team, away_team, None
 
 
 def _schedule_management_rows(db: Session, filters: dict | None = None):
@@ -3273,6 +3308,15 @@ def move_game_schedule(game_id: uuid.UUID, payload: dict, db: Session = Depends(
     if not new_slot or new_slot.status != 'OPEN': raise HTTPException(400, 'Selected slot must be OPEN')
     division = db.query(Division).join(Team, Team.division_id == Division.id).filter(Team.id == game.home_team_id).first()
     if new_slot.field_type != _required_field_type_for_division(division): raise HTTPException(400, 'Selected slot field type must match division requirement')
+    home_team = db.query(Team).filter(Team.id == game.home_team_id).first()
+    away_team = db.query(Team).filter(Team.id == game.away_team_id).first()
+    host_location = db.query(HostLocation).filter(HostLocation.id == new_slot.host_location_id).first() if new_slot.host_location_id else None
+    adj_home, adj_away, adjustment_reason = _enforce_host_owner_home_team(home_team, away_team, host_location)
+    if adj_home and adj_away:
+        game.home_team_id = adj_home.id
+        game.away_team_id = adj_away.id
+        if adjustment_reason:
+            logger.info(adjustment_reason)
     old_slot = db.query(GameSlot).filter(GameSlot.assigned_game_id == game.id).first()
     if old_slot: old_slot.status = 'OPEN'; old_slot.assigned_game_id = None
     new_slot.status = 'ASSIGNED'; new_slot.assigned_game_id = game.id
