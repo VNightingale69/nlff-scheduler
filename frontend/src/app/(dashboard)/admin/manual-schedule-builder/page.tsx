@@ -29,6 +29,9 @@ export default function ManualScheduleBuilderPage() {
   const [autoFillLoading, setAutoFillLoading] = useState(false);
   const [editGame, setEditGame] = useState<any | null>(null);
   const [moveGame, setMoveGame] = useState<any | null>(null);
+  const [showClearScheduleModal, setShowClearScheduleModal] = useState(false);
+  const [clearScheduleInput, setClearScheduleInput] = useState('');
+  const [clearScheduleLoading, setClearScheduleLoading] = useState(false);
 
   const division = useMemo(() => options.divisions.find((d: any) => d.id === divisionId), [options, divisionId]);
   const divisionTeams = useMemo(() => options.teams.filter((t: any) => t.division_id === divisionId && t.is_active), [options, divisionId]);
@@ -183,6 +186,22 @@ export default function ManualScheduleBuilderPage() {
           </ul>
         </div> : null}
       </div>
+      <div className='rounded border border-red-200 bg-red-50 p-3'>
+        <h2 className='text-lg font-semibold text-red-800'>Administrative Management</h2>
+        <p className='mt-1 text-sm text-red-700'>Use this only when you need to reset generated schedules for the selected season.</p>
+        <button
+          className='mt-3 rounded border border-red-600 bg-red-600 px-3 py-2 text-white disabled:cursor-not-allowed disabled:bg-slate-300 disabled:border-slate-300'
+          disabled={!seasonId}
+          onClick={() => {
+            setError('');
+            setSuccess('');
+            setClearScheduleInput('');
+            setShowClearScheduleModal(true);
+          }}
+        >
+          Clear All Scheduled Games
+        </button>
+      </div>
 
       <div className='rounded border p-3'>
         <h2 className='mb-2 text-lg font-semibold'>Suggested Matchups</h2>
@@ -290,6 +309,59 @@ export default function ManualScheduleBuilderPage() {
             catch (e: unknown) { setError(extractError(e)); }
           }}>Save Move</button>
           <button className='rounded border px-3 py-2' onClick={() => { setMoveGame(null); setSlotId(''); }}>Cancel</button>
+        </div>
+      </div> : null}
+      {showClearScheduleModal ? <div className='fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4'>
+        <div className='w-full max-w-xl rounded-lg bg-white p-4 shadow-xl'>
+          <h3 className='text-lg font-semibold text-red-700'>Confirm Clear Scheduled Games</h3>
+          <p className='mt-2 text-sm text-slate-700'>
+            This will permanently remove all scheduled games for the selected season. This action cannot be undone.
+          </p>
+          <p className='mt-3 text-sm font-medium'>Type <span className='font-bold'>CLEAR SCHEDULE</span> to continue.</p>
+          <input
+            className='mt-2 w-full rounded border p-2'
+            value={clearScheduleInput}
+            onChange={(e) => setClearScheduleInput(e.target.value)}
+            placeholder='CLEAR SCHEDULE'
+          />
+          <div className='mt-4 flex justify-end gap-2'>
+            <button
+              className='rounded border px-3 py-2'
+              disabled={clearScheduleLoading}
+              onClick={() => {
+                setShowClearScheduleModal(false);
+                setClearScheduleInput('');
+              }}
+            >
+              Cancel
+            </button>
+            <button
+              className='rounded border border-red-600 bg-red-600 px-3 py-2 text-white disabled:cursor-not-allowed disabled:border-slate-300 disabled:bg-slate-300'
+              disabled={clearScheduleLoading || clearScheduleInput !== 'CLEAR SCHEDULE'}
+              onClick={async () => {
+                if (!seasonId) return;
+                setError('');
+                setSuccess('');
+                setClearScheduleLoading(true);
+                try {
+                  await apiFetch(`/manual-schedule-builder/scheduled-games?season_id=${seasonId}`, { method: 'DELETE' }, token);
+                  setShowClearScheduleModal(false);
+                  setClearScheduleInput('');
+                  await load();
+                  await loadRecommendations();
+                  setAutoFillPreview([]);
+                  setAutoFillSkipped([]);
+                  setSuccess('All scheduled games have been cleared.');
+                } catch (e: unknown) {
+                  setError(extractError(e));
+                } finally {
+                  setClearScheduleLoading(false);
+                }
+              }}
+            >
+              {clearScheduleLoading ? 'Clearing...' : 'Confirm Clear Schedule'}
+            </button>
+          </div>
         </div>
       </div> : null}
     </div>
