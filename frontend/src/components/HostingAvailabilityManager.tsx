@@ -41,18 +41,30 @@ const STATUS_BADGE: Record<string, string> = {
   Partial: 'bg-amber-100 text-amber-800',
 };
 
+const WEEKLY_CAPACITY_REQUIREMENTS: Record<number, { projectedSmallGames: number; projectedLargeGames: number; projectedTotalSlots: number }> = {
+  1: { projectedSmallGames: 12, projectedLargeGames: 9, projectedTotalSlots: 40 },
+  2: { projectedSmallGames: 12, projectedLargeGames: 9, projectedTotalSlots: 40 },
+  3: { projectedSmallGames: 12, projectedLargeGames: 9, projectedTotalSlots: 40 },
+  4: { projectedSmallGames: 12, projectedLargeGames: 9, projectedTotalSlots: 40 },
+  5: { projectedSmallGames: 12, projectedLargeGames: 9, projectedTotalSlots: 40 },
+  6: { projectedSmallGames: 12, projectedLargeGames: 9, projectedTotalSlots: 40 },
+  7: { projectedSmallGames: 8, projectedLargeGames: 6, projectedTotalSlots: 28 },
+  8: { projectedSmallGames: 6, projectedLargeGames: 4, projectedTotalSlots: 20 },
+};
+
 const READINESS_DEFINITIONS: Record<string, string> = {
-  READY: 'Hosting community assigned, fields configured, slots generated, no blocking conflicts, and scheduler-ready.',
-  PARTIAL: 'Some hosting data exists, but setup is incomplete and scheduling may fail for some divisions.',
-  'NOT READY': 'Insufficient data to schedule games.',
+  READY: 'Hosting community assigned, host location assigned, fields configured, slots generated, no slot overlaps, required field sizes present, and projected games supported.',
+  PARTIAL: 'Some hosting setup exists, but one or more validation checks still block full scheduling capacity.',
+  'NOT READY': 'Core hosting setup is missing (community, site, fields, or generated slots).',
 };
 
 const INDICATOR_DEFINITIONS: Record<string, string> = {
   'incomplete hosting setup': 'Core setup exists, but at least one required part (community, field setup, or slots) is missing or incomplete.',
+  'host location missing': 'No host location is attached to this availability row.',
   'field inventory mismatch': 'Fields are configured but could not be resolved into schedulable small/large inventory for this host location.',
-  'no large field available': 'No large-field capacity is configured for this host week.',
-  'insufficient small fields': 'Small-field capacity is below the expected minimum for reliable scheduling.',
-  'insufficient total slots': 'Total playable slot hours are below the minimum needed for expected games.',
+  'no large field available': 'At least one large field is required for this week based on scheduled divisions.',
+  'no small field available': 'At least one small field is required for this week based on scheduled divisions.',
+  'insufficient total slots': 'Total playable slot hours are below the projected requirement for this week.',
   'overlapping slot conflicts': 'Two or more slot ranges overlap and create conflicting start times.',
   'host assignment missing': 'No valid hosting community assignment is attached to this availability row.',
   'scheduling window too short': 'The playable window is too short for a full game-day schedule.',
@@ -268,17 +280,22 @@ export default function HostingAvailabilityManager() {
       const lastEnd = ends.length ? Math.max(...ends) : 0;
       const indicators: string[] = [];
       const totalSlotHours = (entry.time_ranges || []).reduce((n: number, r: any) => n + (Number(r.end_time.slice(0, 2)) - Number(r.start_time.slice(0, 2))), 0);
+      const requirements = WEEKLY_CAPACITY_REQUIREMENTS[week] || { projectedSmallGames: 0, projectedLargeGames: 0, projectedTotalSlots: 0 };
+      const needsSmallField = requirements.projectedSmallGames > 0;
+      const needsLargeField = requirements.projectedLargeGames > 0;
       const hasHostAssignment = Boolean(entry.organization_id || (String(entry.organization_name || '').trim() && !UUID_PATTERN.test(String(entry.organization_name || '').trim())));
+      const hasHostLocation = Boolean(String(entry.host_location_name || '').trim());
       const hasSlots = (entry.time_ranges || []).length > 0;
       const hasFieldConfig = smallFieldCount + largeFieldCount > 0;
 
       if (!hasHostAssignment) indicators.push('host assignment missing');
+      if (!hasHostLocation) indicators.push('host location missing');
       if (!hasFieldConfig || !hasSlots) indicators.push('incomplete hosting setup');
       const hasInventoryMismatch = Boolean(entry.has_field_inventory_mismatch);
       if (hasInventoryMismatch) indicators.push('field inventory mismatch');
-      if (!hasInventoryMismatch && largeFieldCount < 1) indicators.push('no large field available');
-      if (!hasInventoryMismatch && smallFieldCount < 2) indicators.push('insufficient small fields');
-      if (totalSlotHours < 4) indicators.push('insufficient total slots');
+      if (!hasInventoryMismatch && needsLargeField && largeFieldCount < 1) indicators.push('no large field available');
+      if (!hasInventoryMismatch && needsSmallField && smallFieldCount < 1) indicators.push('no small field available');
+      if (totalSlotHours < requirements.projectedTotalSlots) indicators.push('insufficient total slots');
       if (lastEnd > 0 && lastEnd < 14) indicators.push('scheduling window too short');
       const hasOverlap = (entry.time_ranges || []).some((r: any, i: number, arr: any[]) => {
         const start = Number(r.start_time.slice(0, 2));
@@ -286,7 +303,7 @@ export default function HostingAvailabilityManager() {
       });
       if (hasOverlap) indicators.push('overlapping slot conflicts');
 
-      const readiness = !hasHostAssignment || !hasFieldConfig || !hasSlots
+      const readiness = !hasHostAssignment || !hasHostLocation || !hasFieldConfig || !hasSlots
         ? 'NOT READY'
         : indicators.length
           ? 'PARTIAL'
