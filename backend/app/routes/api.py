@@ -2560,6 +2560,83 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         detail = '; '.join([f"field_instance_id={field_id}, date={slot_date}, time={slot_time}" for field_id, slot_date, slot_time in conflicting_preview_keys])
         raise HTTPException(status_code=400, detail=f"Invalid preview batch: duplicate date/time/field assignments detected ({detail}).")
 
+    def _slot_gap_minutes(slot_a: GameSlot | None, slot_b: GameSlot | None) -> int:
+        if not slot_a or not slot_b or not slot_a.start_time or not slot_b.start_time:
+            return 9999
+        return abs(_minutes_from_time(slot_a.start_time) - _minutes_from_time(slot_b.start_time))
+
+    def _is_same_site_day(slot_a: GameSlot | None, slot_b: GameSlot | None) -> bool:
+        if not slot_a or not slot_b:
+            return False
+        return slot_a.host_location_id == slot_b.host_location_id and slot_a.slot_date == slot_b.slot_date
+
+    def _proposal_team_ids(row: dict) -> set[str]:
+        return {str(row.get('home_team_id')), str(row.get('away_team_id'))}
+
+    def _proposal_has_time_conflict(row: dict, slot_obj: GameSlot) -> bool:
+        home_id = str(row.get('home_team_id'))
+        away_id = str(row.get('away_team_id'))
+        if (home_id, slot_obj.slot_date, slot_obj.start_time) in team_time_occupied:
+            return True
+        if (away_id, slot_obj.slot_date, slot_obj.start_time) in team_time_occupied:
+            return True
+        return False
+
+    proposal_slots: dict[int, GameSlot] = {}
+    for idx, proposal in enumerate(proposals):
+        slot_id = proposal.get('slot_id')
+        if not slot_id:
+            continue
+        slot_obj = db.query(GameSlot).join(GameSlot.field_instance).filter(GameSlot.id == slot_id).first()
+        if slot_obj:
+            proposal_slots[idx] = slot_obj
+
+    # Local reshuffle pass: allow in-day/site swaps to improve required double-header adjacency.
+    team_to_indices: dict[str, list[int]] = {}
+    for idx, proposal in enumerate(proposals):
+        for tid in _proposal_team_ids(proposal):
+            if tid and tid != 'None':
+                team_to_indices.setdefault(tid, []).append(idx)
+    double_header_teams = [tid for tid, idxs in team_to_indices.items() if len(idxs) == 2]
+    for team_id in double_header_teams:
+        idx_a, idx_b = team_to_indices[team_id]
+        slot_a = proposal_slots.get(idx_a)
+        slot_b = proposal_slots.get(idx_b)
+        if not _is_same_site_day(slot_a, slot_b):
+            continue
+        if _slot_gap_minutes(slot_a, slot_b) <= 60:
+            continue
+        improved = False
+        for candidate_idx, candidate in enumerate(proposals):
+            if candidate_idx in {idx_a, idx_b}:
+                continue
+            candidate_slot = proposal_slots.get(candidate_idx)
+            if not _is_same_site_day(slot_a, candidate_slot):
+                continue
+            if candidate_slot is None or candidate_slot.field_type != required_field_type:
+                continue
+            if slot_b is None or slot_b.field_type != required_field_type:
+                continue
+            # Prefer moving non-double-header games instead of splitting a double-header.
+            candidate_team_ids = _proposal_team_ids(candidate)
+            if any(len(team_to_indices.get(tid, [])) == 2 for tid in candidate_team_ids if tid and tid != 'None'):
+                continue
+            if _proposal_has_time_conflict(proposals[idx_b], candidate_slot):
+                continue
+            if _proposal_has_time_conflict(candidate, slot_b):
+                continue
+            before_gap = _slot_gap_minutes(slot_a, slot_b)
+            after_gap = _slot_gap_minutes(slot_a, candidate_slot)
+            if after_gap >= before_gap:
+                continue
+            proposals[idx_b]['slot_id'], proposals[candidate_idx]['slot_id'] = proposals[candidate_idx]['slot_id'], proposals[idx_b]['slot_id']
+            proposal_slots[idx_b], proposal_slots[candidate_idx] = candidate_slot, slot_b
+            improved = True
+            if after_gap <= 60:
+                break
+        if improved:
+            continue
+
     for proposal in proposals:
         if existing_games_count + created_games >= max_games_for_division_week:
             _add_skipped('weekly game limit reached for selected division/week')
