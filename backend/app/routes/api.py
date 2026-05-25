@@ -1683,6 +1683,14 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     centralization_requested = bool(payload.get('centralized_scheduling_requested', False))
     staffing_limited = bool(payload.get('staffing_limited', False))
     no_simultaneous_games_same_host = bool(payload.get('no_simultaneous_games_same_host', False))
+
+    def _log_query_on_error(query, label: str, exc: Exception) -> None:
+        try:
+            compiled = str(query.statement.compile(compile_kwargs={'literal_binds': True}))
+        except Exception:
+            compiled = '<query compile unavailable>'
+        logger.exception('auto_fill_preview query failure label=%s error=%s sql=%s', label, exc, compiled)
+
     season_id = payload.get('season_id')
     week_id = payload.get('week_id')
     division_id = payload.get('division_id')
@@ -1737,14 +1745,19 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     team_count = len(teams)
     is_odd_division = team_count % 2 == 1
     required_games_for_division_week = (team_count + 1) // 2 if (is_odd_division and no_byes) else team_count // 2
-    existing_division_games = db.query(Game).join(Game.home_team).join(Game.status).filter(
+    existing_division_games_query = db.query(Game).select_from(Game).join(Team, Game.home_team_id == Team.id).join(GameStatus, Game.status_id == GameStatus.id).filter(
         Game.season_id == season_id,
         Game.week_id == week_id,
         Team.division_id == division_id,
         Team.is_active.is_(True),
         GameStatus.code == 'SCHEDULED',
         GameStatus.is_active.is_(True),
-    ).all()
+    )
+    try:
+        existing_division_games = existing_division_games_query.all()
+    except Exception as exc:
+        _log_query_on_error(existing_division_games_query, 'existing_division_games', exc)
+        raise
     used_team_ids: set[uuid.UUID] = set()
     week_team_game_counts: dict[uuid.UUID, int] = {tid: 0 for tid in teams_by_id}
     used_pairs: set[tuple[uuid.UUID, uuid.UUID]] = set()
@@ -1773,7 +1786,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         for team in (game.home_team, game.away_team):
             if team and team.organization_id:
                 community_assigned_hosts.setdefault(team.organization_id, set()).add(game_slot.host_location_id)
-    existing_non_unscheduled_games = db.query(
+    existing_non_unscheduled_games_query = db.query(
         Game.home_team_id,
         Game.away_team_id,
         Game.game_date,
@@ -1781,13 +1794,18 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         GameSlot.host_location_id,
         GameSlot.field_instance_id,
         Division.name,
-    ).join(Game.status).join(Game.home_team).join(Team.division).outerjoin(
+    ).select_from(Game).join(GameStatus, Game.status_id == GameStatus.id).join(Team, Game.home_team_id == Team.id).join(Division, Team.division_id == Division.id).outerjoin(
         GameSlot, GameSlot.assigned_game_id == Game.id
     ).filter(
         Game.game_date == week.start_date,
         GameStatus.code != 'UNSCHEDULED',
         GameStatus.is_active.is_(True),
-    ).all()
+    )
+    try:
+        existing_non_unscheduled_games = existing_non_unscheduled_games_query.all()
+    except Exception as exc:
+        _log_query_on_error(existing_non_unscheduled_games_query, 'existing_non_unscheduled_games', exc)
+        raise
     team_time_occupied = {
         (str(team_id), game_date, kickoff_time)
         for row in existing_non_unscheduled_games
@@ -1830,7 +1848,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         or payload.get('is_tournament_week')
         or payload.get('is_championship_week')
     )
-    season_division_games = db.query(Game).join(Game.home_team).join(Game.status).filter(
+    season_division_games = db.query(Game).select_from(Game).join(Team, Game.home_team_id == Team.id).join(GameStatus, Game.status_id == GameStatus.id).filter(
         Game.season_id == season_id,
         Team.division_id == division_id,
         Team.is_active.is_(True),
@@ -1888,18 +1906,23 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     regular_season_host_occurrences_by_community: dict[uuid.UUID, set[tuple[uuid.UUID, date]]] = {}
     regular_season_host_occurrences_by_location: dict[uuid.UUID, set[date]] = {}
     if not postseason_week:
-        season_scheduled_rows = db.query(
+        season_scheduled_rows_query = db.query(
             Week.week_number,
             GameSlot.slot_date,
             GameSlot.host_location_id,
             HostLocation.organization_id,
-        ).join(GameSlot, GameSlot.assigned_game_id == Game.id).join(Week, Week.id == Game.week_id).join(
+        ).select_from(Game).join(GameSlot, GameSlot.assigned_game_id == Game.id).join(Week, Week.id == Game.week_id).join(
             HostLocation, HostLocation.id == GameSlot.host_location_id
-        ).join(Game.status).filter(
+        ).join(GameStatus, Game.status_id == GameStatus.id).filter(
             Game.season_id == season_id,
             GameStatus.code == 'SCHEDULED',
             GameStatus.is_active.is_(True),
-        ).all()
+        )
+        try:
+            season_scheduled_rows = season_scheduled_rows_query.all()
+        except Exception as exc:
+            _log_query_on_error(season_scheduled_rows_query, 'season_scheduled_rows', exc)
+            raise
         for week_number, slot_date, host_location_id, host_org_id in season_scheduled_rows:
             if week_number > 99:
                 continue
@@ -2006,7 +2029,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         GameSlot.slot_date,
         GameSlot.field_instance_id,
         func.count(GameSlot.id),
-    ).join(Game, Game.id == GameSlot.assigned_game_id).join(Game.home_team).filter(
+    ).join(Game, Game.id == GameSlot.assigned_game_id).join(Team, Game.home_team_id == Team.id).filter(
         Team.division_id == division_id,
         Team.is_active.is_(True),
         GameSlot.field_type == required_field_type,
@@ -2592,7 +2615,7 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
     no_byes = bool(payload.get('no_byes', True))
     is_odd_division = len(teams) % 2 == 1
     required_games_for_division_week = (len(teams) + 1) // 2 if (is_odd_division and no_byes) else len(teams) // 2
-    existing_division_games = db.query(Game).join(Game.home_team).join(Game.status).filter(
+    existing_division_games = db.query(Game).select_from(Game).join(Team, Game.home_team_id == Team.id).join(GameStatus, Game.status_id == GameStatus.id).filter(
         Game.season_id == season_id,
         Game.week_id == week_id,
         Team.division_id == division_id,
@@ -2633,7 +2656,7 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         GameSlot.host_location_id,
         GameSlot.field_instance_id,
         Division.name,
-    ).join(Game.status).join(Game.home_team).join(Team.division).outerjoin(
+    ).select_from(Game).join(GameStatus, Game.status_id == GameStatus.id).join(Team, Game.home_team_id == Team.id).join(Division, Team.division_id == Division.id).outerjoin(
         GameSlot, GameSlot.assigned_game_id == Game.id
     ).filter(
         Game.game_date == db.query(Week.start_date).filter(Week.id == week_id).scalar_subquery(),
