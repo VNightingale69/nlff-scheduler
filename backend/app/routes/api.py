@@ -2141,10 +2141,15 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                         reason_bits = []
                         warning_bits = []
                         candidate_host_id = slot.host_location_id
-                        candidate_host = slot.host_location if candidate_host_id else None
+                        candidate_host = None
+                        if candidate_host_id:
+                            candidate_host = (
+                                db.query(HostLocation)
+                                .filter(HostLocation.id == candidate_host_id)
+                                .first()
+                            )
                         if candidate_host_id and not candidate_host:
-                            logger.warning(f"Missing host location for slot {slot.id}; skipping candidate during auto-fill preview")
-                            continue
+                            logger.warning(f"HostLocation not found for id {candidate_host_id}")
                         if repeat_count == 0:
                             score += 120
                             reason_bits.append('new opponent pairing (+120)')
@@ -2181,8 +2186,15 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                         if host_pref:
                             score += 40
                             reason_bits.append('reduced travel via host alignment (+40)')
-                        if candidate_host_id and not postseason_week:
-                            candidate_host_org_id = candidate_host.organization_id if candidate_host else None
+                        candidate_host_org_id = (
+                            candidate_host.organization_id
+                            if candidate_host else None
+                        )
+                        logger.debug(
+                            f"candidate_host_id={candidate_host_id}, "
+                            f"candidate_host_org_id={candidate_host_org_id}"
+                        )
+                        if candidate_host_id and candidate_host_org_id and not postseason_week:
                             location_host_count = len(regular_season_host_occurrences_by_location.get(candidate_host_id, set()))
                             community_host_count = len(regular_season_host_occurrences_by_community.get(candidate_host_org_id, set())) if candidate_host_org_id else 0
                             min_location_host_count = min((len(v) for v in regular_season_host_occurrences_by_location.values()), default=0)
