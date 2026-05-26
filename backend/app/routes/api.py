@@ -2584,6 +2584,9 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                         unique_opponents_exhausted_for_pair = len(teams_with_unused_unique_opponents) == 0
                         if repeat_count > 0 and not unique_opponents_exhausted_for_pair:
                             continue
+                        if repeat_count >= 2 and not same_community_operationally_reasonable:
+                            # Avoid third meetings unless the division's opponent graph makes repeats unavoidable.
+                            continue
 
                         if repeat_count == 0:
                             score += 180
@@ -2628,7 +2631,6 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                             home_host_ids = host_ids_by_org.get(team_a.organization_id, set())
                             same_community_home_slot_available = any(
                                 s.host_location_id in home_host_ids
-                                and s.slot_date == slot.slot_date
                                 and _first_compatible_open_slot_by_field_order(
                                     s.host_location_id, s.slot_date, s.start_time
                                 ) is not None
@@ -2658,7 +2660,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                                     and s.start_time == slot.start_time
                                 ]
                                 if not home_slots_same_time:
-                                    same_community_home_unavailable_reason = 'no compatible home-host slot exists on this date'
+                                    same_community_home_unavailable_reason = 'no compatible home-host slot exists for this kickoff window'
                                 else:
                                     blocked_reasons = []
                                     for hs in home_slots_same_time:
@@ -3225,6 +3227,22 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                 'week_end_date': str(week.end_date) if week.end_date else None,
                 'week_open_slot_dates': sorted({str(s.slot_date) for s in sorted_slots if s.slot_date}),
                 'is_week_start_date_active': any(s.slot_date == week.start_date for s in sorted_slots),
+                'contains_sept_13_slot_date': any(str(s.slot_date).endswith('-09-13') for s in sorted_slots if s.slot_date),
+                'week_range_includes_sept_13': bool(
+                    week.start_date
+                    and week.end_date
+                    and week.start_date <= date(week.start_date.year, 9, 13) <= week.end_date
+                ),
+                'sept_13_exclusion_reason': (
+                    'Week range includes September 13 but no compatible open slots exist on that date.'
+                    if (
+                        week.start_date
+                        and week.end_date
+                        and week.start_date <= date(week.start_date.year, 9, 13) <= week.end_date
+                        and not any(str(s.slot_date).endswith('-09-13') for s in sorted_slots if s.slot_date)
+                    )
+                    else None
+                ),
             },
             'same_community_home_host_conflicts': same_community_home_host_conflicts,
             'same_community_not_home_site_details': same_community_not_home_site,
