@@ -423,6 +423,20 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
         org_name = o.name
 
         if not force:
+            deleted_hosting_availabilities = db.execute(text("""
+                DELETE FROM hosting_availabilities
+                WHERE field_configuration_option_id IN (
+                    SELECT fco.id
+                    FROM field_configuration_options fco
+                    JOIN physical_field_areas pfa
+                        ON fco.physical_field_area_id = pfa.id
+                    JOIN host_locations hl
+                        ON pfa.host_location_id = hl.id
+                    WHERE hl.organization_id = :org_id
+                )
+            """), {"org_id": str(org_id)}).rowcount or 0
+            logger.info(f"[ORG DELETE] hosting_availabilities deleted: {deleted_hosting_availabilities}")
+
             deleted_field_configuration_options = db.execute(text("""
                 DELETE FROM field_configuration_options
                 WHERE physical_field_area_id IN (
@@ -523,12 +537,18 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
             )
         """, 'generated_slots')
 
-        rowcounts['hosting_availability'] = _execute_step('delete_hosting_availability', org_name, """
-            DELETE FROM hosting_availability
-            WHERE host_location_id IN (
-              SELECT id FROM host_locations WHERE organization_id = :org_id
+        rowcounts['hosting_availabilities'] = _execute_step('delete_hosting_availabilities', org_name, """
+            DELETE FROM hosting_availabilities
+            WHERE field_configuration_option_id IN (
+                SELECT fco.id
+                FROM field_configuration_options fco
+                JOIN physical_field_areas pfa
+                    ON fco.physical_field_area_id = pfa.id
+                JOIN host_locations hl
+                    ON pfa.host_location_id = hl.id
+                WHERE hl.organization_id = :org_id
             )
-        """, 'hosting_availability')
+        """, 'hosting_availabilities')
 
         rowcounts['field_configuration_options'] = _execute_step('delete_field_configuration_options', org_name, """
             DELETE FROM field_configuration_options
