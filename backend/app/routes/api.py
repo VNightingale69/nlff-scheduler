@@ -1726,6 +1726,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     division_group_key = (division.division_group or '').strip().upper()
     division_name_key = (division.name or '').strip().upper()
     selected_division_key = f'{division_group_key}_{division_name_key}' if division_group_key and division_name_key else ''
+    full_division_label = f"{division.division_group} {division.name}".strip() if division.division_group else (division.name or '')
     supported_girls_division_keys = {
         'GIRLS_K/1ST',
         'GIRLS_2ND/3RD',
@@ -2638,7 +2639,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'warnings': best['warning_bits'],
             'rules_relaxed': [],
             'week': week.week_number,
-            'division': division.name,
+            'division': full_division_label,
         })
         if (
             selected_host_ids
@@ -2733,6 +2734,69 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'divisions_scheduled': sorted(existing_week_host_divisions.get(host_id, set()) | {division.name}),
         })
     selected_host_ids = extract_selected_host_ids(plans)
+    host_sites_used_per_date: dict[str, list[str]] = {}
+    for plan in plans:
+        plan_date = str(plan.get('proposed_date') or '')
+        host_id = str(plan.get('host_location_id') or '')
+        if not plan_date or not host_id:
+            continue
+        host_sites_used_per_date.setdefault(plan_date, [])
+        if host_id not in host_sites_used_per_date[plan_date]:
+            host_sites_used_per_date[plan_date].append(host_id)
+    uneven_game_count_teams = [row for row in per_team_games if row['games_in_week'] != required_games_per_team and not (is_odd_division and no_byes and row['games_in_week'] in {required_games_per_team, required_games_per_team - 1})]
+
+    pair_counts_with_proposals = dict(matchup_counts)
+    for plan in plans:
+        pair = tuple(sorted((uuid.UUID(plan['home_team_id']), uuid.UUID(plan['away_team_id']))))
+        pair_counts_with_proposals[pair] = pair_counts_with_proposals.get(pair, 0) + 1
+    repeat_matchup_pairs = [
+        {'home_team_id': str(pair[0]), 'away_team_id': str(pair[1]), 'count': count}
+        for pair, count in pair_counts_with_proposals.items() if count > 1
+    ]
+
+    plan_by_team: dict[uuid.UUID, list[dict]] = {}
+    for plan in plans:
+        for key in ('home_team_id', 'away_team_id'):
+            team_id = uuid.UUID(plan[key])
+            plan_by_team.setdefault(team_id, []).append(plan)
+    double_header_spacing_issues = []
+    for team_id, team_plans in plan_by_team.items():
+        if len(team_plans) < 2:
+            continue
+        sorted_plans = sorted(team_plans, key=lambda p: (p.get('proposed_date', ''), p.get('proposed_start_time', '')))
+        for idx in range(len(sorted_plans)-1):
+            cur = sorted_plans[idx]
+            nxt = sorted_plans[idx+1]
+            same_loc = cur.get('host_location_id') == nxt.get('host_location_id')
+            try:
+                cur_hour = int(str(cur.get('proposed_start_time')).split(':')[0])
+                nxt_hour = int(str(nxt.get('proposed_start_time')).split(':')[0])
+                back_to_back = (nxt_hour - cur_hour) == 1
+            except Exception:
+                back_to_back = False
+            if not (same_loc and back_to_back):
+                double_header_spacing_issues.append({'team_id': str(team_id), 'team_name': teams_by_id[team_id].name, 'first_slot_id': cur.get('slot_id'), 'second_slot_id': nxt.get('slot_id')})
+
+    same_community_not_home_site = []
+    for plan in plans:
+        home_team = teams_by_id.get(uuid.UUID(plan['home_team_id']))
+        away_team = teams_by_id.get(uuid.UUID(plan['away_team_id']))
+        host_id = plan.get('host_location_id')
+        if not home_team or not away_team or not home_team.organization_id or home_team.organization_id != away_team.organization_id:
+            continue
+        org_host_ids = {str(hid) for hid in host_ids_by_org.get(home_team.organization_id, set())}
+        if host_id and org_host_ids and host_id not in org_host_ids:
+            same_community_not_home_site.append(plan)
+
+    division_labels_used = sorted({str(p.get('division') or '') for p in plans if p.get('division')})
+    compliance_flags = {
+        'host_site_limit_violations': [d for d, hosts in host_sites_used_per_date.items() if len(hosts) > regular_season_host_limit and not admin_override_third_host],
+        'division_label_mixing_detected': any('/' in label and ('COED' not in label.upper() and 'GIRLS' not in label.upper()) for label in division_labels_used),
+        'double_header_spacing_location_issues': len(double_header_spacing_issues),
+        'repeat_matchups_before_exhaustion': len(repeat_matchup_pairs),
+        'uneven_game_counts': len(uneven_game_count_teams),
+        'same_community_not_at_home_site': len(same_community_not_home_site),
+    }
     logger.info(
         f'Selected host sites for scheduling: {selected_host_ids}'
     )
@@ -2831,6 +2895,22 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'rules_relaxed': [],
             'host_limit_relaxation_reasons': host_limit_relaxation_reasons,
             'unresolved_conflicts': [],
+            'compliance_report': {
+                'host_sites_used_per_date': host_sites_used_per_date,
+                'teams_with_uneven_game_counts': uneven_game_count_teams,
+                'repeat_matchups': repeat_matchup_pairs,
+                'double_header_spacing_location_issues': double_header_spacing_issues,
+                'same_community_games_not_at_home_site': [
+                    {
+                        'slot_id': p.get('slot_id'),
+                        'matchup': p.get('proposed_matchup'),
+                        'host_location_id': p.get('host_location_id'),
+                    }
+                    for p in same_community_not_home_site
+                ],
+                'division_labels_used': division_labels_used,
+            },
+            'compliance_flags': compliance_flags,
         },
     }
 
