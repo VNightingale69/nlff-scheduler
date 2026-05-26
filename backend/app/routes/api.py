@@ -423,6 +423,22 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
         org_name = o.name
 
         if not force:
+            deleted_field_instances = db.execute(text("""
+                DELETE FROM field_instances
+                WHERE hosting_availability_id IN (
+                    SELECT ha.id
+                    FROM hosting_availabilities ha
+                    JOIN field_configuration_options fco
+                        ON ha.field_configuration_option_id = fco.id
+                    JOIN physical_field_areas pfa
+                        ON fco.physical_field_area_id = pfa.id
+                    JOIN host_locations hl
+                        ON pfa.host_location_id = hl.id
+                    WHERE hl.organization_id = :org_id
+                )
+            """), {"org_id": str(org_id)}).rowcount or 0
+            logger.info(f"[ORG DELETE] field_instances deleted: {deleted_field_instances}")
+
             deleted_hosting_availabilities = db.execute(text("""
                 DELETE FROM hosting_availabilities
                 WHERE field_configuration_option_id IN (
@@ -536,6 +552,21 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
               SELECT id FROM host_locations WHERE organization_id = :org_id
             )
         """, 'generated_slots')
+
+        rowcounts['field_instances'] = _execute_step('delete_field_instances', org_name, """
+            DELETE FROM field_instances
+            WHERE hosting_availability_id IN (
+                SELECT ha.id
+                FROM hosting_availabilities ha
+                JOIN field_configuration_options fco
+                    ON ha.field_configuration_option_id = fco.id
+                JOIN physical_field_areas pfa
+                    ON fco.physical_field_area_id = pfa.id
+                JOIN host_locations hl
+                    ON pfa.host_location_id = hl.id
+                WHERE hl.organization_id = :org_id
+            )
+        """, 'field_instances')
 
         rowcounts['hosting_availabilities'] = _execute_step('delete_hosting_availabilities', org_name, """
             DELETE FROM hosting_availabilities
