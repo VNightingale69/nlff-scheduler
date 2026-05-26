@@ -2223,6 +2223,9 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     preferred_host_id: uuid.UUID | None = primary_host_id
     used_host_ids: set[uuid.UUID] = set()
     selected_double_header_team_id: uuid.UUID | None = None
+    reserved_double_header_slot_ids: set[str] = set()
+    reserved_double_header_context: dict[str, object] = {}
+    double_header_reservation_failure_reasons: list[str] = []
     compatible_fields_by_host: dict[uuid.UUID, set[uuid.UUID]] = {}
     for slot in open_slots:
         if slot.host_location_id and slot.field_instance_id:
@@ -2280,6 +2283,36 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         candidates = [tid for tid, count in double_header_counts.items() if count == min_dh]
         candidates.sort(key=lambda tid: teams_by_id[tid].name)
         selected_double_header_team_id = candidates[0] if candidates else None
+        if selected_double_header_team_id:
+            site_day_slots: dict[tuple[uuid.UUID, object], list[GameSlot]] = {}
+            for s in sorted(remaining_slots, key=lambda x: (x.slot_date, x.start_time, str(x.host_location_id), str(x.id))):
+                if not s.host_location_id:
+                    continue
+                site_day_slots.setdefault((s.host_location_id, s.slot_date), []).append(s)
+            reservation_candidates: list[tuple[int, int, GameSlot, GameSlot, str]] = []
+            for _, slots in site_day_slots.items():
+                for i in range(len(slots)):
+                    for j in range(i + 1, len(slots)):
+                        a = slots[i]
+                        b = slots[j]
+                        gap = abs(_minutes_from_time(a.start_time) - _minutes_from_time(b.start_time))
+                        if gap == 60:
+                            reservation_candidates.append((0, gap, a, b, 'adjacent same-location slots'))
+                        elif gap == 120:
+                            reservation_candidates.append((2, gap, a, b, 'one-slot gap same-site'))
+            if not reservation_candidates:
+                double_header_reservation_failure_reasons.append('no valid adjacent pair exists across active host locations')
+            else:
+                reservation_candidates.sort(key=lambda row: (row[0], row[1], row[2].slot_date, row[2].start_time, str(row[2].host_location_id)))
+                chosen_priority, _, r1, r2, reservation_mode = reservation_candidates[0]
+                reserved_double_header_slot_ids = {str(r1.id), str(r2.id)}
+                reserved_double_header_context = {
+                    'team_id': str(selected_double_header_team_id),
+                    'team_name': teams_by_id[selected_double_header_team_id].name if selected_double_header_team_id in teams_by_id else None,
+                    'slot_ids': sorted(list(reserved_double_header_slot_ids)),
+                    'reservation_mode': reservation_mode,
+                    'reservation_relaxed': chosen_priority > 0,
+                }
     while remaining_slots and len(plans) < max_new_games:
         if is_odd_division and no_byes and selected_double_header_team_id:
             available_team_ids = [tid for tid in teams_by_id if week_team_game_counts.get(tid, 0) < 1]
@@ -2540,6 +2573,17 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                             reason_bits.append('light adjacent-field grouping preference (+10)')
                         if is_odd_division and no_byes and selected_double_header_team_id:
                             includes_dh = selected_double_header_team_id in {a, b}
+                            if reserved_double_header_slot_ids and week_team_game_counts.get(selected_double_header_team_id, 0) < 2:
+                                if str(selected_field_slot.id) in reserved_double_header_slot_ids:
+                                    if includes_dh:
+                                        score += 550
+                                        reason_bits.append('protected double-header reservation capacity (+550)')
+                                    else:
+                                        score -= 1200
+                                        warning_bits.append('reserved double-header capacity protected (-1200)')
+                                elif includes_dh:
+                                    score -= 350
+                                    warning_bits.append('double-header team steered to reserved adjacent capacity (-350)')
                             if week_team_game_counts.get(selected_double_header_team_id, 0) == 0 and not includes_dh:
                                 score -= 200
                             if includes_dh:
@@ -2837,6 +2881,13 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'double_header_team': teams_by_id[selected_double_header_team_id].name if selected_double_header_team_id else None,
         },
         'diagnostics': {
+            'odd_team_double_header_reservation': {
+                'selected_team_id': str(selected_double_header_team_id) if selected_double_header_team_id else None,
+                'selected_team_name': teams_by_id[selected_double_header_team_id].name if selected_double_header_team_id and selected_double_header_team_id in teams_by_id else None,
+                'reserved_slot_ids': sorted(list(reserved_double_header_slot_ids)),
+                'reservation_context': reserved_double_header_context,
+                'reservation_failure_reasons': double_header_reservation_failure_reasons,
+            },
             'weekly_host_planning_report': {
                 'selected_host_sites': selected_host_ids,
                 'overflow_sites_used': [],
