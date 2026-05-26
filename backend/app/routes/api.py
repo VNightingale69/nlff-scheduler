@@ -370,6 +370,7 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
         o = db.query(Organization).filter(Organization.id == org_id).first()
         if not o:
             raise HTTPException(404, 'Organization not found')
+        org_name = o.name
         if not force:
             db.delete(o)
             db.commit()
@@ -385,29 +386,38 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
         if blocked_game_count > 0:
             raise HTTPException(400, 'Cannot force delete organization with future published or completed games. Delete historical game data confirmation is required.')
 
-        host_location_ids = [host_id for (host_id,) in db.query(HostLocation.id).filter(HostLocation.organization_id == org_id).all()]
-        field_ids = [field_id for (field_id,) in db.query(Field.id).filter(Field.host_location_id.in_(host_location_ids)).all()] if host_location_ids else []
-        area_ids = [area_id for (area_id,) in db.query(PhysicalFieldArea.id).filter(PhysicalFieldArea.host_location_id.in_(host_location_ids)).all()] if host_location_ids else []
-        team_ids = [team_id for (team_id,) in db.query(Team.id).filter(Team.organization_id == org_id).all()]
+        with db.begin_nested():
+            host_location_ids = [host_id for (host_id,) in db.query(HostLocation.id).filter(HostLocation.organization_id == org_id).all()]
+            team_ids = [team_id for (team_id,) in db.query(Team.id).filter(Team.organization_id == org_id).all()]
+            field_ids = [field_id for (field_id,) in db.query(Field.id).filter(Field.host_location_id.in_(host_location_ids)).all()] if host_location_ids else []
+            availability_ids = [availability_id for (availability_id,) in db.query(HostingAvailability.id).filter(
+                (HostingAvailability.field_id.in_(field_ids)) | (HostingAvailability.physical_field_area_id.in_(db.query(PhysicalFieldArea.id).filter(PhysicalFieldArea.host_location_id.in_(host_location_ids)).subquery()))
+            ).all()] if host_location_ids else []
+            field_instance_ids = [instance_id for (instance_id,) in db.query(FieldInstance.id).filter(FieldInstance.host_location_id.in_(host_location_ids)).all()] if host_location_ids else []
+            game_ids = [game_id for (game_id,) in db.query(Game.id).filter(
+                (Game.home_team_id.in_(team_ids)) |
+                (Game.away_team_id.in_(team_ids)) |
+                (Game.field_id.in_(field_ids))
+            ).all()] if (team_ids or field_ids) else []
 
-        warnings: list[str] = []
-        deleted_availability, warning = _safe_delete_count('hosting_availability', lambda: db.query(HostingAvailability).filter((HostingAvailability.field_id.in_(field_ids)) | (HostingAvailability.physical_field_area_id.in_(area_ids))).delete(synchronize_session=False) if (field_ids or area_ids) else 0)
-        if warning: warnings.append(warning)
-        deleted_field_config, warning = _safe_delete_count('field_configuration_options', lambda: db.query(FieldConfigurationOption).filter(FieldConfigurationOption.physical_field_area_id.in_(area_ids)).delete(synchronize_session=False) if area_ids else 0)
-        if warning: warnings.append(warning)
-        deleted_areas, warning = _safe_delete_count('hosting_site_setups', lambda: db.query(PhysicalFieldArea).filter(PhysicalFieldArea.host_location_id.in_(host_location_ids)).delete(synchronize_session=False) if host_location_ids else 0)
-        if warning: warnings.append(warning)
-        deleted_fields, warning = _safe_delete_count('fields', lambda: db.query(Field).filter(Field.host_location_id.in_(host_location_ids)).delete(synchronize_session=False) if host_location_ids else 0)
-        if warning: warnings.append(warning)
-        deleted_teams, warning = _safe_delete_count('teams', lambda: db.query(Team).filter(Team.organization_id == org_id).delete(synchronize_session=False))
-        if warning: warnings.append(warning)
-        deleted_participation, warning = _safe_delete_count('division_participation', lambda: db.query(OrganizationDivisionParticipation).filter(OrganizationDivisionParticipation.organization_id == org_id).delete(synchronize_session=False))
-        if warning: warnings.append(warning)
-        deleted_hosts, warning = _safe_delete_count('host_locations', lambda: db.query(HostLocation).filter(HostLocation.organization_id == org_id).delete(synchronize_session=False))
-        if warning: warnings.append(warning)
-        db.delete(o)
+            deleted_games = db.query(Game).filter(Game.id.in_(game_ids)).delete(synchronize_session=False) if game_ids else 0
+            deleted_slots = db.query(GameSlot).filter((GameSlot.field_instance_id.in_(field_instance_ids)) | (GameSlot.host_location_id.in_(host_location_ids))).delete(synchronize_session=False) if host_location_ids else 0
+            deleted_field_instances = db.query(FieldInstance).filter(FieldInstance.host_location_id.in_(host_location_ids)).delete(synchronize_session=False) if host_location_ids else 0
+            deleted_availability = db.query(HostingAvailability).filter(HostingAvailability.id.in_(availability_ids)).delete(synchronize_session=False) if availability_ids else 0
+            area_ids = [area_id for (area_id,) in db.query(PhysicalFieldArea.id).filter(PhysicalFieldArea.host_location_id.in_(host_location_ids)).all()] if host_location_ids else []
+            deleted_field_config = db.query(FieldConfigurationOption).filter(FieldConfigurationOption.physical_field_area_id.in_(area_ids)).delete(synchronize_session=False) if area_ids else 0
+            deleted_fields = db.query(Field).filter(Field.host_location_id.in_(host_location_ids)).delete(synchronize_session=False) if host_location_ids else 0
+            deleted_areas = db.query(PhysicalFieldArea).filter(PhysicalFieldArea.host_location_id.in_(host_location_ids)).delete(synchronize_session=False) if host_location_ids else 0
+            deleted_hosts = db.query(HostLocation).filter(HostLocation.organization_id == org_id).delete(synchronize_session=False)
+            deleted_teams = db.query(Team).filter(Team.organization_id == org_id).delete(synchronize_session=False)
+            deleted_participation = db.query(OrganizationDivisionParticipation).filter(OrganizationDivisionParticipation.organization_id == org_id).delete(synchronize_session=False)
+            db.delete(o)
         db.commit()
-        return {'success': True, 'message': 'Organization and related data deleted successfully.', 'deleted': {'hosting_availability': deleted_availability, 'field_configuration_options': deleted_field_config, 'hosting_site_setups': deleted_areas, 'teams': deleted_teams, 'division_participation': deleted_participation, 'fields': deleted_fields, 'host_locations': deleted_hosts, 'organization': 1}, 'warnings': warnings}
+        logger.info(
+            'Organization cascade delete completed org_id=%s org_name=%s teams_deleted=%s games_deleted=%s slots_deleted=%s host_locations_deleted=%s availability_deleted=%s',
+            org_id, org_name, deleted_teams, deleted_games, deleted_slots, deleted_hosts, deleted_availability
+        )
+        return {'success': True, 'message': 'Organization and related records deleted.', 'deleted': {'scheduled_games': deleted_games, 'generated_slots': deleted_slots, 'hosting_availability': deleted_availability, 'field_instances': deleted_field_instances, 'field_configuration_options': deleted_field_config, 'hosting_site_setups': deleted_areas, 'teams': deleted_teams, 'division_participation': deleted_participation, 'fields': deleted_fields, 'host_locations': deleted_hosts, 'organization': 1}}
     except HTTPException:
         raise
     except Exception:
