@@ -718,20 +718,38 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
             WHERE organization_id = :org_id
         """, 'community_division_participation')
 
-        rowcounts['teams'] = _execute_step('delete_teams', org_name, """
-            DELETE FROM teams
-            WHERE organization_id = :org_id
-        """, 'teams')
-
-        remaining_teams = db.execute(text("""
+        teams_before_delete = db.execute(text("""
             SELECT COUNT(*)
             FROM teams
             WHERE organization_id = :org_id
         """), {'org_id': str(org_id)}).scalar() or 0
-        logger.info('[ORG DELETE] organization_id=%s organization_name=%s step=verify_teams_remaining table=teams rows_affected=%s', org_id, org_name, remaining_teams)
-        if remaining_teams > 0:
-            db.rollback()
-            raise HTTPException(status_code=409, detail='Delete blocked. teams still reference organization.')
+        logger.info('[ORG DELETE] team count before delete: %s', teams_before_delete)
+
+        team_delete_result = db.execute(text("""
+            DELETE FROM teams
+            WHERE organization_id = :org_id
+        """), {'org_id': str(org_id)})
+        rowcounts['teams'] = team_delete_result.rowcount or 0
+        logger.info('[ORG DELETE] teams deleted rowcount: %s', rowcounts['teams'])
+
+        teams_after_delete = db.execute(text("""
+            SELECT COUNT(*)
+            FROM teams
+            WHERE organization_id = :org_id
+        """), {'org_id': str(org_id)}).scalar() or 0
+        logger.info('[ORG DELETE] team count after delete: %s', teams_after_delete)
+
+        host_locations_remaining_before_org_delete = db.execute(text("""
+            SELECT COUNT(*)
+            FROM host_locations
+            WHERE organization_id = :org_id
+        """), {'org_id': str(org_id)}).scalar() or 0
+
+        if teams_after_delete > 0 or host_locations_remaining_before_org_delete > 0:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Delete blocked. Remaining dependencies: teams={teams_after_delete}, host_locations={host_locations_remaining_before_org_delete}",
+            )
 
         rowcounts['organization'] = _execute_step('delete_organization', org_name, """
             DELETE FROM organizations
