@@ -34,6 +34,26 @@ ALLOWED_FIELD_SPACE_TYPES = {
 }
 
 
+def _minutes_from_time(value):
+    if value is None:
+        return None
+
+    try:
+        if hasattr(value, 'hour') and hasattr(value, 'minute'):
+            return value.hour * 60 + value.minute
+
+        if isinstance(value, str):
+            parts = value.split(':')
+            if len(parts) >= 2:
+                return int(parts[0]) * 60 + int(parts[1])
+    except (TypeError, ValueError):
+        logger.warning(f"Unable to parse slot time: {value}")
+        raise
+
+    logger.warning(f"Unable to parse slot time: {value}")
+    raise ValueError(f"Unsupported time value: {value}")
+
+
 def _canonical_division_suffix(name: str | None) -> str:
     normalized = ''.join(ch for ch in (name or '').upper() if ch.isalnum())
     suffix_map = {
@@ -2295,7 +2315,11 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                     for j in range(i + 1, len(slots)):
                         a = slots[i]
                         b = slots[j]
-                        gap = abs(_minutes_from_time(a.start_time) - _minutes_from_time(b.start_time))
+                        a_minutes = _minutes_from_time(a.start_time)
+                        b_minutes = _minutes_from_time(b.start_time)
+                        if a_minutes is None or b_minutes is None:
+                            continue
+                        gap = abs(a_minutes - b_minutes)
                         if gap == 60:
                             reservation_candidates.append((0, gap, a, b, 'adjacent same-location slots'))
                         elif gap == 120:
