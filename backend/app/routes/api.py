@@ -553,6 +553,23 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
             )
         """, 'generated_slots')
 
+        rowcounts['game_slots'] = _execute_step('delete_game_slots_by_field_instances', org_name, """
+            DELETE FROM game_slots
+            WHERE field_instance_id IN (
+                SELECT fi.id
+                FROM field_instances fi
+                JOIN hosting_availabilities ha
+                    ON fi.hosting_availability_id = ha.id
+                JOIN field_configuration_options fco
+                    ON ha.field_configuration_option_id = fco.id
+                JOIN physical_field_areas pfa
+                    ON fco.physical_field_area_id = pfa.id
+                JOIN host_locations hl
+                    ON pfa.host_location_id = hl.id
+                WHERE hl.organization_id = :org_id
+            )
+        """, 'game_slots')
+
         rowcounts['field_instances'] = _execute_step('delete_field_instances', org_name, """
             DELETE FROM field_instances
             WHERE hosting_availability_id IN (
