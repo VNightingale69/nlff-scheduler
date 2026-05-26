@@ -632,6 +632,21 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
                     detail=f"Delete blocked. {teams_after_delete} teams still reference this organization.",
                 )
 
+            deleted_org_division_participations = db.execute(text("""
+                DELETE FROM organization_division_participations
+                WHERE organization_id = :org_id
+            """), {"org_id": str(org_id)}).rowcount or 0
+            logger.info(f"[ORG DELETE] organization_division_participations deleted: {deleted_org_division_participations}")
+
+            remaining_org_division_participations = db.execute(text("""
+                SELECT COUNT(*)
+                FROM organization_division_participations
+                WHERE organization_id = :org_id
+            """), {"org_id": str(org_id)}).scalar() or 0
+            logger.info(f"[ORG DELETE] organization_division_participations remaining after delete: {remaining_org_division_participations}")
+            if remaining_org_division_participations > 0:
+                raise HTTPException(409, "Delete blocked. organization_division_participations still reference this organization.")
+
             logger.info('[ORG DELETE] final organization delete started')
             result = db.execute(text('DELETE FROM organizations WHERE id = :org_id'), {'org_id': str(org_id)})
             db.commit()
@@ -786,6 +801,20 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
         rowcounts['teams_before_delete'] = teams_before_delete
         rowcounts['teams'] = teams_deleted
         rowcounts['teams_remaining_after_delete'] = teams_after_delete
+
+        rowcounts['organization_division_participations'] = _execute_step('delete_organization_division_participations', org_name, """
+            DELETE FROM organization_division_participations
+            WHERE organization_id = :org_id
+        """, 'organization_division_participations')
+
+        remaining_org_division_participations = db.execute(text("""
+            SELECT COUNT(*)
+            FROM organization_division_participations
+            WHERE organization_id = :org_id
+        """), {'org_id': str(org_id)}).scalar() or 0
+        logger.info(f"[ORG DELETE] organization_division_participations remaining after delete: {remaining_org_division_participations}")
+        if remaining_org_division_participations > 0:
+            raise HTTPException(409, "Delete blocked. organization_division_participations still reference this organization.")
 
         host_locations_remaining_before_org_delete = db.execute(text("""
             SELECT COUNT(*)
