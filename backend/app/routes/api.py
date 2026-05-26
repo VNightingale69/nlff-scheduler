@@ -3815,6 +3815,31 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
             for slot in proposal_slots.values()
             if slot and slot.host_location_id
         })
+
+    locked_host_ids: set[str] = {str(host_id) for host_id in (selected_host_ids or []) if host_id}
+    overflow_host_ids: set[str] = set()
+    for idx, proposal in enumerate(proposals or []):
+        host_id = proposal.get('host_location_id')
+        if not host_id:
+            slot_id = proposal.get('slot_id')
+            slot_obj = proposal_slots.get(idx)
+            if not slot_obj and slot_id:
+                slot_obj = db.query(GameSlot).filter(GameSlot.id == slot_id).first()
+            if slot_obj and slot_obj.host_location_id:
+                host_id = str(slot_obj.host_location_id)
+        if not host_id:
+            continue
+        host_id = str(host_id)
+        reason = (proposal.get('reason') or '').lower()
+        is_overflow = bool(
+            proposal.get('is_overflow')
+            or proposal.get('overflow')
+            or 'overflow' in reason
+            or (locked_host_ids and host_id not in locked_host_ids)
+        )
+        if is_overflow:
+            overflow_host_ids.add(host_id)
+
     logger.info(
         f'Selected host sites for scheduling: {selected_host_ids}'
     )
