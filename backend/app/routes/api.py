@@ -2349,10 +2349,8 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                         gap = abs(a_minutes - b_minutes)
                         if gap == 60:
                             reservation_candidates.append((0, gap, a, b, 'adjacent same-location slots'))
-                        elif gap == 120:
-                            reservation_candidates.append((2, gap, a, b, 'one-slot gap same-site'))
             if not reservation_candidates:
-                double_header_reservation_failure_reasons.append('no valid adjacent pair exists across active host locations')
+                double_header_reservation_failure_reasons.append('Unable to place required double-header because no same-location adjacent slots exist.')
             else:
                 reservation_candidates.sort(key=lambda row: (row[0], row[1], row[2].slot_date, row[2].start_time, str(row[2].host_location_id)))
                 chosen_priority, _, r1, r2, reservation_mode = reservation_candidates[0]
@@ -2374,6 +2372,14 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         if len(available_team_ids) < 2:
             break
         sorted_slots = sorted(remaining_slots, key=lambda s: (s.slot_date, s.start_time, str(s.host_location_id), str(s.id)))
+        dh_team_needs_reservation = (
+            is_odd_division
+            and no_byes
+            and selected_double_header_team_id is not None
+            and week_team_game_counts.get(selected_double_header_team_id, 0) < 2
+        )
+        if dh_team_needs_reservation and reserved_double_header_slot_ids:
+            sorted_slots = [slot for slot in sorted_slots if str(slot.id) in reserved_double_header_slot_ids]
         time_windows: list[tuple[object, object]] = []
         seen_time_windows: set[tuple[object, object]] = set()
         for slot in sorted_slots:
@@ -2686,6 +2692,12 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                                     except Exception:
                                         pass
     
+                        if (
+                            dh_team_needs_reservation
+                            and selected_double_header_team_id
+                            and selected_double_header_team_id not in {a, b}
+                        ):
+                            continue
                         all_candidates.append({
                             'slot': slot,
                             'selected_field_slot': selected_field_slot,
@@ -2824,7 +2836,11 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     total_created_games = existing_games_count + len(plans)
     if total_created_games < required_games_for_division_week:
         if is_odd_division and no_byes:
-            _add_skipped('Unable to schedule required odd-team double header due to no compatible adjacent slot.')
+            if double_header_reservation_failure_reasons:
+                for reason in double_header_reservation_failure_reasons:
+                    _add_skipped(reason)
+            else:
+                _add_skipped('Unable to place required double-header because no same-location adjacent slots exist.')
         else:
             _add_skipped('Unable to schedule required games due to hard scheduling constraints.')
     rejected_games = len(skipped)
@@ -3627,7 +3643,7 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
     if total_created_for_week >= required_games_for_division_week:
         skipped = []
     elif is_odd_division and no_byes:
-        _add_skipped('Unable to schedule required odd-team double header because no compatible slot was available after evaluating all options.')
+        _add_skipped('Unable to place required double-header because no same-location adjacent slots exist.')
     else:
         _add_skipped('Unable to schedule required games due to hard scheduling constraints.')
     unscheduled_teams = [
