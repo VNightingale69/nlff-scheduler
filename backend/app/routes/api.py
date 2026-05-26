@@ -2549,6 +2549,18 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                             )
                         if candidate_host_id and not candidate_host:
                             logger.warning(f"HostLocation not found for id {candidate_host_id}")
+                        teams_with_unused_unique_opponents = []
+                        for team_id in (a, b):
+                            if any(
+                                matchup_counts.get(tuple(sorted((team_id, opponent_id))), 0) == 0
+                                for opponent_id in teams_by_id
+                                if opponent_id != team_id
+                            ):
+                                teams_with_unused_unique_opponents.append(team_id)
+                        unique_opponents_exhausted_for_pair = len(teams_with_unused_unique_opponents) == 0
+                        if repeat_count > 0 and not unique_opponents_exhausted_for_pair:
+                            continue
+
                         if repeat_count == 0:
                             score += 120
                             reason_bits.append('new opponent pairing (+120)')
@@ -2576,9 +2588,18 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                                 reason_bits.append('Same-community matchup allowed because cross-community options are insufficient')
     
                         if repeat_count > 0 and not same_community:
-                            warning_bits.append('Repeat avoided because first-time opponent was available' if any(matchup_counts.get(tuple(sorted((a, oid))),0)==0 for oid in teams_by_id if oid!=a) or any(matchup_counts.get(tuple(sorted((b, oid))),0)==0 for oid in teams_by_id if oid!=b) else 'repeat matchup selected because unique options were exhausted')
+                            warning_bits.append('repeat matchup selected because unique options were exhausted')
                         if same_community_operationally_reasonable:
                             reason_bits.append('Opponent diversity prioritized because division has limited unique opponents')
+                        if same_community and not hosted_by_own_community:
+                            same_community_home_slot_available = any(
+                                s.host_location_id in host_ids_by_org.get(team_a.organization_id, set())
+                                and s.slot_date == slot.slot_date
+                                and s.start_time == slot.start_time
+                                for s in sorted_slots
+                            )
+                            if same_community_home_slot_available:
+                                continue
                         if hosted_by_own_community:
                             score += 60
                             reason_bits.append('same-community at home host field (+60)')
@@ -4055,6 +4076,22 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
             if actual_created_games < required_games:
                 division_unresolved = True
                 missing_games = required_games - actual_created_games
+                division_week_team_counts = db.query(
+                    Team.name,
+                    func.count(Game.id),
+                ).outerjoin(
+                    Game,
+                    and_(
+                        or_(Game.home_team_id == Team.id, Game.away_team_id == Team.id),
+                        Game.week_id == week.id,
+                    ),
+                ).outerjoin(GameStatus, Game.game_status_id == GameStatus.id).filter(
+                    Team.division_id == division.id,
+                    Team.is_active.is_(True),
+                ).filter(
+                    or_(Game.id.is_(None), GameStatus.code != 'UNSCHEDULED')
+                ).group_by(Team.id, Team.name).all()
+                missing_team_names = [name for name, count in division_week_team_counts if int(count or 0) == 0]
                 warning = (
                     f'Unresolved scheduling warning: {division_label} Week {week.week_number} '
                     f'(Required games: {required_games}, Created games: {actual_created_games}, Missing games: {missing_games})'
@@ -4066,14 +4103,42 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
                     'required_games': required_games,
                     'created_games': actual_created_games,
                     'missing_games': missing_games,
+                    'teams_missing_games': missing_team_names,
                 })
                 validation_errors.append(
-                    f'{division_label} Week {week.week_number}: required={required_games}, created={actual_created_games}, missing={missing_games}'
+                    f'{division_label} Week {week.week_number}: required={required_games}, created={actual_created_games}, missing={missing_games}, teams_missing_games={missing_team_names}'
                 )
         if division_created > 0 and not division_unresolved:
             divisions_completed.append(division_label)
         else:
             divisions_with_unresolved_games.append(division_label)
+        season_team_game_counts = db.query(
+            Team.name,
+            func.count(Game.id),
+        ).outerjoin(
+            Game,
+            and_(
+                or_(Game.home_team_id == Team.id, Game.away_team_id == Team.id),
+                Game.season_id == season_id,
+            ),
+        ).outerjoin(GameStatus, Game.game_status_id == GameStatus.id).filter(
+            Team.division_id == division.id,
+            Team.is_active.is_(True),
+        ).filter(
+            or_(Game.id.is_(None), GameStatus.code != 'UNSCHEDULED')
+        ).group_by(Team.id, Team.name).all()
+        season_counts_only = [int(count or 0) for _, count in season_team_game_counts]
+        if season_counts_only:
+            min_games = min(season_counts_only)
+            max_games = max(season_counts_only)
+            odd_team_double_header_allowed = (len(season_counts_only) % 2) == 1
+            if (max_games - min_games) > 1 and not odd_team_double_header_allowed:
+                validation_errors.append(
+                    f'{division_label}: season team game counts are imbalanced (min={min_games}, max={max_games}); must be within 1 game.'
+                )
+                warnings.append(
+                    f'Balance validation failed for {division_label}: min={min_games}, max={max_games}.'
+                )
 
     return {
         'total_games_created': total_games_created,
