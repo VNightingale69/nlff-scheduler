@@ -632,6 +632,13 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
                     detail=f"Delete blocked. {teams_after_delete} teams still reference this organization.",
                 )
 
+            org_division_participations_before_delete = db.execute(text("""
+                SELECT COUNT(*)
+                FROM organization_division_participations
+                WHERE organization_id = :org_id
+            """), {"org_id": str(org_id)}).scalar() or 0
+            logger.info(f"[ORG DELETE] organization_division_participations before delete: {org_division_participations_before_delete}")
+
             deleted_org_division_participations = db.execute(text("""
                 DELETE FROM organization_division_participations
                 WHERE organization_id = :org_id
@@ -792,15 +799,18 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
                 detail=f"Delete blocked. {remaining} host_locations still reference organization {org_id}.",
             )
 
-        rowcounts['community_division_participation'] = _execute_step('delete_community_division_participation', org_name, """
-            DELETE FROM community_division_participation
-            WHERE organization_id = :org_id
-        """, 'community_division_participation')
-
         teams_before_delete, teams_deleted, teams_after_delete = _cleanup_team_dependencies_for_org(org_id)
         rowcounts['teams_before_delete'] = teams_before_delete
         rowcounts['teams'] = teams_deleted
         rowcounts['teams_remaining_after_delete'] = teams_after_delete
+
+        org_division_participations_before_delete = db.execute(text("""
+            SELECT COUNT(*)
+            FROM organization_division_participations
+            WHERE organization_id = :org_id
+        """), {'org_id': str(org_id)}).scalar() or 0
+        logger.info(f"[ORG DELETE] organization_division_participations before delete: {org_division_participations_before_delete}")
+        rowcounts['organization_division_participations_before_delete'] = org_division_participations_before_delete
 
         rowcounts['organization_division_participations'] = _execute_step('delete_organization_division_participations', org_name, """
             DELETE FROM organization_division_participations
