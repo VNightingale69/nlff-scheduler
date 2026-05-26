@@ -8,7 +8,7 @@ from fastapi.responses import StreamingResponse
 import logging
 from datetime import date, datetime, time, timedelta
 
-from sqlalchemy import and_, func, or_
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.exc import ProgrammingError, SQLAlchemyError
 from sqlalchemy.orm import Session, aliased
 
@@ -428,7 +428,7 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
             raise HTTPException(404, 'Organization not found')
         org_name = o.name
         if not force:
-            db.delete(o)
+            db.execute(delete(Organization).where(Organization.id == org_id))
             db.commit()
             return {'success': True, 'deleted': {'organization': 1}}
 
@@ -448,85 +448,70 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
             orphan_cleanup = _organization_orphan_cleanup(db)
             logger.info('[ORG DELETE] organization_id=%s organization_name=%s orphan_cleanup=%s', org_id, org_name, orphan_cleanup)
 
-            host_location_ids = [
-                row.id for row in db.query(HostLocation.id)
-                .filter(HostLocation.organization_id == org_id)
-                .all()
-            ]
-            team_ids = [
-                row.id for row in db.query(Team.id)
-                .filter(Team.organization_id == org_id)
-                .all()
-            ]
+            host_location_ids = db.scalars(
+                select(HostLocation.id).where(HostLocation.organization_id == org_id)
+            ).all()
+            team_ids = db.scalars(
+                select(Team.id).where(Team.organization_id == org_id)
+            ).all()
+            generated_slot_ids = db.scalars(
+                select(GameSlot.id).where(
+                    GameSlot.host_location_id.in_(host_location_ids)
+                )
+            ).all() if host_location_ids else []
+            field_ids = db.scalars(
+                select(Field.id).where(Field.host_location_id.in_(host_location_ids))
+            ).all() if host_location_ids else []
+            area_ids = db.scalars(
+                select(PhysicalFieldArea.id).where(PhysicalFieldArea.host_location_id.in_(host_location_ids))
+            ).all() if host_location_ids else []
             logger.info('[ORG DELETE] organization_id=%s organization_name=%s host_location_ids=%s', org_id, org_name, [str(x) for x in host_location_ids])
-            field_ids = [field_id for (field_id,) in db.query(Field.id).filter(Field.host_location_id.in_(host_location_ids)).all()] if host_location_ids else []
-            area_ids = [area_id for (area_id,) in db.query(PhysicalFieldArea.id).filter(PhysicalFieldArea.host_location_id.in_(host_location_ids)).all()] if host_location_ids else []
-            availability_ids = [availability_id for (availability_id,) in db.query(HostingAvailability.id).filter((HostingAvailability.field_id.in_(field_ids)) | (HostingAvailability.physical_field_area_id.in_(area_ids))).all()] if (field_ids or area_ids) else []
-            field_instance_ids = [instance_id for (instance_id,) in db.query(FieldInstance.id).filter(FieldInstance.host_location_id.in_(host_location_ids)).all()] if host_location_ids else []
-            slot_assigned_game_ids = [game_id for (game_id,) in db.query(GameSlot.assigned_game_id).filter(
-                GameSlot.host_location_id.in_(host_location_ids),
-                GameSlot.assigned_game_id.isnot(None),
-            ).all()] if host_location_ids else []
-            game_ids = list({*[
-                game_id for (game_id,) in db.query(Game.id).filter(
-                    (Game.home_team_id.in_(team_ids))
-                    | (Game.away_team_id.in_(team_ids))
-                    | (Game.field_id.in_(field_ids))
-                ).all()
-            ], *slot_assigned_game_ids}) if (team_ids or field_ids or slot_assigned_game_ids) else []
+            logger.info('[ORG DELETE] organization_id=%s organization_name=%s generated_slot_ids=%s', org_id, org_name, [str(x) for x in generated_slot_ids])
 
             try:
-                deleted_games = db.query(Game).filter(
-                    or_(
-                        Game.home_team_id.in_(team_ids),
-                        Game.away_team_id.in_(team_ids),
-                        Game.id.in_(
-                            db.query(GameSlot.assigned_game_id).filter(
-                                GameSlot.host_location_id.in_(host_location_ids),
-                                GameSlot.assigned_game_id.isnot(None),
-                            )
-                        ),
+                deleted_games = db.execute(
+                    delete(Game).where(
+                        or_(
+                            Game.home_team_id.in_(team_ids),
+                            Game.away_team_id.in_(team_ids),
+                            Game.id.in_(
+                                select(GameSlot.assigned_game_id).where(
+                                    GameSlot.id.in_(generated_slot_ids),
+                                    GameSlot.assigned_game_id.isnot(None),
+                                )
+                            ),
+                        )
                     )
-                ).delete(synchronize_session=False) if (team_ids or host_location_ids) else 0
+                ).rowcount if (team_ids or generated_slot_ids) else 0
                 _log_delete_step('delete_scheduled_games', org_name, deleted_games, 'games')
             except Exception as exc:
                 _stage_failure('delete_scheduled_games', org_name, 'games', exc)
 
 
             try:
-                deleted_slots = db.query(GameSlot).filter((GameSlot.field_instance_id.in_(field_instance_ids)) | (GameSlot.host_location_id.in_(host_location_ids))).delete(synchronize_session=False) if host_location_ids else 0
+                deleted_slots = db.execute(
+                    delete(GameSlot).where(GameSlot.id.in_(generated_slot_ids))
+                ).rowcount if generated_slot_ids else 0
                 _log_delete_step('delete_generated_slots', org_name, deleted_slots, 'game_slots')
             except Exception as exc:
                 _stage_failure('delete_generated_slots', org_name, 'game_slots', exc)
 
             try:
-                deleted_availability = db.query(HostingAvailability).filter(
-                    or_(
-                        HostingAvailability.field_id.in_(db.query(Field.id).filter(Field.host_location_id.in_(host_location_ids))),
-                        HostingAvailability.physical_field_area_id.in_(db.query(PhysicalFieldArea.id).filter(PhysicalFieldArea.host_location_id.in_(host_location_ids))),
+                deleted_availability = db.execute(
+                    delete(HostingAvailability).where(
+                        or_(
+                            HostingAvailability.field_id.in_(field_ids),
+                            HostingAvailability.physical_field_area_id.in_(area_ids),
+                        )
                     )
-                ).delete(synchronize_session=False) if host_location_ids else 0
+                ).rowcount if (field_ids or area_ids) else 0
                 _log_delete_step('delete_hosting_availability', org_name, deleted_availability, 'hosting_availabilities')
             except Exception as exc:
                 _stage_failure('delete_hosting_availability', org_name, 'hosting_availabilities', exc)
-
             try:
-                deleted_field_instances = db.query(FieldInstance).filter(FieldInstance.host_location_id.in_(host_location_ids)).delete(synchronize_session=False) if host_location_ids else 0
-                _log_delete_step('delete_field_instances', org_name, deleted_field_instances, 'field_instances')
-            except Exception as exc:
-                _stage_failure('delete_field_instances', org_name, 'field_instances', exc)
-            try:
-                deleted_field_config = db.query(FieldConfigurationOption).filter(FieldConfigurationOption.physical_field_area_id.in_(area_ids)).delete(synchronize_session=False) if area_ids else 0
-                _log_delete_step('delete_generated_field_layouts', org_name, deleted_field_config, 'field_configuration_options')
-            except Exception as exc:
-                _stage_failure('delete_generated_field_layouts', org_name, 'field_configuration_options', exc)
-            try:
-                deleted_areas = db.query(PhysicalFieldArea).filter(PhysicalFieldArea.host_location_id.in_(host_location_ids)).delete(synchronize_session=False) if host_location_ids else 0
-                _log_delete_step('delete_field_areas', org_name, deleted_areas, 'physical_field_areas')
-            except Exception as exc:
-                _stage_failure('delete_field_areas', org_name, 'physical_field_areas', exc)
-            try:
-                deleted_fields = db.query(Field).filter(Field.host_location_id.in_(host_location_ids)).delete(synchronize_session=False) if host_location_ids else 0
+                deleted_fields = db.execute(
+                    delete(Field).where(Field.host_location_id.in_(host_location_ids))
+                ).rowcount if host_location_ids else 0
                 _log_delete_step('delete_physical_fields', org_name, deleted_fields, 'fields')
             except Exception as exc:
                 _stage_failure('delete_physical_fields', org_name, 'fields', exc)
@@ -540,24 +525,34 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
             })
             logger.info({'deletingHostLocations': True})
             try:
-                deleted_hosts = db.query(HostLocation).filter(HostLocation.organization_id == org_id).delete(synchronize_session=False)
+                deleted_hosts = db.execute(
+                    delete(HostLocation).where(HostLocation.id.in_(host_location_ids))
+                ).rowcount if host_location_ids else 0
                 _log_delete_step('delete_host_locations', org_name, deleted_hosts, 'host_locations')
                 db.flush()
             except Exception as exc:
                 _stage_failure('delete_host_locations', org_name, 'host_locations', exc)
 
-            remaining_host_locations = db.query(HostLocation).filter(HostLocation.organization_id == org_id).count()
+            remaining_host_locations = db.scalar(
+                select(func.count())
+                .select_from(HostLocation)
+                .where(HostLocation.organization_id == org_id)
+            ) or 0
             logger.info('[ORG DELETE] organization_id=%s organization_name=%s remaining_host_locations=%s', org_id, org_name, remaining_host_locations)
             logger.info({'step': 'host_locations_remaining', 'count': remaining_host_locations})
             if remaining_host_locations > 0:
                 raise RuntimeError(f'Host locations still exist for organization {org_id}')
             try:
-                deleted_teams = db.query(Team).filter(Team.organization_id == org_id).delete(synchronize_session=False)
+                deleted_teams = db.execute(
+                    delete(Team).where(Team.organization_id == org_id)
+                ).rowcount
                 _log_delete_step('delete_teams', org_name, deleted_teams, 'teams')
             except Exception as exc:
                 _stage_failure('delete_teams', org_name, 'teams', exc)
             try:
-                deleted_participation = db.query(OrganizationDivisionParticipation).filter(OrganizationDivisionParticipation.organization_id == org_id).delete(synchronize_session=False)
+                deleted_participation = db.execute(
+                    delete(OrganizationDivisionParticipation).where(OrganizationDivisionParticipation.organization_id == org_id)
+                ).rowcount
                 _log_delete_step('delete_division_participation', org_name, deleted_participation, 'organization_division_participations')
             except Exception as exc:
                 _stage_failure('delete_division_participation', org_name, 'organization_division_participations', exc)
@@ -598,8 +593,10 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
 
             logger.info({'organizationDeleteStarting': True})
             try:
-                db.delete(o)
-                _log_delete_step('delete_organization', org_name, 1, 'organizations')
+                deleted_organization = db.execute(
+                    delete(Organization).where(Organization.id == org_id)
+                ).rowcount
+                _log_delete_step('delete_organization', org_name, deleted_organization, 'organizations')
             except Exception as exc:
                 _stage_failure('delete_organization', org_name, 'organizations', exc)
 
@@ -614,7 +611,7 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
             'Organization cascade delete completed org_id=%s org_name=%s teams_deleted=%s games_deleted=%s slots_deleted=%s host_locations_deleted=%s availability_deleted=%s',
             org_id, org_name, deleted_teams, deleted_games, deleted_slots, deleted_hosts, deleted_availability
         )
-        return {'success': True, 'message': 'Organization and related records deleted.', 'deleted': {'scheduled_games': deleted_games, 'generated_slots': deleted_slots, 'hosting_availability': deleted_availability, 'field_instances': deleted_field_instances, 'field_configuration_options': deleted_field_config, 'hosting_site_setups': deleted_areas, 'teams': deleted_teams, 'division_participation': deleted_participation, 'fields': deleted_fields, 'host_locations': deleted_hosts, 'organization': 1}}
+        return {'success': True, 'message': 'Organization and related records deleted.', 'deleted': {'scheduled_games': deleted_games, 'generated_slots': deleted_slots, 'hosting_availability': deleted_availability, 'teams': deleted_teams, 'division_participation': deleted_participation, 'fields': deleted_fields, 'host_locations': deleted_hosts, 'organization': deleted_organization}}
     except HTTPException:
         raise
     except Exception as exc:
