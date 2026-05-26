@@ -1815,6 +1815,7 @@ def extract_selected_host_ids(proposals):
 @router.post('/manual-schedule-builder/auto-fill-preview', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     regular_season_host_limit = 2
+    sorted_slots: list[GameSlot] = []
     admin_override_third_host = bool(payload.get('admin_override_third_host_locations', False))
     scoring_weights = payload.get('scoring_weights') or {}
 
@@ -1978,6 +1979,27 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     if teams and compatible_slots_found == 0:
         _msg = 'Division has teams but no compatible generated slots.'
         logger.warning('%s division=%s normalized_division=%s', _msg, full_division_label, selected_division_normalized)
+        return {
+            'proposals': [],
+            'scheduled_games': [],
+            'warnings': [
+                f'Division has teams but no compatible generated slots: {getattr(division, "display_name", full_division_label)}'
+            ],
+            'week_open_slot_dates': [],
+            'week_open_slot_count': 0,
+            'compatible_slot_count': 0,
+            'skipped': [{'reason': _msg}],
+            'proposed_game_count': 0,
+            'max_allowed_game_count': required_games_for_division_week,
+            'existing_game_count': len(existing_division_games),
+            'unused_team_ids': [str(tid) for tid in teams_by_id],
+            'unused_teams': [teams_by_id[tid].name for tid in teams_by_id],
+            'selected_division_id': str(division_id),
+            'selected_division_key': selected_division_key,
+            'active_teams_found': len(teams),
+            'eligible_pairings_generated': 0,
+            'compatible_slots_found': 0,
+        }
     assigned_game_slots = db.query(Game, GameSlot).join(GameSlot, GameSlot.assigned_game_id == Game.id).filter(
         Game.game_date == week.start_date
     ).all()
