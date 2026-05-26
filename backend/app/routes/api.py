@@ -8,7 +8,7 @@ from fastapi.responses import StreamingResponse
 import logging
 from datetime import date, datetime, time, timedelta
 
-from sqlalchemy import and_, delete, func, or_, select
+from sqlalchemy import and_, delete, func, or_, select, text
 from sqlalchemy.exc import ProgrammingError, SQLAlchemyError
 from sqlalchemy.orm import Session, aliased
 
@@ -517,31 +517,62 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
                 _stage_failure('delete_physical_fields', org_name, 'fields', exc)
 
             logger.info({'deletingOrganizationId': str(org_id)})
-            host_locations = db.query(HostLocation).filter(HostLocation.organization_id == org_id).all()
-            logger.info({
-                'step': 'host_locations_found',
-                'count': len(host_locations),
-                'ids': [str(host.id) for host in host_locations],
-            })
-            logger.info({'deletingHostLocations': True})
             try:
-                deleted_hosts = db.execute(
-                    delete(HostLocation).where(HostLocation.id.in_(host_location_ids))
-                ).rowcount if host_location_ids else 0
-                _log_delete_step('delete_host_locations', org_name, deleted_hosts, 'host_locations')
+                deleted_games = db.execute(text("""
+                    DELETE FROM scheduled_games
+                    WHERE home_team_id IN (
+                        SELECT id FROM teams WHERE organization_id = :org_id
+                    )
+                    OR away_team_id IN (
+                        SELECT id FROM teams WHERE organization_id = :org_id
+                    )
+                """), {'org_id': str(org_id)}).rowcount
+                _log_delete_step('delete_scheduled_games_direct', org_name, deleted_games, 'scheduled_games')
+
+                deleted_slots = db.execute(text("""
+                    DELETE FROM generated_slots
+                    WHERE host_location_id IN (
+                        SELECT id FROM host_locations WHERE organization_id = :org_id
+                    )
+                """), {'org_id': str(org_id)}).rowcount
+                _log_delete_step('delete_generated_slots_direct', org_name, deleted_slots, 'generated_slots')
+
+                deleted_availability = db.execute(text("""
+                    DELETE FROM hosting_availability
+                    WHERE host_location_id IN (
+                        SELECT id FROM host_locations WHERE organization_id = :org_id
+                    )
+                """), {'org_id': str(org_id)}).rowcount
+                _log_delete_step('delete_hosting_availability_direct', org_name, deleted_availability, 'hosting_availability')
+
+                deleted_fields = db.execute(text("""
+                    DELETE FROM fields
+                    WHERE host_location_id IN (
+                        SELECT id FROM host_locations WHERE organization_id = :org_id
+                    )
+                """), {'org_id': str(org_id)}).rowcount
+                _log_delete_step('delete_fields_direct', org_name, deleted_fields, 'fields')
+
+                deleted_hosts = db.execute(text("""
+                    DELETE FROM host_locations
+                    WHERE organization_id = :org_id
+                """), {'org_id': str(org_id)}).rowcount
+                _log_delete_step('delete_host_locations_direct', org_name, deleted_hosts, 'host_locations')
                 db.flush()
             except Exception as exc:
-                _stage_failure('delete_host_locations', org_name, 'host_locations', exc)
+                _stage_failure('delete_host_locations_direct', org_name, 'host_locations', exc)
 
-            remaining_host_locations = db.scalar(
-                select(func.count())
-                .select_from(HostLocation)
-                .where(HostLocation.organization_id == org_id)
-            ) or 0
+            remaining_host_locations = db.execute(text("""
+                SELECT COUNT(*) FROM host_locations
+                WHERE organization_id = :org_id
+            """), {'org_id': str(org_id)}).scalar() or 0
             logger.info('[ORG DELETE] organization_id=%s organization_name=%s remaining_host_locations=%s', org_id, org_name, remaining_host_locations)
             logger.info({'step': 'host_locations_remaining', 'count': remaining_host_locations})
             if remaining_host_locations > 0:
-                raise RuntimeError(f'Host locations still exist for organization {org_id}')
+                raise HTTPException(
+                    status_code=409,
+                    detail=f'Cannot delete organization. {remaining_host_locations} host locations still reference it.',
+                )
             try:
                 deleted_teams = db.execute(
                     delete(Team).where(Team.organization_id == org_id)
@@ -591,6 +622,7 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
                     },
                 )
 
+            logger.info(f"Remaining host locations before org delete: {remaining_host_locations}")
             logger.info({'organizationDeleteStarting': True})
             try:
                 deleted_organization = db.execute(
