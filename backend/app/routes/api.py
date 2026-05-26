@@ -417,6 +417,72 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
         return rowcount
 
     try:
+        def _cleanup_team_dependencies_for_org(org_id_value: uuid.UUID) -> tuple[int, int, int]:
+            # Mandatory direct-SQL cleanup immediately before any organization delete.
+            db.execute(text("""
+                DELETE FROM games
+                WHERE home_team_id IN (
+                    SELECT id FROM teams WHERE organization_id = :org_id
+                )
+                OR away_team_id IN (
+                    SELECT id FROM teams WHERE organization_id = :org_id
+                )
+            """), {"org_id": str(org_id_value)})
+
+            # Find all FK columns that reference teams.id and clear dependent rows first.
+            team_fk_refs = db.execute(text("""
+                SELECT
+                    tc.table_name AS table_name,
+                    kcu.column_name AS column_name
+                FROM information_schema.table_constraints tc
+                JOIN information_schema.key_column_usage kcu
+                    ON tc.constraint_name = kcu.constraint_name
+                    AND tc.table_schema = kcu.table_schema
+                JOIN information_schema.constraint_column_usage ccu
+                    ON ccu.constraint_name = tc.constraint_name
+                    AND ccu.table_schema = tc.table_schema
+                WHERE tc.constraint_type = 'FOREIGN KEY'
+                  AND tc.table_schema = 'public'
+                  AND ccu.table_name = 'teams'
+                  AND ccu.column_name = 'id'
+                  AND tc.table_name <> 'teams'
+                ORDER BY tc.table_name, kcu.column_name
+            """)).mappings().all()
+
+            for ref in team_fk_refs:
+                table_name = ref['table_name']
+                column_name = ref['column_name']
+                db.execute(text(f"""
+                    DELETE FROM {table_name}
+                    WHERE {column_name} IN (
+                        SELECT id
+                        FROM teams
+                        WHERE organization_id = :org_id
+                    )
+                """), {"org_id": str(org_id_value)})
+
+            teams_before_delete = db.execute(text("""
+                SELECT COUNT(*)
+                FROM teams
+                WHERE organization_id = :org_id
+            """), {'org_id': str(org_id_value)}).scalar() or 0
+            logger.info('[ORG DELETE] teams before delete: %s', teams_before_delete)
+
+            team_delete_result = db.execute(text("""
+                DELETE FROM teams
+                WHERE organization_id = :org_id
+            """), {'org_id': str(org_id_value)})
+            teams_deleted = team_delete_result.rowcount or 0
+            logger.info('[ORG DELETE] teams deleted rowcount: %s', teams_deleted)
+
+            teams_after_delete = db.execute(text("""
+                SELECT COUNT(*)
+                FROM teams
+                WHERE organization_id = :org_id
+            """), {'org_id': str(org_id_value)}).scalar() or 0
+            logger.info('[ORG DELETE] teams remaining after delete: %s', teams_after_delete)
+            return teams_before_delete, teams_deleted, teams_after_delete
+
         o = db.query(Organization).filter(Organization.id == org_id).first()
         if not o:
             raise HTTPException(404, 'Organization not found')
@@ -559,6 +625,14 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
                     detail=f"Delete blocked. {remaining} host_locations still reference organization {org_id}.",
                 )
 
+            _, _, teams_after_delete = _cleanup_team_dependencies_for_org(org_id)
+            if teams_after_delete > 0:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Delete blocked. {teams_after_delete} teams still reference this organization.",
+                )
+
+            logger.info('[ORG DELETE] final organization delete started')
             result = db.execute(text('DELETE FROM organizations WHERE id = :org_id'), {'org_id': str(org_id)})
             db.commit()
             return {'success': True, 'deleted': {'organization': result.rowcount or 0}}
@@ -703,41 +777,15 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
                 detail=f"Delete blocked. {remaining} host_locations still reference organization {org_id}.",
             )
 
-        rowcounts['games_by_team'] = _execute_step('delete_games_by_team_before_team_delete', org_name, """
-            DELETE FROM games
-            WHERE home_team_id IN (
-                SELECT id FROM teams WHERE organization_id = :org_id
-            )
-            OR away_team_id IN (
-                SELECT id FROM teams WHERE organization_id = :org_id
-            )
-        """, 'games')
-
         rowcounts['community_division_participation'] = _execute_step('delete_community_division_participation', org_name, """
             DELETE FROM community_division_participation
             WHERE organization_id = :org_id
         """, 'community_division_participation')
 
-        teams_before_delete = db.execute(text("""
-            SELECT COUNT(*)
-            FROM teams
-            WHERE organization_id = :org_id
-        """), {'org_id': str(org_id)}).scalar() or 0
-        logger.info('[ORG DELETE] team count before delete: %s', teams_before_delete)
-
-        team_delete_result = db.execute(text("""
-            DELETE FROM teams
-            WHERE organization_id = :org_id
-        """), {'org_id': str(org_id)})
-        rowcounts['teams'] = team_delete_result.rowcount or 0
-        logger.info('[ORG DELETE] teams deleted rowcount: %s', rowcounts['teams'])
-
-        teams_after_delete = db.execute(text("""
-            SELECT COUNT(*)
-            FROM teams
-            WHERE organization_id = :org_id
-        """), {'org_id': str(org_id)}).scalar() or 0
-        logger.info('[ORG DELETE] team count after delete: %s', teams_after_delete)
+        teams_before_delete, teams_deleted, teams_after_delete = _cleanup_team_dependencies_for_org(org_id)
+        rowcounts['teams_before_delete'] = teams_before_delete
+        rowcounts['teams'] = teams_deleted
+        rowcounts['teams_remaining_after_delete'] = teams_after_delete
 
         host_locations_remaining_before_org_delete = db.execute(text("""
             SELECT COUNT(*)
@@ -751,6 +799,7 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
                 detail=f"Delete blocked. Remaining dependencies: teams={teams_after_delete}, host_locations={host_locations_remaining_before_org_delete}",
             )
 
+        logger.info('[ORG DELETE] final organization delete started')
         rowcounts['organization'] = _execute_step('delete_organization', org_name, """
             DELETE FROM organizations
             WHERE id = :org_id
