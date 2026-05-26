@@ -33,6 +33,31 @@ ALLOWED_FIELD_SPACE_TYPES = {
     'GRASS_PARK_SITE',
 }
 
+
+def _canonical_division_suffix(name: str | None) -> str:
+    normalized = ''.join(ch for ch in (name or '').upper() if ch.isalnum())
+    suffix_map = {
+        'K1ST': 'K_1',
+        '2ND3RD': '2_3',
+        '4TH5TH': '4_5',
+        '6TH7TH': '6_7',
+        '8TH': '8',
+        '6TH7TH8TH': '6_7_8',
+    }
+    return suffix_map.get(normalized, normalized)
+
+
+def canonical_division_id(division_group: str | None, division_name: str | None) -> str:
+    group = ''.join(ch for ch in (division_group or '').upper() if ch.isalnum())
+    suffix = _canonical_division_suffix(division_name)
+    return f'{group}_{suffix}' if group and suffix else ''
+
+
+def canonical_division_id_from_division(division: Division | None) -> str:
+    if not division:
+        return ''
+    return canonical_division_id(division.division_group, division.name)
+
 def _capacity_for_layout(layout_name: str | None, option: FieldConfigurationOption | None) -> tuple[int, int]:
     if option:
         return option.thirty_yard_capacity, option.fifty_three_yard_capacity
@@ -1355,11 +1380,7 @@ def manual_schedule_builder_recommendations(payload: dict, db: Session = Depends
 
     division = db.query(Division).filter(Division.id == division_id).first() if division_id else None
     expected_field_type = _required_field_type_for_division(division)
-    division_key = ''
-    if division:
-        division_name_key = ''.join(ch for ch in (division.name or '').upper() if ch.isalnum())
-        division_group_key = ''.join(ch for ch in (division.division_group or '').upper() if ch.isalnum())
-        division_key = f'{division_group_key}_{division_name_key}'
+    division_key = canonical_division_id_from_division(division)
 
     teams_q = db.query(Team).filter(Team.is_active.is_(True))
     if division_id:
@@ -1724,14 +1745,13 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     if not division or not week:
         raise HTTPException(404, 'Selected season/week/division is invalid')
     division_group_key = (division.division_group or '').strip().upper()
-    division_name_key = (division.name or '').strip().upper()
-    selected_division_key = f'{division_group_key}_{division_name_key}' if division_group_key and division_name_key else ''
+    selected_division_key = canonical_division_id_from_division(division)
     full_division_label = f"{division.division_group} {division.name}".strip() if division.division_group else (division.name or '')
     supported_girls_division_keys = {
-        'GIRLS_K/1ST',
-        'GIRLS_2ND/3RD',
-        'GIRLS_4TH/5TH',
-        'GIRLS_6TH/7TH/8TH',
+        'GIRLS_K_1',
+        'GIRLS_2_3',
+        'GIRLS_4_5',
+        'GIRLS_6_7_8',
     }
     required_field_type = _required_field_type_for_division(division)
     teams = db.query(Team).filter(Team.division_id == division_id, Team.is_active.is_(True)).order_by(Team.name).all()
@@ -1773,7 +1793,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     league_games_required_by_division_week: dict[str, int] = {}
     for league_team in league_active_teams:
         div = league_team.division
-        div_key = f"{(div.division_group or '').strip()} {(div.name or '').strip()}".strip() if div else 'UNKNOWN'
+        div_key = canonical_division_id_from_division(div) if div else 'UNKNOWN'
         league_teams_by_division[div_key] = league_teams_by_division.get(div_key, 0) + 1
     for div_key, div_team_count in league_teams_by_division.items():
         league_games_required_by_division_week[div_key] = div_team_count // 2
@@ -3569,7 +3589,7 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
         ('COED', '6TH/7TH'), ('COED', '8TH'),
         ('GIRLS', '6TH/7TH/8TH'),
     ]
-    divisions_by_key = {((d.division_group or '').strip().upper(), (d.name or '').strip().upper()): d for d in db.query(Division).all()}
+    divisions_by_key = {canonical_division_id_from_division(d): d for d in db.query(Division).all()}
     weeks = db.query(Week).filter(Week.season_id == season_id).order_by(Week.week_number.asc(), Week.start_date.asc()).all()
 
     total_games_created = 0
@@ -3609,7 +3629,7 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
             skipped_attempts_by_reason[key] = skipped_attempts_by_reason.get(key, 0) + 1
 
     for group, name in division_order:
-        division = divisions_by_key.get((group, name))
+        division = divisions_by_key.get(canonical_division_id(group, name))
         division_label = f'{group.title()} {name}'
         if not division:
             warnings.append(f'Division not found: {division_label}')
