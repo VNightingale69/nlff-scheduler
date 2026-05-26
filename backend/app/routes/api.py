@@ -1,4 +1,5 @@
 import csv
+import os
 import io
 import math
 import uuid
@@ -366,6 +367,34 @@ def get_organization_delete_check(org_id: uuid.UUID, db: Session = Depends(get_d
 
 @router.delete('/organizations/{org_id}', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Session = Depends(get_db)):
+    def _is_development() -> bool:
+        env = (os.getenv('ENV') or os.getenv('APP_ENV') or os.getenv('ENVIRONMENT') or 'development').lower()
+        return env in {'dev', 'development', 'local', 'test', 'testing'}
+
+    def _log_delete_step(step: str, organization_name: str, rows_affected: int | None = None, table: str | None = None):
+        logger.info(
+            '[ORG DELETE] organization_id=%s organization_name=%s step=%s table=%s rows_affected=%s',
+            org_id,
+            organization_name,
+            step,
+            table or 'n/a',
+            rows_affected if rows_affected is not None else 'n/a',
+        )
+
+    def _stage_failure(stage: str, organization_name: str, table: str, exc: Exception):
+        logger.exception(
+            '[ORG DELETE] organization_id=%s organization_name=%s step=%s table=%s error=%s',
+            org_id,
+            organization_name,
+            stage,
+            table,
+            str(exc),
+        )
+        detail = f'Failed deleting {stage}'
+        if _is_development():
+            detail = f'{detail} due to {str(exc)}'
+        raise HTTPException(status_code=500, detail={'error': 'organization_delete_failed', 'stage': stage, 'message': detail})
+
     try:
         o = db.query(Organization).filter(Organization.id == org_id).first()
         if not o:
@@ -400,18 +429,78 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
                 (Game.field_id.in_(field_ids))
             ).all()] if (team_ids or field_ids) else []
 
-            deleted_games = db.query(Game).filter(Game.id.in_(game_ids)).delete(synchronize_session=False) if game_ids else 0
-            deleted_slots = db.query(GameSlot).filter((GameSlot.field_instance_id.in_(field_instance_ids)) | (GameSlot.host_location_id.in_(host_location_ids))).delete(synchronize_session=False) if host_location_ids else 0
-            deleted_field_instances = db.query(FieldInstance).filter(FieldInstance.host_location_id.in_(host_location_ids)).delete(synchronize_session=False) if host_location_ids else 0
-            deleted_availability = db.query(HostingAvailability).filter(HostingAvailability.id.in_(availability_ids)).delete(synchronize_session=False) if availability_ids else 0
+            try:
+                deleted_games = db.query(Game).filter(Game.id.in_(game_ids)).delete(synchronize_session=False) if game_ids else 0
+                _log_delete_step('delete_scheduled_games', org_name, deleted_games, 'games')
+            except Exception as exc:
+                _stage_failure('delete_scheduled_games', org_name, 'games', exc)
+
+            try:
+                deleted_game_slot_relationships = db.query(GameSlot).filter(GameSlot.assigned_game_id.in_(game_ids)).update({'assigned_game_id': None}, synchronize_session=False) if game_ids else 0
+                _log_delete_step('delete_game_slot_relationships', org_name, deleted_game_slot_relationships, 'game_slots')
+            except Exception as exc:
+                _stage_failure('delete_game_slot_relationships', org_name, 'game_slots', exc)
+
+            try:
+                deleted_slots = db.query(GameSlot).filter((GameSlot.field_instance_id.in_(field_instance_ids)) | (GameSlot.host_location_id.in_(host_location_ids))).delete(synchronize_session=False) if host_location_ids else 0
+                _log_delete_step('delete_generated_slots', org_name, deleted_slots, 'game_slots')
+            except Exception as exc:
+                _stage_failure('delete_generated_slots', org_name, 'game_slots', exc)
+
+            try:
+                deleted_availability = db.query(HostingAvailability).filter(HostingAvailability.id.in_(availability_ids)).delete(synchronize_session=False) if availability_ids else 0
+                _log_delete_step('delete_hosting_availability', org_name, deleted_availability, 'hosting_availabilities')
+            except Exception as exc:
+                _stage_failure('delete_hosting_availability', org_name, 'hosting_availabilities', exc)
+
+            try:
+                deleted_field_instances = db.query(FieldInstance).filter(FieldInstance.host_location_id.in_(host_location_ids)).delete(synchronize_session=False) if host_location_ids else 0
+                _log_delete_step('delete_field_instances', org_name, deleted_field_instances, 'field_instances')
+            except Exception as exc:
+                _stage_failure('delete_field_instances', org_name, 'field_instances', exc)
             area_ids = [area_id for (area_id,) in db.query(PhysicalFieldArea.id).filter(PhysicalFieldArea.host_location_id.in_(host_location_ids)).all()] if host_location_ids else []
-            deleted_field_config = db.query(FieldConfigurationOption).filter(FieldConfigurationOption.physical_field_area_id.in_(area_ids)).delete(synchronize_session=False) if area_ids else 0
-            deleted_fields = db.query(Field).filter(Field.host_location_id.in_(host_location_ids)).delete(synchronize_session=False) if host_location_ids else 0
-            deleted_areas = db.query(PhysicalFieldArea).filter(PhysicalFieldArea.host_location_id.in_(host_location_ids)).delete(synchronize_session=False) if host_location_ids else 0
-            deleted_hosts = db.query(HostLocation).filter(HostLocation.organization_id == org_id).delete(synchronize_session=False)
-            deleted_teams = db.query(Team).filter(Team.organization_id == org_id).delete(synchronize_session=False)
-            deleted_participation = db.query(OrganizationDivisionParticipation).filter(OrganizationDivisionParticipation.organization_id == org_id).delete(synchronize_session=False)
-            db.delete(o)
+            try:
+                deleted_field_config = db.query(FieldConfigurationOption).filter(FieldConfigurationOption.physical_field_area_id.in_(area_ids)).delete(synchronize_session=False) if area_ids else 0
+                _log_delete_step('delete_generated_field_layouts', org_name, deleted_field_config, 'field_configuration_options')
+            except Exception as exc:
+                _stage_failure('delete_generated_field_layouts', org_name, 'field_configuration_options', exc)
+            try:
+                deleted_fields = db.query(Field).filter(Field.host_location_id.in_(host_location_ids)).delete(synchronize_session=False) if host_location_ids else 0
+                _log_delete_step('delete_physical_fields', org_name, deleted_fields, 'fields')
+            except Exception as exc:
+                _stage_failure('delete_physical_fields', org_name, 'fields', exc)
+            try:
+                deleted_areas = db.query(PhysicalFieldArea).filter(PhysicalFieldArea.host_location_id.in_(host_location_ids)).delete(synchronize_session=False) if host_location_ids else 0
+                _log_delete_step('delete_field_areas', org_name, deleted_areas, 'physical_field_areas')
+            except Exception as exc:
+                _stage_failure('delete_field_areas', org_name, 'physical_field_areas', exc)
+            try:
+                deleted_hosts = db.query(HostLocation).filter(HostLocation.organization_id == org_id).delete(synchronize_session=False)
+                _log_delete_step('delete_host_locations', org_name, deleted_hosts, 'host_locations')
+            except Exception as exc:
+                _stage_failure('delete_host_locations', org_name, 'host_locations', exc)
+            try:
+                deleted_participation = db.query(OrganizationDivisionParticipation).filter(OrganizationDivisionParticipation.organization_id == org_id).delete(synchronize_session=False)
+                _log_delete_step('delete_division_participation', org_name, deleted_participation, 'organization_division_participations')
+            except Exception as exc:
+                _stage_failure('delete_division_participation', org_name, 'organization_division_participations', exc)
+            try:
+                deleted_teams = db.query(Team).filter(Team.organization_id == org_id).delete(synchronize_session=False)
+                _log_delete_step('delete_teams', org_name, deleted_teams, 'teams')
+            except Exception as exc:
+                _stage_failure('delete_teams', org_name, 'teams', exc)
+            try:
+                db.delete(o)
+                _log_delete_step('delete_organization', org_name, 1, 'organizations')
+            except Exception as exc:
+                _stage_failure('delete_organization', org_name, 'organizations', exc)
+
+            remaining_refs = _organization_dependency_summary(db, org_id)
+            unresolved = [{'label': label, 'count': count} for label, count in remaining_refs if isinstance(count, int) and count > 0]
+            if unresolved:
+                logger.error('[ORG DELETE] organization_id=%s organization_name=%s step=integrity_check_failed unresolved=%s', org_id, org_name, unresolved)
+                raise HTTPException(status_code=500, detail={'error': 'organization_delete_integrity_failed', 'message': 'Deletion integrity check failed. Transaction rolled back.', 'unresolved_references': unresolved})
+            _log_delete_step('integrity_check_passed', org_name, 0, 'all')
         db.commit()
         logger.info(
             'Organization cascade delete completed org_id=%s org_name=%s teams_deleted=%s games_deleted=%s slots_deleted=%s host_locations_deleted=%s availability_deleted=%s',
@@ -430,6 +519,30 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
                 'message': 'Unable to delete organization due to a server error.',
             },
         )
+
+
+@router.get('/admin/debug/organization/{org_id}/dependencies', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+def debug_organization_dependencies(org_id: uuid.UUID, db: Session = Depends(get_db)):
+    org = db.query(Organization).filter(Organization.id == org_id).first()
+    if not org:
+        raise HTTPException(404, 'Organization not found')
+    host_location_ids = [host_id for (host_id,) in db.query(HostLocation.id).filter(HostLocation.organization_id == org_id).all()]
+    team_ids = [team_id for (team_id,) in db.query(Team.id).filter(Team.organization_id == org_id).all()]
+    field_ids = [field_id for (field_id,) in db.query(Field.id).filter(Field.host_location_id.in_(host_location_ids)).all()] if host_location_ids else []
+    availability_ids = [availability_id for (availability_id,) in db.query(HostingAvailability.id).filter((HostingAvailability.field_id.in_(field_ids)) | (HostingAvailability.physical_field_area_id.in_(db.query(PhysicalFieldArea.id).filter(PhysicalFieldArea.host_location_id.in_(host_location_ids)).subquery()))).all()] if host_location_ids else []
+    unresolved = _organization_dependency_summary(db, org_id)
+    return {
+        'organization_id': str(org.id),
+        'organization_name': org.name,
+        'teams': len(team_ids),
+        'games': db.query(Game).filter((Game.home_team_id.in_(team_ids)) | (Game.away_team_id.in_(team_ids)) | (Game.field_id.in_(field_ids))).count() if (team_ids or field_ids) else 0,
+        'slots': db.query(GameSlot).filter((GameSlot.field_instance_id.in_(db.query(FieldInstance.id).filter(FieldInstance.host_location_id.in_(host_location_ids)).subquery())) | (GameSlot.host_location_id.in_(host_location_ids))).count() if host_location_ids else 0,
+        'host_locations': len(host_location_ids),
+        'fields': len(field_ids),
+        'availability': len(availability_ids),
+        'division_participation': db.query(OrganizationDivisionParticipation).filter(OrganizationDivisionParticipation.organization_id == org_id).count(),
+        'unresolved_references': [{'label': label, 'count': count} for label, count in unresolved if isinstance(count, int) and count > 0],
+    }
 
 
 LEAGUE_DIVISION_SEED = [
