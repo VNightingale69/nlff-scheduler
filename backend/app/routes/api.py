@@ -423,6 +423,45 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
         org_name = o.name
 
         if not force:
+            deleted_game_slots = db.execute(text("""
+                DELETE FROM game_slots
+                WHERE field_instance_id IN (
+                    SELECT fi.id
+                    FROM field_instances fi
+                    JOIN hosting_availabilities ha
+                        ON fi.hosting_availability_id = ha.id
+                    JOIN field_configuration_options fco
+                        ON ha.field_configuration_option_id = fco.id
+                    JOIN physical_field_areas pfa
+                        ON fco.physical_field_area_id = pfa.id
+                    JOIN host_locations hl
+                        ON pfa.host_location_id = hl.id
+                    WHERE hl.organization_id = :org_id
+                )
+            """), {"org_id": str(org_id)}).rowcount or 0
+            logger.info(f"[ORG DELETE] game_slots deleted: {deleted_game_slots}")
+
+            remaining_game_slots = db.execute(text("""
+                SELECT COUNT(*)
+                FROM game_slots
+                WHERE field_instance_id IN (
+                    SELECT fi.id
+                    FROM field_instances fi
+                    JOIN hosting_availabilities ha
+                        ON fi.hosting_availability_id = ha.id
+                    JOIN field_configuration_options fco
+                        ON ha.field_configuration_option_id = fco.id
+                    JOIN physical_field_areas pfa
+                        ON fco.physical_field_area_id = pfa.id
+                    JOIN host_locations hl
+                        ON pfa.host_location_id = hl.id
+                    WHERE hl.organization_id = :org_id
+                )
+            """), {"org_id": str(org_id)}).scalar() or 0
+            logger.info(f"[ORG DELETE] game_slots remaining after delete: {remaining_game_slots}")
+            if remaining_game_slots > 0:
+                raise HTTPException(409, "Delete blocked. game_slots still reference field_instances.")
+
             deleted_field_instances = db.execute(text("""
                 DELETE FROM field_instances
                 WHERE hosting_availability_id IN (
