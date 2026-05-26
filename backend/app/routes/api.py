@@ -423,6 +423,34 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
         org_name = o.name
 
         if not force:
+            host_count = db.execute(text("""
+                SELECT COUNT(*)
+                FROM host_locations
+                WHERE organization_id = :org_id
+            """), {"org_id": str(org_id)}).scalar()
+            logger.info(f"[ORG DELETE] host_locations before delete: {host_count}")
+
+            result = db.execute(text("""
+                DELETE FROM host_locations
+                WHERE organization_id = :org_id
+            """), {"org_id": str(org_id)})
+            logger.info(f"[ORG DELETE] host_locations deleted: {result.rowcount}")
+
+            db.flush()
+
+            remaining = db.execute(text("""
+                SELECT COUNT(*)
+                FROM host_locations
+                WHERE organization_id = :org_id
+            """), {"org_id": str(org_id)}).scalar()
+            logger.info(f"[ORG DELETE] host_locations remaining after delete: {remaining}")
+
+            if remaining > 0:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Delete blocked. {remaining} host_locations still reference organization {org_id}.",
+                )
+
             result = db.execute(text('DELETE FROM organizations WHERE id = :org_id'), {'org_id': str(org_id)})
             db.commit()
             return {'success': True, 'deleted': {'organization': result.rowcount or 0}}
@@ -470,21 +498,34 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
             )
         """, 'fields')
 
-        rowcounts['host_locations'] = _execute_step('delete_host_locations', org_name, """
+        host_count = db.execute(text("""
+            SELECT COUNT(*)
+            FROM host_locations
+            WHERE organization_id = :org_id
+        """), {"org_id": str(org_id)}).scalar()
+        logger.info(f"[ORG DELETE] host_locations before delete: {host_count}")
+
+        result = db.execute(text("""
             DELETE FROM host_locations
             WHERE organization_id = :org_id
-        """, 'host_locations')
+        """), {"org_id": str(org_id)})
+        logger.info(f"[ORG DELETE] host_locations deleted: {result.rowcount}")
+        rowcounts['host_locations'] = result.rowcount or 0
 
-        remaining_host_locations = db.execute(text("""
+        db.flush()
+
+        remaining = db.execute(text("""
             SELECT COUNT(*)
             FROM host_locations
             WHERE organization_id = :org_id
         """), {'org_id': str(org_id)}).scalar() or 0
-        logger.info('[ORG DELETE] organization_id=%s organization_name=%s step=verify_host_locations_remaining remaining=%s', org_id, org_name, remaining_host_locations)
+        logger.info(f"[ORG DELETE] host_locations remaining after delete: {remaining}")
 
-        if remaining_host_locations > 0:
-            db.rollback()
-            raise HTTPException(status_code=409, detail='Cannot delete organization because host locations still reference it.')
+        if remaining > 0:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Delete blocked. {remaining} host_locations still reference organization {org_id}.",
+            )
 
         rowcounts['teams'] = _execute_step('delete_teams', org_name, """
             DELETE FROM teams
@@ -506,7 +547,7 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
         response = {
             'success': True,
             'message': 'Organization and related records deleted.',
-            'host_locations_remaining': remaining_host_locations,
+            'host_locations_remaining': remaining,
             'organization_deleted': rowcounts['organization'] > 0,
         }
 
