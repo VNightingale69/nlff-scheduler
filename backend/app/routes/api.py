@@ -1934,7 +1934,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     no_byes = bool(payload.get('no_byes', True))
     team_count = len(teams)
     is_odd_division = team_count % 2 == 1
-    required_games_for_division_week = (team_count + 1) // 2 if (is_odd_division and no_byes) else team_count // 2
+    required_games_for_division_week = team_count // 2
     existing_division_games_query = db.query(Game).select_from(Game).join(Team, Game.home_team_id == Team.id).join(Game.status).filter(
         Game.season_id == season_id,
         Game.week_id == week_id,
@@ -3075,6 +3075,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'active_team_count': team_count,
             'required_game_count': required_games_for_division_week,
             'created_game_count': total_created_games,
+            'odd_even_status_source': 'division_active_team_count',
             'unscheduled_teams': [teams_by_id[uuid.UUID(tid)].name for tid in unscheduled_team_ids],
             'double_header_team': teams_by_id[selected_double_header_team_id].name if selected_double_header_team_id else None,
         },
@@ -3100,6 +3101,10 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'rules_relaxed': len(host_limit_relaxation_reasons),
             'conflicts_avoided': len(skipped),
             'final_games_created': len(plans),
+            'division_team_count': team_count,
+            'required_games': required_games_for_division_week,
+            'actual_games_scheduled': total_created_games,
+            'odd_even_status_source': 'division_active_team_count',
             'week_host_site_usage': {
                 'active_host_sites': week_host_site_usage,
                 'overflow_sites': [],
@@ -3241,7 +3246,7 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
     team_ids = {t.id for t in teams}
     no_byes = bool(payload.get('no_byes', True))
     is_odd_division = len(teams) % 2 == 1
-    required_games_for_division_week = (len(teams) + 1) // 2 if (is_odd_division and no_byes) else len(teams) // 2
+    required_games_for_division_week = len(teams) // 2
     existing_division_games = db.query(Game).select_from(Game).join(Team, Game.home_team_id == Team.id).join(Game.status).filter(
         Game.season_id == season_id,
         Game.week_id == week_id,
@@ -3903,6 +3908,7 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
             'active_team_count': len(teams),
             'required_game_count': required_games_for_division_week,
             'created_game_count': total_created_for_week,
+            'odd_even_status_source': 'division_active_team_count',
             'unscheduled_teams': unscheduled_teams,
             'double_header_team': teams_by_id[double_header_team_id].name if double_header_team_id and double_header_team_id in teams_by_id else None,
             'recovery_diagnostics': recovery_diagnostics[-25:],
@@ -3918,6 +3924,10 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
             'teams_evaluated': len(teams),
             'slots_evaluated': open_slots_count,
             'valid_matchups_found': len(proposals),
+            'division_team_count': len(teams),
+            'required_games': required_games_for_division_week,
+            'actual_games_scheduled': total_created_for_week,
+            'odd_even_status_source': 'division_active_team_count',
             'valid_slot_combinations_found': len(proposals),
             'rules_relaxed': len([s for s in skipped if 'non-back-to-back' in str(s.get('reason', '')).lower()]),
             'conflicts_avoided': len(skipped),
