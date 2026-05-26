@@ -1934,7 +1934,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     no_byes = bool(payload.get('no_byes', True))
     team_count = len(teams)
     is_odd_division = team_count % 2 == 1
-    required_games_for_division_week = team_count // 2
+    required_games_for_division_week = (team_count + 1) // 2
     existing_division_games_query = db.query(Game).select_from(Game).join(Team, Game.home_team_id == Team.id).join(Game.status).filter(
         Game.season_id == season_id,
         Game.week_id == week_id,
@@ -3262,7 +3262,7 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
     team_ids = {t.id for t in teams}
     no_byes = bool(payload.get('no_byes', True))
     is_odd_division = len(teams) % 2 == 1
-    required_games_for_division_week = len(teams) // 2
+    required_games_for_division_week = (len(teams) + 1) // 2
     existing_division_games = db.query(Game).select_from(Game).join(Team, Game.home_team_id == Team.id).join(Game.status).filter(
         Game.season_id == season_id,
         Game.week_id == week_id,
@@ -3857,13 +3857,26 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
     )
 
     recovery_diagnostics: list[dict[str, object]] = []
-    if is_odd_division and no_byes and total_created_for_week < required_games_for_division_week:
+    recovery_overflow_used = False
+    if total_created_for_week < required_games_for_division_week:
         remaining_needed = required_games_for_division_week - total_created_for_week
         division_team_ids = [str(team.id) for team in teams]
-        unscheduled_ids = [tid for tid in division_team_ids if week_team_game_counts.get(uuid.UUID(tid), 0) == 0]
-        double_header_team_ids = [str(tid) for tid, count in week_team_game_counts.items() if count >= 2]
-        if not double_header_team_ids:
-            double_header_team_ids = [tid for tid in division_team_ids if week_team_game_counts.get(uuid.UUID(tid), 0) == 1]
+        season_team_counts_rows = db.query(
+            Team.id,
+            func.count(Game.id),
+        ).outerjoin(
+            Game,
+            and_(
+                or_(Game.home_team_id == Team.id, Game.away_team_id == Team.id),
+                Game.season_id == season_id,
+            ),
+        ).outerjoin(GameStatus, Game.game_status_id == GameStatus.id).filter(
+            Team.division_id == division_id,
+            Team.is_active.is_(True),
+        ).filter(
+            or_(Game.id.is_(None), GameStatus.code != 'UNSCHEDULED')
+        ).group_by(Team.id).all()
+        season_team_counts = {str(team_id): int(count or 0) for team_id, count in season_team_counts_rows}
         open_slots = db.query(GameSlot).join(GameSlot.field_instance).filter(
             GameSlot.slot_date == db.query(Week.start_date).filter(Week.id == week_id).scalar_subquery(),
             GameSlot.status == 'OPEN',
@@ -3872,7 +3885,10 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         ).order_by(GameSlot.start_time.asc()).all()
         while remaining_needed > 0:
             placed = False
-            candidate_teams = sorted(division_team_ids, key=lambda tid: week_team_game_counts.get(uuid.UUID(tid), 0))
+            candidate_teams = sorted(
+                division_team_ids,
+                key=lambda tid: (season_team_counts.get(tid, 0), week_team_game_counts.get(uuid.UUID(tid), 0)),
+            )
             for home_tid in candidate_teams:
                 for away_tid in candidate_teams:
                     if home_tid == away_tid:
@@ -3881,15 +3897,19 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
                     away_count = week_team_game_counts.get(uuid.UUID(away_tid), 0)
                     if home_count >= 2 or away_count >= 2:
                         continue
-                    projected_double_headers = len([tid for tid, cnt in week_team_game_counts.items() if cnt >= 2])
-                    if home_count == 1 or away_count == 1:
-                        if projected_double_headers >= 1 and home_count == 1 and away_count == 1:
-                            continue
-                    for slot in open_slots:
+                    preferred_slots = sorted(
+                        open_slots,
+                        key=lambda slot: 0 if str(slot.host_location_id) in selected_host_ids else 1,
+                    )
+                    for slot in preferred_slots:
                         ok, reason = _can_place_matchup(home_tid, away_tid, slot)
                         if not ok:
                             recovery_diagnostics.append({'slot': f"{slot.start_time} {slot.field_type}", 'home': _team_name(home_tid), 'away': _team_name(away_tid), 'reason': reason})
                             continue
+                        if str(slot.host_location_id) not in selected_host_ids:
+                            recovery_overflow_used = True
+                            two_location_rule_relaxed = True
+                            overflow_host_ids.add(str(slot.host_location_id))
                         game = Game(season_id=season_id, week_id=week_id, home_team_id=home_tid, away_team_id=away_tid, field_id=None, game_status_id=status.id, game_date=slot.slot_date, kickoff_time=slot.start_time)
                         db.add(game); db.flush()
                         slot.status = 'ASSIGNED'; slot.assigned_game_id = game.id
@@ -3898,7 +3918,10 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
                         host_time_occupied[(str(slot.host_location_id), slot.slot_date, slot.start_time)] = division.name if division else 'another division'
                         week_team_game_counts[uuid.UUID(home_tid)] = home_count + 1
                         week_team_game_counts[uuid.UUID(away_tid)] = away_count + 1
+                        season_team_counts[home_tid] = season_team_counts.get(home_tid, 0) + 1
+                        season_team_counts[away_tid] = season_team_counts.get(away_tid, 0) + 1
                         created_games += 1; assigned_slots += 1; remaining_needed -= 1; placed = True
+                        open_slots = [s for s in open_slots if s.id != slot.id]
                         break
                     if placed:
                         break
@@ -3908,6 +3931,7 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
                 break
         total_created_for_week = existing_games_count + created_games
         if total_created_for_week < required_games_for_division_week:
+            unscheduled_ids = [tid for tid in division_team_ids if week_team_game_counts.get(uuid.UUID(tid), 0) == 0]
             _add_skipped(f"RECOVERY PASS FAILED Division: {division.name if division else 'Unknown'} Week: {db.query(Week.week_number).filter(Week.id == week_id).scalar()} Unscheduled Teams: {', '.join([_team_name(tid) for tid in unscheduled_ids]) or 'None'}")
 
     if total_created_for_week >= required_games_for_division_week:
@@ -4094,7 +4118,8 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
             proposals = preview.get('proposals') or []
             _record_skipped(preview.get('skipped') or [])
             preview_validation = preview.get('final_validation') or {}
-            required_games = int(preview_validation.get('required_game_count') or 0)
+            active_team_count = int(preview_validation.get('active_team_count') or 0)
+            required_games = int(preview_validation.get('required_game_count') or ((active_team_count + 1) // 2))
             created_games = int(preview_validation.get('created_game_count') or 0)
             unscheduled_teams = list(preview_validation.get('unscheduled_teams') or [])
             unresolved_conflicts = list(preview.get('skipped') or [])
@@ -4118,11 +4143,14 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
             post_run_validation.append({
                 'division': division_label,
                 'week': week.week_number,
-                'active_team_count': int(preview_validation.get('active_team_count') or 0),
+                'active_team_count': active_team_count,
                 'required_games': required_games,
                 'created_games': actual_created_games,
+                'missing_games': max(0, required_games - actual_created_games),
                 'unscheduled_teams': unscheduled_teams,
                 'unresolved_conflicts': unresolved_conflicts,
+                'overflow_used': host_count > 2,
+                'two_location_rule_relaxed': host_count > 2,
                 'validation_warnings': ['Third host location used.'] if host_count > 2 else [],
             })
             if host_count > 2:
@@ -4191,12 +4219,14 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
             max_games = max(season_counts_only)
             odd_team_double_header_allowed = (len(season_counts_only) % 2) == 1
             if (max_games - min_games) > 1 and not odd_team_double_header_allowed:
+                under_target_teams = [name for name, count in season_team_game_counts if int(count or 0) == min_games]
                 validation_errors.append(
                     f'{division_label}: season team game counts are imbalanced (min={min_games}, max={max_games}); must be within 1 game.'
                 )
                 warnings.append(
                     f'Balance validation failed for {division_label}: min={min_games}, max={max_games}.'
                 )
+                warnings.append(f'Balance under-target teams for {division_label}: {under_target_teams}')
 
     return {
         'total_games_created': total_games_created,
