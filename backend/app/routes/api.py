@@ -2629,7 +2629,9 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                             same_community_home_slot_available = any(
                                 s.host_location_id in home_host_ids
                                 and s.slot_date == slot.slot_date
-                                and s.start_time == slot.start_time
+                                and _first_compatible_open_slot_by_field_order(
+                                    s.host_location_id, s.slot_date, s.start_time
+                                ) is not None
                                 for s in sorted_slots
                             )
                             if same_community_home_slot_available:
@@ -2656,7 +2658,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                                     and s.start_time == slot.start_time
                                 ]
                                 if not home_slots_same_time:
-                                    same_community_home_unavailable_reason = 'no compatible home-host slot exists at this date/time'
+                                    same_community_home_unavailable_reason = 'no compatible home-host slot exists on this date'
                                 else:
                                     blocked_reasons = []
                                     for hs in home_slots_same_time:
@@ -3124,6 +3126,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
 
     same_community_not_home_site = []
     third_meeting_count = 0
+    repeat_matchup_details = []
     for plan in plans:
         home_team = teams_by_id.get(uuid.UUID(plan['home_team_id']))
         away_team = teams_by_id.get(uuid.UUID(plan['away_team_id']))
@@ -3137,6 +3140,13 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                 'preferred_home_site_unavailable_reason': plan.get('same_community_home_unavailable_reason') or 'no compatible home-host slot existed under active constraints',
             })
         pair = tuple(sorted((uuid.UUID(plan['home_team_id']), uuid.UUID(plan['away_team_id']))))
+        if pair_counts_with_proposals.get(pair, 0) > 1:
+            repeat_matchup_details.append({
+                'home_team': home_team.name,
+                'away_team': away_team.name,
+                'games': pair_counts_with_proposals.get(pair, 0),
+                'date': plan.get('proposed_date'),
+            })
         if pair_counts_with_proposals.get(pair, 0) >= 3:
             third_meeting_count += 1
 
@@ -3218,6 +3228,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             },
             'same_community_home_host_conflicts': same_community_home_host_conflicts,
             'same_community_not_home_site_details': same_community_not_home_site,
+            'repeat_matchups_with_dates': repeat_matchup_details,
             'division_team_count': team_count,
             'required_games': required_games_for_division_week,
             'actual_games_scheduled': total_created_games,
@@ -4058,6 +4069,61 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         if week_team_game_counts.get(t.id, 0) == 0
     ]
     double_header_team_id = next((str(team_id) for team_id, count in week_team_game_counts.items() if count > 1), None)
+    same_community_home_swaps = 0
+    same_community_home_swap_notes: list[dict[str, object]] = []
+    scheduled_games_for_swap = _division_week_scheduled_games()
+    slots_for_swap = _slot_by_game_id()
+    for game in scheduled_games_for_swap:
+        slot = slots_for_swap.get(str(game.id))
+        if not slot or not slot.host_location_id:
+            continue
+        home_team = teams_by_id.get(game.home_team_id)
+        away_team = teams_by_id.get(game.away_team_id)
+        if not home_team or not away_team:
+            continue
+        if not home_team.organization_id or home_team.organization_id != away_team.organization_id:
+            continue
+        preferred_home_hosts = {str(hid) for hid in host_ids_by_org.get(home_team.organization_id, set())}
+        if not preferred_home_hosts or str(slot.host_location_id) in preferred_home_hosts:
+            continue
+        candidate_swaps = []
+        for other in scheduled_games_for_swap:
+            if other.id == game.id:
+                continue
+            other_slot = slots_for_swap.get(str(other.id))
+            if not other_slot or str(other_slot.host_location_id) not in preferred_home_hosts:
+                continue
+            other_home = teams_by_id.get(other.home_team_id)
+            other_away = teams_by_id.get(other.away_team_id)
+            if not other_home or not other_away:
+                continue
+            other_same_community = bool(other_home.organization_id and other_home.organization_id == other_away.organization_id)
+            if other_same_community:
+                continue
+            if slot.slot_date != other_slot.slot_date:
+                continue
+            two_location_before = len({str(slots_for_swap.get(str(g.id)).host_location_id) for g in scheduled_games_for_swap if slots_for_swap.get(str(g.id)) and slots_for_swap.get(str(g.id)).slot_date == slot.slot_date})
+            projected_hosts = {
+                str((other_slot if g.id == game.id else slot if g.id == other.id else slots_for_swap.get(str(g.id))).host_location_id)
+                for g in scheduled_games_for_swap
+                if (other_slot if g.id == game.id else slot if g.id == other.id else slots_for_swap.get(str(g.id)))
+                and (other_slot if g.id == game.id else slot if g.id == other.id else slots_for_swap.get(str(g.id))).slot_date == slot.slot_date
+            }
+            if len(projected_hosts) > max(two_location_before, regular_season_host_limit):
+                continue
+            if _can_swap_games(game, slot, other, other_slot):
+                candidate_swaps.append((other, other_slot))
+        if not candidate_swaps:
+            same_community_home_swap_notes.append({'game_id': str(game.id), 'reason': 'No compatible lower-priority cross-community swap candidate found'})
+            continue
+        other, other_slot = candidate_swaps[0]
+        game.kickoff_time, other.kickoff_time = other_slot.start_time, slot.start_time
+        game.game_date, other.game_date = other_slot.slot_date, slot.slot_date
+        slot.assigned_game_id, other_slot.assigned_game_id = other.id, game.id
+        db.flush()
+        same_community_home_swaps += 1
+        same_community_home_swap_notes.append({'game_id': str(game.id), 'swapped_with_game_id': str(other.id), 'new_host_location_id': str(other_slot.host_location_id)})
+        slots_for_swap = _slot_by_game_id()
     if created_games == 0:
         db.rollback()
         raise HTTPException(400, 'No valid scheduling combinations were found for the selected division/week.')
@@ -4117,6 +4183,8 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
             'rules_relaxed': len([s for s in skipped if 'non-back-to-back' in str(s.get('reason', '')).lower()]),
             'conflicts_avoided': len(skipped),
             'final_games_created': created_games,
+            'same_community_home_swaps': same_community_home_swaps,
+            'same_community_home_swap_notes': same_community_home_swap_notes,
         },
     }
 
