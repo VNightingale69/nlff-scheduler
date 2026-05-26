@@ -3575,6 +3575,117 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         assigned_slots += 1
     total_created_for_week = existing_games_count + created_games
 
+    def _division_week_scheduled_games() -> list[Game]:
+        return db.query(Game).join(Game.home_team).join(Game.status).filter(
+            Game.season_id == season_id,
+            Game.week_id == week_id,
+            Team.division_id == division_id,
+            GameStatus.code == 'SCHEDULED',
+            GameStatus.is_active.is_(True),
+        ).all()
+
+    def _slot_by_game_id() -> dict[str, GameSlot]:
+        rows = db.query(GameSlot).filter(
+            GameSlot.assigned_game_id.isnot(None),
+            GameSlot.slot_date == db.query(Week.start_date).filter(Week.id == week_id).scalar_subquery(),
+        ).all()
+        return {str(row.assigned_game_id): row for row in rows if row.assigned_game_id}
+
+    def _double_header_warning_team_ids(games: list[Game], slots_by_game_id: dict[str, GameSlot]) -> list[str]:
+        team_slots: dict[str, list[GameSlot]] = {}
+        for game in games:
+            slot = slots_by_game_id.get(str(game.id))
+            if not slot or not slot.start_time:
+                continue
+            team_slots.setdefault(str(game.home_team_id), []).append(slot)
+            team_slots.setdefault(str(game.away_team_id), []).append(slot)
+        warning_team_ids: list[str] = []
+        for tid, assigned_slots_for_team in team_slots.items():
+            if len(assigned_slots_for_team) != 2:
+                continue
+            first, second = assigned_slots_for_team[0], assigned_slots_for_team[1]
+            same_site_day = first.host_location_id == second.host_location_id and first.slot_date == second.slot_date
+            adjacent = _slot_gap_minutes(first, second) <= 60
+            if not (same_site_day and adjacent):
+                warning_team_ids.append(tid)
+        return warning_team_ids
+
+    def _can_swap_games(game_a: Game, slot_a: GameSlot, game_b: Game, slot_b: GameSlot) -> bool:
+        if not slot_a.start_time or not slot_b.start_time or not slot_a.host_location_id or not slot_b.host_location_id:
+            return False
+        ok_a, _ = _can_place_matchup(str(game_a.home_team_id), str(game_a.away_team_id), slot_b)
+        ok_b, _ = _can_place_matchup(str(game_b.home_team_id), str(game_b.away_team_id), slot_a)
+        return ok_a and ok_b
+
+    optimization_swaps_attempted = 0
+    warnings_resolved = 0
+    warnings_remaining = 0
+    if is_odd_division and no_byes:
+        games_for_optimization = _division_week_scheduled_games()
+        slots_for_optimization = _slot_by_game_id()
+        baseline_warning_team_ids = _double_header_warning_team_ids(games_for_optimization, slots_for_optimization)
+        baseline_warning_count = len(baseline_warning_team_ids)
+        current_warning_count = baseline_warning_count
+        max_attempts = 120
+        for problem_tid in list(baseline_warning_team_ids):
+            if optimization_swaps_attempted >= max_attempts:
+                break
+            team_games = [
+                g for g in games_for_optimization
+                if str(g.home_team_id) == problem_tid or str(g.away_team_id) == problem_tid
+            ]
+            if len(team_games) != 2:
+                continue
+            target_game = team_games[1]
+            target_slot = slots_for_optimization.get(str(target_game.id))
+            anchor_slot = slots_for_optimization.get(str(team_games[0].id))
+            if not target_slot or not anchor_slot:
+                continue
+            swap_candidates = []
+            for candidate_game in games_for_optimization:
+                if candidate_game.id in {team_games[0].id, team_games[1].id}:
+                    continue
+                candidate_slot = slots_for_optimization.get(str(candidate_game.id))
+                if not candidate_slot:
+                    continue
+                same_division_week = True
+                if not same_division_week:
+                    continue
+                distance_after = _slot_gap_minutes(anchor_slot, candidate_slot)
+                if candidate_slot.host_location_id != anchor_slot.host_location_id or candidate_slot.slot_date != anchor_slot.slot_date:
+                    distance_after += 500
+                swap_candidates.append((distance_after, candidate_game, candidate_slot))
+            swap_candidates.sort(key=lambda item: item[0])
+            for _, candidate_game, candidate_slot in swap_candidates:
+                if optimization_swaps_attempted >= max_attempts:
+                    break
+                optimization_swaps_attempted += 1
+                if not _can_swap_games(target_game, target_slot, candidate_game, candidate_slot):
+                    continue
+                original_target_time, original_target_date = target_game.kickoff_time, target_game.game_date
+                original_candidate_time, original_candidate_date = candidate_game.kickoff_time, candidate_game.game_date
+                target_slot.assigned_game_id = candidate_game.id
+                candidate_slot.assigned_game_id = target_game.id
+                target_game.kickoff_time, target_game.game_date = candidate_slot.start_time, candidate_slot.slot_date
+                candidate_game.kickoff_time, candidate_game.game_date = target_slot.start_time, target_slot.slot_date
+                db.flush()
+                refreshed_slots = _slot_by_game_id()
+                new_warning_count = len(_double_header_warning_team_ids(games_for_optimization, refreshed_slots))
+                if new_warning_count < current_warning_count:
+                    slots_for_optimization = refreshed_slots
+                    current_warning_count = new_warning_count
+                    break
+                target_slot.assigned_game_id = target_game.id
+                candidate_slot.assigned_game_id = candidate_game.id
+                target_game.kickoff_time, target_game.game_date = original_target_time, original_target_date
+                candidate_game.kickoff_time, candidate_game.game_date = original_candidate_time, original_candidate_date
+                db.flush()
+        warnings_resolved = max(0, baseline_warning_count - current_warning_count)
+        warnings_remaining = current_warning_count
+        skipped.append(f'Double-header optimization swaps attempted: {optimization_swaps_attempted}')
+        skipped.append(f'Warnings resolved: {warnings_resolved}')
+        skipped.append(f'Warnings remaining: {warnings_remaining}')
+
     selected_host_ids = extract_selected_host_ids(proposals)
     if not selected_host_ids:
         selected_host_ids = sorted({
