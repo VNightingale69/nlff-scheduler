@@ -3916,6 +3916,19 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         ok_b, _ = _can_place_matchup(str(game_b.home_team_id), str(game_b.away_team_id), slot_a)
         return ok_a and ok_b
 
+    def _same_community_unresolved_note(game: Game, slot: GameSlot | None, preferred_home_host_id: uuid.UUID | None, reason: str) -> dict[str, object]:
+        home_team = teams_by_id.get(game.home_team_id)
+        away_team = teams_by_id.get(game.away_team_id)
+        return {
+            'game_id': str(game.id),
+            'date': str(slot.slot_date) if slot and slot.slot_date else None,
+            'division': home_team.division.name if home_team and home_team.division else None,
+            'teams': f"{home_team.name if home_team else game.home_team_id} vs {away_team.name if away_team else game.away_team_id}",
+            'current_location': str(slot.host_location_id) if slot and slot.host_location_id else None,
+            'preferred_home_location': str(preferred_home_host_id) if preferred_home_host_id else None,
+            'reason': reason,
+        }
+
     optimization_swaps_attempted = 0
     warnings_resolved = 0
     warnings_remaining = 0
@@ -4111,6 +4124,10 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
     ]
     double_header_team_id = next((str(team_id) for team_id, count in week_team_game_counts.items() if count > 1), None)
     same_community_home_swaps = 0
+    same_community_games_reviewed = 0
+    same_community_repairs_attempted = 0
+    same_community_swaps_attempted = 0
+    same_community_swaps_committed = 0
     same_community_home_swap_notes: list[dict[str, object]] = []
     same_community_home_unresolved_notes: list[dict[str, object]] = []
     triple_repeat_swaps = 0
@@ -4172,21 +4189,23 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
             continue
         if not home_team.organization_id or home_team.organization_id != away_team.organization_id:
             continue
+        same_community_games_reviewed += 1
         preferred_home_host_id = primary_host_by_org.get(home_team.organization_id)
         preferred_home_hosts = {str(preferred_home_host_id)} if preferred_home_host_id else set()
         if not preferred_home_hosts:
-            same_community_home_unresolved_notes.append({'game_id': str(game.id), 'reason': 'community has no identified primary host location'})
+            same_community_home_unresolved_notes.append(_same_community_unresolved_note(game, slot, preferred_home_host_id, 'community has no identified primary host location'))
             continue
         if str(slot.host_location_id) in preferred_home_hosts:
             continue
+        same_community_repairs_attempted += 1
         open_home_slot = next((
             s for s in sorted_slots
-            if s.host_location_id == preferred_home_host_id and _can_place_matchup(str(game.home_team_id), str(game.away_team_id), s)[0]
+            if s.slot_date == slot.slot_date and s.host_location_id == preferred_home_host_id and _can_place_matchup(str(game.home_team_id), str(game.away_team_id), s)[0]
         ), None)
         if open_home_slot:
             existing_assigned = db.query(Game).join(GameSlot, GameSlot.assigned_game_id == Game.id).filter(GameSlot.id == open_home_slot.id).first()
             if existing_assigned:
-                same_community_home_unresolved_notes.append({'game_id': str(game.id), 'reason': 'primary home slot unexpectedly already assigned'})
+                same_community_home_unresolved_notes.append(_same_community_unresolved_note(game, slot, preferred_home_host_id, 'primary home slot unexpectedly already assigned'))
             else:
                 slot.assigned_game_id = None
                 slot.status = 'OPEN'
@@ -4196,6 +4215,7 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
                 game.kickoff_time = open_home_slot.start_time
                 db.flush()
                 same_community_home_swaps += 1
+                same_community_swaps_committed += 1
                 same_community_home_swap_notes.append({'game_id': str(game.id), 'action': 'moved_to_open_home_slot', 'new_host_location_id': str(open_home_slot.host_location_id)})
                 slots_for_swap = _slot_by_game_id()
                 continue
@@ -4215,6 +4235,8 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
                 continue
             if slot.slot_date != other_slot.slot_date:
                 continue
+            same_division = other_home.division_id == home_team.division_id
+            same_field_size = bool(slot.field_type and other_slot.field_type and slot.field_type == other_slot.field_type)
             two_location_before = len({str(slots_for_swap.get(str(g.id)).host_location_id) for g in scheduled_games_for_swap if slots_for_swap.get(str(g.id)) and slots_for_swap.get(str(g.id)).slot_date == slot.slot_date})
             projected_hosts = {
                 str((other_slot if g.id == game.id else slot if g.id == other.id else slots_for_swap.get(str(g.id))).host_location_id)
@@ -4224,17 +4246,21 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
             }
             if len(projected_hosts) > max(two_location_before, regular_season_host_limit):
                 continue
+            same_community_swaps_attempted += 1
             if _can_swap_games(game, slot, other, other_slot):
-                candidate_swaps.append((other, other_slot))
+                priority = 0 if same_division else (1 if same_field_size else 2)
+                candidate_swaps.append((priority, other, other_slot))
         if not candidate_swaps:
-            same_community_home_unresolved_notes.append({'game_id': str(game.id), 'reason': 'No compatible lower-priority cross-community swap candidate found'})
+            same_community_home_unresolved_notes.append(_same_community_unresolved_note(game, slot, preferred_home_host_id, 'no compatible same-date home-slot or legal swap candidate found'))
             continue
-        other, other_slot = candidate_swaps[0]
+        candidate_swaps.sort(key=lambda x: x[0])
+        _, other, other_slot = candidate_swaps[0]
         game.kickoff_time, other.kickoff_time = other_slot.start_time, slot.start_time
         game.game_date, other.game_date = other_slot.slot_date, slot.slot_date
         slot.assigned_game_id, other_slot.assigned_game_id = other.id, game.id
         db.flush()
         same_community_home_swaps += 1
+        same_community_swaps_committed += 1
         same_community_home_swap_notes.append({'game_id': str(game.id), 'swapped_with_game_id': str(other.id), 'new_host_location_id': str(other_slot.host_location_id)})
         slots_for_swap = _slot_by_game_id()
     same_community_total = 0
@@ -4314,6 +4340,12 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
             'conflicts_avoided': len(skipped),
             'final_games_created': created_games,
             'same_community_home_swaps': same_community_home_swaps,
+            'same_community_games_reviewed': same_community_games_reviewed,
+            'same_community_repairs_attempted': same_community_repairs_attempted,
+            'same_community_repairs_completed': same_community_home_swaps,
+            'same_community_repairs_unresolved': same_community_not_at_home,
+            'same_community_swaps_attempted': same_community_swaps_attempted,
+            'same_community_swaps_committed': same_community_swaps_committed,
             'same_community_home_swap_notes': same_community_home_swap_notes,
             'same_community_home_unresolved_notes': same_community_home_unresolved_notes,
             'same_community_games_total': same_community_total,
