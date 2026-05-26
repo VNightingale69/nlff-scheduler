@@ -703,6 +703,16 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
                 detail=f"Delete blocked. {remaining} host_locations still reference organization {org_id}.",
             )
 
+        rowcounts['games_by_team'] = _execute_step('delete_games_by_team_before_team_delete', org_name, """
+            DELETE FROM games
+            WHERE home_team_id IN (
+                SELECT id FROM teams WHERE organization_id = :org_id
+            )
+            OR away_team_id IN (
+                SELECT id FROM teams WHERE organization_id = :org_id
+            )
+        """, 'games')
+
         rowcounts['community_division_participation'] = _execute_step('delete_community_division_participation', org_name, """
             DELETE FROM community_division_participation
             WHERE organization_id = :org_id
@@ -712,16 +722,16 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
             DELETE FROM teams
             WHERE organization_id = :org_id
         """, 'teams')
-        logger.info("[ORG DELETE] teams deleted: %s", rowcounts['teams'])
 
         remaining_teams = db.execute(text("""
             SELECT COUNT(*)
             FROM teams
             WHERE organization_id = :org_id
         """), {'org_id': str(org_id)}).scalar() or 0
-        logger.info("[ORG DELETE] teams remaining after delete: %s", remaining_teams)
+        logger.info('[ORG DELETE] organization_id=%s organization_name=%s step=verify_teams_remaining table=teams rows_affected=%s', org_id, org_name, remaining_teams)
         if remaining_teams > 0:
-            raise HTTPException(status_code=409, detail="Delete blocked. teams still reference organization.")
+            db.rollback()
+            raise HTTPException(status_code=409, detail='Delete blocked. teams still reference organization.')
 
         rowcounts['organization'] = _execute_step('delete_organization', org_name, """
             DELETE FROM organizations
@@ -744,6 +754,7 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
 
         return response
     except HTTPException:
+        db.rollback()
         raise
     except Exception as exc:
         db.rollback()
