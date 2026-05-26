@@ -1816,6 +1816,12 @@ def extract_selected_host_ids(proposals):
 def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     regular_season_host_limit = 2
     sorted_slots: list[GameSlot] = []
+    same_community_home_host_conflicts: list[dict[str, object]] = []
+    repeat_matchup_warnings: list[dict[str, object]] = []
+    third_meeting_warnings: list[dict[str, object]] = []
+    preferred_home_site_failures: list[dict[str, object]] = []
+    overflow_host_ids: set[uuid.UUID] = set()
+    two_location_rule_relaxed = False
     admin_override_third_host = bool(payload.get('admin_override_third_host_locations', False))
     scoring_weights = payload.get('scoring_weights') or {}
 
@@ -3099,7 +3105,6 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             team_id = uuid.UUID(plan[key])
             plan_by_team.setdefault(team_id, []).append(plan)
     double_header_spacing_issues = []
-    same_community_home_host_conflicts: list[dict[str, object]] = []
     for team_id, team_plans in plan_by_team.items():
         if len(team_plans) < 2:
             continue
