@@ -119,7 +119,7 @@ class PhysicalFieldArea(Base, TimestampMixin):
 class FieldConfigurationOption(Base, TimestampMixin):
     __tablename__ = 'field_configuration_options'
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    physical_field_area_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('physical_field_areas.id'), nullable=False)
+    physical_field_area_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('physical_field_areas.id', ondelete='CASCADE'), nullable=False)
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     thirty_yard_capacity: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     fifty_three_yard_capacity: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
