@@ -976,6 +976,7 @@ def list_saved_hosting_availability(organization_id: uuid.UUID | None = None, ho
             layout_counts['total'] = layout_small + layout_large
             layout_counts['mismatch'] = layout_small + layout_large == 0
             grouped[key] = {
+                'id': row.id,
                 'available_date': row.available_date,
                 'organization_id': host.organization_id,
                 'organization_name': host.organization.name if host.organization else None,
@@ -1017,6 +1018,7 @@ def list_saved_hosting_availability(organization_id: uuid.UUID | None = None, ho
                 prev = hour
             ranges.append({'start_time': time(start, 0), 'end_time': time(prev + 1, 0)})
         items.append({
+            'id': data['id'],
             'available_date': data['available_date'],
             'organization_id': data['organization_id'],
             'organization_name': data['organization_name'],
@@ -1041,14 +1043,23 @@ def list_saved_hosting_availability(organization_id: uuid.UUID | None = None, ho
     return {'items': items}
 
 
-@router.delete('/hosting-availabilities/saved', dependencies=[Depends(get_current_user)])
-def delete_saved_hosting_availability(host_location_id: uuid.UUID, available_date: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    date_value = date.fromisoformat(available_date)
-    q = db.query(HostingAvailability).join(HostingAvailability.physical_field_area).join(PhysicalFieldArea.host_location).filter(HostLocation.id == host_location_id, HostingAvailability.available_date == date_value)
-    sample = q.first()
+@router.delete('/hosting-availabilities/saved/{item_id}', dependencies=[Depends(get_current_user)])
+def delete_saved_hosting_availability(item_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    try:
+        availability_id = uuid.UUID(item_id)
+    except ValueError as exc:
+        raise HTTPException(400, 'Invalid availability id.') from exc
+
+    sample = db.query(HostingAvailability).join(HostingAvailability.physical_field_area).join(PhysicalFieldArea.host_location).filter(HostingAvailability.id == availability_id).first()
     if not sample:
         raise HTTPException(404, 'Saved availability not found')
+    if not sample.physical_field_area or not sample.physical_field_area.host_location:
+        raise HTTPException(400, 'Saved availability is missing host location data')
+
+    host_location_id = sample.physical_field_area.host_location.id
+    date_value = sample.available_date
     enforce_organization_scope(sample.physical_field_area.host_location.organization_id, current_user)
+    q = db.query(HostingAvailability).join(HostingAvailability.physical_field_area).join(PhysicalFieldArea.host_location).filter(HostLocation.id == host_location_id, HostingAvailability.available_date == date_value)
     availability_ids = [row.id for row in q.all()]
     _delete_availability_with_generated_slots_guard(db, availability_ids, host_location_id, date_value)
     deleted = q.delete(synchronize_session=False)

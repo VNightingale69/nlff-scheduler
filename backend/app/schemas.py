@@ -219,6 +219,7 @@ class SavedAvailabilityRange(BaseModel):
 
 
 class SavedAvailabilityEntry(BaseModel):
+    id: uuid.UUID
     available_date: date
     organization_id: uuid.UUID | None = None
     organization_name: str | None = None
