@@ -224,11 +224,16 @@ export default function HostingAvailabilityManager() {
   const deleteSaved = async (entry: any) => {
     const prompt = `Delete availability for ${entry.host_location_name} on ${formatDateLabel(entry.available_date)}?`;
     if (!window.confirm(prompt)) return;
-    await apiFetch(`/hosting-availabilities/saved/${entry.id}`, { method: 'DELETE' }, token);
-    setSavedAvailability((prev: any[]) => prev.filter((item: any) => item.id !== entry.id));
-    setMessage('Saved availability deleted.');
-    setType('ok');
-    await loadSavedAvailability();
+    try {
+      await apiFetch(`/hosting-availabilities/saved/${entry.id}`, { method: 'DELETE' }, token);
+      setSavedAvailability((prev: any[]) => prev.filter((item: any) => item.id !== entry.id));
+      setMessage('Saved availability deleted.');
+      setType('ok');
+      await loadSavedAvailability();
+    } catch (e: any) {
+      setType('err');
+      setMessage(e?.message || 'Unable to delete saved availability.');
+    }
   };
 
   const save = async () => {
