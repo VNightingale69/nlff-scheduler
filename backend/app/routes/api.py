@@ -3742,6 +3742,7 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
     required_games_missing: list[dict[str, object]] = []
     skipped_attempts_by_reason: dict[str, int] = {}
     post_run_validation: list[dict[str, object]] = []
+    validation_warnings: list[dict[str, object]] = []
 
     def _normalize_skip_reason(reason: str) -> str:
         text = (reason or '').strip().lower()
@@ -3770,6 +3771,26 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
             key = _normalize_skip_reason(str((row or {}).get('reason') or 'unknown'))
             skipped_attempts_by_reason[key] = skipped_attempts_by_reason.get(key, 0) + 1
 
+    def _actual_created_game_count_for_week(division_id: uuid.UUID, week_id: uuid.UUID) -> int:
+        return db.query(Game.id).join(Game.status).join(Team, Game.home_team_id == Team.id).filter(
+            Team.division_id == division_id,
+            Team.is_active.is_(True),
+            Game.week_id == week_id,
+            GameStatus.code != 'UNSCHEDULED',
+        ).count()
+
+    def _host_count_for_week(division_id: uuid.UUID, week_id: uuid.UUID) -> int:
+        rows = db.query(GameSlot.host_location_id).join(Game, Game.id == GameSlot.assigned_game_id).join(Game.status).join(
+            Team, Game.home_team_id == Team.id
+        ).filter(
+            Team.division_id == division_id,
+            Team.is_active.is_(True),
+            Game.week_id == week_id,
+            GameStatus.code != 'UNSCHEDULED',
+            GameSlot.host_location_id.isnot(None),
+        ).distinct().all()
+        return len(rows)
+
     for group, name in division_order:
         requested_label = f'{group} {name}'
         requested_normalized = normalize_division_name(requested_label)
@@ -3795,49 +3816,57 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
             created_games = int(preview_validation.get('created_game_count') or 0)
             unscheduled_teams = list(preview_validation.get('unscheduled_teams') or [])
             unresolved_conflicts = list(preview.get('skipped') or [])
+            if not proposals:
+                actual_created_games = _actual_created_game_count_for_week(division.id, week.id)
+                host_count = _host_count_for_week(division.id, week.id)
+            else:
+                applied = auto_fill_apply({'season_id': season_id, 'week_id': week.id, 'division_id': division.id, 'proposals': proposals}, db)
+                created_count = int(applied.get('created_count') or 0)
+                skipped_count = int(applied.get('skipped_count') or 0)
+                division_created += created_count
+                total_games_created += created_count
+                _record_skipped(applied.get('skipped') or [])
+                host_count = _host_count_for_week(division.id, week.id)
+                actual_created_games = _actual_created_game_count_for_week(division.id, week.id)
+                if skipped_count > 0:
+                    division_unresolved = True
+                apply_validation = applied.get('final_validation') or {}
+                if int(apply_validation.get('required_game_count') or 0) != required_games:
+                    required_games = int(apply_validation.get('required_game_count') or 0)
             post_run_validation.append({
                 'division': division_label,
                 'week': week.week_number,
                 'active_team_count': int(preview_validation.get('active_team_count') or 0),
                 'required_games': required_games,
-                'created_games': created_games,
+                'created_games': actual_created_games,
                 'unscheduled_teams': unscheduled_teams,
                 'unresolved_conflicts': unresolved_conflicts,
+                'validation_warnings': ['Third host location used.'] if host_count > 2 else [],
             })
-            if created_games < required_games:
+            if host_count > 2:
+                validation_warnings.append({
+                    'division': division_label,
+                    'week': week.week_number,
+                    'warning': 'Third host location used.',
+                })
+            if actual_created_games < required_games:
                 division_unresolved = True
-                missing_games = required_games - created_games
+                missing_games = required_games - actual_created_games
                 warning = (
                     f'Unresolved scheduling warning: {division_label} Week {week.week_number} '
-                    f'(Required games: {required_games}, Created games: {created_games}, Missing games: {missing_games})'
+                    f'(Required games: {required_games}, Created games: {actual_created_games}, Missing games: {missing_games})'
                 )
                 warnings.append(warning)
                 required_games_missing.append({
                     'division': division_label,
                     'week': week.week_number,
                     'required_games': required_games,
-                    'created_games': created_games,
+                    'created_games': actual_created_games,
                     'missing_games': missing_games,
                 })
-            if not proposals:
-                continue
-            applied = auto_fill_apply({'season_id': season_id, 'week_id': week.id, 'division_id': division.id, 'proposals': proposals}, db)
-            created_count = int(applied.get('created_count') or 0)
-            skipped_count = int(applied.get('skipped_count') or 0)
-            division_created += created_count
-            total_games_created += created_count
-            _record_skipped(applied.get('skipped') or [])
-            apply_validation = applied.get('final_validation') or {}
-            if int(apply_validation.get('created_game_count') or 0) < int(apply_validation.get('required_game_count') or 0):
-                division_unresolved = True
-                required_games = int(apply_validation.get('required_game_count') or 0)
-                created_games = int(apply_validation.get('created_game_count') or 0)
-                missing_games = required_games - created_games
                 validation_errors.append(
-                    f'{division_label} Week {week.week_number}: required={required_games}, created={created_games}, missing={missing_games}'
+                    f'{division_label} Week {week.week_number}: required={required_games}, created={actual_created_games}, missing={missing_games}'
                 )
-            if skipped_count > 0:
-                division_unresolved = True
         if division_created > 0 and not division_unresolved:
             divisions_completed.append(division_label)
         else:
@@ -3850,6 +3879,7 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
         'required_games_still_missing': required_games_missing,
         'warnings': warnings,
         'validation_errors': validation_errors,
+        'validation_warnings': validation_warnings,
         'post_run_validation': post_run_validation,
         'divisions_completed': divisions_completed,
         'divisions_with_unresolved_games': divisions_with_unresolved_games,
