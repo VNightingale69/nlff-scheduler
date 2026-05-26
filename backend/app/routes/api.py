@@ -2560,13 +2560,21 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                         if repeat_count == 0:
                             score += 120
                             reason_bits.append('new opponent pairing (+120)')
-                        else:
-                            repeat_penalty = 150 * repeat_count
+                        elif repeat_count == 1:
+                            repeat_penalty = 300
                             score -= repeat_penalty
-                            warning_bits.append(f'repeat opponent pairing (-{repeat_penalty})')
+                            warning_bits.append(f'second meeting pairing penalty (-{repeat_penalty})')
                             if same_community:
                                 score -= 50
                                 warning_bits.append('repeat same-community opponent (-50)')
+                        else:
+                            # Third-or-more meetings are strongly discouraged and should only survive when unique options are exhausted.
+                            repeat_penalty = 2000 + (repeat_count * 250)
+                            score -= repeat_penalty
+                            warning_bits.append(f'third-or-more meeting heavily penalized (-{repeat_penalty})')
+                            if same_community:
+                                score -= 100
+                                warning_bits.append('third-or-more same-community repeat (-100)')
     
                         if not same_community:
                             score += 40
@@ -2588,13 +2596,25 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                         if same_community_operationally_reasonable:
                             reason_bits.append('Opponent diversity prioritized because division has limited unique opponents')
                         if same_community and not hosted_by_own_community:
+                            home_host_ids = host_ids_by_org.get(team_a.organization_id, set())
                             same_community_home_slot_available = any(
-                                s.host_location_id in host_ids_by_org.get(team_a.organization_id, set())
+                                s.host_location_id in home_host_ids
                                 and s.slot_date == slot.slot_date
                                 and s.start_time == slot.start_time
                                 for s in sorted_slots
                             )
                             if same_community_home_slot_available:
+                                same_community_home_host_conflicts.append({
+                                    'home_team_id': str(team_a.id),
+                                    'away_team_id': str(team_b.id),
+                                    'home_team_name': team_a.name,
+                                    'away_team_name': team_b.name,
+                                    'required_community_id': str(team_a.organization_id) if team_a.organization_id else None,
+                                    'candidate_host_location_id': str(candidate_host_id) if candidate_host_id else None,
+                                    'slot_date': str(slot.slot_date) if slot.slot_date else None,
+                                    'slot_time': str(slot.start_time) if slot.start_time else None,
+                                    'reason': 'same-community game rejected at non-home host because compatible home-host slot exists at this date/time',
+                                })
                                 continue
                         if hosted_by_own_community:
                             score += 60
@@ -3012,7 +3032,17 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         pair = tuple(sorted((uuid.UUID(plan['home_team_id']), uuid.UUID(plan['away_team_id']))))
         pair_counts_with_proposals[pair] = pair_counts_with_proposals.get(pair, 0) + 1
     repeat_matchup_pairs = [
-        {'home_team_id': str(pair[0]), 'away_team_id': str(pair[1]), 'count': count}
+        {
+            'home_team_id': str(pair[0]),
+            'away_team_id': str(pair[1]),
+            'home_team_name': teams_by_id[pair[0]].name if pair[0] in teams_by_id else str(pair[0]),
+            'away_team_name': teams_by_id[pair[1]].name if pair[1] in teams_by_id else str(pair[1]),
+            'count': count,
+            'scheduled_dates': sorted([
+                str(plan.get('proposed_date')) for plan in plans
+                if tuple(sorted((uuid.UUID(plan['home_team_id']), uuid.UUID(plan['away_team_id'])))) == pair
+            ]),
+        }
         for pair, count in pair_counts_with_proposals.items() if count > 1
     ]
 
@@ -3022,6 +3052,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             team_id = uuid.UUID(plan[key])
             plan_by_team.setdefault(team_id, []).append(plan)
     double_header_spacing_issues = []
+    same_community_home_host_conflicts: list[dict[str, object]] = []
     for team_id, team_plans in plan_by_team.items():
         if len(team_plans) < 2:
             continue
@@ -3105,6 +3136,14 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'rules_relaxed': len(host_limit_relaxation_reasons),
             'conflicts_avoided': len(skipped),
             'final_games_created': len(plans),
+            'season_week_date_diagnostics': {
+                'week_number': week.week_number,
+                'week_start_date': str(week.start_date) if week.start_date else None,
+                'week_end_date': str(week.end_date) if week.end_date else None,
+                'week_open_slot_dates': sorted({str(s.slot_date) for s in sorted_slots if s.slot_date}),
+                'is_week_start_date_active': any(s.slot_date == week.start_date for s in sorted_slots),
+            },
+            'same_community_home_host_conflicts': same_community_home_host_conflicts,
             'division_team_count': team_count,
             'required_games': required_games_for_division_week,
             'actual_games_scheduled': total_created_games,
@@ -4228,8 +4267,22 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
                 )
                 warnings.append(f'Balance under-target teams for {division_label}: {under_target_teams}')
 
+    season_weeks = [w for w in weeks if w.start_date]
+    september_13_weeks = [w for w in season_weeks if w.start_date.month == 9 and w.start_date.day == 13]
+    september_13_slots = db.query(GameSlot.id).join(FieldInstance, FieldInstance.id == GameSlot.field_instance_id).join(
+        HostLocation, HostLocation.id == FieldInstance.host_location_id
+    ).filter(
+        GameSlot.slot_date == date(season.start_date.year, 9, 13)
+    ).count() if season.start_date else 0
+
     return {
-        'total_games_created': total_games_created,
+        'season_date_diagnostics': {
+            'target_date_checked': f"{season.start_date.year}-09-13" if season.start_date else None,
+            'matching_week_numbers': [w.week_number for w in september_13_weeks],
+            'date_in_regular_season_weeks': len(september_13_weeks) > 0,
+            'available_slots_on_target_date': september_13_slots,
+            'date_excluded_reason': None if len(september_13_weeks) > 0 else 'No season week starts on September 13; date is outside defined weekly schedule windows.',
+        },
         'games_skipped': sum(skipped_attempts_by_reason.values()),
         'skipped_attempts_by_reason': skipped_attempts_by_reason,
         'required_games_still_missing': required_games_missing,
