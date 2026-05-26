@@ -2600,7 +2600,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                                 warning_bits.append('repeat same-community opponent (-50)')
                         else:
                             # Third-or-more meetings are strongly discouraged and should only survive when unique options are exhausted.
-                            repeat_penalty = 5000 + (repeat_count * 500)
+                            repeat_penalty = 50000 + (repeat_count * 4000)
                             score -= repeat_penalty
                             warning_bits.append(f'third-or-more meeting heavily penalized (-{repeat_penalty})')
                             if same_community:
@@ -2628,6 +2628,9 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                             reason_bits.append('Opponent diversity prioritized because division has limited unique opponents')
                         same_community_home_unavailable_reason = None
                         if same_community and not hosted_by_own_community:
+                            # Near-hard preference: same-community games should stay at the community's own host site whenever legal.
+                            score -= 12000
+                            warning_bits.append('same-community game away from home host near-hard penalty (-12000)')
                             home_host_ids = host_ids_by_org.get(team_a.organization_id, set())
                             same_community_home_slot_available = any(
                                 s.host_location_id in home_host_ids
@@ -2671,9 +2674,11 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                                         elif no_simultaneous_games_same_host and (str(hs.host_location_id), hs.slot_date, hs.start_time) in host_time_occupied:
                                             blocked_reasons.append('host overlap rule blocks home-host slot')
                                     same_community_home_unavailable_reason = blocked_reasons[0] if blocked_reasons else 'home-host slot unavailable due to active constraints'
+                                if same_community_home_unavailable_reason:
+                                    warning_bits.append(f'home-site unavailable: {same_community_home_unavailable_reason}')
                         if hosted_by_own_community:
-                            score += 60
-                            reason_bits.append('same-community at home host field (+60)')
+                            score += 260
+                            reason_bits.append('same-community at home host field (+260)')
                         if host_pref:
                             score += 40
                             reason_bits.append('reduced travel via host alignment (+40)')
@@ -2896,6 +2901,17 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                             'prior_week_team_repeat': prior_week_team_repeat,
                             'double_header_back_to_back': double_header_back_to_back,
                             'same_community_home_unavailable_reason': same_community_home_unavailable_reason,
+                            'compatible_home_slots_at_scheduling_time': (
+                                sum(
+                                    1
+                                    for s in sorted_slots
+                                    if same_community
+                                    and team_a.organization_id
+                                    and s.host_location_id in host_ids_by_org.get(team_a.organization_id, set())
+                                    and _first_compatible_open_slot_by_field_order(s.host_location_id, s.slot_date, s.start_time) is not None
+                                )
+                                if same_community else 0
+                            ),
                         })
 
             home_same_community_pairs = {c['pair'] for c in all_candidates if c['same_community'] and c['hosted_by_own_community']}
@@ -3140,6 +3156,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             same_community_not_home_site.append({
                 **plan,
                 'preferred_home_site_unavailable_reason': plan.get('same_community_home_unavailable_reason') or 'no compatible home-host slot existed under active constraints',
+                'compatible_home_slots_at_scheduling_time': int(plan.get('compatible_home_slots_at_scheduling_time') or 0),
             })
         pair = tuple(sorted((uuid.UUID(plan['home_team_id']), uuid.UUID(plan['away_team_id']))))
         if pair_counts_with_proposals.get(pair, 0) > 1:
@@ -4089,8 +4106,55 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
     double_header_team_id = next((str(team_id) for team_id, count in week_team_game_counts.items() if count > 1), None)
     same_community_home_swaps = 0
     same_community_home_swap_notes: list[dict[str, object]] = []
+    triple_repeat_swaps = 0
+    triple_repeat_swap_notes: list[dict[str, object]] = []
     scheduled_games_for_swap = _division_week_scheduled_games()
     slots_for_swap = _slot_by_game_id()
+    # Post-schedule optimization: reduce third-repeat pairings via legal slot swaps and home/away flips.
+    def _pair_counts(games):
+        counts = {}
+        for g in games:
+            k = tuple(sorted((str(g.home_team_id), str(g.away_team_id))))
+            counts[k] = counts.get(k, 0) + 1
+        return counts
+
+    pair_counts_for_swap = _pair_counts(scheduled_games_for_swap)
+    for game in list(scheduled_games_for_swap):
+        key = tuple(sorted((str(game.home_team_id), str(game.away_team_id))))
+        if pair_counts_for_swap.get(key, 0) < 3:
+            continue
+        slot = slots_for_swap.get(str(game.id))
+        if not slot:
+            continue
+        improved = False
+        for other in scheduled_games_for_swap:
+            if other.id == game.id:
+                continue
+            other_key = tuple(sorted((str(other.home_team_id), str(other.away_team_id))))
+            if other_key == key:
+                continue
+            other_slot = slots_for_swap.get(str(other.id))
+            if not other_slot:
+                continue
+            if _can_swap_games(game, slot, other, other_slot):
+                game.kickoff_time, other.kickoff_time = other_slot.start_time, slot.start_time
+                game.game_date, other.game_date = other_slot.slot_date, slot.slot_date
+                slot.assigned_game_id, other_slot.assigned_game_id = other.id, game.id
+                db.flush()
+                triple_repeat_swaps += 1
+                triple_repeat_swap_notes.append({'game_id': str(game.id), 'swapped_with_game_id': str(other.id), 'action': 'slot_swap'})
+                slots_for_swap = _slot_by_game_id()
+                improved = True
+                break
+        if not improved:
+            # try home/away flip at same slot as lower-risk rebalance
+            game.home_team_id, game.away_team_id = game.away_team_id, game.home_team_id
+            db.flush()
+            triple_repeat_swap_notes.append({'game_id': str(game.id), 'action': 'home_away_flip_attempted'})
+
+    scheduled_games_for_swap = _division_week_scheduled_games()
+    slots_for_swap = _slot_by_game_id()
+
     for game in scheduled_games_for_swap:
         slot = slots_for_swap.get(str(game.id))
         if not slot or not slot.host_location_id:
@@ -4203,6 +4267,8 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
             'final_games_created': created_games,
             'same_community_home_swaps': same_community_home_swaps,
             'same_community_home_swap_notes': same_community_home_swap_notes,
+            'triple_repeat_swaps': triple_repeat_swaps,
+            'triple_repeat_swap_notes': triple_repeat_swap_notes,
         },
     }
 
