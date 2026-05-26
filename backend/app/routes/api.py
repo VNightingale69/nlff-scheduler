@@ -2334,25 +2334,19 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                 selected_host_ids = {best_two_host_combo[0], best_two_host_combo[1]}
                 locked_host_mode = 'dual'
                 host_lock_reason = 'single host insufficient; selected two hosts to satisfy required games'
-    if not selected_host_ids and not admin_override_third_host and games_required > 0:
-        _add_skipped('More than 2 host locations required. Admin override needed.')
-        _add_skipped('This division/week cannot be scheduled within the two-location limit based on available slots.')
-        return {
-            'proposals': [],
-            'skipped': skipped,
-            'proposed_game_count': 0,
-            'max_allowed_game_count': required_games_for_division_week,
-            'existing_game_count': existing_games_count,
-            'unused_team_ids': [str(tid) for tid in teams_by_id if tid not in used_team_ids],
-            'unused_teams': [teams_by_id[tid].name for tid in teams_by_id if tid not in used_team_ids],
-            'audit': {
-                'host_locations_used_count': 0,
-                'host_locations_used': [],
-                'locked_host_locations': [],
-                'locked_host_mode': locked_host_mode,
-                'admin_override_third_host_locations': admin_override_third_host,
-            },
-        }
+    two_location_rule_relaxed = False
+    overflow_host_ids: set[uuid.UUID] = set()
+    if not selected_host_ids and games_required > 0:
+        fallback_hosts = [row['host_id'] for row in host_capacity[:3]]
+        if fallback_hosts:
+            selected_host_ids = set(fallback_hosts)
+            two_location_rule_relaxed = len(selected_host_ids) > 2
+            if two_location_rule_relaxed:
+                _add_skipped('Two-location host preference relaxed: overflow host location enabled to complete required games.')
+            locked_host_mode = 'overflow_relaxed' if two_location_rule_relaxed else 'capacity_fallback'
+            host_lock_reason = 'fallback host selection used to avoid missing required games'
+        else:
+            _add_skipped('Unable to schedule required games due to hard scheduling constraints.')
     if selected_host_ids and not admin_override_third_host:
         remaining_slots = [slot for slot in remaining_slots if slot.host_location_id in selected_host_ids]
         open_slots = [slot for slot in open_slots if slot.host_location_id in selected_host_ids]
@@ -2413,6 +2407,8 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         return min(
             open_compatible_candidates,
             key=lambda c: (
+                existing_field_usage_by_host_date_division_layout.get((str(c.host_location_id), str(c.slot_date), str(c.field_instance_id), layout_key), 0)
+                + proposed_field_usage_by_host_date_division_layout.get((str(c.host_location_id), str(c.slot_date), str(c.field_instance_id), layout_key), 0),
                 c.field_instance.field_name if c.field_instance and c.field_instance.field_name else '',
                 str(c.id),
             ),
@@ -2894,6 +2890,8 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             plans[-1]['reason'] = f"{plans[-1]['reason']}; home team aligned to own selected host location (+150)"
         if admin_override_third_host and selected_field_slot.host_location_id and selected_host_ids and selected_field_slot.host_location_id not in selected_host_ids:
             plans[-1]['warnings'] = list(plans[-1]['warnings']) + ['Admin override: third host location required.']
+        usage_key = (str(selected_field_slot.host_location_id), str(selected_field_slot.slot_date), str(selected_field_slot.field_instance_id), layout_key)
+        proposed_field_usage_by_host_date_division_layout[usage_key] = proposed_field_usage_by_host_date_division_layout.get(usage_key, 0) + 1
         used_pairs.add(tuple(sorted((best['home_team_id'], best['away_team_id']))))
         week_team_game_counts[best['home_team_id']] = week_team_game_counts.get(best['home_team_id'], 0) + 1
         week_team_game_counts[best['away_team_id']] = week_team_game_counts.get(best['away_team_id'], 0) + 1
@@ -2902,6 +2900,8 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             used_team_ids.add(best['away_team_id'])
         if selected_field_slot.host_location_id:
             used_host_ids.add(selected_field_slot.host_location_id)
+            if len(selected_host_ids) >= 2 and selected_field_slot.host_location_id not in set(list(selected_host_ids)[:2]):
+                overflow_host_ids.add(selected_field_slot.host_location_id)
             projected_games_by_host[selected_field_slot.host_location_id] = projected_games_by_host.get(selected_field_slot.host_location_id, 0) + 1
             if not postseason_week and selected_field_slot.slot_date:
                 regular_season_host_occurrences_by_location.setdefault(selected_field_slot.host_location_id, set()).add(selected_field_slot.slot_date)
@@ -3089,7 +3089,11 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             },
             'weekly_host_planning_report': {
                 'selected_host_sites': selected_host_ids,
-                'overflow_sites_used': [],
+                'overflow_sites_used': [str(hid) for hid in sorted(overflow_host_ids, key=str)],
+                'two_location_rule_relaxed': two_location_rule_relaxed,
+                'required_games': games_required,
+                'created_games': len(plans),
+                'missing_games': max(0, games_required - len(plans)),
                 'host_limit_exceptions': [],
                 'league_team_demand': {},
                 'host_capacities': [],
@@ -3107,7 +3111,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'odd_even_status_source': 'division_active_team_count',
             'week_host_site_usage': {
                 'active_host_sites': week_host_site_usage,
-                'overflow_sites': [],
+                'overflow_sites': [str(hid) for hid in sorted(overflow_host_ids, key=str)],
             },
         },
         'audit': {
@@ -3916,7 +3920,11 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         'diagnostics': {
             'weekly_host_planning_report': {
                 'selected_host_sites': selected_host_ids,
-                'overflow_sites_used': [],
+                'overflow_sites_used': [str(hid) for hid in sorted(overflow_host_ids, key=str)],
+                'two_location_rule_relaxed': two_location_rule_relaxed,
+                'required_games': games_required,
+                'created_games': len(plans),
+                'missing_games': max(0, games_required - len(plans)),
                 'host_limit_exceptions': [],
                 'league_team_demand': {},
                 'host_capacities': [],
