@@ -423,6 +423,33 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
         org_name = o.name
 
         if not force:
+            deleted_physical_field_areas = db.execute(text("""
+                DELETE FROM physical_field_areas
+                WHERE host_location_id IN (
+                    SELECT id
+                    FROM host_locations
+                    WHERE organization_id = :org_id
+                )
+            """), {"org_id": str(org_id)}).rowcount or 0
+            logger.info(f"[ORG DELETE] physical_field_areas deleted: {deleted_physical_field_areas}")
+
+            remaining_physical_field_areas = db.execute(text("""
+                SELECT COUNT(*)
+                FROM physical_field_areas
+                WHERE host_location_id IN (
+                    SELECT id
+                    FROM host_locations
+                    WHERE organization_id = :org_id
+                )
+            """), {"org_id": str(org_id)}).scalar() or 0
+            logger.info(f"[ORG DELETE] physical_field_areas remaining after delete: {remaining_physical_field_areas}")
+
+            if remaining_physical_field_areas > 0:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Delete blocked. {remaining_physical_field_areas} physical_field_areas still reference host_locations for organization {org_id}.",
+                )
+
             host_count = db.execute(text("""
                 SELECT COUNT(*)
                 FROM host_locations
@@ -497,6 +524,32 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
               SELECT id FROM host_locations WHERE organization_id = :org_id
             )
         """, 'fields')
+
+        rowcounts['physical_field_areas'] = _execute_step('delete_physical_field_areas', org_name, """
+            DELETE FROM physical_field_areas
+            WHERE host_location_id IN (
+              SELECT id
+              FROM host_locations
+              WHERE organization_id = :org_id
+            )
+        """, 'physical_field_areas')
+
+        remaining_physical_field_areas = db.execute(text("""
+            SELECT COUNT(*)
+            FROM physical_field_areas
+            WHERE host_location_id IN (
+                SELECT id
+                FROM host_locations
+                WHERE organization_id = :org_id
+            )
+        """), {'org_id': str(org_id)}).scalar() or 0
+        logger.info(f"[ORG DELETE] physical_field_areas remaining after delete: {remaining_physical_field_areas}")
+
+        if remaining_physical_field_areas > 0:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Delete blocked. {remaining_physical_field_areas} physical_field_areas still reference host_locations for organization {org_id}.",
+            )
 
         host_count = db.execute(text("""
             SELECT COUNT(*)
