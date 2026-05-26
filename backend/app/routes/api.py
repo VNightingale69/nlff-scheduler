@@ -3200,6 +3200,18 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
     week_id = payload.get('week_id')
     division_id = payload.get('division_id')
     proposals = payload.get('proposals') or []
+    two_location_rule_relaxed = False
+    for proposal in proposals or []:
+        reason = (proposal.get('reason') or '').lower()
+        if (
+            proposal.get('two_location_rule_relaxed')
+            or proposal.get('is_overflow')
+            or proposal.get('overflow')
+            or 'two-location' in reason
+            or 'overflow' in reason
+        ):
+            two_location_rule_relaxed = True
+            break
     no_simultaneous_games_same_host = bool(payload.get('no_simultaneous_games_same_host', False))
     if not season_id or not week_id or not division_id:
         raise HTTPException(400, 'season_id, week_id, and division_id are required')
@@ -3925,6 +3937,9 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         'auto_fill_apply_complete season_id=%s week_id=%s division_id=%s final_games_created=%s skipped_candidates=%s transaction_status=committed',
         season_id, week_id, division_id, created_games, len(skipped),
     )
+    games_required = required_games_for_division_week
+    applied_games_created = created_games
+
     return {
         'proposed_count': len(proposals),
         'created_count': created_games,
@@ -3948,8 +3963,8 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
                 'overflow_sites_used': [str(hid) for hid in sorted(overflow_host_ids, key=str)],
                 'two_location_rule_relaxed': two_location_rule_relaxed,
                 'required_games': games_required,
-                'created_games': len(plans),
-                'missing_games': max(0, games_required - len(plans)),
+                'created_games': applied_games_created,
+                'missing_games': max(0, games_required - applied_games_created),
                 'host_limit_exceptions': [],
                 'league_team_demand': {},
                 'host_capacities': [],
