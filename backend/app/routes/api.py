@@ -423,6 +423,18 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
         org_name = o.name
 
         if not force:
+            deleted_field_configuration_options = db.execute(text("""
+                DELETE FROM field_configuration_options
+                WHERE physical_field_area_id IN (
+                    SELECT pfa.id
+                    FROM physical_field_areas pfa
+                    JOIN host_locations hl
+                        ON pfa.host_location_id = hl.id
+                    WHERE hl.organization_id = :org_id
+                )
+            """), {"org_id": str(org_id)}).rowcount or 0
+            logger.info(f"[ORG DELETE] field_configuration_options deleted: {deleted_field_configuration_options}")
+
             deleted_physical_field_areas = db.execute(text("""
                 DELETE FROM physical_field_areas
                 WHERE host_location_id IN (
@@ -518,12 +530,16 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
             )
         """, 'hosting_availability')
 
-        rowcounts['fields'] = _execute_step('delete_fields', org_name, """
-            DELETE FROM fields
-            WHERE host_location_id IN (
-              SELECT id FROM host_locations WHERE organization_id = :org_id
+        rowcounts['field_configuration_options'] = _execute_step('delete_field_configuration_options', org_name, """
+            DELETE FROM field_configuration_options
+            WHERE physical_field_area_id IN (
+                SELECT pfa.id
+                FROM physical_field_areas pfa
+                JOIN host_locations hl
+                    ON pfa.host_location_id = hl.id
+                WHERE hl.organization_id = :org_id
             )
-        """, 'fields')
+        """, 'field_configuration_options')
 
         rowcounts['physical_field_areas'] = _execute_step('delete_physical_field_areas', org_name, """
             DELETE FROM physical_field_areas
@@ -533,6 +549,13 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
               WHERE organization_id = :org_id
             )
         """, 'physical_field_areas')
+
+        rowcounts['fields'] = _execute_step('delete_fields', org_name, """
+            DELETE FROM fields
+            WHERE host_location_id IN (
+              SELECT id FROM host_locations WHERE organization_id = :org_id
+            )
+        """, 'fields')
 
         remaining_physical_field_areas = db.execute(text("""
             SELECT COUNT(*)
