@@ -260,6 +260,39 @@ def _organization_dependency_summary(db: Session, organization_id: uuid.UUID) ->
     ]
 
 
+
+
+def _organization_delete_inventory(db: Session, organization_id: uuid.UUID) -> dict[str, int]:
+    host_location_ids = [host_id for (host_id,) in db.query(HostLocation.id).filter(HostLocation.organization_id == organization_id).all()]
+    team_ids = [team_id for (team_id,) in db.query(Team.id).filter(Team.organization_id == organization_id).all()]
+    field_ids = [field_id for (field_id,) in db.query(Field.id).filter(Field.host_location_id.in_(host_location_ids)).all()] if host_location_ids else []
+    area_ids = [area_id for (area_id,) in db.query(PhysicalFieldArea.id).filter(PhysicalFieldArea.host_location_id.in_(host_location_ids)).all()] if host_location_ids else []
+    availability_ids = [availability_id for (availability_id,) in db.query(HostingAvailability.id).filter((HostingAvailability.field_id.in_(field_ids)) | (HostingAvailability.physical_field_area_id.in_(area_ids))).all()] if (field_ids or area_ids) else []
+    field_instance_ids = [instance_id for (instance_id,) in db.query(FieldInstance.id).filter(FieldInstance.host_location_id.in_(host_location_ids)).all()] if host_location_ids else []
+    game_ids = [game_id for (game_id,) in db.query(Game.id).filter((Game.home_team_id.in_(team_ids)) | (Game.away_team_id.in_(team_ids)) | (Game.field_id.in_(field_ids))).all()] if (team_ids or field_ids) else []
+    return {
+        'teams': len(team_ids),
+        'scheduled_games': len(game_ids),
+        'generated_slots': db.query(GameSlot).filter((GameSlot.field_instance_id.in_(field_instance_ids)) | (GameSlot.host_location_id.in_(host_location_ids))).count() if host_location_ids else 0,
+        'host_locations': len(host_location_ids),
+        'fields': len(field_ids),
+        'hosting_availability': len(availability_ids),
+        'division_participation': db.query(OrganizationDivisionParticipation).filter(OrganizationDivisionParticipation.organization_id == organization_id).count(),
+        'field_instances': len(field_instance_ids),
+        'schedule_audit_records': 0,
+    }
+
+
+def _organization_orphan_cleanup(db: Session) -> dict[str, int]:
+    stale_slot_assignments = db.query(GameSlot).filter(GameSlot.assigned_game_id.isnot(None), ~GameSlot.assigned_game_id.in_(db.query(Game.id).subquery())).update({'assigned_game_id': None}, synchronize_session=False)
+    stale_game_home_team_refs = db.query(Game).filter(~Game.home_team_id.in_(db.query(Team.id).subquery())).delete(synchronize_session=False)
+    stale_game_away_team_refs = db.query(Game).filter(~Game.away_team_id.in_(db.query(Team.id).subquery())).delete(synchronize_session=False)
+    stale_slots_missing_host_location = db.query(GameSlot).filter(~GameSlot.host_location_id.in_(db.query(HostLocation.id).subquery())).delete(synchronize_session=False)
+    return {
+        'slot_id_missing_slot': stale_slot_assignments,
+        'team_id_missing_team': stale_game_home_team_refs + stale_game_away_team_refs,
+        'host_location_id_missing_location': stale_slots_missing_host_location,
+    }
 def _format_organization_blockers(org_name: str, dependencies: list[tuple[str, int | str]]) -> str:
     blockers = [f"- {count} {label} record{'s' if count != 1 else ''}" for label, count in dependencies if isinstance(count, int) and count > 0]
     if not blockers:
@@ -367,10 +400,6 @@ def get_organization_delete_check(org_id: uuid.UUID, db: Session = Depends(get_d
 
 @router.delete('/organizations/{org_id}', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Session = Depends(get_db)):
-    def _is_development() -> bool:
-        env = (os.getenv('ENV') or os.getenv('APP_ENV') or os.getenv('ENVIRONMENT') or 'development').lower()
-        return env in {'dev', 'development', 'local', 'test', 'testing'}
-
     def _log_delete_step(step: str, organization_name: str, rows_affected: int | None = None, table: str | None = None):
         logger.info(
             '[ORG DELETE] organization_id=%s organization_name=%s step=%s table=%s rows_affected=%s',
@@ -390,10 +419,8 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
             table,
             str(exc),
         )
-        detail = f'Failed deleting {stage}'
-        if _is_development():
-            detail = f'{detail} due to {str(exc)}'
-        raise HTTPException(status_code=500, detail={'error': 'organization_delete_failed', 'stage': stage, 'message': detail})
+        detail = f'Delete failed during {stage}: {str(exc)}'
+        raise HTTPException(status_code=500, detail={'error': 'organization_delete_failed', 'stage': stage, 'message': detail, 'raw_error': str(exc)})
 
     try:
         o = db.query(Organization).filter(Organization.id == org_id).first()
@@ -416,18 +443,18 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
             raise HTTPException(400, 'Cannot force delete organization with future published or completed games. Delete historical game data confirmation is required.')
 
         with db.begin_nested():
+            inventory = _organization_delete_inventory(db, org_id)
+            logger.info('[ORG DELETE] organization_id=%s organization_name=%s dependency_inventory=%s', org_id, org_name, inventory)
+            orphan_cleanup = _organization_orphan_cleanup(db)
+            logger.info('[ORG DELETE] organization_id=%s organization_name=%s orphan_cleanup=%s', org_id, org_name, orphan_cleanup)
+
             host_location_ids = [host_id for (host_id,) in db.query(HostLocation.id).filter(HostLocation.organization_id == org_id).all()]
             team_ids = [team_id for (team_id,) in db.query(Team.id).filter(Team.organization_id == org_id).all()]
             field_ids = [field_id for (field_id,) in db.query(Field.id).filter(Field.host_location_id.in_(host_location_ids)).all()] if host_location_ids else []
-            availability_ids = [availability_id for (availability_id,) in db.query(HostingAvailability.id).filter(
-                (HostingAvailability.field_id.in_(field_ids)) | (HostingAvailability.physical_field_area_id.in_(db.query(PhysicalFieldArea.id).filter(PhysicalFieldArea.host_location_id.in_(host_location_ids)).subquery()))
-            ).all()] if host_location_ids else []
+            area_ids = [area_id for (area_id,) in db.query(PhysicalFieldArea.id).filter(PhysicalFieldArea.host_location_id.in_(host_location_ids)).all()] if host_location_ids else []
+            availability_ids = [availability_id for (availability_id,) in db.query(HostingAvailability.id).filter((HostingAvailability.field_id.in_(field_ids)) | (HostingAvailability.physical_field_area_id.in_(area_ids))).all()] if (field_ids or area_ids) else []
             field_instance_ids = [instance_id for (instance_id,) in db.query(FieldInstance.id).filter(FieldInstance.host_location_id.in_(host_location_ids)).all()] if host_location_ids else []
-            game_ids = [game_id for (game_id,) in db.query(Game.id).filter(
-                (Game.home_team_id.in_(team_ids)) |
-                (Game.away_team_id.in_(team_ids)) |
-                (Game.field_id.in_(field_ids))
-            ).all()] if (team_ids or field_ids) else []
+            game_ids = [game_id for (game_id,) in db.query(Game.id).filter((Game.home_team_id.in_(team_ids)) | (Game.away_team_id.in_(team_ids)) | (Game.field_id.in_(field_ids))).all()] if (team_ids or field_ids) else []
 
             try:
                 deleted_games = db.query(Game).filter(Game.id.in_(game_ids)).delete(synchronize_session=False) if game_ids else 0
@@ -458,7 +485,6 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
                 _log_delete_step('delete_field_instances', org_name, deleted_field_instances, 'field_instances')
             except Exception as exc:
                 _stage_failure('delete_field_instances', org_name, 'field_instances', exc)
-            area_ids = [area_id for (area_id,) in db.query(PhysicalFieldArea.id).filter(PhysicalFieldArea.host_location_id.in_(host_location_ids)).all()] if host_location_ids else []
             try:
                 deleted_field_config = db.query(FieldConfigurationOption).filter(FieldConfigurationOption.physical_field_area_id.in_(area_ids)).delete(synchronize_session=False) if area_ids else 0
                 _log_delete_step('delete_generated_field_layouts', org_name, deleted_field_config, 'field_configuration_options')
@@ -509,16 +535,20 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
         return {'success': True, 'message': 'Organization and related records deleted.', 'deleted': {'scheduled_games': deleted_games, 'generated_slots': deleted_slots, 'hosting_availability': deleted_availability, 'field_instances': deleted_field_instances, 'field_configuration_options': deleted_field_config, 'hosting_site_setups': deleted_areas, 'teams': deleted_teams, 'division_participation': deleted_participation, 'fields': deleted_fields, 'host_locations': deleted_hosts, 'organization': 1}}
     except HTTPException:
         raise
-    except Exception:
+    except Exception as exc:
         db.rollback()
         logger.exception('Organization delete failed for org_id=%s force=%s', org_id, force)
-        raise HTTPException(
-            status_code=500,
-            detail={
-                'error': 'organization_delete_failed',
-                'message': 'Unable to delete organization due to a server error.',
-            },
-        )
+        raise HTTPException(status_code=500, detail={'error': 'organization_delete_failed', 'stage': 'unhandled', 'message': f'Delete failed during unhandled: {str(exc)}', 'raw_error': str(exc)})
+
+
+@router.get('/admin/debug/org-delete/{org_id}', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+def debug_org_delete_inventory(org_id: uuid.UUID, db: Session = Depends(get_db)):
+    org = db.query(Organization).filter(Organization.id == org_id).first()
+    if not org:
+        raise HTTPException(404, 'Organization not found')
+    inventory = _organization_delete_inventory(db, org_id)
+    orphans = _organization_orphan_cleanup(db)
+    return {'organization': org.name, **inventory, 'orphans': orphans}
 
 
 @router.get('/admin/debug/organization/{org_id}/dependencies', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
