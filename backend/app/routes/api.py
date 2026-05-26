@@ -845,14 +845,8 @@ def del_hosting_availability(item_id: uuid.UUID, current_user: User = Depends(ge
     x = db.query(HostingAvailability).filter(HostingAvailability.id == item_id).first()
     if not x: raise HTTPException(404, 'Hosting availability not found')
     enforce_organization_scope(x.field.host_location.organization_id, current_user)
-    assigned_slots = db.query(GameSlot).join(GameSlot.field_instance).filter(
-        FieldInstance.hosting_availability_id == x.id,
-        GameSlot.assigned_game_id.isnot(None),
-    ).count()
-    if assigned_slots > 0:
-        raise HTTPException(400, 'Cannot delete availability with assigned generated slots.')
-    db.query(GameSlot).filter(GameSlot.field_instance_id.in_(db.query(FieldInstance.id).filter(FieldInstance.hosting_availability_id == x.id))).delete(synchronize_session=False)
-    db.query(FieldInstance).filter(FieldInstance.hosting_availability_id == x.id).delete(synchronize_session=False)
+    host_location_id = x.physical_field_area.host_location_id if x.physical_field_area_id else x.field.host_location_id
+    _delete_availability_with_generated_slots_guard(db, [x.id], host_location_id, x.available_date)
     db.delete(x); db.commit(); return {'ok': True}
 
 
@@ -1056,17 +1050,42 @@ def delete_saved_hosting_availability(host_location_id: uuid.UUID, available_dat
         raise HTTPException(404, 'Saved availability not found')
     enforce_organization_scope(sample.physical_field_area.host_location.organization_id, current_user)
     availability_ids = [row.id for row in q.all()]
-    assigned_slots = db.query(GameSlot).join(GameSlot.field_instance).filter(
-        FieldInstance.hosting_availability_id.in_(availability_ids),
-        GameSlot.assigned_game_id.isnot(None),
-    ).count()
-    if assigned_slots > 0:
-        raise HTTPException(400, 'Cannot delete saved availability that has assigned generated slots.')
-    db.query(GameSlot).filter(GameSlot.field_instance_id.in_(db.query(FieldInstance.id).filter(FieldInstance.hosting_availability_id.in_(availability_ids)))).delete(synchronize_session=False)
-    db.query(FieldInstance).filter(FieldInstance.hosting_availability_id.in_(availability_ids)).delete(synchronize_session=False)
+    _delete_availability_with_generated_slots_guard(db, availability_ids, host_location_id, date_value)
     deleted = q.delete(synchronize_session=False)
     db.commit()
     return {'ok': True, 'deleted': deleted}
+
+
+def _delete_availability_with_generated_slots_guard(db: Session, availability_ids: list[uuid.UUID], host_location_id: uuid.UUID, available_date: date):
+    generated_slot_count = db.query(GameSlot).join(GameSlot.field_instance).filter(
+        FieldInstance.hosting_availability_id.in_(availability_ids),
+    ).count()
+    scheduled_game_count = db.query(GameSlot).join(GameSlot.field_instance).filter(
+        FieldInstance.hosting_availability_id.in_(availability_ids),
+        GameSlot.assigned_game_id.isnot(None),
+    ).count()
+
+    logger.info(
+        'Availability delete request availability_ids=%s host_location_id=%s date=%s generated_slot_count=%s scheduled_game_count=%s',
+        availability_ids,
+        host_location_id,
+        available_date,
+        generated_slot_count,
+        scheduled_game_count,
+    )
+
+    if scheduled_game_count > 0:
+        raise HTTPException(
+            400,
+            'Cannot delete availability because scheduled games exist for this location/date. Unschedule or move those games first.',
+        )
+
+    db.query(GameSlot).filter(
+        GameSlot.field_instance_id.in_(
+            db.query(FieldInstance.id).filter(FieldInstance.hosting_availability_id.in_(availability_ids))
+        )
+    ).delete(synchronize_session=False)
+    db.query(FieldInstance).filter(FieldInstance.hosting_availability_id.in_(availability_ids)).delete(synchronize_session=False)
 
 
 @router.get('/hosting-availabilities/generated-slots', response_model=list[GeneratedSlotRead], dependencies=[Depends(get_current_user)])

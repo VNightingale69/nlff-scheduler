@@ -51,11 +51,13 @@ export async function apiFetch(path: string, opts: RequestInit = {}, token?: str
     const parsed = await parseJsonSafely(raw);
 
     const message =
-      typeof parsed === 'object' && parsed && 'message' in parsed
-        ? String((parsed as { message: unknown }).message)
-        : typeof parsed === 'object' && parsed && 'detail' in parsed
-        ? String((parsed as { detail: unknown }).detail)
-        : 'Request failed.';
+      typeof parsed === 'object' && parsed && typeof (parsed as { detail?: unknown }).detail === 'string'
+        ? (parsed as { detail: string }).detail
+        : typeof parsed === 'object' && parsed && typeof (parsed as { message?: unknown }).message === 'string'
+        ? (parsed as { message: string }).message
+        : parsed
+        ? JSON.stringify(parsed)
+        : 'Request failed';
 
     throw new ApiError(message, res.status, parsed);
   }
