@@ -80,16 +80,17 @@ def canonical_division_id_from_division(division: Division | None) -> str:
 
 
 def normalize_division_name(value: str) -> str:
+    """Normalize division labels while preserving category identity (e.g. girls/coed)."""
     if not value:
         return ''
-    return (
-        value.strip()
-        .lower()
-        .replace('girls ', '')
-        .replace('coed ', '')
-        .replace('grade', '')
-        .replace(' ', '')
-    )
+    compact = ''.join(ch.lower() if ch.isalnum() else '_' for ch in value.strip())
+    while '__' in compact:
+        compact = compact.replace('__', '_')
+    return compact.strip('_')
+
+
+def normalized_division_key(division_group: str | None, division_name: str | None) -> str:
+    return normalize_division_name(f"{division_group or ''} {division_name or ''}")
 
 def _capacity_for_layout(layout_name: str | None, option: FieldConfigurationOption | None) -> tuple[int, int]:
     if option:
@@ -1779,7 +1780,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         raise HTTPException(404, 'Selected season/week/division is invalid')
     division_group_key = (division.division_group or '').strip().upper()
     selected_division_key = canonical_division_id_from_division(division)
-    selected_division_normalized = normalize_division_name(f'{division.division_group or ""} {division.name or ""}')
+    selected_division_normalized = normalized_division_key(division.division_group, division.name)
     full_division_label = f"{division.division_group} {division.name}".strip() if division.division_group else (division.name or '')
     supported_girls_division_keys = {
         'GIRLS_K_1',
@@ -2828,7 +2829,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             _add_skipped('Unable to schedule required games due to hard scheduling constraints.')
     rejected_games = len(skipped)
     logger.info(
-        'division_week_diagnostics division=%s normalized_division=%s week=%s required_games=%s compatible_slots=%s teams_found=%s generated_candidate_games=%s rejected_games=%s rejection_reasons=%s',
+        'division_week_diagnostics division=%s normalized_division=%s week=%s required_games=%s compatible_slots=%s teams_found=%s generated_candidate_games=%s scheduled_games_created=%s rejected_games=%s rejection_reasons=%s',
         full_division_label,
         selected_division_normalized,
         week.week_number,
@@ -2836,10 +2837,15 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         compatible_slots_found,
         len(teams),
         len(plans),
+        total_created_games,
         rejected_games,
         [row.get('reason') for row in skipped],
     )
     unscheduled_team_ids = [str(tid) for tid, count in week_team_game_counts.items() if count == 0]
+
+    if (division_group_key == 'GIRLS' and len(teams) > 0 and total_created_games == 0):
+        logger.error('Girls division scheduling failed due to category mismatch. division=%s normalized_division=%s week=%s', full_division_label, selected_division_normalized, week.week_number)
+
     logger.info(
         'auto_fill_preview division_id=%s division_key=%s active_teams=%s eligible_pairings=%s compatible_slots=%s',
         division_id,
@@ -4186,11 +4192,11 @@ def cleanup_unscheduled_games(db: Session = Depends(get_db)):
 @router.get('/schedule-management/export.csv', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def export_schedule_management_csv(date: date | None = None, division_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, host_location_id: uuid.UUID | None = None, field_type: str | None = None, field_id: uuid.UUID | None = None, team_id: uuid.UUID | None = None, db: Session = Depends(get_db)):
     rows = _schedule_management_rows(db, {'date': date, 'division_id': division_id, 'organization_id': organization_id, 'host_location_id': host_location_id, 'field_type': field_type, 'field_id': field_id, 'team_id': team_id})
-    out = io.StringIO(); w=csv.writer(out); w.writerow(['Date','Time','Division Group','Division','Division ID','Normalized Division','Home Team','Away Team','Host Location','Field','Status'])
+    out = io.StringIO(); w=csv.writer(out); w.writerow(['Date','Time','Division Group','Division','Division ID','Display Division Name','Category/Gender','Normalized Division Key','Home Team','Away Team','Host Location','Field','Field Type','Status'])
     export_division_names: set[str] = set()
     for g, slot, fi, host, home, away, div, org, status in rows:
         export_division_names.add(f'{div.division_group} {div.name}'.strip())
-        w.writerow([g.game_date.isoformat(), g.kickoff_time.strftime('%H:%M'), div.division_group, div.name, str(div.id), normalize_division_name(f'{div.division_group or ""} {div.name or ""}'), home.name, away.name, host.name if host else '', fi.field_name if fi else '', status.code])
+        w.writerow([g.game_date.isoformat(), g.kickoff_time.strftime('%H:%M'), div.division_group, div.name, str(div.id), f'{div.division_group} {div.name}'.strip(), div.division_group or '', normalized_division_key(div.division_group, div.name), home.name, away.name, host.name if host else '', fi.field_name if fi else '', slot.field_type if slot else '', status.code])
     logger.info('export_schedule_management_csv division_entries=%s', sorted(export_division_names))
     return StreamingResponse(iter([out.getvalue()]), media_type='text/csv', headers={'Content-Disposition':'attachment; filename="schedule-export.csv"'})
 @router.post('/games', response_model=GameSaveResponse, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
