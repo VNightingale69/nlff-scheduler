@@ -472,11 +472,6 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
             except Exception as exc:
                 _stage_failure('delete_scheduled_games', org_name, 'games', exc)
 
-            try:
-                deleted_game_slot_relationships = db.query(GameSlot).filter(GameSlot.assigned_game_id.in_(game_ids)).update({'assigned_game_id': None}, synchronize_session=False) if game_ids else 0
-                _log_delete_step('delete_game_slot_relationships', org_name, deleted_game_slot_relationships, 'game_slots')
-            except Exception as exc:
-                _stage_failure('delete_game_slot_relationships', org_name, 'game_slots', exc)
 
             try:
                 deleted_slots = db.query(GameSlot).filter((GameSlot.field_instance_id.in_(field_instance_ids)) | (GameSlot.host_location_id.in_(host_location_ids))).delete(synchronize_session=False) if host_location_ids else 0
@@ -501,20 +496,35 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
             except Exception as exc:
                 _stage_failure('delete_generated_field_layouts', org_name, 'field_configuration_options', exc)
             try:
-                deleted_fields = db.query(Field).filter(Field.host_location_id.in_(host_location_ids)).delete(synchronize_session=False) if host_location_ids else 0
-                _log_delete_step('delete_physical_fields', org_name, deleted_fields, 'fields')
-            except Exception as exc:
-                _stage_failure('delete_physical_fields', org_name, 'fields', exc)
-            try:
                 deleted_areas = db.query(PhysicalFieldArea).filter(PhysicalFieldArea.host_location_id.in_(host_location_ids)).delete(synchronize_session=False) if host_location_ids else 0
                 _log_delete_step('delete_field_areas', org_name, deleted_areas, 'physical_field_areas')
             except Exception as exc:
                 _stage_failure('delete_field_areas', org_name, 'physical_field_areas', exc)
             try:
+                deleted_fields = db.query(Field).filter(Field.host_location_id.in_(host_location_ids)).delete(synchronize_session=False) if host_location_ids else 0
+                _log_delete_step('delete_physical_fields', org_name, deleted_fields, 'fields')
+            except Exception as exc:
+                _stage_failure('delete_physical_fields', org_name, 'fields', exc)
+
+            logger.info({'deletingOrganizationId': str(org_id)})
+            host_locations = db.query(HostLocation).filter(HostLocation.organization_id == org_id).all()
+            logger.info({
+                'step': 'host_locations_found',
+                'count': len(host_locations),
+                'ids': [str(host.id) for host in host_locations],
+            })
+            logger.info({'deletingHostLocations': True})
+            try:
                 deleted_hosts = db.query(HostLocation).filter(HostLocation.organization_id == org_id).delete(synchronize_session=False)
                 _log_delete_step('delete_host_locations', org_name, deleted_hosts, 'host_locations')
+                db.flush()
             except Exception as exc:
                 _stage_failure('delete_host_locations', org_name, 'host_locations', exc)
+
+            remaining_host_locations = db.query(HostLocation).filter(HostLocation.organization_id == org_id).count()
+            logger.info({'step': 'host_locations_remaining', 'count': remaining_host_locations})
+            if remaining_host_locations > 0:
+                raise RuntimeError(f'Host locations still exist for organization {org_id}')
             try:
                 deleted_teams = db.query(Team).filter(Team.organization_id == org_id).delete(synchronize_session=False)
                 _log_delete_step('delete_teams', org_name, deleted_teams, 'teams')
@@ -560,6 +570,7 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
                     },
                 )
 
+            logger.info({'organizationDeleteStarting': True})
             try:
                 db.delete(o)
                 _log_delete_step('delete_organization', org_name, 1, 'organizations')
