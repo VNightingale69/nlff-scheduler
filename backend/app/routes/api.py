@@ -1059,11 +1059,39 @@ def delete_saved_hosting_availability(item_id: str, current_user: User = Depends
     host_location_id = sample.physical_field_area.host_location.id
     date_value = sample.available_date
     enforce_organization_scope(sample.physical_field_area.host_location.organization_id, current_user)
-    q = db.query(HostingAvailability).join(HostingAvailability.physical_field_area).join(PhysicalFieldArea.host_location).filter(HostLocation.id == host_location_id, HostingAvailability.available_date == date_value)
-    availability_ids = [row.id for row in q.all()]
-    _delete_availability_with_generated_slots_guard(db, availability_ids, host_location_id, date_value)
-    deleted = q.delete(synchronize_session=False)
-    db.commit()
+    availability_ids = [
+        row.id
+        for row in db.query(HostingAvailability.id)
+        .join(HostingAvailability.physical_field_area)
+        .join(PhysicalFieldArea.host_location)
+        .filter(HostLocation.id == host_location_id, HostingAvailability.available_date == date_value)
+        .all()
+    ]
+
+    try:
+        _delete_availability_with_generated_slots_guard(db, availability_ids, host_location_id, date_value)
+        deleted = db.query(HostingAvailability).filter(HostingAvailability.id.in_(availability_ids)).delete(synchronize_session=False)
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    except SQLAlchemyError:
+        db.rollback()
+        logger.exception(
+            'Availability delete failed availability_ids=%s host_location_id=%s date=%s outcome=db_error',
+            availability_ids,
+            host_location_id,
+            date_value,
+        )
+        raise HTTPException(500, 'A database error occurred while processing the request.')
+
+    logger.info(
+        'Availability delete complete availability_ids=%s host_location_id=%s date=%s deleted_availability_count=%s outcome=success',
+        availability_ids,
+        host_location_id,
+        date_value,
+        deleted,
+    )
     return {'ok': True, 'deleted': deleted}
 
 
@@ -1086,9 +1114,17 @@ def _delete_availability_with_generated_slots_guard(db: Session, availability_id
     )
 
     if scheduled_game_count > 0:
+        logger.info(
+            'Availability delete blocked availability_ids=%s host_location_id=%s date=%s generated_slot_count=%s scheduled_game_count=%s outcome=blocked_scheduled_games',
+            availability_ids,
+            host_location_id,
+            available_date,
+            generated_slot_count,
+            scheduled_game_count,
+        )
         raise HTTPException(
-            400,
-            'Cannot delete availability because scheduled games exist for this location/date. Unschedule or move those games first.',
+            409,
+            'Cannot delete this availability because scheduled games exist for this location/date. Unschedule or move those games first.',
         )
 
     db.query(GameSlot).filter(
@@ -1097,6 +1133,14 @@ def _delete_availability_with_generated_slots_guard(db: Session, availability_id
         )
     ).delete(synchronize_session=False)
     db.query(FieldInstance).filter(FieldInstance.hosting_availability_id.in_(availability_ids)).delete(synchronize_session=False)
+    logger.info(
+        'Availability dependent slots removed availability_ids=%s host_location_id=%s date=%s generated_slot_count=%s scheduled_game_count=%s outcome=slots_deleted',
+        availability_ids,
+        host_location_id,
+        available_date,
+        generated_slot_count,
+        scheduled_game_count,
+    )
 
 
 @router.get('/hosting-availabilities/generated-slots', response_model=list[GeneratedSlotRead], dependencies=[Depends(get_current_user)])
