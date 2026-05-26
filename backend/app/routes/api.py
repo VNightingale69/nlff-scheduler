@@ -454,7 +454,17 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
             area_ids = [area_id for (area_id,) in db.query(PhysicalFieldArea.id).filter(PhysicalFieldArea.host_location_id.in_(host_location_ids)).all()] if host_location_ids else []
             availability_ids = [availability_id for (availability_id,) in db.query(HostingAvailability.id).filter((HostingAvailability.field_id.in_(field_ids)) | (HostingAvailability.physical_field_area_id.in_(area_ids))).all()] if (field_ids or area_ids) else []
             field_instance_ids = [instance_id for (instance_id,) in db.query(FieldInstance.id).filter(FieldInstance.host_location_id.in_(host_location_ids)).all()] if host_location_ids else []
-            game_ids = [game_id for (game_id,) in db.query(Game.id).filter((Game.home_team_id.in_(team_ids)) | (Game.away_team_id.in_(team_ids)) | (Game.field_id.in_(field_ids))).all()] if (team_ids or field_ids) else []
+            slot_assigned_game_ids = [game_id for (game_id,) in db.query(GameSlot.assigned_game_id).filter(
+                GameSlot.host_location_id.in_(host_location_ids),
+                GameSlot.assigned_game_id.isnot(None),
+            ).all()] if host_location_ids else []
+            game_ids = list({*[
+                game_id for (game_id,) in db.query(Game.id).filter(
+                    (Game.home_team_id.in_(team_ids))
+                    | (Game.away_team_id.in_(team_ids))
+                    | (Game.field_id.in_(field_ids))
+                ).all()
+            ], *slot_assigned_game_ids}) if (team_ids or field_ids or slot_assigned_game_ids) else []
 
             try:
                 deleted_games = db.query(Game).filter(Game.id.in_(game_ids)).delete(synchronize_session=False) if game_ids else 0
@@ -506,15 +516,50 @@ def delete_organization(org_id: uuid.UUID, force: bool = Query(False), db: Sessi
             except Exception as exc:
                 _stage_failure('delete_host_locations', org_name, 'host_locations', exc)
             try:
-                deleted_participation = db.query(OrganizationDivisionParticipation).filter(OrganizationDivisionParticipation.organization_id == org_id).delete(synchronize_session=False)
-                _log_delete_step('delete_division_participation', org_name, deleted_participation, 'organization_division_participations')
-            except Exception as exc:
-                _stage_failure('delete_division_participation', org_name, 'organization_division_participations', exc)
-            try:
                 deleted_teams = db.query(Team).filter(Team.organization_id == org_id).delete(synchronize_session=False)
                 _log_delete_step('delete_teams', org_name, deleted_teams, 'teams')
             except Exception as exc:
                 _stage_failure('delete_teams', org_name, 'teams', exc)
+            try:
+                deleted_participation = db.query(OrganizationDivisionParticipation).filter(OrganizationDivisionParticipation.organization_id == org_id).delete(synchronize_session=False)
+                _log_delete_step('delete_division_participation', org_name, deleted_participation, 'organization_division_participations')
+            except Exception as exc:
+                _stage_failure('delete_division_participation', org_name, 'organization_division_participations', exc)
+
+            remaining_host_locations = db.query(HostLocation).filter(HostLocation.organization_id == org_id).count()
+            remaining_teams = db.query(Team).filter(Team.organization_id == org_id).count()
+            remaining_games = db.query(Game).filter(
+                (Game.home_team_id.in_(db.query(Team.id).filter(Team.organization_id == org_id).subquery()))
+                | (Game.away_team_id.in_(db.query(Team.id).filter(Team.organization_id == org_id).subquery()))
+                | (Game.id.in_(db.query(GameSlot.assigned_game_id).filter(GameSlot.host_location_id.in_(host_location_ids), GameSlot.assigned_game_id.isnot(None)).subquery()))
+            ).count() if host_location_ids else 0
+            remaining_generated_slots = db.query(GameSlot).filter(GameSlot.host_location_id.in_(host_location_ids)).count() if host_location_ids else 0
+
+            logger.info(
+                '[ORG DELETE] organization_id=%s organization_name=%s step=pre_final_delete_counts host_locations_remaining=%s teams_remaining=%s games_remaining=%s generated_slots_remaining=%s',
+                org_id,
+                org_name,
+                remaining_host_locations,
+                remaining_teams,
+                remaining_games,
+                remaining_generated_slots,
+            )
+
+            if any(count > 0 for count in [remaining_host_locations, remaining_teams, remaining_games, remaining_generated_slots]):
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        'error': 'organization_delete_blocked',
+                        'message': 'Cannot delete organization: dependent records still exist.',
+                        'remaining_counts': {
+                            'host_locations': remaining_host_locations,
+                            'teams': remaining_teams,
+                            'games': remaining_games,
+                            'generated_slots': remaining_generated_slots,
+                        },
+                    },
+                )
+
             try:
                 db.delete(o)
                 _log_delete_step('delete_organization', org_name, 1, 'organizations')
