@@ -176,7 +176,7 @@ class AutoFillPreviewTest(unittest.TestCase):
         result = auto_fill_preview({'season_id': self.season.id, 'week_id': self.week2.id, 'division_id': self.division.id}, db=self.db)
         self.assertEqual(result['proposed_game_count'], 1)
         self.assertEqual(result['proposals'][0]['host_location'], 'Westosha Park')
-        self.assertIn('same-community at home host field (+60)', result['proposals'][0]['reason'])
+        self.assertIn('same-community at primary home host field (+500)', result['proposals'][0]['reason'])
 
     def test_split_host_week_prefers_existing_community_host_assignment(self):
         lake_org = Organization(id=uuid.uuid4(), name='Lake County', is_active=True)
