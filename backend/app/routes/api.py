@@ -4698,10 +4698,10 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
     ).count() if season.start_date else 0
 
     try:
-        same_community_repair = repair_same_community_home_fields(db, season_id)
+        post_schedule_repair = run_post_schedule_repair_pass(db, season_id)
     except Exception as repair_ex:
-        logger.exception("[REPAIR] Same-community repair failed")
-        same_community_repair = {
+        logger.exception("[REPAIR] Post-schedule repair pass failed")
+        post_schedule_repair = {
             "ran": False,
             "error": str(repair_ex)
         }
@@ -4724,7 +4724,7 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
         'post_run_validation': post_run_validation,
         'divisions_completed': divisions_completed,
         'divisions_with_unresolved_games': divisions_with_unresolved_games,
-        'same_community_repair': same_community_repair,
+        'post_schedule_repair': post_schedule_repair,
     }
 
 
@@ -4943,6 +4943,188 @@ def repair_same_community_home_fields(db: Session, season_id: uuid.UUID) -> dict
         'swaps_committed': swaps_committed,
         'violations_remaining': violations_remaining,
         'unrepaired': unrepaired,
+    }
+
+
+def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID) -> dict[str, object]:
+    """Final repair pass for a fully-built season schedule.
+
+    Order of operations is intentional:
+      1) double-header adjacency/location
+      2) same-community primary-home host placement
+      3) post-repair validation diagnostics
+    """
+    teams = db.query(Team).filter(Team.is_active.is_(True)).all()
+    teams_by_id = {t.id: t for t in teams}
+    primary_host_by_org = _primary_host_by_org(db)
+    scheduled_games = db.query(Game).join(Game.status).filter(
+        Game.season_id == season_id,
+        GameStatus.code != 'UNSCHEDULED',
+    ).all()
+    scheduled_game_ids = {g.id for g in scheduled_games}
+    slots = db.query(GameSlot).filter(
+        GameSlot.assigned_game_id.isnot(None),
+    ).all()
+    slots_by_game_id = {s.assigned_game_id: s for s in slots if s.assigned_game_id in scheduled_game_ids}
+
+    base_team_counts: dict[uuid.UUID, int] = {}
+    for g in scheduled_games:
+        base_team_counts[g.home_team_id] = base_team_counts.get(g.home_team_id, 0) + 1
+        base_team_counts[g.away_team_id] = base_team_counts.get(g.away_team_id, 0) + 1
+
+    def _time_minutes(t: time | None) -> int:
+        return (t.hour * 60 + t.minute) if t else -1
+
+    def _adjacent(a: time | None, b: time | None) -> bool:
+        if not a or not b:
+            return False
+        return abs(_time_minutes(a) - _time_minutes(b)) == 60
+
+    def _collect_weekly_pairs() -> list[tuple[uuid.UUID, uuid.UUID, list[Game]]]:
+        by_key: dict[tuple[uuid.UUID, uuid.UUID], list[Game]] = {}
+        for g in scheduled_games:
+            for tid in (g.home_team_id, g.away_team_id):
+                by_key.setdefault((tid, g.week_id), []).append(g)
+        return [(tid, wk, games) for (tid, wk), games in by_key.items() if len(games) == 2]
+
+    def _snapshot_for_rollback(g1: Game, s1: GameSlot, g2: Game, s2: GameSlot) -> dict[str, object]:
+        return {
+            'g1_date': g1.game_date, 'g1_time': g1.kickoff_time, 's1_game': s1.assigned_game_id, 's1_status': s1.status,
+            'g2_date': g2.game_date, 'g2_time': g2.kickoff_time, 's2_game': s2.assigned_game_id, 's2_status': s2.status,
+        }
+
+    def _rollback(snapshot: dict[str, object], g1: Game, s1: GameSlot, g2: Game, s2: GameSlot) -> None:
+        g1.game_date = snapshot['g1_date']; g1.kickoff_time = snapshot['g1_time']
+        s1.assigned_game_id = snapshot['s1_game']; s1.status = snapshot['s1_status']
+        g2.game_date = snapshot['g2_date']; g2.kickoff_time = snapshot['g2_time']
+        s2.assigned_game_id = snapshot['s2_game']; s2.status = snapshot['s2_status']
+        db.flush()
+
+    dh_found = 0
+    dh_attempted = 0
+    dh_committed = 0
+    dh_remaining: list[dict[str, object]] = []
+    dh_unrepaired: list[dict[str, object]] = []
+    for team_id, week_id, games in _collect_weekly_pairs():
+        g1, g2 = games[0], games[1]
+        s1 = slots_by_game_id.get(g1.id)
+        s2 = slots_by_game_id.get(g2.id)
+        if not s1 or not s2:
+            continue
+        same_loc = s1.host_location_id and s1.host_location_id == s2.host_location_id
+        is_adj = _adjacent(s1.start_time, s2.start_time)
+        if same_loc and is_adj:
+            continue
+        dh_found += 1
+        committed = False
+        if s1.host_location_id and s2.host_location_id and s1.host_location_id != s2.host_location_id:
+            dh_unrepaired.append({'team_id': str(team_id), 'week_id': str(week_id), 'reason': 'double-header spans different locations; no safe same-location swap found'})
+            continue
+        base_slot = s1 if s1.host_location_id else s2
+        other_slot = s2 if base_slot.id == s1.id else s1
+        host_id = base_slot.host_location_id
+        if not host_id:
+            dh_unrepaired.append({'team_id': str(team_id), 'week_id': str(week_id), 'reason': 'missing host location data'})
+            continue
+        open_adjacent = db.query(GameSlot).filter(
+            GameSlot.host_location_id == host_id,
+            GameSlot.slot_date == base_slot.slot_date,
+            GameSlot.field_type == base_slot.field_type,
+            GameSlot.assigned_game_id.is_(None),
+            GameSlot.status == 'OPEN',
+        ).all()
+        target = next((s for s in open_adjacent if _adjacent(base_slot.start_time, s.start_time)), None)
+        if target:
+            dh_attempted += 1
+            snapshot = _snapshot_for_rollback(other_slot.assigned_game, other_slot, target.assigned_game, target) if target.assigned_game else None
+            try:
+                target.assigned_game_id = other_slot.assigned_game_id
+                target.status = 'BOOKED'
+                other_slot.assigned_game_id = None
+                other_slot.status = 'OPEN'
+                moving_game = g2 if other_slot.id == s2.id else g1
+                moving_game.game_date = target.slot_date
+                moving_game.kickoff_time = target.start_time
+                db.flush()
+                slots_by_game_id[moving_game.id] = target
+                committed = True
+                dh_committed += 1
+            except Exception:
+                db.rollback()
+                dh_unrepaired.append({'team_id': str(team_id), 'week_id': str(week_id), 'reason': 'rollback: failed committing adjacent-slot move'})
+        if not committed:
+            dh_remaining.append({'team_id': str(team_id), 'team_name': teams_by_id.get(team_id).name if team_id in teams_by_id else str(team_id), 'week_id': str(week_id)})
+
+    same_found = 0
+    same_attempted = 0
+    same_committed = 0
+    same_remaining: list[dict[str, object]] = []
+    same_unrepaired: list[dict[str, object]] = []
+    for g in scheduled_games:
+        slot = slots_by_game_id.get(g.id)
+        if not slot or not slot.host_location_id:
+            continue
+        ht = teams_by_id.get(g.home_team_id)
+        at = teams_by_id.get(g.away_team_id)
+        if not ht or not at or not ht.organization_id or ht.organization_id != at.organization_id:
+            continue
+        preferred = primary_host_by_org.get(ht.organization_id)
+        if not preferred or slot.host_location_id == preferred:
+            continue
+        same_found += 1
+        open_home = db.query(GameSlot).filter(
+            GameSlot.slot_date == slot.slot_date,
+            GameSlot.host_location_id == preferred,
+            GameSlot.field_type == slot.field_type,
+            GameSlot.assigned_game_id.is_(None),
+            GameSlot.status == 'OPEN',
+        ).order_by(GameSlot.start_time.asc()).all()
+        target = open_home[0] if open_home else None
+        if not target:
+            same_unrepaired.append({'game_id': str(g.id), 'reason': 'no compatible open preferred-home slot on same date'})
+            same_remaining.append({'game_id': str(g.id)})
+            continue
+        same_attempted += 1
+        try:
+            slot.assigned_game_id = None
+            slot.status = 'OPEN'
+            target.assigned_game_id = g.id
+            target.status = 'BOOKED'
+            g.game_date = target.slot_date
+            g.kickoff_time = target.start_time
+            db.flush()
+            slots_by_game_id[g.id] = target
+            same_committed += 1
+        except Exception:
+            db.rollback()
+            same_unrepaired.append({'game_id': str(g.id), 'reason': 'rollback: repair caused validation/constraint failure'})
+            same_remaining.append({'game_id': str(g.id)})
+
+    db.flush()
+    post_team_counts: dict[uuid.UUID, int] = {}
+    for g in scheduled_games:
+        post_team_counts[g.home_team_id] = post_team_counts.get(g.home_team_id, 0) + 1
+        post_team_counts[g.away_team_id] = post_team_counts.get(g.away_team_id, 0) + 1
+    count_changed = base_team_counts != post_team_counts
+    if count_changed:
+        same_unrepaired.append({'reason': 'team game counts changed unexpectedly during repair pass'})
+
+    return {
+        'ran': True,
+        'double_header': {
+            'violations_found': dh_found,
+            'repairs_attempted': dh_attempted,
+            'repairs_committed': dh_committed,
+            'violations_remaining': dh_remaining,
+            'unrepaired_reasons': dh_unrepaired,
+        },
+        'same_community_home': {
+            'violations_found': same_found,
+            'repairs_attempted': same_attempted,
+            'repairs_committed': same_committed,
+            'violations_remaining': same_remaining,
+            'unrepaired_reasons': same_unrepaired,
+        },
     }
 
 
