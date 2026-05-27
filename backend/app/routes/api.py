@@ -4585,7 +4585,14 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
         GameSlot.slot_date == date(season.start_date.year, 9, 13)
     ).count() if season.start_date else 0
 
-    same_community_repair = repair_same_community_home_fields(db, season_id)
+    try:
+        same_community_repair = repair_same_community_home_fields(db, season_id)
+    except Exception as repair_ex:
+        logger.exception("[REPAIR] Same-community repair failed")
+        same_community_repair = {
+            "ran": False,
+            "error": str(repair_ex)
+        }
     db.commit()
 
     return {
@@ -4672,11 +4679,53 @@ def _enforce_host_owner_home_team(
     return home_team, away_team, None
 
 
+def _primary_host_by_org(db: Session) -> dict[uuid.UUID, uuid.UUID]:
+    """Return organization -> primary host-location mapping."""
+    active_hosts = db.query(HostLocation).filter(HostLocation.is_active.is_(True)).all()
+    if not active_hosts:
+        return {}
+    host_ids = [host.id for host in active_hosts]
+    game_counts_by_host: dict[uuid.UUID, int] = {}
+    for host_id, game_count in db.query(Field.host_location_id, func.count(Game.id)).join(
+        Game, Game.field_id == Field.id
+    ).filter(
+        Field.host_location_id.in_(host_ids)
+    ).group_by(Field.host_location_id).all():
+        if host_id:
+            game_counts_by_host[host_id] = int(game_count or 0)
+    hosts_by_org: dict[uuid.UUID, list[HostLocation]] = {}
+    for host in active_hosts:
+        if host.organization_id:
+            hosts_by_org.setdefault(host.organization_id, []).append(host)
+    primary_by_org: dict[uuid.UUID, uuid.UUID] = {}
+    for org_id, org_hosts in hosts_by_org.items():
+        ranked_hosts = sorted(
+            org_hosts,
+            key=lambda host: (
+                1 if bool(getattr(host, 'is_primary', False) or getattr(host, 'is_default', False) or getattr(host, 'preferred', False)) else 0,
+                game_counts_by_host.get(host.id, 0),
+            ),
+            reverse=True,
+        )
+        if ranked_hosts:
+            primary_by_org[org_id] = ranked_hosts[0].id
+    return primary_by_org
+
+
 def repair_same_community_home_fields(db: Session, season_id: uuid.UUID) -> dict[str, object]:
     logger.info("[REPAIR] Same-community home-field repair started")
     teams = db.query(Team).filter(Team.is_active.is_(True)).all()
     teams_by_id = {t.id: t for t in teams}
     primary_host_by_org = _primary_host_by_org(db)
+    if not primary_host_by_org:
+        logger.warning("[REPAIR] No primary host mappings found")
+        return {
+            'ran': True,
+            'violations_found': 0,
+            'swaps_attempted': 0,
+            'swaps_committed': 0,
+            'unrepaired': [],
+        }
     violations_found = 0
     swaps_attempted = 0
     swaps_committed = 0
