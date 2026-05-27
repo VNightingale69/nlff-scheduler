@@ -1964,6 +1964,8 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     week = db.query(Week).filter(Week.id == week_id, Week.season_id == season_id).first()
     if not division or not week:
         raise HTTPException(404, 'Selected season/week/division is invalid')
+    season_weeks = db.query(Week).filter(Week.season_id == season_id).all()
+    week_numbers_by_id = {w.id: int(w.week_number) for w in season_weeks}
     division_group_key = (division.division_group or '').strip().upper()
     selected_division_key = canonical_division_id_from_division(division)
     selected_division_normalized = normalized_division_key(division.division_group, division.name)
@@ -2180,6 +2182,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         double_header_counts[game.home_team_id] = double_header_counts.get(game.home_team_id, 0)
         double_header_counts[game.away_team_id] = double_header_counts.get(game.away_team_id, 0)
     team_week_counts: dict[tuple[uuid.UUID, uuid.UUID], int] = {}
+    double_header_weeks_by_team: dict[uuid.UUID, set[int]] = {tid: set() for tid in teams_by_id}
     for game in season_division_games:
         key_home = (game.home_team_id, game.week_id)
         key_away = (game.away_team_id, game.week_id)
@@ -2188,6 +2191,9 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     for (team_id, _wk_id), count in team_week_counts.items():
         if count > 1:
             double_header_counts[team_id] = double_header_counts.get(team_id, 0) + 1
+            wk_no = week_numbers_by_id.get(_wk_id)
+            if wk_no is not None:
+                double_header_weeks_by_team.setdefault(team_id, set()).add(int(wk_no))
 
     matchup_counts: dict[tuple[uuid.UUID, uuid.UUID], int] = {}
     community_matchup_counts: dict[tuple[uuid.UUID, uuid.UUID], int] = {}
@@ -2535,8 +2541,27 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         )
     if is_odd_division and no_byes:
         min_dh = min(double_header_counts.values() or [0])
-        candidates = [tid for tid, count in double_header_counts.items() if count == min_dh]
-        candidates.sort(key=lambda tid: teams_by_id[tid].name)
+        min_count_candidates = [tid for tid, count in double_header_counts.items() if count == min_dh]
+        prior_week_number = prior_week.week_number if prior_week else None
+        non_consecutive_candidates = [
+            tid for tid in min_count_candidates
+            if prior_week_number is None or prior_week_number not in double_header_weeks_by_team.get(tid, set())
+        ]
+        candidates = non_consecutive_candidates or min_count_candidates
+        def _dh_candidate_priority(tid: uuid.UUID) -> tuple[int, int, str]:
+            team = teams_by_id.get(tid)
+            home_host_ids = host_ids_by_org.get(team.organization_id, set()) if team and team.organization_id else set()
+            has_home_host_slot = any(s.host_location_id in home_host_ids for s in remaining_slots) if home_host_ids else False
+            has_selected_home_host_slot = any(
+                s.host_location_id in home_host_ids and s.host_location_id in selected_host_ids
+                for s in remaining_slots
+            ) if home_host_ids else False
+            return (
+                0 if has_selected_home_host_slot else 1,
+                0 if has_home_host_slot else 1,
+                teams_by_id[tid].name,
+            )
+        candidates.sort(key=_dh_candidate_priority)
         selected_double_header_team_id = candidates[0] if candidates else None
         if selected_double_header_team_id:
             site_day_slots: dict[tuple[uuid.UUID, object], list[GameSlot]] = {}
@@ -3157,6 +3182,19 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         [row.get('reason') for row in skipped],
     )
     unscheduled_team_ids = [str(tid) for tid, count in week_team_game_counts.items() if count == 0]
+    teams_with_one_game = [str(tid) for tid, count in week_team_game_counts.items() if count == 1]
+    double_header_team_ids = [str(tid) for tid, count in week_team_game_counts.items() if count == 2]
+    overbooked_team_ids = [str(tid) for tid, count in week_team_game_counts.items() if count > 2]
+    weekly_completion_ok = (
+        len(unscheduled_team_ids) == 0
+        and len(overbooked_team_ids) == 0
+        and (
+            (not (is_odd_division and no_byes) and len(double_header_team_ids) == 0)
+            or ((is_odd_division and no_byes) and len(double_header_team_ids) == 1)
+        )
+        and total_created_games >= required_games_for_division_week
+    )
+    weekly_participation_status = 'complete' if weekly_completion_ok else 'incomplete'
 
     if (division_group_key == 'GIRLS' and len(teams) > 0 and total_created_games == 0):
         logger.error('Girls division scheduling failed due to category mismatch. division=%s normalized_division=%s week=%s', full_division_label, selected_division_normalized, week.week_number)
@@ -3291,8 +3329,28 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'odd_even_status_source': 'division_active_team_count',
             'unscheduled_teams': [teams_by_id[uuid.UUID(tid)].name for tid in unscheduled_team_ids],
             'double_header_team': teams_by_id[selected_double_header_team_id].name if selected_double_header_team_id else None,
+            'weekly_completion_status': weekly_participation_status,
         },
         'diagnostics': {
+            'weekly_participation': {
+                'division': full_division_label,
+                'week': week.week_number,
+                'active_teams': team_count,
+                'teams_with_zero_games': [teams_by_id[uuid.UUID(tid)].name for tid in unscheduled_team_ids],
+                'teams_with_one_game': [teams_by_id[uuid.UUID(tid)].name for tid in teams_with_one_game],
+                'double_header_team': teams_by_id[uuid.UUID(double_header_team_ids[0])].name if len(double_header_team_ids) == 1 else None,
+                'required_games': required_games_for_division_week,
+                'scheduled_games': total_created_games,
+                'status': weekly_participation_status,
+            },
+            'double_header_rotation': [
+                {
+                    'team': teams_by_id[tid].name,
+                    'double_header_count': double_header_counts.get(tid, 0),
+                    'weeks_assigned': sorted(list(double_header_weeks_by_team.get(tid, set()))),
+                }
+                for tid in sorted(teams_by_id.keys(), key=lambda item: teams_by_id[item].name)
+            ],
             'odd_team_double_header_reservation': {
                 'selected_team_id': str(selected_double_header_team_id) if selected_double_header_team_id else None,
                 'selected_team_name': teams_by_id[selected_double_header_team_id].name if selected_double_header_team_id and selected_double_header_team_id in teams_by_id else None,
