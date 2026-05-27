@@ -3420,6 +3420,21 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
     ).distinct().count()
     if host_locations_count <= 0:
         raise HTTPException(400, 'No compatible host locations found.')
+    open_slots = db.query(GameSlot).join(GameSlot.field_instance).filter(
+        GameSlot.slot_date == week.start_date,
+        GameSlot.status == 'OPEN',
+        GameSlot.assigned_game_id.is_(None),
+        GameSlot.field_type == required_field_type,
+    ).all()
+    sorted_slots = sorted(
+        open_slots or [],
+        key=lambda s: (
+            getattr(s, 'slot_date', None),
+            getattr(s, 'start_time', None),
+            str(getattr(s, 'host_location_id', '')),
+            str(getattr(s, 'field_instance_id', '')),
+        ),
+    )
     logger.info(
         'auto_fill_apply_start season_id=%s week_id=%s division_id=%s active_team_count=%s open_slot_count=%s host_location_count=%s valid_matchup_count=%s',
         season_id, week_id, division_id, len(teams), open_slots_count, host_locations_count, len(proposals),
