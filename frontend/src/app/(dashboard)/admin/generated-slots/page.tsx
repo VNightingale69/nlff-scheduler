@@ -47,7 +47,12 @@ export default function GeneratedSlotsPage() {
     setError('');
     try {
       const response: any = await apiFetch('/generated-game-slots/regenerate', { method: 'POST' }, token);
-      setMessage(response?.message || 'Slots generated successfully');
+      const lockedSkipped = Number(response?.total_locked_slots_skipped || 0);
+      setMessage(
+        lockedSkipped > 0
+          ? `Skipped ${lockedSkipped} locked slots already assigned to scheduled games.`
+          : (response?.message || 'Slots generated successfully'),
+      );
       setResults(response?.results || []);
       setLastGeneratedAt(response?.last_generated_at || new Date().toISOString());
       if (hostId) {
@@ -84,10 +89,16 @@ export default function GeneratedSlotsPage() {
             {results.map((row: any) => (
               <div key={row.host_location_id}>
                 <div className='font-medium'>{row.host_location_name}</div>
+                <div>- total slots evaluated: {row.total_slots_evaluated ?? 0}</div>
+                <div>- slots regenerated: {row.slots_regenerated ?? 0}</div>
+                <div>- locked slots skipped: {row.locked_slots_skipped ?? 0}</div>
+                <div>- new slots created: {row.new_slots_created ?? 0}</div>
+                <div>- obsolete unused slots removed: {row.obsolete_unused_slots_removed ?? 0}</div>
+                <div>- hard failures: {row.hard_failures ?? 0}</div>
                 <div>- {row.field_instances_created} field instances created</div>
                 <div>- {row.slots_created} slots generated</div>
                 {row.skipped_reason ? <div>- {row.skipped_reason}</div> : null}
-                {row.errors?.length ? <div>- Errors: {row.errors.join('; ')}</div> : null}
+                {row.errors?.length ? <div>- Errors: {[...new Set(row.errors)].join('; ')}</div> : null}
               </div>
             ))}
           </div>

@@ -106,19 +106,27 @@ def _capacity_for_layout(layout_name: str | None, option: FieldConfigurationOpti
     return 0, 0
 
 
-def _regenerate_generated_slots(db: Session, availability: HostingAvailability, host_location_id: uuid.UUID):
-    assigned_slots = db.query(GameSlot).join(GameSlot.field_instance).filter(
+def _regenerate_generated_slots(db: Session, availability: HostingAvailability, host_location_id: uuid.UUID) -> dict[str, int]:
+    existing_slots = db.query(GameSlot).join(GameSlot.field_instance).filter(
         FieldInstance.hosting_availability_id == availability.id,
-        GameSlot.assigned_game_id.isnot(None),
-    ).count()
-    if assigned_slots > 0:
-        raise HTTPException(400, 'Cannot update availability because one or more generated slots are assigned to games.')
+    ).all()
+    locked_slots = [slot for slot in existing_slots if slot.assigned_game_id is not None]
+    unlocked_slots = [slot for slot in existing_slots if slot.assigned_game_id is None]
+    unlocked_field_instance_ids = {slot.field_instance_id for slot in unlocked_slots}
 
-    db.query(GameSlot).filter(GameSlot.field_instance_id.in_(db.query(FieldInstance.id).filter(FieldInstance.hosting_availability_id == availability.id))).delete(synchronize_session=False)
-    db.query(FieldInstance).filter(FieldInstance.hosting_availability_id == availability.id).delete(synchronize_session=False)
+    removed_slots = 0
+    if unlocked_field_instance_ids:
+        removed_slots = db.query(GameSlot).filter(GameSlot.field_instance_id.in_(unlocked_field_instance_ids)).delete(synchronize_session=False)
+        db.query(FieldInstance).filter(FieldInstance.id.in_(unlocked_field_instance_ids)).delete(synchronize_session=False)
 
     if not availability.is_available:
-        return
+        return {
+            'total_slots_evaluated': len(existing_slots),
+            'slots_regenerated': removed_slots,
+            'locked_slots_skipped': len(locked_slots),
+            'new_slots_created': 0,
+            'obsolete_unused_slots_removed': removed_slots,
+        }
     area = availability.physical_field_area
     if not area:
         return
@@ -143,6 +151,13 @@ def _regenerate_generated_slots(db: Session, availability: HostingAvailability, 
             created_slots += 1
         start_dt = next_dt
     logger.info('Generated %s game slots for availability_id=%s host_location_id=%s', created_slots, availability.id, host_location_id)
+    return {
+        'total_slots_evaluated': len(existing_slots),
+        'slots_regenerated': removed_slots,
+        'locked_slots_skipped': len(locked_slots),
+        'new_slots_created': created_slots,
+        'obsolete_unused_slots_removed': removed_slots,
+    }
 
 
 def _regenerate_hosting_day(db: Session, availability_rows: list[HostingAvailability], host: HostLocation) -> HostingGenerationLocationResult:
@@ -168,19 +183,28 @@ def _regenerate_hosting_day(db: Session, availability_rows: list[HostingAvailabi
 
             before_instances = db.query(FieldInstance).filter(FieldInstance.hosting_availability_id == availability.id).count()
             before_slots = db.query(GameSlot).join(GameSlot.field_instance).filter(FieldInstance.hosting_availability_id == availability.id).count()
-            _regenerate_generated_slots(db, availability, host.id)
+            slot_metrics = _regenerate_generated_slots(db, availability, host.id)
             after_instances = db.query(FieldInstance).filter(FieldInstance.hosting_availability_id == availability.id).count()
             after_slots = db.query(GameSlot).join(GameSlot.field_instance).filter(FieldInstance.hosting_availability_id == availability.id).count()
             result.field_instances_created += max(after_instances, before_instances)
             result.slots_created += max(after_slots, before_slots)
+            result.total_slots_evaluated += slot_metrics['total_slots_evaluated']
+            result.slots_regenerated += slot_metrics['slots_regenerated']
+            result.locked_slots_skipped += slot_metrics['locked_slots_skipped']
+            result.new_slots_created += slot_metrics['new_slots_created']
+            result.obsolete_unused_slots_removed += slot_metrics['obsolete_unused_slots_removed']
             logger.info('Host %s (%s): availability %s regenerated, field_instances=%s slots=%s', host.name, host.id, availability.id, after_instances, after_slots)
         except HTTPException as exc:
             detail = str(exc.detail)
-            result.errors.append(detail)
+            if detail not in result.errors:
+                result.errors.append(detail)
+            result.hard_failures += 1
             logger.error('Host %s (%s): availability %s failed: %s', host.name, host.id, availability.id, detail)
         except Exception as exc:
             detail = str(exc)
-            result.errors.append(detail)
+            if detail not in result.errors:
+                result.errors.append(detail)
+            result.hard_failures += 1
             logger.exception('Host %s (%s): availability %s failed unexpectedly: %s', host.name, host.id, availability.id, detail)
     return result
 
@@ -1171,7 +1195,7 @@ def list_generated_slots(host_location_id: uuid.UUID, available_date: str | None
     if available_date:
         q = q.filter(func.cast(GameSlot.slot_date, str) == available_date)
     rows = q.order_by(GameSlot.slot_date, GameSlot.start_time, FieldInstance.field_name).all()
-    return [{'id': row.GameSlot.id, 'available_date': row.GameSlot.slot_date, 'host_location_name': row.host_location_name, 'field_instance_name': row.field_name, 'field_type': row.GameSlot.field_type, 'start_time': row.GameSlot.start_time, 'end_time': row.GameSlot.end_time, 'status': row.GameSlot.status} for row in rows]
+    return [{'id': row.GameSlot.id, 'available_date': row.GameSlot.slot_date, 'host_location_name': row.host_location_name, 'field_instance_name': row.field_name, 'field_type': row.GameSlot.field_type, 'start_time': row.GameSlot.start_time, 'end_time': row.GameSlot.end_time, 'status': row.GameSlot.status, 'is_locked': row.GameSlot.assigned_game_id is not None} for row in rows]
 
 
 @router.get('/field-instances', dependencies=[Depends(get_current_user)])
@@ -1201,7 +1225,7 @@ def list_generated_game_slots(host_location_id: uuid.UUID | None = None, availab
     if field_type:
         q = q.filter(GameSlot.field_type == field_type)
     rows = q.order_by(GameSlot.slot_date, GameSlot.start_time, FieldInstance.field_name).all()
-    return [{'id': row.GameSlot.id, 'available_date': row.GameSlot.slot_date, 'host_location_name': row.host_location_name, 'field_instance_name': row.field_name, 'field_type': row.GameSlot.field_type, 'start_time': row.GameSlot.start_time, 'end_time': row.GameSlot.end_time, 'status': row.GameSlot.status} for row in rows]
+    return [{'id': row.GameSlot.id, 'available_date': row.GameSlot.slot_date, 'host_location_name': row.host_location_name, 'field_instance_name': row.field_name, 'field_type': row.GameSlot.field_type, 'start_time': row.GameSlot.start_time, 'end_time': row.GameSlot.end_time, 'status': row.GameSlot.status, 'is_locked': row.GameSlot.assigned_game_id is not None} for row in rows]
 
 
 @router.post('/generated-game-slots/regenerate', response_model=HostingGenerationRunResult, dependencies=[Depends(get_current_user)])
@@ -1220,6 +1244,12 @@ def regenerate_generated_game_slots(current_user: User = Depends(get_current_use
     errors = 0
     total_field_instances = 0
     total_slots = 0
+    total_slots_evaluated = 0
+    total_slots_regenerated = 0
+    total_locked_slots_skipped = 0
+    total_new_slots_created = 0
+    total_obsolete_unused_slots_removed = 0
+    total_hard_failures = 0
     for host in hosts:
         availabilities = db.query(HostingAvailability).join(HostingAvailability.physical_field_area).filter(
             PhysicalFieldArea.host_location_id == host.id,
@@ -1235,6 +1265,12 @@ def regenerate_generated_game_slots(current_user: User = Depends(get_current_use
             errors += 1
         total_field_instances += result.field_instances_created
         total_slots += result.slots_created
+        total_slots_evaluated += result.total_slots_evaluated
+        total_slots_regenerated += result.slots_regenerated
+        total_locked_slots_skipped += result.locked_slots_skipped
+        total_new_slots_created += result.new_slots_created
+        total_obsolete_unused_slots_removed += result.obsolete_unused_slots_removed
+        total_hard_failures += result.hard_failures
 
     db.commit()
     return HostingGenerationRunResult(
@@ -1244,6 +1280,12 @@ def regenerate_generated_game_slots(current_user: User = Depends(get_current_use
         errors=errors,
         total_field_instances_created=total_field_instances,
         total_slots_created=total_slots,
+        total_slots_evaluated=total_slots_evaluated,
+        total_slots_regenerated=total_slots_regenerated,
+        total_locked_slots_skipped=total_locked_slots_skipped,
+        total_new_slots_created=total_new_slots_created,
+        total_obsolete_unused_slots_removed=total_obsolete_unused_slots_removed,
+        total_hard_failures=total_hard_failures,
         last_generated_at=datetime.utcnow(),
         results=results,
     )
