@@ -4966,6 +4966,10 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID) -> dict[str
         GameSlot.assigned_game_id.isnot(None),
     ).all()
     slots_by_game_id = {s.assigned_game_id: s for s in slots if s.assigned_game_id in scheduled_game_ids}
+    pre_repair_snapshot: list[dict[str, object]] = [
+        {'game_id': g.id, 'date': g.game_date, 'time': g.kickoff_time, 'slot': slots_by_game_id.get(g.id)}
+        for g in scheduled_games
+    ]
 
     base_team_counts: dict[uuid.UUID, int] = {}
     for g in scheduled_games:
@@ -4979,6 +4983,72 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID) -> dict[str
         if not a or not b:
             return False
         return abs(_time_minutes(a) - _time_minutes(b)) == 60
+
+    def validate_schedule_integrity(games: list[Game], *, enforce_double_header_preference: bool = False) -> dict[str, object]:
+        errors: list[str] = []
+        team_time_slots: dict[tuple[uuid.UUID, date, time], str] = {}
+        field_time_slots: dict[tuple[uuid.UUID | None, date, time], str] = {}
+        game_ids_seen: set[uuid.UUID] = set()
+        slot_keys_seen: set[tuple[date, time, uuid.UUID | None, uuid.UUID | None]] = set()
+
+        for g in games:
+            if g.id in game_ids_seen:
+                errors.append(f'duplicate game id {g.id}')
+            game_ids_seen.add(g.id)
+            if not g.home_team_id or not g.away_team_id:
+                errors.append(f'game {g.id} has missing teams')
+            slot = slots_by_game_id.get(g.id)
+            if not slot:
+                continue
+            if slot.assigned_game_id != g.id:
+                errors.append(f'game {g.id} has inconsistent slot assignment')
+                continue
+            if slot.field_type and g.field_type and slot.field_type != g.field_type:
+                errors.append(f'game {g.id} has invalid field type assignment')
+            if not g.game_date or not g.kickoff_time:
+                errors.append(f'game {g.id} missing date/time')
+                continue
+            for tid in (g.home_team_id, g.away_team_id):
+                team_key = (tid, g.game_date, g.kickoff_time)
+                if team_key in team_time_slots:
+                    errors.append(
+                        f'team overlap: team {tid} scheduled at {g.game_date} {g.kickoff_time} in games {team_time_slots[team_key]} and {g.id}'
+                    )
+                else:
+                    team_time_slots[team_key] = str(g.id)
+            field_key = (slot.field_instance_id, g.game_date, g.kickoff_time)
+            if field_key in field_time_slots:
+                errors.append(
+                    f'field overlap: field {slot.field_instance_id} scheduled at {g.game_date} {g.kickoff_time} in games {field_time_slots[field_key]} and {g.id}'
+                )
+            else:
+                field_time_slots[field_key] = str(g.id)
+            slot_key = (slot.slot_date, slot.start_time, slot.field_instance_id, slot.host_location_id)
+            if slot_key in slot_keys_seen:
+                errors.append(f'duplicate slot assignment detected for game {g.id}')
+            slot_keys_seen.add(slot_key)
+
+        weekly_by_team: dict[tuple[uuid.UUID, uuid.UUID], list[GameSlot]] = {}
+        for g in games:
+            slot = slots_by_game_id.get(g.id)
+            if not slot:
+                continue
+            for tid in (g.home_team_id, g.away_team_id):
+                weekly_by_team.setdefault((tid, g.week_id), []).append(slot)
+        for (tid, _), team_slots in weekly_by_team.items():
+            if len(team_slots) != 2:
+                continue
+            a, b = team_slots[0], team_slots[1]
+            # Hard rule: never same start time for a double-header team.
+            if a.slot_date == b.slot_date and a.start_time and b.start_time and a.start_time == b.start_time:
+                errors.append(f'double-header overlap: team {tid} has two games at the same time')
+            if enforce_double_header_preference:
+                if not _adjacent(a.start_time, b.start_time):
+                    errors.append(f'double-header spacing violation: team {tid} not in adjacent slots')
+                if a.host_location_id and b.host_location_id and a.host_location_id != b.host_location_id:
+                    errors.append(f'double-header location violation: team {tid} spans different host locations')
+
+        return {'valid': not errors, 'errors': errors}
 
     def _collect_weekly_pairs() -> list[tuple[uuid.UUID, uuid.UUID, list[Game]]]:
         by_key: dict[tuple[uuid.UUID, uuid.UUID], list[Game]] = {}
@@ -5005,6 +5075,7 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID) -> dict[str
     dh_committed = 0
     dh_remaining: list[dict[str, object]] = []
     dh_unrepaired: list[dict[str, object]] = []
+    repair_rejected_reasons: list[str] = []
     for team_id, week_id, games in _collect_weekly_pairs():
         g1, g2 = games[0], games[1]
         s1 = slots_by_game_id.get(g1.id)
@@ -5036,7 +5107,14 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID) -> dict[str
         target = next((s for s in open_adjacent if _adjacent(base_slot.start_time, s.start_time)), None)
         if target:
             dh_attempted += 1
-            snapshot = _snapshot_for_rollback(other_slot.assigned_game, other_slot, target.assigned_game, target) if target.assigned_game else None
+            snapshot = {
+                'from_slot_game': other_slot.assigned_game_id,
+                'from_slot_status': other_slot.status,
+                'to_slot_game': target.assigned_game_id,
+                'to_slot_status': target.status,
+                'moving_game_date': (g2 if other_slot.id == s2.id else g1).game_date,
+                'moving_game_time': (g2 if other_slot.id == s2.id else g1).kickoff_time,
+            }
             try:
                 target.assigned_game_id = other_slot.assigned_game_id
                 target.status = 'BOOKED'
@@ -5047,8 +5125,22 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID) -> dict[str
                 moving_game.kickoff_time = target.start_time
                 db.flush()
                 slots_by_game_id[moving_game.id] = target
-                committed = True
-                dh_committed += 1
+                validation = validate_schedule_integrity(scheduled_games, enforce_double_header_preference=False)
+                if validation['valid']:
+                    committed = True
+                    dh_committed += 1
+                else:
+                    other_slot.assigned_game_id = snapshot['from_slot_game']
+                    other_slot.status = snapshot['from_slot_status']
+                    target.assigned_game_id = snapshot['to_slot_game']
+                    target.status = snapshot['to_slot_status']
+                    moving_game.game_date = snapshot['moving_game_date']
+                    moving_game.kickoff_time = snapshot['moving_game_time']
+                    slots_by_game_id[moving_game.id] = other_slot
+                    db.flush()
+                    reasons = validation['errors']
+                    repair_rejected_reasons.extend(reasons)
+                    dh_unrepaired.append({'team_id': str(team_id), 'week_id': str(week_id), 'reason': 'rollback: integrity validation failed', 'details': reasons[:5]})
             except Exception:
                 db.rollback()
                 dh_unrepaired.append({'team_id': str(team_id), 'week_id': str(week_id), 'reason': 'rollback: failed committing adjacent-slot move'})
@@ -5085,6 +5177,14 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID) -> dict[str
             same_remaining.append({'game_id': str(g.id)})
             continue
         same_attempted += 1
+        snapshot = {
+            'from_slot_game': slot.assigned_game_id,
+            'from_slot_status': slot.status,
+            'to_slot_game': target.assigned_game_id,
+            'to_slot_status': target.status,
+            'game_date': g.game_date,
+            'game_time': g.kickoff_time,
+        }
         try:
             slot.assigned_game_id = None
             slot.status = 'OPEN'
@@ -5094,7 +5194,22 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID) -> dict[str
             g.kickoff_time = target.start_time
             db.flush()
             slots_by_game_id[g.id] = target
-            same_committed += 1
+            validation = validate_schedule_integrity(scheduled_games, enforce_double_header_preference=False)
+            if validation['valid']:
+                same_committed += 1
+            else:
+                slot.assigned_game_id = snapshot['from_slot_game']
+                slot.status = snapshot['from_slot_status']
+                target.assigned_game_id = snapshot['to_slot_game']
+                target.status = snapshot['to_slot_status']
+                g.game_date = snapshot['game_date']
+                g.kickoff_time = snapshot['game_time']
+                slots_by_game_id[g.id] = slot
+                db.flush()
+                reasons = validation['errors']
+                repair_rejected_reasons.extend(reasons)
+                same_unrepaired.append({'game_id': str(g.id), 'reason': 'rollback: repair caused hard validation failure', 'details': reasons[:5]})
+                same_remaining.append({'game_id': str(g.id)})
         except Exception:
             db.rollback()
             same_unrepaired.append({'game_id': str(g.id), 'reason': 'rollback: repair caused validation/constraint failure'})
@@ -5108,9 +5223,41 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID) -> dict[str
     count_changed = base_team_counts != post_team_counts
     if count_changed:
         same_unrepaired.append({'reason': 'team game counts changed unexpectedly during repair pass'})
+        repair_rejected_reasons.append('team game counts changed unexpectedly during repair pass')
+
+    final_validation = validate_schedule_integrity(scheduled_games, enforce_double_header_preference=False)
+    rollback_triggered = count_changed or (not final_validation['valid'])
+    if rollback_triggered:
+        for snap in pre_repair_snapshot:
+            game = next((g for g in scheduled_games if g.id == snap['game_id']), None)
+            if not game:
+                continue
+            game.game_date = snap['date']
+            game.kickoff_time = snap['time']
+            slot = snap['slot']
+            if slot is None:
+                continue
+            current_slot = slots_by_game_id.get(game.id)
+            if current_slot and current_slot.id != slot.id:
+                current_slot.assigned_game_id = None
+                current_slot.status = 'OPEN'
+            slot.assigned_game_id = game.id
+            slot.status = 'BOOKED'
+            slots_by_game_id[game.id] = slot
+        db.flush()
+        if not final_validation['valid']:
+            repair_rejected_reasons.extend(final_validation['errors'])
+        same_unrepaired.append({'reason': 'Repair pass rolled back due to hard validation failure.'})
 
     return {
         'ran': True,
+        'post_schedule_repair': {
+            'repairs_attempted': dh_attempted + same_attempted,
+            'repairs_committed': dh_committed + same_committed,
+            'repairs_rejected': (dh_attempted + same_attempted) - (dh_committed + same_committed),
+            'rollback_triggered': rollback_triggered,
+            'rejected_reasons': repair_rejected_reasons,
+        },
         'double_header': {
             'violations_found': dh_found,
             'repairs_attempted': dh_attempted,
