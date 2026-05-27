@@ -98,6 +98,10 @@ export default function FieldAreaManager() {
 
   const toggleActive = async (area: any) => {
     const nextActive = !area.is_active;
+    if (!nextActive) {
+      const confirmed = window.confirm('This location will no longer be available for scheduling unless another active field setup exists.');
+      if (!confirmed) return;
+    }
     await apiFetch(`/physical-field-areas/${area.id}`, { method: 'PUT', body: JSON.stringify({ ...area, is_active: nextActive }) }, token);
     const rows = configByArea[area.id] || [];
     for (const row of rows) await apiFetch(`/field-configuration-options/${row.id}`, { method: 'PUT', body: JSON.stringify({ ...row, is_active: nextActive }) }, token);

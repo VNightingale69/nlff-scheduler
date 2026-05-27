@@ -246,6 +246,22 @@ def _host_location_dependency_summary(db: Session, host_location_id: uuid.UUID) 
     ]
 
 
+
+
+def _host_location_effective_status(db: Session) -> dict[uuid.UUID, bool]:
+    active_area_host_ids = {
+        host_id for (host_id,) in db.query(PhysicalFieldArea.host_location_id)
+        .filter(PhysicalFieldArea.is_active.is_(True))
+        .distinct()
+        .all()
+    }
+    host_rows = db.query(HostLocation.id, HostLocation.is_active).all()
+    return {host_id: bool(is_active and host_id in active_area_host_ids) for host_id, is_active in host_rows}
+
+
+def _eligible_host_location_ids(db: Session) -> set[uuid.UUID]:
+    status_by_host = _host_location_effective_status(db)
+    return {host_id for host_id, is_ready in status_by_host.items() if is_ready}
 def _format_delete_blockers(host_location_name: str, dependencies: list[tuple[str, int]]) -> str:
     blockers = [f"{count} {label}" for label, count in dependencies if count > 0]
     if not blockers:
@@ -565,6 +581,13 @@ def get_schedule_readiness(current_user: User = Depends(get_current_user), db: S
         total_teams += teams
         total_games_needed += games_needed
 
+    active_host_ids = {host_id for (host_id,) in db.query(HostLocation.id).filter(HostLocation.is_active.is_(True)).all()}
+    active_setup_host_ids = {host_id for (host_id,) in db.query(PhysicalFieldArea.host_location_id).filter(PhysicalFieldArea.is_active.is_(True)).distinct().all()}
+    hosts_missing_setup = active_host_ids - active_setup_host_ids
+    warnings = []
+    if hosts_missing_setup:
+        warnings.append(f"{len(hosts_missing_setup)} active host location(s) have no active field setup and are unavailable for scheduling.")
+
     return ScheduleReadinessResponse(
         rows=rows,
         totals=ScheduleReadinessTotals(
@@ -574,6 +597,7 @@ def get_schedule_readiness(current_user: User = Depends(get_current_user), db: S
             total_large_field_slots=large_slots,
             total_open_slots=small_slots + large_slots,
         ),
+        warnings=warnings,
     )
 @router.post('/divisions', response_model=DivisionRead, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def create_division(payload: DivisionCreate, db: Session = Depends(get_db)):
@@ -660,7 +684,16 @@ def list_host_locations(search: str | None = None, organization_id: uuid.UUID | 
     elif organization_id: q = q.filter(HostLocation.organization_id == organization_id)
     if search: q = q.filter(func.lower(HostLocation.name).like(f"%{search.lower()}%"))
     if is_active is not None: q = q.filter(HostLocation.is_active == is_active)
-    return paginate(q.order_by(HostLocation.name), page, page_size)
+    page_data = paginate(q.order_by(HostLocation.name), page, page_size)
+    active_area_host_ids = {host_id for (host_id,) in db.query(PhysicalFieldArea.host_location_id).filter(PhysicalFieldArea.is_active.is_(True)).distinct().all()}
+    for item in page_data.items:
+        has_active_field_setup = item.id in active_area_host_ids
+        effective_is_active = bool(item.is_active and has_active_field_setup)
+        item.has_active_field_setup = has_active_field_setup
+        item.effective_is_active = effective_is_active
+        item.status_label = 'Active' if effective_is_active else 'Inactive/Unavailable'
+        item.status_warning = 'No active field setup' if item.is_active and not has_active_field_setup else None
+    return page_data
 
 @router.put('/host-locations/{item_id}', response_model=HostLocationRead, dependencies=[Depends(get_current_user)])
 def upd_host_location(item_id: uuid.UUID, payload: HostLocationCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -1520,7 +1553,8 @@ def list_games(division_id:uuid.UUID|None=None, week_id:uuid.UUID|None=None, tea
 def manual_schedule_builder_options(db: Session = Depends(get_db)):
     divisions = db.query(Division).filter(Division.is_active.is_(True)).order_by(Division.sort_order, Division.name).all()
     teams = db.query(Team).filter(Team.is_active.is_(True)).order_by(Team.name).all()
-    host_locations = db.query(HostLocation).filter(HostLocation.is_active.is_(True)).order_by(HostLocation.name).all()
+    eligible_host_ids = _eligible_host_location_ids(db)
+    host_locations = db.query(HostLocation).filter(HostLocation.id.in_(eligible_host_ids)).order_by(HostLocation.name).all()
     seasons = db.query(Season).filter(Season.is_active.is_(True)).order_by(Season.start_date.desc()).all()
     weeks = db.query(Week).order_by(Week.week_number).all()
     organizations = db.query(Organization).filter(Organization.is_active.is_(True)).order_by(Organization.name).all()
@@ -1775,6 +1809,8 @@ def assign_generated_slot(payload: dict, db: Session = Depends(get_db)):
         logger.error('Manual assignment blocked: missing required SCHEDULED game status.')
         raise HTTPException(400, 'Game status setup is incomplete. Please contact an administrator.')
     host_location = db.query(HostLocation).filter(HostLocation.id == slot.host_location_id).first() if slot.host_location_id else None
+    if not host_location or host_location.id not in _eligible_host_location_ids(db):
+        raise HTTPException(400, 'Selected slot host location is unavailable because it has no active field setup.')
     home_team, away_team, adjustment_reason = _enforce_host_owner_home_team(home_team, away_team, host_location)
     if adjustment_reason:
         logger.info(adjustment_reason)
@@ -3451,6 +3487,7 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         GameSlot.status == 'OPEN',
         GameSlot.assigned_game_id.is_(None),
         GameSlot.field_type == required_field_type,
+        GameSlot.host_location_id.in_(_eligible_host_location_ids(db)),
     ).count()
     if open_slots_count <= 0:
         raise HTTPException(400, 'No valid slot combinations available.')
@@ -3460,6 +3497,7 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         GameSlot.assigned_game_id.is_(None),
         GameSlot.field_type == required_field_type,
         GameSlot.host_location_id.is_not(None),
+        GameSlot.host_location_id.in_(_eligible_host_location_ids(db)),
     ).distinct().count()
     if host_locations_count <= 0:
         raise HTTPException(400, 'No compatible host locations found.')
@@ -3468,6 +3506,7 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         GameSlot.status == 'OPEN',
         GameSlot.assigned_game_id.is_(None),
         GameSlot.field_type == required_field_type,
+        GameSlot.host_location_id.in_(_eligible_host_location_ids(db)),
     ).all()
     sorted_slots = sorted(
         open_slots or [],

@@ -107,7 +107,10 @@ class HostLocationCreate(BaseModel):
     is_active: bool = True
 
 class HostLocationRead(BaseSchema, HostLocationCreate):
-    pass
+    has_active_field_setup: bool = False
+    effective_is_active: bool = False
+    status_label: str = 'Inactive/Unavailable'
+    status_warning: str | None = None
 
 class PhysicalFieldAreaCreate(BaseModel):
     host_location_id: uuid.UUID
@@ -272,6 +275,7 @@ class ScheduleReadinessTotals(BaseModel):
 class ScheduleReadinessResponse(BaseModel):
     rows: list[ScheduleReadinessDivisionRow]
     totals: ScheduleReadinessTotals
+    warnings: list[str] = []
 
 
 class HostingGenerationLocationResult(BaseModel):

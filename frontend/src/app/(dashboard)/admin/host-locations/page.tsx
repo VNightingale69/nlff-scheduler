@@ -18,6 +18,10 @@ type HostLocation = {
   state?: string;
   zip_code?: string;
   is_active?: boolean;
+  has_active_field_setup?: boolean;
+  effective_is_active?: boolean;
+  status_label?: string;
+  status_warning?: string | null;
 };
 
 type Organization = {
@@ -326,7 +330,7 @@ export default function HostLocationsAdminPage() {
                 <th className='px-3 py-2'>Location</th>
                 <th className='px-3 py-2'>Zip Code</th>
                 <th className='px-3 py-2'>Site Type</th>
-                <th className='px-3 py-2'>Active</th>
+                <th className='px-3 py-2'>Effective Status</th>
                 <th className='px-3 py-2'>Actions</th>
               </tr>
             </thead>
@@ -339,7 +343,7 @@ export default function HostLocationsAdminPage() {
                   <td className='px-3 py-2'>{(item as any).location}</td>
                   <td className='px-3 py-2'>{item.zip_code || '-'}</td>
                   <td className='px-3 py-2'>{(item as any).site_type}</td>
-                  <td className='px-3 py-2'>{item.is_active ? 'Active' : 'Inactive'}</td>
+                  <td className='px-3 py-2'><div className='flex flex-col gap-1'><span>{item.status_label || ((item.effective_is_active ?? item.is_active) ? 'Active' : 'Inactive/Unavailable')}</span>{item.status_warning ? <span className='inline-flex w-fit rounded bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800'>{item.status_warning}</span> : null}</div></td>
                   <td className='space-x-2 px-3 py-2'>
                     <button className='text-blue-700' onClick={() => edit(item)}>Edit</button>
                     <button className='text-rose-700' onClick={() => openDeleteModal(item)}>Delete</button>
