@@ -37,6 +37,13 @@ export default function ManualScheduleBuilderPage() {
   const [clearExistingBeforeAutoSchedule, setClearExistingBeforeAutoSchedule] = useState(false);
   const [autoScheduleSeasonLoading, setAutoScheduleSeasonLoading] = useState(false);
   const [autoScheduleDiagnostics, setAutoScheduleDiagnostics] = useState<any | null>(null);
+  const [optimizeSameCommunityHome, setOptimizeSameCommunityHome] = useState(true);
+  const [repairDoubleHeaders, setRepairDoubleHeaders] = useState(true);
+  const [reduceRepeatMatchups, setReduceRepeatMatchups] = useState(false);
+  const [preserveTwoLocationLimit, setPreserveTwoLocationLimit] = useState(true);
+  const [optimizerDryRun, setOptimizerDryRun] = useState(true);
+  const [optimizerLoading, setOptimizerLoading] = useState(false);
+  const [optimizerDiagnostics, setOptimizerDiagnostics] = useState<any | null>(null);
 
   const division = useMemo(() => options.divisions.find((d: any) => d.id === divisionId), [options, divisionId]);
   const divisionTeams = useMemo(() => options.teams.filter((t: any) => t.division_id === divisionId && t.is_active), [options, divisionId]);
@@ -221,6 +228,38 @@ export default function ManualScheduleBuilderPage() {
           Auto-Schedule Entire Season
         </button>
         <button
+          className='mt-3 mr-2 rounded border border-emerald-700 bg-emerald-700 px-3 py-2 text-white disabled:cursor-not-allowed disabled:bg-slate-300 disabled:border-slate-300'
+          disabled={!seasonId || optimizerLoading}
+          onClick={async () => {
+            setError('');
+            setSuccess('');
+            setOptimizerLoading(true);
+            try {
+              const res: any = await apiFetch('/manual-schedule-builder/optimize-schedule', {
+                method: 'POST',
+                body: JSON.stringify({
+                  season_id: seasonId,
+                  optimize_same_community_home: optimizeSameCommunityHome,
+                  repair_double_headers: repairDoubleHeaders,
+                  reduce_repeat_matchups: reduceRepeatMatchups,
+                  preserve_two_location_limit: preserveTwoLocationLimit,
+                  dry_run: optimizerDryRun,
+                }),
+              }, token);
+              setOptimizerDiagnostics(res);
+              const summary = res.summary || {};
+              setSuccess(`Optimization ${optimizerDryRun ? 'preview' : 'run'} completed. Proposed: ${Number(summary.same_community_repairs_proposed || 0) + Number(summary.double_header_repairs_proposed || 0)}, committed: ${Number(summary.same_community_repairs_committed || 0) + Number(summary.double_header_repairs_committed || 0)}, rejected: ${Number(summary.repairs_rejected || 0)}.`);
+              await load();
+            } catch (e: unknown) {
+              setError(`Schedule optimization failed: ${extractError(e)}`);
+            } finally {
+              setOptimizerLoading(false);
+            }
+          }}
+        >
+          {optimizerLoading ? 'Running Optimization...' : 'Run Schedule Optimization'}
+        </button>
+        <button
           className='mt-3 rounded border border-red-600 bg-red-600 px-3 py-2 text-white disabled:cursor-not-allowed disabled:bg-slate-300 disabled:border-slate-300'
           disabled={!seasonId}
           onClick={() => {
@@ -232,6 +271,20 @@ export default function ManualScheduleBuilderPage() {
         >
           Clear All Scheduled Games
         </button>
+        <div className='mt-3 grid gap-2 text-sm text-red-900 md:grid-cols-2'>
+          <label className='flex items-center gap-2'><input type='checkbox' checked={optimizeSameCommunityHome} onChange={(e) => setOptimizeSameCommunityHome(e.target.checked)} />Optimize same-community home games</label>
+          <label className='flex items-center gap-2'><input type='checkbox' checked={repairDoubleHeaders} onChange={(e) => setRepairDoubleHeaders(e.target.checked)} />Repair double headers</label>
+          <label className='flex items-center gap-2'><input type='checkbox' checked={reduceRepeatMatchups} onChange={(e) => setReduceRepeatMatchups(e.target.checked)} />Reduce repeat matchups</label>
+          <label className='flex items-center gap-2'><input type='checkbox' checked={preserveTwoLocationLimit} onChange={(e) => setPreserveTwoLocationLimit(e.target.checked)} />Preserve two-location limit</label>
+          <label className='flex items-center gap-2 md:col-span-2'><input type='checkbox' checked={optimizerDryRun} onChange={(e) => setOptimizerDryRun(e.target.checked)} />Dry run (preview only, do not save)</label>
+        </div>
+        {optimizerDiagnostics ? <div className='mt-3 rounded border bg-white p-3 text-sm text-slate-800'>
+          <div className='font-semibold'>Optimization Diagnostics</div>
+          <div>Games reviewed: {optimizerDiagnostics.summary?.games_reviewed ?? 0}</div>
+          <div>Same-community violations: {optimizerDiagnostics.summary?.same_community_violations_found ?? 0}</div>
+          <div>Double-header violations: {optimizerDiagnostics.summary?.double_header_violations_found ?? 0}</div>
+          <div>Repairs rejected: {optimizerDiagnostics.summary?.repairs_rejected ?? 0}</div>
+        </div> : null}
       </div>
 
       <div className='rounded border p-3'>
