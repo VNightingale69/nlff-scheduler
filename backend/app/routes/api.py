@@ -4739,14 +4739,8 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
         GameSlot.slot_date == date(season.start_date.year, 9, 13)
     ).count() if season.start_date else 0
 
-    try:
-        post_schedule_repair = run_post_schedule_repair_pass(db, season_id)
-    except Exception as repair_ex:
-        logger.exception("[REPAIR] Post-schedule repair pass failed")
-        post_schedule_repair = {
-            "ran": False,
-            "error": str(repair_ex)
-        }
+    # Intentionally do not run post-schedule optimization automatically.
+    # Optimization is executed manually via /manual-schedule-builder/optimize-schedule.
     db.commit()
 
     return {
@@ -4766,10 +4760,53 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
         'post_run_validation': post_run_validation,
         'divisions_completed': divisions_completed,
         'divisions_with_unresolved_games': divisions_with_unresolved_games,
-        'post_schedule_repair': post_schedule_repair,
+        'post_schedule_repair': {'ran': False, 'note': 'Run manual optimization endpoint to execute repairs.'},
     }
 
 
+
+
+@router.post('/manual-schedule-builder/optimize-schedule', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+def optimize_schedule(payload: dict, db: Session = Depends(get_db)):
+    season_id = payload.get('season_id')
+    if not season_id:
+        raise HTTPException(400, 'season_id is required')
+    season = db.query(Season).filter(Season.id == season_id).first()
+    if not season:
+        raise HTTPException(404, 'Season not found')
+
+    optimize_same_community_home = bool(payload.get('optimize_same_community_home', True))
+    repair_double_headers = bool(payload.get('repair_double_headers', True))
+    reduce_repeat_matchups = bool(payload.get('reduce_repeat_matchups', False))
+    preserve_two_location_limit = bool(payload.get('preserve_two_location_limit', True))
+    dry_run = bool(payload.get('dry_run', True))
+
+    diagnostics = run_post_schedule_repair_pass(
+        db,
+        season_id,
+        optimize_same_community_home=optimize_same_community_home,
+        repair_double_headers=repair_double_headers,
+        reduce_repeat_matchups=reduce_repeat_matchups,
+        preserve_two_location_limit=preserve_two_location_limit,
+    )
+
+    proposed_changes = list((diagnostics.get('proposed_changes') or []))
+    rejected_changes = list((diagnostics.get('rejected_changes') or []))
+
+    if dry_run:
+        db.rollback()
+    else:
+        db.commit()
+
+    summary = diagnostics.get('summary') or {}
+    return {
+        'ran': True,
+        'dry_run': dry_run,
+        'summary': summary,
+        'proposed_changes': proposed_changes,
+        'rejected_changes': rejected_changes,
+        'remaining_violations': diagnostics.get('remaining_violations') or [],
+    }
 @router.post('/manual-schedule-builder/repair/same-community-home-fields', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def run_same_community_home_field_repair(payload: dict, db: Session = Depends(get_db)):
     season_id = payload.get('season_id')
@@ -4988,7 +5025,7 @@ def repair_same_community_home_fields(db: Session, season_id: uuid.UUID) -> dict
     }
 
 
-def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID) -> dict[str, object]:
+def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize_same_community_home: bool = True, repair_double_headers: bool = True, reduce_repeat_matchups: bool = False, preserve_two_location_limit: bool = True) -> dict[str, object]:
     """Final repair pass for a fully-built season schedule.
 
     Order of operations is intentional:
@@ -5119,6 +5156,8 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID) -> dict[str
     dh_unrepaired: list[dict[str, object]] = []
     repair_rejected_reasons: list[str] = []
     for team_id, week_id, games in _collect_weekly_pairs():
+        if not repair_double_headers:
+            continue
         g1, g2 = games[0], games[1]
         s1 = slots_by_game_id.get(g1.id)
         s2 = slots_by_game_id.get(g2.id)
@@ -5195,6 +5234,8 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID) -> dict[str
     same_remaining: list[dict[str, object]] = []
     same_unrepaired: list[dict[str, object]] = []
     for g in scheduled_games:
+        if not optimize_same_community_home:
+            continue
         slot = slots_by_game_id.get(g.id)
         if not slot or not slot.host_location_id:
             continue
@@ -5291,8 +5332,22 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID) -> dict[str
             repair_rejected_reasons.extend(final_validation['errors'])
         same_unrepaired.append({'reason': 'Repair pass rolled back due to hard validation failure.'})
 
+    summary = {
+        'games_reviewed': len(scheduled_games),
+        'same_community_violations_found': same_found,
+        'same_community_repairs_proposed': same_attempted,
+        'same_community_repairs_committed': same_committed,
+        'double_header_violations_found': dh_found,
+        'double_header_repairs_proposed': dh_attempted,
+        'double_header_repairs_committed': dh_committed,
+        'repairs_rejected': (dh_attempted + same_attempted) - (dh_committed + same_committed),
+    }
     return {
         'ran': True,
+        'summary': summary,
+        'proposed_changes': [],
+        'rejected_changes': [],
+        'remaining_violations': (dh_remaining + same_remaining),
         'post_schedule_repair': {
             'repairs_attempted': dh_attempted + same_attempted,
             'repairs_committed': dh_committed + same_committed,
