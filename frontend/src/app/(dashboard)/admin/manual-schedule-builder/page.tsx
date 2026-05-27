@@ -425,7 +425,7 @@ export default function ManualScheduleBuilderPage() {
                   const warningCount = (res.warnings || []).length + (res.validation_errors || []).length;
                   setSuccess(`Auto-schedule completed: ${Number(res.total_games_created || 0)} games scheduled, ${Number(res.games_skipped || 0)} placement attempts skipped, ${missing} required game groups still missing, ${warningCount} warnings/errors.`);
                 } catch (e: unknown) {
-                  setError(extractError(e));
+                  setError(`Schedule optimization failed: ${extractError(e)}`);
                 } finally {
                   setAutoScheduleSeasonLoading(false);
                 }
