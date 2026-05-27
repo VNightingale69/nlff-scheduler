@@ -3424,6 +3424,19 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         'auto_fill_apply_start season_id=%s week_id=%s division_id=%s active_team_count=%s open_slot_count=%s host_location_count=%s valid_matchup_count=%s',
         season_id, week_id, division_id, len(teams), open_slots_count, host_locations_count, len(proposals),
     )
+    try:
+        primary_host_by_org = _primary_host_by_org(db)
+    except Exception:
+        logger.warning(
+            'auto_fill_apply_primary_host_map_unavailable season_id=%s week_id=%s division_id=%s; continuing without same-community host preference',
+            season_id,
+            week_id,
+            division_id,
+            exc_info=True,
+        )
+        primary_host_by_org = {}
+    if primary_host_by_org is None:
+        primary_host_by_org = {}
     team_ids = {t.id for t in teams}
     no_byes = bool(payload.get('no_byes', True))
     is_odd_division = len(teams) % 2 == 1
