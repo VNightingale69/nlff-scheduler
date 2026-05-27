@@ -35,6 +35,7 @@ type DeleteCheck = {
   can_delete: boolean;
   reason?: string | null;
   recommended_action?: string | null;
+  delete_message?: string | null;
   dependencies: Array<{ label: string; count: number }>;
 };
 
@@ -365,6 +366,9 @@ export default function HostLocationsAdminPage() {
             {!checkingDelete && deleteCheck && (
               <div className='mt-3 rounded border p-3 text-sm'>
                 <p className='font-medium'>{deleteCheck.can_delete ? 'No blocking dependencies found.' : `${deleteCheck.host_location_name} has related records:`}</p>
+                {deleteCheck.can_delete && deleteCheck.delete_message ? (
+                  <p className='mt-2 font-semibold text-emerald-700'>{deleteCheck.delete_message}</p>
+                ) : null}
                 <ul className='mt-2 list-disc pl-6'>
                   {deleteCheck.dependencies.filter((d) => d.count > 0).map((d) => <li key={d.label}>{d.count} {d.label}</li>)}
                 </ul>
