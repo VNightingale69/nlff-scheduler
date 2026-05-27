@@ -248,6 +248,7 @@ class GeneratedSlotRead(BaseModel):
     start_time: time
     end_time: time
     status: str
+    is_locked: bool = False
 
 
 class ScheduleReadinessDivisionRow(BaseModel):
@@ -276,6 +277,12 @@ class ScheduleReadinessResponse(BaseModel):
 class HostingGenerationLocationResult(BaseModel):
     host_location_id: uuid.UUID
     host_location_name: str
+    total_slots_evaluated: int = 0
+    slots_regenerated: int = 0
+    locked_slots_skipped: int = 0
+    new_slots_created: int = 0
+    obsolete_unused_slots_removed: int = 0
+    hard_failures: int = 0
     field_instances_created: int = 0
     slots_created: int = 0
     skipped_reason: str | None = None
@@ -289,6 +296,12 @@ class HostingGenerationRunResult(BaseModel):
     errors: int = 0
     total_field_instances_created: int = 0
     total_slots_created: int = 0
+    total_slots_evaluated: int = 0
+    total_slots_regenerated: int = 0
+    total_locked_slots_skipped: int = 0
+    total_new_slots_created: int = 0
+    total_obsolete_unused_slots_removed: int = 0
+    total_hard_failures: int = 0
     last_generated_at: datetime
     results: list[HostingGenerationLocationResult]
 
