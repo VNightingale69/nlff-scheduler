@@ -239,7 +239,7 @@ def _host_location_dependency_summary(db: Session, host_location_id: uuid.UUID) 
     return [
         ('Scheduled Games', db.query(Game).join(Game.field).filter(Field.host_location_id == host_location_id).count()),
         ('Generated Slots Assigned to Games', db.query(GameSlot).filter(GameSlot.host_location_id == host_location_id, GameSlot.assigned_game_id.is_not(None)).count()),
-        ('Generated Slots', db.query(GameSlot).filter(GameSlot.host_location_id == host_location_id).count()),
+        ('Generated Slots Unassigned', db.query(GameSlot).filter(GameSlot.host_location_id == host_location_id, GameSlot.assigned_game_id.is_(None)).count()),
         ('Field Instances', db.query(FieldInstance).filter(FieldInstance.host_location_id == host_location_id).count()),
         ('Hosting Availability', db.query(HostingAvailability).filter((HostingAvailability.field_id.in_(field_ids_subquery)) | (HostingAvailability.physical_field_area_id.in_(area_ids_subquery))).count()),
         ('Field Configuration Options', db.query(FieldConfigurationOption).filter(FieldConfigurationOption.physical_field_area_id.in_(area_ids_subquery)).count()),
@@ -710,21 +710,15 @@ def get_host_location_delete_check(item_id: uuid.UUID, current_user: User = Depe
     if not x: raise HTTPException(404, 'Host location not found')
     enforce_organization_scope(x.organization_id, current_user)
     dependencies = _host_location_dependency_summary(db, item_id)
-    blocking_labels = {
-        'Scheduled Games',
-        'Generated Slots Assigned to Games',
-        'Generated Slots',
-        'Field Instances',
-        'Hosting Availability',
-    }
+    blocking_labels = {'Scheduled Games', 'Generated Slots Assigned to Games'}
     has_blocking_dependencies = any(count > 0 for label, count in dependencies if label in blocking_labels)
     return {
         'host_location_id': str(x.id),
         'host_location_name': x.name,
         'can_delete': not has_blocking_dependencies,
-        'reason': None if not has_blocking_dependencies else 'Host location is referenced by scheduling data.',
+        'reason': None if not has_blocking_dependencies else 'Cannot permanently delete because scheduled games reference this location. Mark inactive instead.',
         'recommended_action': None if not has_blocking_dependencies else 'mark_inactive',
-        'delete_message': 'Delete allowed. Only unused setup records will be removed.' if not has_blocking_dependencies else None,
+        'delete_message': 'Delete allowed. This will remove unused setup and generated slot records.' if not has_blocking_dependencies else None,
         'dependencies': [{'label': label, 'count': count} for label, count in dependencies],
     }
 
@@ -735,36 +729,44 @@ def del_host_location(item_id: uuid.UUID, force: bool = Query(False), current_us
     if not x: raise HTTPException(404, 'Host location not found')
     enforce_organization_scope(x.organization_id, current_user)
     dependencies = _host_location_dependency_summary(db, item_id)
-    blocking_labels = {
-        'Scheduled Games',
-        'Generated Slots Assigned to Games',
-        'Generated Slots',
-        'Field Instances',
-        'Hosting Availability',
-    }
+    blocking_labels = {'Scheduled Games', 'Generated Slots Assigned to Games'}
     has_blocking_dependencies = any(count > 0 for label, count in dependencies if label in blocking_labels)
 
     if has_blocking_dependencies:
         return {
             'can_delete': False,
-            'reason': 'Host location is referenced by scheduling data.',
+            'reason': 'Cannot permanently delete because scheduled games reference this location. Mark inactive instead.',
             'recommended_action': 'mark_inactive',
             'dependencies': [{'label': label, 'count': count} for label, count in dependencies],
         }
-
+    deleted_game_slots = db.query(GameSlot).filter(
+        GameSlot.host_location_id == item_id,
+        GameSlot.assigned_game_id.is_(None),
+    ).delete(synchronize_session=False)
+    deleted_generated_slots = deleted_game_slots
+    deleted_field_instances = db.query(FieldInstance).filter(FieldInstance.host_location_id == item_id).delete(synchronize_session=False)
     area_ids = [area_id for (area_id,) in db.query(PhysicalFieldArea.id).filter(PhysicalFieldArea.host_location_id == item_id).all()]
-
+    field_ids = [field_id for (field_id,) in db.query(Field.id).filter(Field.host_location_id == item_id).all()]
+    deleted_hosting_availabilities = db.query(HostingAvailability).filter(
+        (HostingAvailability.field_id.in_(field_ids)) | (HostingAvailability.physical_field_area_id.in_(area_ids))
+    ).delete(synchronize_session=False)
     deleted_field_configuration_options = db.query(FieldConfigurationOption).filter(FieldConfigurationOption.physical_field_area_id.in_(area_ids)).delete(synchronize_session=False) if area_ids else 0
     deleted_physical_field_areas = db.query(PhysicalFieldArea).filter(PhysicalFieldArea.id.in_(area_ids)).delete(synchronize_session=False) if area_ids else 0
+    deleted_fields = db.query(Field).filter(Field.id.in_(field_ids)).delete(synchronize_session=False) if field_ids else 0
     db.delete(x); db.commit()
 
     return {
         'ok': True,
-        'message': 'Delete allowed. Only unused setup records will be removed.',
+        'message': 'Delete allowed. This will remove unused setup and generated slot records.',
         'deleted': {
             'host_locations': 1,
+            'game_slots': deleted_game_slots,
+            'generated_slots': deleted_generated_slots,
+            'field_instances': deleted_field_instances,
+            'hosting_availabilities': deleted_hosting_availabilities,
             'physical_field_areas': deleted_physical_field_areas,
             'field_configuration_options': deleted_field_configuration_options,
+            'fields': deleted_fields,
         }
     }
 

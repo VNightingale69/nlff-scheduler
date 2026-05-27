@@ -227,7 +227,7 @@ export default function HostLocationsAdminPage() {
     try {
       const response = (await apiFetch(`/host-locations/${deleteTarget.id}`, { method: 'DELETE' }, getToken())) as DeleteResponse & DeleteCheck;
       if (response && response.can_delete === false) {
-        setMessage('Cannot permanently delete host location because it is referenced by scheduling records. Mark the location inactive instead.');
+        setMessage('Cannot permanently delete because scheduled games reference this location. Mark inactive instead.');
         setType('err');
         return;
       }
@@ -365,8 +365,8 @@ export default function HostLocationsAdminPage() {
             {checkingDelete && <p className='mt-3 text-sm text-slate-500'>Checking dependencies...</p>}
             {!checkingDelete && deleteCheck && (
               <div className='mt-3 rounded border p-3 text-sm'>
-                <p className='font-medium'>{deleteCheck.can_delete ? 'Delete allowed. Only unused setup records will be removed.' : `${deleteCheck.host_location_name} has related records:`}</p>
-                {deleteCheck.can_delete && deleteCheck.delete_message && deleteCheck.delete_message !== 'Delete allowed. Only unused setup records will be removed.' ? (
+                <p className='font-medium'>{deleteCheck.can_delete ? 'Delete allowed. This will remove unused setup and generated slot records.' : `${deleteCheck.host_location_name} has related records:`}</p>
+                {deleteCheck.can_delete && deleteCheck.delete_message && deleteCheck.delete_message !== 'Delete allowed. This will remove unused setup and generated slot records.' ? (
                   <p className='mt-2 font-semibold text-emerald-700'>{deleteCheck.delete_message}</p>
                 ) : null}
                 <ul className='mt-2 list-disc pl-6'>
@@ -374,7 +374,7 @@ export default function HostLocationsAdminPage() {
                 </ul>
                 {!deleteCheck.can_delete && (
                   <>
-                    <p className='mt-3 font-semibold text-rose-700'>Cannot permanently delete host location because it is referenced by scheduling records. Mark the location inactive instead.</p>
+                    <p className='mt-3 font-semibold text-rose-700'>Cannot permanently delete because scheduled games reference this location. Mark inactive instead.</p>
                   </>
                 )}
               </div>
