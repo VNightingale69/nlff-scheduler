@@ -4585,6 +4585,9 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
         GameSlot.slot_date == date(season.start_date.year, 9, 13)
     ).count() if season.start_date else 0
 
+    same_community_repair = repair_same_community_home_fields(db, season_id)
+    db.commit()
+
     return {
         'season_date_diagnostics': {
             'target_date_checked': f"{season.start_date.year}-09-13" if season.start_date else None,
@@ -4602,6 +4605,23 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
         'post_run_validation': post_run_validation,
         'divisions_completed': divisions_completed,
         'divisions_with_unresolved_games': divisions_with_unresolved_games,
+        'same_community_repair': same_community_repair,
+    }
+
+
+@router.post('/manual-schedule-builder/repair/same-community-home-fields', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+def run_same_community_home_field_repair(payload: dict, db: Session = Depends(get_db)):
+    season_id = payload.get('season_id')
+    if not season_id:
+        raise HTTPException(400, 'season_id is required')
+    season = db.query(Season).filter(Season.id == season_id).first()
+    if not season:
+        raise HTTPException(404, 'Season not found')
+    diagnostics = repair_same_community_home_fields(db, season_id)
+    db.commit()
+    return {
+        'season_id': str(season_id),
+        'same_community_repair': diagnostics,
     }
 
 @router.get('/public/games', response_model=PagedResponse[PublicGameRead])
@@ -4650,6 +4670,114 @@ def _enforce_host_owner_home_team(
         reason = f'Home/away adjusted because {away_team.organization.name if away_team.organization else "host community"} owns {host_location.name}.'
         return away_team, home_team, reason
     return home_team, away_team, None
+
+
+def repair_same_community_home_fields(db: Session, season_id: uuid.UUID) -> dict[str, object]:
+    logger.info("[REPAIR] Same-community home-field repair started")
+    teams = db.query(Team).filter(Team.is_active.is_(True)).all()
+    teams_by_id = {t.id: t for t in teams}
+    primary_host_by_org = _primary_host_by_org(db)
+    violations_found = 0
+    swaps_attempted = 0
+    swaps_committed = 0
+    unrepaired: list[dict[str, object]] = []
+    season_games = db.query(Game).join(Game.status).filter(Game.season_id == season_id, GameStatus.code != 'UNSCHEDULED').all()
+    slots = db.query(GameSlot).filter(GameSlot.assigned_game_id.isnot(None)).all()
+    slots_by_game_id = {str(s.assigned_game_id): s for s in slots if s.assigned_game_id}
+
+    def _reason_note(game: Game, reason: str) -> None:
+        unrepaired.append({'game_id': str(game.id), 'reason': reason})
+
+    for game in season_games:
+        slot = slots_by_game_id.get(str(game.id))
+        if not slot or not slot.host_location_id:
+            continue
+        home_team = teams_by_id.get(game.home_team_id)
+        away_team = teams_by_id.get(game.away_team_id)
+        if not home_team or not away_team:
+            continue
+        if not home_team.organization_id or home_team.organization_id != away_team.organization_id:
+            continue
+        preferred_home_host_id = primary_host_by_org.get(home_team.organization_id)
+        if not preferred_home_host_id:
+            violations_found += 1
+            _reason_note(game, 'no compatible home slot')
+            continue
+        if slot.host_location_id == preferred_home_host_id:
+            continue
+        violations_found += 1
+        candidate_home_slots = db.query(GameSlot).filter(
+            GameSlot.slot_date == slot.slot_date,
+            GameSlot.host_location_id == preferred_home_host_id,
+        ).all()
+        open_home_slot = next((s for s in candidate_home_slots if s.assigned_game_id is None and s.status == 'OPEN'), None)
+        if open_home_slot:
+            swaps_attempted += 1
+            slot.assigned_game_id = None
+            slot.status = 'OPEN'
+            open_home_slot.assigned_game_id = game.id
+            open_home_slot.status = 'BOOKED'
+            game.game_date = open_home_slot.slot_date
+            game.kickoff_time = open_home_slot.start_time
+            db.flush()
+            slots_by_game_id[str(game.id)] = open_home_slot
+            swaps_committed += 1
+            continue
+        swap_candidates = [s for s in candidate_home_slots if s.assigned_game_id and str(s.assigned_game_id) in {str(g.id) for g in season_games}]
+        if not swap_candidates:
+            _reason_note(game, 'no compatible home slot')
+            continue
+        committed = False
+        for candidate_slot in swap_candidates:
+            other_game = next((g for g in season_games if str(g.id) == str(candidate_slot.assigned_game_id)), None)
+            if not other_game:
+                continue
+            swaps_attempted += 1
+            other_home = teams_by_id.get(other_game.home_team_id)
+            other_away = teams_by_id.get(other_game.away_team_id)
+            if not other_home or not other_away:
+                _reason_note(game, 'swap would cause team overlap')
+                continue
+            if slot.field_type and candidate_slot.field_type and slot.field_type != candidate_slot.field_type:
+                _reason_note(game, 'swap would violate field type')
+                continue
+            same_week_games = [g for g in season_games if g.week_id == game.week_id]
+            hosts_before = {str(slots_by_game_id.get(str(g.id)).host_location_id) for g in same_week_games if slots_by_game_id.get(str(g.id))}
+            hosts_after = set(hosts_before)
+            hosts_after.discard(str(slot.host_location_id)); hosts_after.discard(str(candidate_slot.host_location_id))
+            hosts_after.add(str(slot.host_location_id)); hosts_after.add(str(candidate_slot.host_location_id))
+            if len(hosts_after) > max(len(hosts_before), 2):
+                _reason_note(game, 'swap would worsen two-location rule')
+                continue
+            # conservative placeholder checks for constraints not explicitly modeled in persisted records
+            if game.kickoff_time == other_game.kickoff_time and game.week_id == other_game.week_id:
+                _reason_note(game, 'swap would cause team overlap')
+                continue
+            game.kickoff_time, other_game.kickoff_time = candidate_slot.start_time, slot.start_time
+            game.game_date, other_game.game_date = candidate_slot.slot_date, slot.slot_date
+            slot.assigned_game_id, candidate_slot.assigned_game_id = other_game.id, game.id
+            db.flush()
+            slots_by_game_id[str(game.id)] = candidate_slot
+            slots_by_game_id[str(other_game.id)] = slot
+            swaps_committed += 1
+            committed = True
+            break
+        if not committed and not any(u.get('game_id') == str(game.id) for u in unrepaired):
+            _reason_note(game, 'no compatible home slot')
+
+    violations_remaining = len(unrepaired)
+    logger.info("[REPAIR] violations_found=%s", violations_found)
+    logger.info("[REPAIR] swaps_attempted=%s", swaps_attempted)
+    logger.info("[REPAIR] swaps_committed=%s", swaps_committed)
+    logger.info("[REPAIR] violations_remaining=%s", violations_remaining)
+    return {
+        'ran': True,
+        'violations_found': violations_found,
+        'swaps_attempted': swaps_attempted,
+        'swaps_committed': swaps_committed,
+        'violations_remaining': violations_remaining,
+        'unrepaired': unrepaired,
+    }
 
 
 def _schedule_management_rows(db: Session, filters: dict | None = None):
