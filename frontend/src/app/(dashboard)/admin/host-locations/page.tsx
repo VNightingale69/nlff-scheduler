@@ -365,8 +365,8 @@ export default function HostLocationsAdminPage() {
             {checkingDelete && <p className='mt-3 text-sm text-slate-500'>Checking dependencies...</p>}
             {!checkingDelete && deleteCheck && (
               <div className='mt-3 rounded border p-3 text-sm'>
-                <p className='font-medium'>{deleteCheck.can_delete ? 'No blocking dependencies found.' : `${deleteCheck.host_location_name} has related records:`}</p>
-                {deleteCheck.can_delete && deleteCheck.delete_message ? (
+                <p className='font-medium'>{deleteCheck.can_delete ? 'Delete allowed. Only unused setup records will be removed.' : `${deleteCheck.host_location_name} has related records:`}</p>
+                {deleteCheck.can_delete && deleteCheck.delete_message && deleteCheck.delete_message !== 'Delete allowed. Only unused setup records will be removed.' ? (
                   <p className='mt-2 font-semibold text-emerald-700'>{deleteCheck.delete_message}</p>
                 ) : null}
                 <ul className='mt-2 list-disc pl-6'>
