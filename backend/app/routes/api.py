@@ -236,14 +236,13 @@ def paginate(query, page: int, page_size: int):
 def _host_location_dependency_summary(db: Session, host_location_id: uuid.UUID) -> list[tuple[str, int]]:
     field_ids_subquery = db.query(Field.id).filter(Field.host_location_id == host_location_id).subquery()
     area_ids_subquery = db.query(PhysicalFieldArea.id).filter(PhysicalFieldArea.host_location_id == host_location_id).subquery()
-    today = date.today()
     return [
-        ('Fields', db.query(Field).filter(Field.host_location_id == host_location_id).count()),
-        ('Physical Field Areas', db.query(PhysicalFieldArea).filter(PhysicalFieldArea.host_location_id == host_location_id).count()),
+        ('Scheduled Games', db.query(Game).join(Game.field).filter(Field.host_location_id == host_location_id).count()),
+        ('Generated Slots', db.query(GameSlot).filter(GameSlot.host_location_id == host_location_id).count()),
+        ('Field Instances', db.query(FieldInstance).filter(FieldInstance.host_location_id == host_location_id).count()),
         ('Hosting Availability', db.query(HostingAvailability).filter((HostingAvailability.field_id.in_(field_ids_subquery)) | (HostingAvailability.physical_field_area_id.in_(area_ids_subquery))).count()),
         ('Field Configuration Options', db.query(FieldConfigurationOption).filter(FieldConfigurationOption.physical_field_area_id.in_(area_ids_subquery)).count()),
-        ('Scheduled Games', db.query(Game).join(Game.field).filter(Field.host_location_id == host_location_id, Game.game_date >= today).count()),
-        ('Published Games', db.query(Game).join(Game.status).join(Game.field).filter(Field.host_location_id == host_location_id, GameStatus.code == 'published').count()),
+        ('Physical Field Areas', db.query(PhysicalFieldArea).filter(PhysicalFieldArea.host_location_id == host_location_id).count()),
     ]
 
 
@@ -681,6 +680,8 @@ def get_host_location_delete_check(item_id: uuid.UUID, current_user: User = Depe
         'host_location_id': str(x.id),
         'host_location_name': x.name,
         'can_delete': all(count == 0 for _, count in dependencies),
+        'reason': None if all(count == 0 for _, count in dependencies) else 'Host location is referenced by scheduling data.',
+        'recommended_action': None if all(count == 0 for _, count in dependencies) else 'mark_inactive',
         'dependencies': [{'label': label, 'count': count} for label, count in dependencies],
     }
 
@@ -693,38 +694,38 @@ def del_host_location(item_id: uuid.UUID, force: bool = Query(False), current_us
     dependencies = _host_location_dependency_summary(db, item_id)
     dependency_map = {label: count for label, count in dependencies}
 
-    if not force:
-        detail = _format_delete_blockers(x.name, dependencies)
-        if detail:
-            raise HTTPException(400, detail)
-        db.delete(x); db.commit(); return {'ok': True, 'deleted': {'host_locations': 1}}
+    if any(count > 0 for _, count in dependencies):
+        return {
+            'can_delete': False,
+            'reason': 'Host location is referenced by scheduling data.',
+            'recommended_action': 'mark_inactive',
+            'dependencies': [{'label': label, 'count': count} for label, count in dependencies],
+        }
 
-    require_roles(ROLE_LEAGUE_ADMIN)(current_user)
-    if dependency_map.get('Published Games', 0) > 0:
-        raise HTTPException(400, "Cannot force delete host location with published games.")
-
-    field_ids = [field_id for (field_id,) in db.query(Field.id).filter(Field.host_location_id == item_id).all()]
     area_ids = [area_id for (area_id,) in db.query(PhysicalFieldArea.id).filter(PhysicalFieldArea.host_location_id == item_id).all()]
+    field_instance_ids = [instance_id for (instance_id,) in db.query(FieldInstance.id).filter(FieldInstance.host_location_id == item_id).all()]
 
-    deleted_games = db.query(Game).filter(Game.field_id.in_(field_ids)).delete(synchronize_session=False) if field_ids else 0
+    deleted_generated_slots = db.query(GameSlot).filter(
+        (GameSlot.host_location_id == item_id) | (GameSlot.field_instance_id.in_(field_instance_ids))
+    ).delete(synchronize_session=False)
+    deleted_field_instances = db.query(FieldInstance).filter(FieldInstance.id.in_(field_instance_ids)).delete(synchronize_session=False) if field_instance_ids else 0
     deleted_hosting_availability = db.query(HostingAvailability).filter(
-        (HostingAvailability.field_id.in_(field_ids)) | (HostingAvailability.physical_field_area_id.in_(area_ids))
-    ).delete(synchronize_session=False) if (field_ids or area_ids) else 0
+        (HostingAvailability.field_id.in_(db.query(Field.id).filter(Field.host_location_id == item_id).subquery()))
+        | (HostingAvailability.physical_field_area_id.in_(area_ids))
+    ).delete(synchronize_session=False)
     deleted_field_configuration_options = db.query(FieldConfigurationOption).filter(FieldConfigurationOption.physical_field_area_id.in_(area_ids)).delete(synchronize_session=False) if area_ids else 0
-    deleted_fields = db.query(Field).filter(Field.id.in_(field_ids)).delete(synchronize_session=False) if field_ids else 0
     deleted_physical_field_areas = db.query(PhysicalFieldArea).filter(PhysicalFieldArea.id.in_(area_ids)).delete(synchronize_session=False) if area_ids else 0
-    db.delete(x)
-    db.commit()
+    db.delete(x); db.commit()
 
     return {
         'ok': True,
         'deleted': {
+            'generated_slots': deleted_generated_slots,
+            'field_instances': deleted_field_instances,
             'host_locations': 1,
-            'fields': deleted_fields,
             'physical_field_areas': deleted_physical_field_areas,
             'hosting_availability': deleted_hosting_availability,
             'field_configuration_options': deleted_field_configuration_options,
-            'games': deleted_games,
         }
     }
 
