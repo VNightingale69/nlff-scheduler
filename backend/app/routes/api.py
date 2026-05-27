@@ -3552,6 +3552,32 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
             return 0
         return (value.hour * 60) + value.minute
 
+    host_locations = db.query(HostLocation).filter(HostLocation.is_active.is_(True)).all()
+    host_org_by_location_id: dict[str, str] = {
+        str(host.id): str(host.organization_id)
+        for host in host_locations
+        if host.id and host.organization_id
+    }
+    host_ids_by_org: dict[str, set[str]] = {}
+    for location_id, org_id in host_org_by_location_id.items():
+        host_ids_by_org.setdefault(org_id, set()).add(location_id)
+
+    def _slot_host_rank(
+        requested_slot: GameSlot | None,
+        candidate_slot: GameSlot,
+    ) -> int:
+        if not candidate_slot.host_location_id:
+            return 4
+        if requested_slot and requested_slot.field_instance_id and candidate_slot.field_instance_id and requested_slot.field_instance_id == candidate_slot.field_instance_id:
+            return 0
+        if requested_slot and requested_slot.host_location_id and candidate_slot.host_location_id == requested_slot.host_location_id:
+            return 1
+        requested_org_id = host_org_by_location_id.get(str(requested_slot.host_location_id)) if requested_slot and requested_slot.host_location_id else None
+        candidate_org_id = host_org_by_location_id.get(str(candidate_slot.host_location_id))
+        if requested_org_id and candidate_org_id and requested_org_id == candidate_org_id:
+            return 2
+        return 3
+
     def _find_adjacent_double_header_slot(
         requested_slot: GameSlot,
         home_team_id: str,
@@ -3574,7 +3600,7 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
             GameSlot.field_type == required_field_type,
             GameSlot.id != requested_slot.id,
         ).all()
-        ranked: list[tuple[int, int, GameSlot]] = []
+        ranked: list[tuple[int, int, int, GameSlot]] = []
         for candidate_slot in open_slots:
             if not candidate_slot.start_time or not candidate_slot.field_instance_id:
                 continue
@@ -3600,9 +3626,10 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
             } else 1
             if candidate_slot.start_time in target_team_times:
                 continue
-            ranked.append((back_to_back_priority, distance, candidate_slot))
-        ranked.sort(key=lambda item: (item[0], item[1], _minutes_from_time(item[2].start_time)))
-        return ranked[0][2] if ranked else None
+            host_rank = _slot_host_rank(requested_slot, candidate_slot)
+            ranked.append((back_to_back_priority, host_rank, distance, candidate_slot))
+        ranked.sort(key=lambda item: (item[0], item[1], item[2], _minutes_from_time(item[3].start_time)))
+        return ranked[0][3] if ranked else None
 
     def _find_best_compatible_slot(
         requested_slot: GameSlot,
@@ -3616,7 +3643,7 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
             GameSlot.field_type == required_field_type,
         ).all()
         requested_minutes = _minutes_from_time(requested_slot.start_time)
-        ranked: list[tuple[int, int, int, GameSlot]] = []
+        ranked: list[tuple[int, int, int, int, GameSlot]] = []
         for candidate_slot in open_slots:
             if not candidate_slot.start_time or not candidate_slot.field_instance_id:
                 continue
@@ -3638,11 +3665,12 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
             distance = abs(_minutes_from_time(candidate_slot.start_time) - requested_minutes)
             adjacency_priority = 0 if distance == 60 else 1
             is_later = 0 if _minutes_from_time(candidate_slot.start_time) >= requested_minutes else 1
-            ranked.append((adjacency_priority, is_later, distance, candidate_slot))
-        ranked.sort(key=lambda item: (item[0], item[1], item[2], _minutes_from_time(item[3].start_time)))
+            host_rank = _slot_host_rank(requested_slot, candidate_slot)
+            ranked.append((adjacency_priority, host_rank, is_later, distance, candidate_slot))
+        ranked.sort(key=lambda item: (item[0], item[1], item[2], item[3], _minutes_from_time(item[4].start_time)))
         if not ranked:
             return None, False
-        selected = ranked[0][3]
+        selected = ranked[0][4]
         selected_is_non_adjacent = ranked[0][0] == 1
         return selected, selected_is_non_adjacent
 
@@ -4033,6 +4061,16 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
             for slot in proposal_slots.values()
             if slot and slot.host_location_id
         })
+    selected_org_ids = {
+        host_org_by_location_id.get(str(host_id))
+        for host_id in selected_host_ids
+        if host_org_by_location_id.get(str(host_id))
+    }
+    selected_org_host_ids = {
+        host_id
+        for org_id in selected_org_ids
+        for host_id in host_ids_by_org.get(str(org_id), set())
+    }
 
     locked_host_ids: set[str] = {str(host_id) for host_id in (selected_host_ids or []) if host_id}
     overflow_host_ids: set[str] = set()
@@ -4105,7 +4143,12 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
                         continue
                     preferred_slots = sorted(
                         open_slots,
-                        key=lambda slot: 0 if str(slot.host_location_id) in selected_host_ids else 1,
+                        key=lambda slot: (
+                            0 if str(slot.host_location_id) in selected_host_ids else (
+                                1 if str(slot.host_location_id) in selected_org_host_ids else 2
+                            ),
+                            _minutes_from_time(slot.start_time),
+                        ),
                     )
                     for slot in preferred_slots:
                         ok, reason = _can_place_matchup(home_tid, away_tid, slot)
@@ -4218,22 +4261,24 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         if not home_team.organization_id or home_team.organization_id != away_team.organization_id:
             continue
         same_community_games_reviewed += 1
-        preferred_home_host_id = primary_host_by_org.get(home_team.organization_id)
-        preferred_home_hosts = {str(preferred_home_host_id)} if preferred_home_host_id else set()
+        preferred_home_hosts = {
+            str(host_id)
+            for host_id in host_ids_by_org.get(str(home_team.organization_id), set())
+        }
         if not preferred_home_hosts:
-            same_community_home_unresolved_notes.append(_same_community_unresolved_note(game, slot, preferred_home_host_id, 'community has no identified primary host location'))
+            same_community_home_unresolved_notes.append(_same_community_unresolved_note(game, slot, None, 'community has no identified host locations'))
             continue
         if str(slot.host_location_id) in preferred_home_hosts:
             continue
         same_community_repairs_attempted += 1
         open_home_slot = next((
             s for s in sorted_slots
-            if s.slot_date == slot.slot_date and s.host_location_id == preferred_home_host_id and _can_place_matchup(str(game.home_team_id), str(game.away_team_id), s)[0]
+            if s.slot_date == slot.slot_date and s.host_location_id and str(s.host_location_id) in preferred_home_hosts and _can_place_matchup(str(game.home_team_id), str(game.away_team_id), s)[0]
         ), None)
         if open_home_slot:
             existing_assigned = db.query(Game).join(GameSlot, GameSlot.assigned_game_id == Game.id).filter(GameSlot.id == open_home_slot.id).first()
             if existing_assigned:
-                same_community_home_unresolved_notes.append(_same_community_unresolved_note(game, slot, preferred_home_host_id, 'primary home slot unexpectedly already assigned'))
+                same_community_home_unresolved_notes.append(_same_community_unresolved_note(game, slot, primary_host_by_org.get(home_team.organization_id), 'organization home slot unexpectedly already assigned'))
             else:
                 slot.assigned_game_id = None
                 slot.status = 'OPEN'
@@ -4279,7 +4324,7 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
                 priority = 0 if same_division else (1 if same_field_size else 2)
                 candidate_swaps.append((priority, other, other_slot))
         if not candidate_swaps:
-            same_community_home_unresolved_notes.append(_same_community_unresolved_note(game, slot, preferred_home_host_id, 'no compatible same-date home-slot or legal swap candidate found'))
+            same_community_home_unresolved_notes.append(_same_community_unresolved_note(game, slot, primary_host_by_org.get(home_team.organization_id), 'no compatible same-date organization-home slot or legal swap candidate found'))
             continue
         candidate_swaps.sort(key=lambda x: x[0])
         _, other, other_slot = candidate_swaps[0]
@@ -4294,6 +4339,8 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
     same_community_total = 0
     same_community_at_home = 0
     same_community_not_at_home = 0
+    organization_home_placements = 0
+    organization_home_misses = 0
     for game in _division_week_scheduled_games():
         slot = _slot_by_game_id().get(str(game.id))
         if not slot or not slot.host_location_id:
@@ -4303,11 +4350,44 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         if not home_team or not away_team or not home_team.organization_id or home_team.organization_id != away_team.organization_id:
             continue
         same_community_total += 1
-        primary_host_id = primary_host_by_org.get(home_team.organization_id)
-        if primary_host_id and slot.host_location_id == primary_host_id:
+        org_host_ids = host_ids_by_org.get(str(home_team.organization_id), set())
+        if slot.host_location_id and str(slot.host_location_id) in org_host_ids:
             same_community_at_home += 1
+            organization_home_placements += 1
         else:
             same_community_not_at_home += 1
+            organization_home_misses += 1
+
+    cross_site_double_headers = 0
+    team_week_slots: dict[str, list[GameSlot]] = {}
+    scheduled_games_post = _division_week_scheduled_games()
+    scheduled_slots_post = _slot_by_game_id()
+    for g in scheduled_games_post:
+        s = scheduled_slots_post.get(str(g.id))
+        if not s:
+            continue
+        team_week_slots.setdefault(str(g.home_team_id), []).append(s)
+        team_week_slots.setdefault(str(g.away_team_id), []).append(s)
+    for team_id, assigned_slots_for_team in team_week_slots.items():
+        if len(assigned_slots_for_team) != 2:
+            continue
+        team = teams_by_id.get(team_id)
+        if not team or not team.organization_id:
+            continue
+        org_hosts = host_ids_by_org.get(str(team.organization_id), set())
+        first, second = assigned_slots_for_team[0], assigned_slots_for_team[1]
+        if not first.host_location_id or not second.host_location_id:
+            continue
+        if str(first.host_location_id) != str(second.host_location_id) and str(first.host_location_id) in org_hosts and str(second.host_location_id) in org_hosts:
+            cross_site_double_headers += 1
+
+    unused_compatible_fields_within_org = db.query(GameSlot).filter(
+        GameSlot.slot_date == db.query(Week.start_date).filter(Week.id == week_id).scalar_subquery(),
+        GameSlot.status == 'OPEN',
+        GameSlot.assigned_game_id.is_(None),
+        GameSlot.field_type == required_field_type,
+        GameSlot.host_location_id.in_([uuid.UUID(host_id) for host_id in selected_org_host_ids]) if selected_org_host_ids else False,
+    ).count() if selected_org_host_ids else 0
     if created_games == 0:
         db.rollback()
         raise HTTPException(400, 'No valid scheduling combinations were found for the selected division/week.')
@@ -4379,6 +4459,10 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
             'same_community_games_total': same_community_total,
             'same_community_games_at_home': same_community_at_home,
             'same_community_games_not_at_home': same_community_not_at_home,
+            'organization_home_placements': organization_home_placements,
+            'organization_home_misses': organization_home_misses,
+            'cross_site_double_headers': cross_site_double_headers,
+            'unused_compatible_fields_within_hosting_organizations': unused_compatible_fields_within_org,
             'triple_repeat_swaps': triple_repeat_swaps,
             'triple_repeat_swap_notes': triple_repeat_swap_notes,
         },
@@ -4745,6 +4829,11 @@ def repair_same_community_home_fields(db: Session, season_id: uuid.UUID) -> dict
     teams = db.query(Team).filter(Team.is_active.is_(True)).all()
     teams_by_id = {t.id: t for t in teams}
     primary_host_by_org = _primary_host_by_org(db)
+    host_locations = db.query(HostLocation).filter(HostLocation.is_active.is_(True)).all()
+    host_ids_by_org: dict[str, set[str]] = {}
+    for host in host_locations:
+        if host.id and host.organization_id:
+            host_ids_by_org.setdefault(str(host.organization_id), set()).add(str(host.id))
     if not primary_host_by_org:
         logger.warning("[REPAIR] No primary host mappings found")
         return {
@@ -4775,18 +4864,18 @@ def repair_same_community_home_fields(db: Session, season_id: uuid.UUID) -> dict
             continue
         if not home_team.organization_id or home_team.organization_id != away_team.organization_id:
             continue
-        preferred_home_host_id = primary_host_by_org.get(home_team.organization_id)
-        if not preferred_home_host_id:
+        preferred_home_hosts = host_ids_by_org.get(str(home_team.organization_id), set())
+        if not preferred_home_hosts:
             violations_found += 1
             _reason_note(game, 'no compatible home slot')
             continue
-        if slot.host_location_id == preferred_home_host_id:
+        if str(slot.host_location_id) in preferred_home_hosts:
             continue
         violations_found += 1
         candidate_home_slots = db.query(GameSlot).filter(
             GameSlot.slot_date == slot.slot_date,
-            GameSlot.host_location_id == preferred_home_host_id,
         ).all()
+        candidate_home_slots = [s for s in candidate_home_slots if s.host_location_id and str(s.host_location_id) in preferred_home_hosts]
         open_home_slot = next((s for s in candidate_home_slots if s.assigned_game_id is None and s.status == 'OPEN'), None)
         if open_home_slot:
             swaps_attempted += 1
