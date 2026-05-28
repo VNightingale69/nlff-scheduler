@@ -1473,46 +1473,100 @@ def update_season(season_id: uuid.UUID, payload: dict, db: Session = Depends(get
     db.commit(); db.refresh(season); return {"id": season.id, "name": season.name}
 
 
-def _validate_season_publishability(db: Session, season_id: uuid.UUID) -> dict[str, list[str]]:
-    games = db.query(Game).join(Game.home_team).filter(Game.season_id == season_id).all()
-    hard_errors: list[str] = []
-    warnings: list[str] = []
-    team_time: set[tuple[uuid.UUID, date, time]] = set()
-    field_time: set[tuple[uuid.UUID, date, time]] = set()
+def build_schedule_quality_report(db: Session, season_id: uuid.UUID) -> dict[str, object]:
+    rows = _schedule_management_rows(db, {'season_id': season_id})
+    teams = db.query(Team).filter(Team.is_active.is_(True)).all()
+    season_team_ids = {t.id for t in teams if db.query(Game).filter(Game.season_id == season_id, (Game.home_team_id == t.id) | (Game.away_team_id == t.id)).first() is not None}
+    team_game_counts = {tid: 0 for tid in season_team_ids}
+    required_field_errors: list[dict[str, object]] = []
+    team_double_booking_errors: list[dict[str, object]] = []
+    field_double_booking_errors: list[dict[str, object]] = []
+    warnings: list[dict[str, object]] = []
+    team_time_seen: dict[tuple[uuid.UUID, date, time], dict[str, object]] = {}
+    field_time_seen: dict[tuple[uuid.UUID, date, time], dict[str, object]] = {}
     matchup_counts: dict[tuple[uuid.UUID, uuid.UUID], int] = {}
-    for g in games:
-        ht = (g.home_team_id, g.game_date, g.kickoff_time)
-        at = (g.away_team_id, g.game_date, g.kickoff_time)
-        if ht in team_time or at in team_time:
-            hard_errors.append('team double-bookings detected')
-        team_time.add(ht); team_time.add(at)
-        if g.field_id:
-            ft = (g.field_id, g.game_date, g.kickoff_time)
-            if ft in field_time:
-                hard_errors.append('field double-bookings detected')
-            field_time.add(ft)
-        div = g.home_team.division if g.home_team else None
-        if div and g.field and g.field.layout_type and div.required_field_layout_type != g.field.layout_type:
-            hard_errors.append('invalid field type detected')
-        pair = tuple(sorted([g.home_team_id, g.away_team_id]))
+    team_games_by_date: dict[tuple[uuid.UUID, date], list[time]] = {}
+
+    for g, slot, fi, host, home, away, div, org, status in rows:
+        for tid in (home.id, away.id):
+            if tid in team_game_counts:
+                team_game_counts[tid] += 1
+            team_games_by_date.setdefault((tid, g.game_date), []).append(g.kickoff_time)
+
+        for team in (home, away):
+            t_key = (team.id, g.game_date, g.kickoff_time)
+            entry = {'game_id': str(g.id), 'team': team.name, 'date': g.game_date.isoformat(), 'time': g.kickoff_time.strftime('%H:%M:%S'), 'host_location': host.name if host else None, 'field': fi.field_name if fi else None}
+            if t_key in team_time_seen:
+                team_double_booking_errors.append({**entry, 'conflicting_games': [team_time_seen[t_key], entry]})
+            else:
+                team_time_seen[t_key] = entry
+
+        if slot and fi:
+            f_key = (fi.id, g.game_date, g.kickoff_time)
+            f_entry = {'game_id': str(g.id), 'date': g.game_date.isoformat(), 'time': g.kickoff_time.strftime('%H:%M:%S'), 'host_location': host.name if host else None, 'field': fi.field_name}
+            if f_key in field_time_seen:
+                field_double_booking_errors.append({**f_entry, 'conflicting_games': [field_time_seen[f_key], f_entry]})
+            else:
+                field_time_seen[f_key] = f_entry
+            if slot.field_type != _required_field_type_for_division(div):
+                required_field_errors.append({'game_id': str(g.id), 'division': div.name, 'date': g.game_date.isoformat(), 'time': g.kickoff_time.strftime('%H:%M:%S'), 'host_location': host.name if host else None, 'field': fi.field_name, 'message': 'invalid field type'})
+
+        pair = tuple(sorted([home.id, away.id], key=lambda x: str(x)))
         matchup_counts[pair] = matchup_counts.get(pair, 0) + 1
-    if not games:
-        hard_errors.append('missing required games')
-    if any(v > 1 for v in matchup_counts.values()):
-        warnings.append('repeat matchups detected')
-    return {'hard_errors': sorted(set(hard_errors)), 'warnings': sorted(set(warnings))}
+
+    teams_with_zero_games = sum(1 for count in team_game_counts.values() if count == 0)
+    uneven_game_counts = (max(team_game_counts.values()) - min(team_game_counts.values())) if team_game_counts else 0
+    non_back_to_back_double_headers = 0
+    for entries in team_games_by_date.values():
+        if len(entries) <= 1:
+            continue
+        entries = sorted(entries)
+        for prev, cur in zip(entries, entries[1:]):
+            if (datetime.combine(date.today(), cur) - datetime.combine(date.today(), prev)).seconds > 7200:
+                non_back_to_back_double_headers += 1
+                break
+
+    repeat_matchups = sum(1 for v in matchup_counts.values() if v > 1)
+    if repeat_matchups > 0:
+        warnings.append({'code': 'repeat_matchups', 'count': repeat_matchups, 'message': 'repeat matchups detected'})
+
+    missing_required_games = 1 if not rows else 0
+    metrics = {
+        'conflicts': len(team_double_booking_errors) + len(field_double_booking_errors),
+        'team_double_bookings': len(team_double_booking_errors),
+        'field_double_bookings': len(field_double_booking_errors),
+        'teams_with_zero_games': teams_with_zero_games,
+        'missing_required_games': missing_required_games,
+        'uneven_game_counts': uneven_game_counts,
+        'non_back_to_back_double_headers': non_back_to_back_double_headers,
+    }
+    hard_errors = (
+        [{'code': 'team_double_bookings', 'issues': team_double_booking_errors}]
+        + [{'code': 'field_double_bookings', 'issues': field_double_booking_errors}]
+        + ([{'code': 'teams_with_zero_games', 'count': teams_with_zero_games}] if teams_with_zero_games > 0 else [])
+        + ([{'code': 'missing_required_games', 'count': missing_required_games}] if missing_required_games > 0 else [])
+        + [{'code': 'invalid_field_type', 'issues': required_field_errors}]
+    )
+    hard_errors = [e for e in hard_errors if not (isinstance(e, dict) and 'issues' in e and not e['issues'])]
+    if hard_errors:
+        overall_health = 'Blocked'
+    elif warnings:
+        overall_health = 'Good'
+    else:
+        overall_health = 'Excellent'
+    return {'overall_health': overall_health, 'hard_errors': hard_errors, 'warnings': warnings, 'metrics': metrics}
 
 
 @router.post('/seasons/{season_id}/publish-schedule', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def publish_schedule(season_id: uuid.UUID, db: Session = Depends(get_db)):
     season = db.query(Season).filter(Season.id == season_id).first()
     if not season: raise HTTPException(404, 'Season not found')
-    validation = _validate_season_publishability(db, season_id)
+    validation = build_schedule_quality_report(db, season_id)
     if validation['hard_errors']:
-        raise HTTPException(status_code=400, detail={'error': 'publish_validation_failed', 'hard_errors': validation['hard_errors'], 'warnings': validation['warnings']})
+        raise HTTPException(status_code=400, detail={'error': 'publish_validation_failed', **validation})
     season.schedule_status = 'published'
     db.commit()
-    return {'ok': True, 'season_id': str(season_id), 'schedule_status': season.schedule_status, 'warnings': validation['warnings']}
+    return {'ok': True, 'season_id': str(season_id), 'schedule_status': season.schedule_status, 'warnings': validation['warnings'], 'overall_health': validation['overall_health']}
 
 
 @router.post('/seasons/{season_id}/unpublish-schedule', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
@@ -5624,6 +5678,7 @@ def _schedule_management_rows(db: Session, filters: dict | None = None):
     if filters.get('field_type'): q = q.filter(GameSlot.field_type == filters['field_type'])
     if filters.get('field_id'): q = q.filter(FieldInstance.field_id == filters['field_id'])
     if filters.get('team_id'): q = q.filter((home.id == filters['team_id']) | (away.id == filters['team_id']))
+    if filters.get('season_id'): q = q.filter(Game.season_id == filters['season_id'])
     return q.order_by(Game.game_date, Game.kickoff_time).all()
 
 
@@ -5684,6 +5739,10 @@ def schedule_publish_diagnostics(season_id: uuid.UUID | None = None, db: Session
 @router.get('/schedule-management/quality-report', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def schedule_quality_report(division_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, db: Session = Depends(get_db)):
     try:
+        season = db.query(Season).filter(Season.is_active.is_(True)).order_by(Season.start_date.desc()).first()
+        if not season:
+            raise HTTPException(404, 'No season found')
+        quality = build_schedule_quality_report(db, season.id)
         filters = {'division_id': division_id, 'organization_id': organization_id}
         rows = _schedule_management_rows(db, filters)
         teams_query = db.query(Team, Division, Organization).join(Team.division).join(Team.organization).filter(Team.is_active.is_(True))
@@ -5815,6 +5874,7 @@ def schedule_quality_report(division_id: uuid.UUID | None = None, organization_i
             field_utilization.append(data)
 
         return {
+            **quality,
             'games_per_team': games_per_team,
             'repeat_matchups': repeat_matchups,
             'home_away_balance': home_away_balance,
