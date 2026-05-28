@@ -259,14 +259,16 @@ class ScheduleReadinessDivisionRow(BaseModel):
     division_label: str
     field_type_required: str
     number_of_teams: int
-    estimated_games_needed: int
+    minimum_unique_matchups: int
+    target_scheduled_games: int | None = None
     available_matching_slots: int
     status: str
 
 
 class ScheduleReadinessTotals(BaseModel):
     total_teams: int
-    total_games_needed: int
+    total_minimum_unique_matchups: int
+    total_target_scheduled_games: int | None = None
     total_small_field_slots: int
     total_large_field_slots: int
     total_open_slots: int
