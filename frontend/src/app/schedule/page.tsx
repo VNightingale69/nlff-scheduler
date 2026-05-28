@@ -2,6 +2,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { API_URL } from '@/lib/api';
 import { getDivisionLabel } from '@/lib/divisionLabel';
+import { formatDisplayDate, formatDisplayTime } from '@/lib/displayFormat';
 
 type Game = { id: string; game_date: string; kickoff_time: string; host_location_name: string; field_name: string; division_name: string; home_team_name: string; away_team_name: string; game_status_label: string; };
 
@@ -9,15 +10,7 @@ type Game = { id: string; game_date: string; kickoff_time: string; host_location
 const getWeekOptionLabel = (week: any) => {
   const baseLabel = week.label || `Week ${week.week_number}`;
   if (!week.start_date) return baseLabel;
-  const parsed = new Date(week.start_date);
-  const formattedDate = Number.isNaN(parsed.getTime())
-    ? week.start_date
-    : parsed.toLocaleDateString('en-US', {
-        month: '2-digit',
-        day: '2-digit',
-        year: 'numeric',
-        timeZone: 'UTC',
-      });
+  const formattedDate = formatDisplayDate(week.start_date);
   return `${baseLabel} — ${formattedDate}`;
 };
 
@@ -56,6 +49,6 @@ export default function PublicSchedulePage() {
     <div className='flex flex-wrap gap-2'><button className='rounded bg-slate-800 px-3 py-2 text-white' onClick={() => load(filters)}>Apply Filters</button><button className='rounded border px-3 py-2' onClick={()=>{ setFilters({}); load({}); }}>Reset</button><button className='rounded border px-3 py-2' onClick={()=>window.print()}>Print / PDF</button><a className='rounded border px-3 py-2' href={`${API_URL}/schedule-management/export.csv`} target='_blank'>Export CSV</a></div>
     {loading && <div className='rounded border p-4'>Loading published schedule...</div>}
     {empty && <div className='rounded border p-4'>{message || (hasActiveFilters ? 'No games match the selected filters.' : 'No published schedule is currently available.')}</div>}
-    {!loading && games.length>0 && <div className='overflow-x-auto rounded border'><table className='min-w-full text-sm'><thead className='bg-slate-100 text-left'><tr><th className='p-2'>Date</th><th className='p-2'>Time</th><th className='p-2'>Host location</th><th className='p-2'>Field</th><th className='p-2'>Division</th><th className='p-2'>Home team</th><th className='p-2'>Away team</th><th className='p-2'>Game status</th></tr></thead><tbody>{games.map(g=><tr key={g.id} className='border-t'><td className='p-2'>{g.game_date}</td><td className='p-2'>{g.kickoff_time}</td><td className='p-2'>{g.host_location_name}</td><td className='p-2'>{g.field_name}</td><td className='p-2'>{g.division_name}</td><td className='p-2'>{g.home_team_name}</td><td className='p-2'>{g.away_team_name}</td><td className='p-2'>{g.game_status_label}</td></tr>)}</tbody></table></div>}
+    {!loading && games.length>0 && <div className='overflow-x-auto rounded border'><table className='min-w-full text-sm'><thead className='bg-slate-100 text-left'><tr><th className='p-2'>Date</th><th className='p-2'>Time</th><th className='p-2'>Host location</th><th className='p-2'>Field</th><th className='p-2'>Division</th><th className='p-2'>Home team</th><th className='p-2'>Away team</th><th className='p-2'>Game status</th></tr></thead><tbody>{games.map(g=><tr key={g.id} className='border-t'><td className='p-2'>{formatDisplayDate(g.game_date)}</td><td className='p-2'>{formatDisplayTime(g.kickoff_time)}</td><td className='p-2'>{g.host_location_name}</td><td className='p-2'>{g.field_name}</td><td className='p-2'>{g.division_name}</td><td className='p-2'>{g.home_team_name}</td><td className='p-2'>{g.away_team_name}</td><td className='p-2'>{g.game_status_label}</td></tr>)}</tbody></table></div>}
   </div>;
 }

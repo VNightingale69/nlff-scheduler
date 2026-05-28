@@ -3,18 +3,19 @@
 import { useEffect, useMemo, useState } from 'react';
 import { apiFetch } from '@/lib/api';
 import { getAuthUser, getToken } from '@/lib/auth';
+import { formatDisplayDate, formatDisplayTime } from '@/lib/displayFormat';
 import Toast from './Toast';
 import { useSearchParams } from 'next/navigation';
 
 const HOSTING_DATES = [
-  { date: '2026-09-06', label: 'Saturday, September 6' },
-  { date: '2026-09-13', label: 'Saturday, September 13' },
-  { date: '2026-09-20', label: 'Saturday, September 20' },
-  { date: '2026-09-27', label: 'Saturday, September 27' },
-  { date: '2026-10-04', label: 'Saturday, October 4' },
-  { date: '2026-10-11', label: 'Saturday, October 11' },
-  { date: '2026-10-18', label: 'Saturday, October 18 — Playoffs' },
-  { date: '2026-10-25', label: 'Saturday, October 25 — Championships' },
+  { date: '2026-09-06', label: '09/06/2026' },
+  { date: '2026-09-13', label: '09/13/2026' },
+  { date: '2026-09-20', label: '09/20/2026' },
+  { date: '2026-09-27', label: '09/27/2026' },
+  { date: '2026-10-04', label: '10/04/2026' },
+  { date: '2026-10-11', label: '10/11/2026' },
+  { date: '2026-10-18', label: '10/18/2026 — Playoffs' },
+  { date: '2026-10-25', label: '10/25/2026 — Championships' },
 ] as const;
 const STADIUM_TYPE = 'STADIUM_SITE';
 const HOURS = [9, 10, 11, 12, 13, 14, 15, 16];
@@ -22,15 +23,10 @@ const HOURS = [9, 10, 11, 12, 13, 14, 15, 16];
 const slotKey = (areaId: string, date: string, hour: number) => `${areaId}|${date}|${hour}`;
 const layoutKey = (areaId: string, date: string) => `${areaId}|${date}`;
 
-const hourLabel = (hour: number) => (hour <= 11 ? `${hour}:00 AM` : hour === 12 ? '12:00 PM' : `${hour - 12}:00 PM`);
-const displayHour = (hour: number) => {
-  if (hour === 12) return '12:00 PM';
-  if (hour === 24 || hour === 0) return '12:00 AM';
-  if (hour > 12) return `${hour - 12}:00 PM`;
-  return `${hour}:00 AM`;
-};
+const hourLabel = (hour: number) => formatDisplayTime(`${hour}:00`);
+const displayHour = (hour: number) => formatDisplayTime(`${hour === 24 ? 0 : hour}:00`);
 
-const formatDateLabel = (date: string) => new Date(`${date}T00:00:00`).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+const formatDateLabel = (date: string) => formatDisplayDate(date);
 
 const layoutLabel = (layout: string) => (layout === '2x53' ? 'Two Large Fields' : layout === '1x53_plus_2x30' ? 'One Large Field + Two Small Fields' : layout === '3x30' ? 'Three Small Fields' : 'Custom Layout');
 const weekForDate = (date: string) => HOSTING_DATES.findIndex((d) => d.date === date) + 1;
@@ -568,7 +564,7 @@ export default function HostingAvailabilityManager() {
                   </div>
                   <div className='mb-2'>
                     <label className='inline-flex items-center gap-2 text-sm font-medium'>
-                      <input type='checkbox' checked={allDay(area.id, date)} onChange={(e) => toggleAllDay(area.id, date, e.target.checked)} /> All Day (9:00 AM–4:00 PM)
+                      <input type='checkbox' checked={allDay(area.id, date)} onChange={(e) => toggleAllDay(area.id, date, e.target.checked)} /> All Day (09:00 AM–04:00 PM)
                     </label>
                   </div>
                   <div className='grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-8'>
