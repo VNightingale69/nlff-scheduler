@@ -5175,12 +5175,10 @@ def list_public_schedule_filters(season_id: uuid.UUID | None = None, db: Session
         divisions_by_id = {div.id: div for _, _, _, _, _, _, div, _, _ in rows if div}
         weeks_by_id = {g.week.id: g.week for g, _, _, _, _, _, _, _, _ in rows if g.week}
         teams_by_id = {}
-        statuses_by_code = {}
         fields_by_id = {}
-        for _, _, fi, _, home, away, _, _, status in rows:
+        for _, _, fi, _, home, away, _, _, _ in rows:
             teams_by_id[home.id] = home
             teams_by_id[away.id] = away
-            statuses_by_code[status.code] = status
             if fi:
                 fields_by_id[fi.id] = fi
 
@@ -5189,7 +5187,6 @@ def list_public_schedule_filters(season_id: uuid.UUID | None = None, db: Session
         divisions = sorted(divisions_by_id.values(), key=lambda item: (item.sort_order or 0, item.name))
         weeks = sorted(weeks_by_id.values(), key=lambda item: (item.start_date, item.week_number))
         teams = sorted(teams_by_id.values(), key=lambda item: item.name)
-        statuses = sorted(statuses_by_code.values(), key=lambda item: item.label)
         fields = sorted(fields_by_id.values(), key=lambda item: item.field_name)
     else:
         host_locations = db.query(HostLocation).join(HostLocation.organization).filter(
@@ -5203,7 +5200,6 @@ def list_public_schedule_filters(season_id: uuid.UUID | None = None, db: Session
             weeks_query = weeks_query.filter(Week.season_id == season.id)
         weeks = weeks_query.order_by(Week.start_date, Week.week_number).all()
         teams = db.query(Team).filter(Team.is_active.is_(True)).order_by(Team.name).all()
-        statuses = db.query(GameStatus).filter(GameStatus.is_active.is_(True)).order_by(GameStatus.label).all()
         fields = db.query(FieldInstance).filter(FieldInstance.is_active.is_(True)).order_by(FieldInstance.field_name).all()
 
     return {
@@ -5213,7 +5209,6 @@ def list_public_schedule_filters(season_id: uuid.UUID | None = None, db: Session
         'divisions': [{'id': item.id, 'name': item.name, 'division_group': item.division_group} for item in divisions],
         'weeks': [{'id': item.id, 'week_number': item.week_number, 'start_date': item.start_date, 'label': f'Week {item.week_number}'} for item in weeks],
         'teams': [{'id': item.id, 'name': item.name} for item in teams],
-        'statuses': [{'code': item.code, 'label': item.label} for item in statuses],
         'fields': [{'id': item.id, 'name': item.field_name} for item in fields],
     }
 
