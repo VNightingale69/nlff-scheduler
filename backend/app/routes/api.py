@@ -5060,9 +5060,50 @@ def list_public_games(season_id: uuid.UUID | None = None, host_location_id: uuid
     if week_id: q = q.filter(Game.week_id == week_id)
     if team_id: q = q.filter((Game.home_team_id == team_id) | (Game.away_team_id == team_id))
     if date: q = q.filter(Game.game_date == date)
-    if status_code: q = q.filter(GameStatus.code == status_code)
+    if status_code:
+        q = q.filter(func.lower(GameStatus.code) == status_code.strip().lower())
+    else:
+        q = q.filter(func.lower(GameStatus.code).in_(['scheduled', 'active']))
     total = q.count(); items = q.order_by(Game.game_date, Game.kickoff_time).offset((page - 1) * page_size).limit(page_size).all()
     return PagedResponse(items=[PublicGameRead(id=g.id,game_date=g.game_date,kickoff_time=g.kickoff_time,host_location_id=g.field.host_location.id,host_location_name=g.field.host_location.name,field_id=g.field.id,field_name=g.field.name,organization_id=g.field.host_location.organization.id,organization_name=g.field.host_location.organization.name,division_id=g.home_team.division_id,division_name=g.home_team.division.name,week_id=g.week_id,week_number=(g.week.week_number if g.week else None),home_team_id=g.home_team_id,home_team_name=g.home_team.name,away_team_id=g.away_team_id,away_team_name=g.away_team.name,game_status_id=g.game_status_id,game_status_code=g.status.code,game_status_label=g.status.label) for g in items], total=total, page=page, page_size=page_size)
+
+
+@router.get('/public/schedule/debug')
+def public_schedule_debug(season_id: uuid.UUID | None = None, db: Session = Depends(get_db)):
+    if season_id:
+        season = db.query(Season).filter(Season.id == season_id).first()
+    else:
+        season = db.query(Season).filter(Season.is_active.is_(True)).order_by(Season.start_date.desc()).first()
+
+    published_seasons = db.query(Season).filter(Season.schedule_status == 'published').order_by(Season.start_date.desc()).all()
+
+    if not season:
+        return {
+            'published_seasons': [{'id': str(s.id), 'name': s.name, 'schedule_status': s.schedule_status} for s in published_seasons],
+            'current_season_status': None,
+            'total_games_for_season': 0,
+            'games_returned_by_public_query': 0,
+            'filters_applied': {'season_schedule_status': 'published', 'default_game_status_codes': ['scheduled', 'active']},
+        }
+
+    total_games_for_season = db.query(Game).filter(Game.season_id == season.id).count()
+    public_games_count = db.query(func.count(Game.id)).join(Game.season).join(Game.status).filter(
+        Game.season_id == season.id,
+        Season.schedule_status == 'published',
+        func.lower(GameStatus.code).in_(['scheduled', 'active']),
+    ).scalar() or 0
+
+    return {
+        'published_seasons': [{'id': str(s.id), 'name': s.name, 'schedule_status': s.schedule_status} for s in published_seasons],
+        'current_season_status': season.schedule_status,
+        'total_games_for_season': total_games_for_season,
+        'games_returned_by_public_query': int(public_games_count),
+        'filters_applied': {
+            'season_id': str(season.id),
+            'season_schedule_status': 'published',
+            'default_game_status_codes': ['scheduled', 'active'],
+        },
+    }
 
 @router.get('/public/schedule/options')
 @router.get('/public/schedule-filters')
@@ -5833,7 +5874,7 @@ def schedule_quality_report(division_id: uuid.UUID | None = None, organization_i
             if total == 0:
                 unscheduled.append({'team_name': team['team_name'], 'division_name': team['division_name'], 'organization_name': team['organization_name'], 'status': 'Issue'})
 
-        host_rows = db.query(HostingAvailability, HostLocation, Organization).join(HostingAvailability.host_location).join(HostLocation.organization)
+        host_rows = db.query(HostingAvailability, HostLocation, Organization).join(Field, HostingAvailability.field_id == Field.id).join(HostLocation, Field.host_location_id == HostLocation.id).join(Organization, HostLocation.organization_id == Organization.id)
         if organization_id:
             host_rows = host_rows.filter(Organization.id == organization_id)
         host_rows = host_rows.all()
@@ -5884,9 +5925,14 @@ def schedule_quality_report(division_id: uuid.UUID | None = None, organization_i
             'unscheduled_teams': unscheduled,
             'field_utilization': field_utilization,
         }
-    except Exception:
+    except Exception as exc:
         logger.exception('Schedule quality report generation failed (division_id=%s organization_id=%s)', division_id, organization_id)
-        return _empty_quality_report()
+        return {
+            **_empty_quality_report(),
+            'overall_health': 'Validation Error',
+            'hard_errors': ['quality report generation failed'],
+            'details': str(exc),
+        }
 
 @router.get('/schedule-management/games', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def schedule_management_games(date: date | None = None, division_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, host_location_id: uuid.UUID | None = None, field_type: str | None = None, field_id: uuid.UUID | None = None, team_id: uuid.UUID | None = None, db: Session = Depends(get_db)):
