@@ -1485,6 +1485,8 @@ def build_schedule_quality_report(db: Session, season_id: uuid.UUID) -> dict[str
     team_time_seen: dict[tuple[uuid.UUID, date, time], dict[str, object]] = {}
     field_time_seen: dict[tuple[uuid.UUID, date, time], dict[str, object]] = {}
     matchup_counts: dict[tuple[uuid.UUID, uuid.UUID], int] = {}
+    team_division_map: dict[uuid.UUID, uuid.UUID] = {}
+    division_team_ids: dict[uuid.UUID, set[uuid.UUID]] = {}
     team_games_by_date: dict[tuple[uuid.UUID, date], list[time]] = {}
 
     for g, slot, fi, host, home, away, div, org, status in rows:
@@ -1492,6 +1494,8 @@ def build_schedule_quality_report(db: Session, season_id: uuid.UUID) -> dict[str
             if tid in team_game_counts:
                 team_game_counts[tid] += 1
             team_games_by_date.setdefault((tid, g.game_date), []).append(g.kickoff_time)
+            team_division_map[tid] = div.id
+            division_team_ids.setdefault(div.id, set()).add(tid)
 
         for team in (home, away):
             t_key = (team.id, g.game_date, g.kickoff_time)
@@ -1516,19 +1520,44 @@ def build_schedule_quality_report(db: Session, season_id: uuid.UUID) -> dict[str
 
     teams_with_zero_games = sum(1 for count in team_game_counts.values() if count == 0)
     uneven_game_counts = (max(team_game_counts.values()) - min(team_game_counts.values())) if team_game_counts else 0
+    odd_team_divisions = {division_id for division_id, team_ids in division_team_ids.items() if len(team_ids) % 2 == 1}
     non_back_to_back_double_headers = 0
-    for entries in team_games_by_date.values():
+    uneven_double_header_distribution = 0
+    double_header_counts_by_team: dict[uuid.UUID, int] = {}
+    # Double headers are expected in odd-team divisions and should not be a warning by default.
+    # We still track distribution and adjacency for quality insights.
+    for (team_id, _game_date), entries in team_games_by_date.items():
         if len(entries) <= 1:
             continue
+        double_header_counts_by_team[team_id] = double_header_counts_by_team.get(team_id, 0) + 1
         entries = sorted(entries)
         for prev, cur in zip(entries, entries[1:]):
             if (datetime.combine(date.today(), cur) - datetime.combine(date.today(), prev)).seconds > 7200:
                 non_back_to_back_double_headers += 1
                 break
 
-    repeat_matchups = sum(1 for v in matchup_counts.values() if v > 1)
+    if double_header_counts_by_team:
+        high = max(double_header_counts_by_team.values())
+        low = min(double_header_counts_by_team.values())
+        uneven_double_header_distribution = high - low
+
+    repeat_matchups = 0
+    for (team_a, _team_b), count in matchup_counts.items():
+        division_id = team_division_map.get(team_a)
+        division_team_count = len(division_team_ids.get(division_id, set())) if division_id else 0
+        if count >= 3 and division_team_count >= 4:
+            repeat_matchups += 1
     if repeat_matchups > 0:
-        warnings.append({'code': 'repeat_matchups', 'count': repeat_matchups, 'message': 'repeat matchups detected'})
+        warnings.append({'code': 'repeat_matchups', 'count': repeat_matchups, 'message': 'avoidable third-or-more repeat matchups detected'})
+
+    if uneven_game_counts > 0 and not odd_team_divisions:
+        warnings.append({'code': 'uneven_game_counts', 'count': uneven_game_counts, 'message': 'uneven game counts detected'})
+
+    if uneven_double_header_distribution > 1:
+        warnings.append({'code': 'uneven_double_headers', 'count': uneven_double_header_distribution, 'message': 'double headers are not evenly distributed'})
+
+    if non_back_to_back_double_headers > 0:
+        warnings.append({'code': 'non_back_to_back_double_headers', 'count': non_back_to_back_double_headers, 'message': 'non-back-to-back double headers detected'})
 
     missing_required_games = 1 if not rows else 0
     metrics = {
@@ -1539,6 +1568,8 @@ def build_schedule_quality_report(db: Session, season_id: uuid.UUID) -> dict[str
         'missing_required_games': missing_required_games,
         'uneven_game_counts': uneven_game_counts,
         'non_back_to_back_double_headers': non_back_to_back_double_headers,
+        'odd_team_divisions': len(odd_team_divisions),
+        'uneven_double_header_distribution': uneven_double_header_distribution,
     }
     hard_errors = (
         [{'code': 'team_double_bookings', 'issues': team_double_booking_errors}]
@@ -1546,6 +1577,7 @@ def build_schedule_quality_report(db: Session, season_id: uuid.UUID) -> dict[str
         + ([{'code': 'teams_with_zero_games', 'count': teams_with_zero_games}] if teams_with_zero_games > 0 else [])
         + ([{'code': 'missing_required_games', 'count': missing_required_games}] if missing_required_games > 0 else [])
         + [{'code': 'invalid_field_type', 'issues': required_field_errors}]
+        + ([{'code': 'non_back_to_back_double_headers', 'count': non_back_to_back_double_headers}] if non_back_to_back_double_headers > 0 else [])
     )
     hard_errors = [e for e in hard_errors if not (isinstance(e, dict) and 'issues' in e and not e['issues'])]
     if hard_errors:

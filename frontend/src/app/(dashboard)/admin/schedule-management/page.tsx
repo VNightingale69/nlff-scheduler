@@ -170,14 +170,17 @@ export default function ScheduleManagementPage() {
     ] as Array<{ key: string; label: string; count: number; severity: Severity; details: string[] }>;
 
     const issueCount = issueSummary.filter((i) => i.severity === 'Issue').reduce((s, i) => s + i.count, 0);
-    const warningCount = issueSummary.filter((i) => i.severity === 'Warning').reduce((s, i) => s + i.count, 0);
+    const avoidableWarningKeys = new Set(['repeat_matchups', 'uneven_counts']);
+    const warningCount = issueSummary
+      .filter((i) => i.severity === 'Warning' && avoidableWarningKeys.has(i.key))
+      .reduce((s, i) => s + i.count, 0);
 
     let healthLabel = 'Excellent';
     let healthClass = 'bg-emerald-100 text-emerald-800 border-emerald-300';
 
     if (issueCount > 0) {
-      healthLabel = issueCount >= 5 ? 'Problem' : 'Needs Review';
-      healthClass = issueCount >= 5 ? 'bg-red-100 text-red-800 border-red-300' : 'bg-orange-100 text-orange-800 border-orange-300';
+      healthLabel = 'Blocked';
+      healthClass = 'bg-red-100 text-red-800 border-red-300';
     } else if (warningCount > 0) {
       healthLabel = warningCount >= 5 ? 'Needs Review' : 'Good';
       healthClass = warningCount >= 5 ? 'bg-orange-100 text-orange-800 border-orange-300' : 'bg-amber-100 text-amber-800 border-amber-300';
