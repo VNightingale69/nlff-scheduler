@@ -5105,7 +5105,7 @@ def list_public_games(season_id: uuid.UUID | None = None, host_location_id: uuid
             message='No published schedule is currently available.',
         )
 
-    rows = get_scheduled_games_for_season(db, season.id, filters)
+    rows = get_scheduled_games_for_season(db, season.id, filters, organization_filter_any_team=True)
     total = len(rows)
     start = max(page - 1, 0) * page_size
     items = rows[start:start + page_size]
@@ -5135,7 +5135,7 @@ def public_schedule_debug(season_id: uuid.UUID | None = None, host_location_id: 
     )
     admin_rows = get_scheduled_games_for_season(db, season.id if season else None, base_filters) if season else []
     public_before_filters = admin_rows if season and _season_schedule_is_published(season) else []
-    public_after_filters = get_scheduled_games_for_season(db, season.id, active_filters) if season and _season_schedule_is_published(season) else []
+    public_after_filters = get_scheduled_games_for_season(db, season.id, active_filters, organization_filter_any_team=True) if season and _season_schedule_is_published(season) else []
     return {
         'season_status': season.schedule_status if season else None,
         'admin_schedule_management_count': len(admin_rows),
@@ -5154,6 +5154,11 @@ def list_public_schedule_filters(season_id: uuid.UUID | None = None, db: Session
     if rows:
         host_locations_by_id = {host.id: host for _, _, _, host, _, _, _, _, _ in rows if host}
         organizations_by_id = {org.id: org for _, _, _, _, _, _, _, org, _ in rows if org}
+        for _, _, _, _, home, away, _, _, _ in rows:
+            if home.organization:
+                organizations_by_id[home.organization.id] = home.organization
+            if away.organization:
+                organizations_by_id[away.organization.id] = away.organization
         divisions_by_id = {div.id: div for _, _, _, _, _, _, div, _, _ in rows if div}
         weeks_by_id = {g.week.id: g.week for g, _, _, _, _, _, _, _, _ in rows if g.week}
         teams_by_id = {}
@@ -5797,7 +5802,7 @@ def _serialize_schedule_filters(filters: dict) -> dict:
     return {key: (value.isoformat() if hasattr(value, 'isoformat') else str(value)) for key, value in filters.items()}
 
 
-def _schedule_management_rows(db: Session, filters: dict | None = None):
+def _schedule_management_rows(db: Session, filters: dict | None = None, organization_filter_any_team: bool = False):
     filters = filters or {}
     home = aliased(Team)
     away = aliased(Team)
@@ -5805,7 +5810,11 @@ def _schedule_management_rows(db: Session, filters: dict | None = None):
     q = q.filter(func.lower(GameStatus.code) != 'unscheduled')
     if filters.get('date'): q = q.filter(Game.game_date == filters['date'])
     if filters.get('division_id'): q = q.filter(Division.id == filters['division_id'])
-    if filters.get('organization_id'): q = q.filter(home.organization_id == filters['organization_id'])
+    if filters.get('organization_id'):
+        if organization_filter_any_team:
+            q = q.filter(or_(home.organization_id == filters['organization_id'], away.organization_id == filters['organization_id']))
+        else:
+            q = q.filter(home.organization_id == filters['organization_id'])
     if filters.get('host_location_id'): q = q.filter(HostLocation.id == filters['host_location_id'])
     if filters.get('field_type'): q = q.filter(GameSlot.field_type == filters['field_type'])
     if filters.get('field_id'): q = q.filter(FieldInstance.id == filters['field_id'])
@@ -5816,11 +5825,11 @@ def _schedule_management_rows(db: Session, filters: dict | None = None):
     return q.order_by(Game.game_date, Game.kickoff_time).all()
 
 
-def get_scheduled_games_for_season(db: Session, season_id: uuid.UUID | None, filters: dict | None = None):
+def get_scheduled_games_for_season(db: Session, season_id: uuid.UUID | None, filters: dict | None = None, organization_filter_any_team: bool = False):
     shared_filters = dict(filters or {})
     if season_id:
         shared_filters['season_id'] = season_id
-    return _schedule_management_rows(db, shared_filters)
+    return _schedule_management_rows(db, shared_filters, organization_filter_any_team=organization_filter_any_team)
 
 
 def _public_game_read_from_schedule_row(row) -> PublicGameRead:
