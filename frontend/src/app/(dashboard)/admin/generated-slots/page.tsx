@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { apiFetch } from '@/lib/api';
 import { getToken } from '@/lib/auth';
+import { formatDisplayDate, formatDisplayTime, formatDisplayTimestamp } from '@/lib/displayFormat';
 
 export default function GeneratedSlotsPage() {
   const token = getToken();
@@ -77,7 +78,7 @@ export default function GeneratedSlotsPage() {
         <button onClick={onGenerate} disabled={isGenerating} className='rounded bg-blue-600 px-4 py-2 text-white disabled:opacity-60'>
           {isGenerating ? 'Generating...' : 'Generate Slots'}
         </button>
-        {lastGeneratedAt ? <span className='text-sm text-slate-600'>Last Generated: {new Date(lastGeneratedAt).toLocaleString()}</span> : null}
+        {lastGeneratedAt ? <span className='text-sm text-slate-600'>Last Generated: {formatDisplayTimestamp(lastGeneratedAt)}</span> : null}
       </div>
       {message ? <div className='rounded border border-green-200 bg-green-50 p-2 text-sm text-green-700'>{message}</div> : null}
       {error ? <div className='rounded border border-red-200 bg-red-50 p-2 text-sm text-red-700'>{error}</div> : null}
@@ -110,12 +111,12 @@ export default function GeneratedSlotsPage() {
           <tbody>
             {slots.map((slot: any) => (
               <tr key={slot.id} className='border-b'>
-                <td className='p-2'>{slot.available_date}</td>
+                <td className='p-2'>{formatDisplayDate(slot.available_date)}</td>
                 <td className='p-2'>{slot.host_location_name}</td>
                 <td className='p-2'>{slot.field_instance_name}</td>
                 <td className='p-2'>{slot.field_type}</td>
-                <td className='p-2'>{slot.start_time}</td>
-                <td className='p-2'>{slot.end_time}</td>
+                <td className='p-2'>{formatDisplayTime(slot.start_time)}</td>
+                <td className='p-2'>{formatDisplayTime(slot.end_time)}</td>
                 <td className='p-2'>{slot.status}</td>
               </tr>
             ))}

@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { ApiError, apiFetch } from '@/lib/api';
 import { getToken } from '@/lib/auth';
 import { getDivisionLabel } from '@/lib/divisionLabel';
+import { formatDisplayDate, formatDisplayDateTime, formatDisplayTime } from '@/lib/displayFormat';
 
 export default function ManualScheduleBuilderPage() {
   const token = getToken();
@@ -53,15 +54,7 @@ export default function ManualScheduleBuilderPage() {
   const getWeekOptionLabel = (week: any) => {
     const baseLabel = week.label || `Week ${week.week_number}`;
     if (!week.start_date) return baseLabel;
-    const parsed = new Date(week.start_date);
-    const formattedDate = Number.isNaN(parsed.getTime())
-      ? week.start_date
-      : parsed.toLocaleDateString('en-US', {
-          month: '2-digit',
-          day: '2-digit',
-          year: 'numeric',
-          timeZone: 'UTC',
-        });
+    const formattedDate = formatDisplayDate(week.start_date);
     return `${baseLabel} — ${formattedDate}`;
   };
 
@@ -163,7 +156,7 @@ export default function ManualScheduleBuilderPage() {
               <tbody>
                 {autoFillPreview.map((p: any, idx: number) => <tr key={`${p.slot_id}-${idx}`} className='border-t'>
                   <td className='p-2'>{p.proposed_matchup}</td>
-                  <td className='p-2'>{p.proposed_date} {p.proposed_start_time}</td>
+                  <td className='p-2'>{formatDisplayDateTime(p.proposed_date, p.proposed_start_time)}</td>
                   <td className='p-2'>{p.host_location}</td>
                   <td className='p-2'>{p.field}</td>
                   <td className='p-2'>{p.reason}</td>
@@ -309,7 +302,7 @@ export default function ManualScheduleBuilderPage() {
           {slots.map((s: any) => {
             const color = s.indicator === 'green' ? 'bg-emerald-50' : s.indicator === 'yellow' ? 'bg-yellow-50' : s.indicator === 'red' ? 'bg-red-50' : 'bg-white';
             return <tr key={s.slot_id || s.id} className={`align-middle ${slotId === (s.slot_id || s.id) ? 'ring-1 ring-blue-300' : ''} ${color}`}>
-              <td className='px-2 py-3 text-center'>{s.slot_date || s.available_date}</td><td className='px-2 py-3 text-center'>{s.host_location_name}</td><td className='px-2 py-3 text-center'>{s.field_instance_name}</td><td className='px-2 py-3 text-center'>{s.field_type}</td><td className='px-2 py-3 text-center'>{s.start_time}</td><td className='px-2 py-3 text-center'>{s.end_time}</td><td className='px-2 py-3 text-center'>{s.reason || '-'}</td><td className='px-2 py-3 text-center font-semibold'>{s.score ?? '-'}</td><td className='px-2 py-3 text-center'>{s.rating || '-'}</td><td className='px-2 py-3 text-center'><button className='rounded border px-2 py-1 text-xs' onClick={() => setSlotId(s.slot_id || s.id)}>Use Recommended Slot</button></td>
+              <td className='px-2 py-3 text-center'>{formatDisplayDate(s.slot_date || s.available_date)}</td><td className='px-2 py-3 text-center'>{s.host_location_name}</td><td className='px-2 py-3 text-center'>{s.field_instance_name}</td><td className='px-2 py-3 text-center'>{s.field_type}</td><td className='px-2 py-3 text-center'>{formatDisplayTime(s.start_time)}</td><td className='px-2 py-3 text-center'>{formatDisplayTime(s.end_time)}</td><td className='px-2 py-3 text-center'>{s.reason || '-'}</td><td className='px-2 py-3 text-center font-semibold'>{s.score ?? '-'}</td><td className='px-2 py-3 text-center'>{s.rating || '-'}</td><td className='px-2 py-3 text-center'><button className='rounded border px-2 py-1 text-xs' onClick={() => setSlotId(s.slot_id || s.id)}>Use Recommended Slot</button></td>
             </tr>;
           })}
         </tbody></table>
@@ -320,8 +313,8 @@ export default function ManualScheduleBuilderPage() {
           <thead><tr>{['Date', 'Time', 'Division', 'Matchup', 'Host Location', 'Field', 'Status', 'Actions'].map((h) => <th key={h} className='px-2 py-2 text-left'>{h}</th>)}</tr></thead>
           <tbody>
             {games.map((g: any) => <tr key={g.id} className='border-t'>
-              <td className='p-2'>{g.game_date || '-'}</td>
-              <td className='p-2'>{g.kickoff_time || '-'}</td>
+              <td className='p-2'>{formatDisplayDate(g.game_date)}</td>
+              <td className='p-2'>{formatDisplayTime(g.kickoff_time)}</td>
               <td className='p-2'>{g.division_name || 'Unknown Division'}</td>
               <td className='p-2'>{g.home_team_name || 'Unknown Team'} vs {g.away_team_name || 'Unknown Team'}</td>
               <td className='p-2'>{g.host_location_name || '-'}</td>
@@ -383,7 +376,7 @@ export default function ManualScheduleBuilderPage() {
         <h3 className='mb-2 font-semibold'>Move Game</h3>
         <select className='rounded border p-2' value={slotId} onChange={(e) => setSlotId(e.target.value)}>
           <option value=''>Select OPEN slot</option>
-          {slots.map((s: any) => <option key={s.slot_id || s.id} value={s.slot_id || s.id}>{s.slot_date || s.available_date} {s.start_time} - {s.host_location_name} ({s.field_type})</option>)}
+          {slots.map((s: any) => <option key={s.slot_id || s.id} value={s.slot_id || s.id}>{formatDisplayDateTime(s.slot_date || s.available_date, s.start_time)} - {s.host_location_name} ({s.field_type})</option>)}
         </select>
         <div className='mt-2 flex gap-2'>
           <button className='rounded bg-blue-600 px-3 py-2 text-white' onClick={async () => {

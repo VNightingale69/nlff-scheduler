@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { API_URL, ApiError, apiFetch } from '@/lib/api';
 import { getToken } from '@/lib/auth';
 import { getDivisionLabel } from '@/lib/divisionLabel';
+import { formatDisplayDate, formatDisplayTime } from '@/lib/displayFormat';
 
 const tabs = ['By Date', 'By Host Location', 'By Team', 'By Division'] as const;
 type TabKey = (typeof tabs)[number];
@@ -136,7 +137,7 @@ export default function ScheduleManagementPage() {
     for (const game of games) {
       const groupKey =
         tab === 'By Date'
-          ? game.date || 'No Date'
+          ? (game.date ? formatDisplayDate(game.date) : 'No Date')
           : tab === 'By Host Location'
             ? game.host_location_name || 'Unassigned Host Location'
             : tab === 'By Team'
@@ -165,9 +166,9 @@ export default function ScheduleManagementPage() {
       { key: 'repeat_matchups', label: 'Repeat Matchups', count: repeat.length, severity: repeat.length > 0 ? 'Info' : 'OK', details: repeat.map((r: any) => `${r.team_a} vs ${r.team_b} (${r.games} games)`) },
       { key: 'zero_games', label: 'Teams with Zero Games', count: zeroGames.length, severity: zeroGames.length > 0 ? 'Issue' : 'OK', details: zeroGames.map((r: any) => `${r.team_name} (${r.division_name})`) },
       { key: 'uneven_counts', label: 'Uneven Game Counts', count: uneven.length, severity: uneven.length > 0 ? 'Info' : 'OK', details: uneven.map((r: any) => `${r.team_name}: ${r.games_scheduled} games (division avg ${r.division_average})`) },
-      { key: 'double_headers', label: 'Double Headers', count: doubleHeaders.length, severity: doubleHeaders.length > 0 ? 'Info' : 'OK', details: doubleHeaders.map((r: any) => `${r.team_name} on ${r.date}: ${r.games} games`) },
-      { key: 'non_back_to_back_double_headers', label: 'Non-Back-to-Back Double Headers', count: nonBackToBack.length, severity: nonBackToBack.length > 0 ? 'Issue' : 'OK', details: nonBackToBack.map((r: any) => `${r.team_name} on ${r.date}`) },
-      { key: 'low_field_utilization', label: 'Low Field Utilization', count: lowUtilization.length, severity: lowUtilization.length > 0 ? 'Info' : 'OK', details: lowUtilization.map((r: any) => `${r.host_location_name} ${r.date}: ${r.utilization_percent}%`) },
+      { key: 'double_headers', label: 'Double Headers', count: doubleHeaders.length, severity: doubleHeaders.length > 0 ? 'Info' : 'OK', details: doubleHeaders.map((r: any) => `${r.team_name} on ${formatDisplayDate(r.date)}: ${r.games} games`) },
+      { key: 'non_back_to_back_double_headers', label: 'Non-Back-to-Back Double Headers', count: nonBackToBack.length, severity: nonBackToBack.length > 0 ? 'Issue' : 'OK', details: nonBackToBack.map((r: any) => `${r.team_name} on ${formatDisplayDate(r.date)}`) },
+      { key: 'low_field_utilization', label: 'Low Field Utilization', count: lowUtilization.length, severity: lowUtilization.length > 0 ? 'Info' : 'OK', details: lowUtilization.map((r: any) => `${r.host_location_name} ${formatDisplayDate(r.date)}: ${r.utilization_percent}%`) },
     ] as Array<{ key: string; label: string; count: number; severity: Severity; details: string[] }>;
 
     const hardErrorCount = issueSummary.filter((i) => i.severity === 'Issue').reduce((s, i) => s + i.count, 0);
@@ -330,10 +331,10 @@ export default function ScheduleManagementPage() {
             <h3 className='mb-2 text-lg font-semibold'>{groupName}</h3>
             {(groupGames as any[]).map((game) => (
               <div key={game.id} className='mb-2 rounded border p-2'>
-                <div><strong>Date:</strong> {game.date || 'N/A'}</div>
+                <div><strong>Date:</strong> {game.date ? formatDisplayDate(game.date) : 'N/A'}</div>
                 <div><strong>Host Location:</strong> {game.host_location_name || 'Unassigned'}</div>
                 <div><strong>Field:</strong> {game.field || 'Unassigned'}</div>
-                <div><strong>Time:</strong> {game.time || 'N/A'}</div>
+                <div><strong>Time:</strong> {game.time ? formatDisplayTime(game.time) : 'N/A'}</div>
                 <div><strong>Matchup:</strong> {game.home_team_name || 'TBD'} vs {game.away_team_name || 'TBD'}</div>
                 <div><strong>Division:</strong> {game.division_name || 'N/A'}</div>
               </div>
