@@ -4996,11 +4996,27 @@ def list_public_games(season_id: uuid.UUID | None = None, host_location_id: uuid
     total = q.count(); items = q.order_by(Game.game_date, Game.kickoff_time).offset((page - 1) * page_size).limit(page_size).all()
     return PagedResponse(items=[PublicGameRead(id=g.id,game_date=g.game_date,kickoff_time=g.kickoff_time,host_location_id=g.field.host_location.id,host_location_name=g.field.host_location.name,field_id=g.field.id,field_name=g.field.name,organization_id=g.field.host_location.organization.id,organization_name=g.field.host_location.organization.name,division_id=g.home_team.division_id,division_name=g.home_team.division.name,week_id=g.week_id,week_number=(g.week.week_number if g.week else None),home_team_id=g.home_team_id,home_team_name=g.home_team.name,away_team_id=g.away_team_id,away_team_name=g.away_team.name,game_status_id=g.game_status_id,game_status_code=g.status.code,game_status_label=g.status.label) for g in items], total=total, page=page, page_size=page_size)
 
+@router.get('/public/schedule/options')
 @router.get('/public/schedule-filters')
 def list_public_schedule_filters(db: Session = Depends(get_db)):
-    games = db.query(Game).join(Game.season).join(Game.status).join(Game.field).join(Field.host_location).join(HostLocation.organization).join(Game.home_team).filter(Season.schedule_status == 'published').all()
-    host_locations = {(g.field.host_location.id, g.field.host_location.name) for g in games}; organizations = {(g.field.host_location.organization.id, g.field.host_location.organization.name) for g in games}; divisions = {(g.home_team.division.id, g.home_team.division.name) for g in games}; weeks = {(g.week.id, g.week.week_number) for g in games}; teams = {(g.home_team.id, g.home_team.name) for g in games} | {(g.away_team.id, g.away_team.name) for g in games}; statuses = {(g.status.code, g.status.label) for g in games}
-    return {'host_locations': [{'id': item[0], 'name': item[1]} for item in sorted(host_locations, key=lambda x: x[1])], 'organizations': [{'id': item[0], 'name': item[1]} for item in sorted(organizations, key=lambda x: x[1])], 'divisions': [{'id': item[0], 'name': item[1]} for item in sorted(divisions, key=lambda x: x[1])], 'weeks': [{'id': item[0], 'week_number': item[1]} for item in sorted(weeks, key=lambda x: x[1])], 'teams': [{'id': item[0], 'name': item[1]} for item in sorted(teams, key=lambda x: x[1])], 'statuses': [{'code': item[0], 'label': item[1]} for item in sorted(statuses, key=lambda x: x[1])]}
+    host_locations = db.query(HostLocation).join(HostLocation.organization).filter(
+        HostLocation.is_active.is_(True),
+        Organization.is_active.is_(True),
+    ).order_by(HostLocation.name).all()
+    organizations = db.query(Organization).filter(Organization.is_active.is_(True)).order_by(Organization.name).all()
+    divisions = db.query(Division).filter(Division.is_active.is_(True)).order_by(Division.sort_order, Division.name).all()
+    weeks = db.query(Week).join(Week.season).filter(Season.is_active.is_(True)).order_by(Week.start_date, Week.week_number).all()
+    teams = db.query(Team).filter(Team.is_active.is_(True)).order_by(Team.name).all()
+    statuses = db.query(GameStatus).filter(GameStatus.is_active.is_(True)).order_by(GameStatus.label).all()
+
+    return {
+        'host_locations': [{'id': item.id, 'name': item.name} for item in host_locations],
+        'organizations': [{'id': item.id, 'name': item.name} for item in organizations],
+        'divisions': [{'id': item.id, 'name': item.name, 'division_group': item.division_group} for item in divisions],
+        'weeks': [{'id': item.id, 'week_number': item.week_number, 'start_date': item.start_date, 'label': f'Week {item.week_number}'} for item in weeks],
+        'teams': [{'id': item.id, 'name': item.name} for item in teams],
+        'statuses': [{'code': item.code, 'label': item.label} for item in statuses],
+    }
 
 
 
@@ -5571,6 +5587,37 @@ def _empty_quality_report() -> dict:
         'field_utilization': [],
     }
 
+
+
+@router.get('/schedule-management/publish-diagnostics', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+def schedule_publish_diagnostics(season_id: uuid.UUID | None = None, db: Session = Depends(get_db)):
+    if season_id:
+        season = db.query(Season).filter(Season.id == season_id).first()
+    else:
+        season = db.query(Season).filter(Season.is_active.is_(True)).order_by(Season.start_date.desc()).first()
+    if not season:
+        raise HTTPException(404, 'No season found')
+
+    counts = dict(
+        db.query(func.lower(GameStatus.code), func.count(Game.id))
+        .join(Game, Game.game_status_id == GameStatus.id)
+        .filter(Game.season_id == season.id)
+        .group_by(func.lower(GameStatus.code))
+        .all()
+    )
+    total = int(sum(counts.values()))
+    published = int(counts.get('published', 0))
+    archived = int(counts.get('archived', 0))
+    draft = max(total - published - archived, 0)
+    return {
+        'season_id': str(season.id),
+        'season_name': season.name,
+        'schedule_status': season.schedule_status,
+        'total_scheduled_games': total,
+        'published_games': published,
+        'draft_games': draft,
+        'archived_games': archived,
+    }
 
 @router.get('/schedule-management/quality-report', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def schedule_quality_report(division_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, db: Session = Depends(get_db)):

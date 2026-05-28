@@ -34,6 +34,7 @@ export default function ScheduleManagementPage() {
   const [qualityLoading, setQualityLoading] = useState(true);
   const [qualityError, setQualityError] = useState('');
   const [error, setError] = useState('');
+  const [publishDiagnostics, setPublishDiagnostics] = useState<any | null>(null);
 
   const qs = useMemo(
     () =>
@@ -57,10 +58,11 @@ export default function ScheduleManagementPage() {
       fields: opts.fields || [],
     });
 
-    const [gameResponse, conflictResponse, qualityResult] = await Promise.allSettled([
+    const [gameResponse, conflictResponse, qualityResult, publishDiagnosticsResult] = await Promise.allSettled([
       apiFetch(`/schedule-management/games${qs ? `?${qs}` : ''}`, {}, token),
       apiFetch('/schedule-management/conflicts', {}, token),
       apiFetch(`/schedule-management/quality-report${qs ? `?${qs}` : ''}`, {}, token),
+      apiFetch('/schedule-management/publish-diagnostics', {}, token),
     ]);
 
     if (gameResponse.status === 'rejected' || conflictResponse.status === 'rejected') {
@@ -69,6 +71,12 @@ export default function ScheduleManagementPage() {
 
     setGames((gameResponse.value as any).items || []);
     setConflicts((conflictResponse.value as any).conflicts || []);
+
+    if (publishDiagnosticsResult.status === 'fulfilled') {
+      setPublishDiagnostics((publishDiagnosticsResult.value as any) || null);
+    } else {
+      setPublishDiagnostics(null);
+    }
 
     if (qualityResult.status === 'fulfilled') {
       setQuality((qualityResult.value as any) || null);
@@ -203,6 +211,22 @@ export default function ScheduleManagementPage() {
       <h1 className='text-2xl font-bold'>Schedule Management</h1>
 
       {error ? <div className='rounded border border-red-300 bg-red-50 p-2 text-red-700'>{error}</div> : null}
+
+      {publishDiagnostics ? <div className='rounded border bg-slate-50 p-3 text-sm'>
+        <div className='flex flex-wrap items-center justify-between gap-2'>
+          <div><span className='font-semibold'>Season:</span> {publishDiagnostics.season_name} · <span className='font-semibold'>Schedule Status:</span> {String(publishDiagnostics.schedule_status || 'draft').toUpperCase()}</div>
+          <div className='flex gap-2'>
+            <button className='rounded bg-emerald-700 px-3 py-1 text-white' onClick={async()=>{ await apiFetch(`/seasons/${publishDiagnostics.season_id}/publish-schedule`, { method:'POST' }, token); await load(); }}>Publish Schedule</button>
+            <button className='rounded border px-3 py-1' onClick={async()=>{ await apiFetch(`/seasons/${publishDiagnostics.season_id}/unpublish-schedule`, { method:'POST' }, token); await load(); }}>Unpublish</button>
+          </div>
+        </div>
+        <div className='mt-2 grid grid-cols-2 gap-2 md:grid-cols-4'>
+          <div>Total Scheduled Games: <span className='font-semibold'>{publishDiagnostics.total_scheduled_games ?? 0}</span></div>
+          <div>Published Games: <span className='font-semibold'>{publishDiagnostics.published_games ?? 0}</span></div>
+          <div>Draft Games: <span className='font-semibold'>{publishDiagnostics.draft_games ?? 0}</span></div>
+          <div>Archived Games: <span className='font-semibold'>{publishDiagnostics.archived_games ?? 0}</span></div>
+        </div>
+      </div> : null}
 
       <div className='grid gap-2 md:grid-cols-6'>
         <input type='date' className='rounded border p-2' value={filters.date} onChange={(e) => setFilters({ ...filters, date: e.target.value })} aria-label='Date' />
