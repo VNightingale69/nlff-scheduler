@@ -30,7 +30,7 @@ export default function PublicSchedulePage() {
     setLoading(true);
     const q = new URLSearchParams(Object.fromEntries(Object.entries(activeFilters).filter(([, v]) => v)));
     const [gamesRes, optionsRes] = await Promise.all([
-      fetch(`${API_URL}/public/games?${q.toString()}`),
+      fetch(`${API_URL}/public/schedule?${q.toString()}`),
       fetch(`${API_URL}/public/schedule-filters`),
     ]);
     setGames(((await gamesRes.json()).items || []));
@@ -49,7 +49,7 @@ export default function PublicSchedulePage() {
       <select className='rounded border p-2' value={filters.team_id||''} onChange={e=>setFilters({...filters,team_id:e.target.value})}><option value=''>All Teams</option>{options.teams.map((o:any)=><option key={o.id} value={o.id}>{o.name}</option>)}</select>
       <select className='rounded border p-2' value={filters.status_code||''} onChange={e=>setFilters({...filters,status_code:e.target.value})}><option value=''>All Statuses</option>{options.statuses.map((o:any)=><option key={o.code} value={o.code}>{o.label}</option>)}</select>
     </div>
-    <div className='flex gap-2'><button className='rounded bg-slate-800 px-3 py-2 text-white' onClick={() => load(filters)}>Apply Filters</button><button className='rounded border px-3 py-2' onClick={()=>{ setFilters({}); load({}); }}>Reset</button></div>
+    <div className='flex flex-wrap gap-2'><button className='rounded bg-slate-800 px-3 py-2 text-white' onClick={() => load(filters)}>Apply Filters</button><button className='rounded border px-3 py-2' onClick={()=>{ setFilters({}); load({}); }}>Reset</button><button className='rounded border px-3 py-2' onClick={()=>window.print()}>Print / PDF</button><a className='rounded border px-3 py-2' href={`${API_URL}/schedule-management/export.csv`} target='_blank'>Export CSV</a></div>
     {loading && <div className='rounded border p-4'>Loading published schedule...</div>}
     {empty && <div className='rounded border p-4'>No published games found for the selected filters.</div>}
     {!loading && games.length>0 && <div className='overflow-x-auto rounded border'><table className='min-w-full text-sm'><thead className='bg-slate-100 text-left'><tr><th className='p-2'>Date</th><th className='p-2'>Time</th><th className='p-2'>Host location</th><th className='p-2'>Field</th><th className='p-2'>Division</th><th className='p-2'>Home team</th><th className='p-2'>Away team</th><th className='p-2'>Game status</th></tr></thead><tbody>{games.map(g=><tr key={g.id} className='border-t'><td className='p-2'>{g.game_date}</td><td className='p-2'>{g.kickoff_time}</td><td className='p-2'>{g.host_location_name}</td><td className='p-2'>{g.field_name}</td><td className='p-2'>{g.division_name}</td><td className='p-2'>{g.home_team_name}</td><td className='p-2'>{g.away_team_name}</td><td className='p-2'>{g.game_status_label}</td></tr>)}</tbody></table></div>}

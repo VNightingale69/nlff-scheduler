@@ -144,6 +144,7 @@ class Season(Base, TimestampMixin):
     name: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
     start_date: Mapped[Date] = mapped_column(Date, nullable=False)
     end_date: Mapped[Date] = mapped_column(Date, nullable=False)
+    schedule_status: Mapped[str] = mapped_column(String(20), nullable=False, default='draft')
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
 class Week(Base, TimestampMixin):

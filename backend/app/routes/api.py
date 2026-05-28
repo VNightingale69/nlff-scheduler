@@ -1450,7 +1450,7 @@ def seed_game_statuses_endpoint(db: Session = Depends(get_db)):
 @router.get('/seasons', response_model=PagedResponse[dict], dependencies=[Depends(get_current_user)])
 def list_seasons(page:int=1,page_size:int=50, db:Session=Depends(get_db)):
     q=db.query(Season).order_by(Season.start_date.desc())
-    return PagedResponse(items=[{"id":x.id,"name":x.name} for x in q.offset((page-1)*page_size).limit(page_size).all()], total=q.count(), page=page, page_size=page_size)
+    return PagedResponse(items=[{"id":x.id,"name":x.name, "schedule_status": x.schedule_status} for x in q.offset((page-1)*page_size).limit(page_size).all()], total=q.count(), page=page, page_size=page_size)
 
 @router.get('/weeks', response_model=PagedResponse[dict], dependencies=[Depends(get_current_user)])
 def list_weeks(season_id:uuid.UUID|None=None, page:int=1,page_size:int=100, db:Session=Depends(get_db)):
@@ -1461,7 +1461,7 @@ def list_weeks(season_id:uuid.UUID|None=None, page:int=1,page_size:int=100, db:S
 
 @router.post('/seasons', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def create_season(payload: dict, db: Session = Depends(get_db)):
-    season = Season(name=payload['name'], start_date=payload['start_date'], end_date=payload['end_date'], is_active=bool(payload.get('is_active', True)))
+    season = Season(name=payload['name'], start_date=payload['start_date'], end_date=payload['end_date'], schedule_status=payload.get('schedule_status', 'draft'), is_active=bool(payload.get('is_active', True)))
     db.add(season); db.commit(); db.refresh(season)
     return {"id": season.id, "name": season.name}
 
@@ -1469,8 +1469,59 @@ def create_season(payload: dict, db: Session = Depends(get_db)):
 def update_season(season_id: uuid.UUID, payload: dict, db: Session = Depends(get_db)):
     season = db.query(Season).filter(Season.id == season_id).first()
     if not season: raise HTTPException(404, 'Season not found')
-    season.name = payload.get('name', season.name); season.start_date = payload.get('start_date', season.start_date); season.end_date = payload.get('end_date', season.end_date); season.is_active = bool(payload.get('is_active', season.is_active))
+    season.name = payload.get('name', season.name); season.start_date = payload.get('start_date', season.start_date); season.end_date = payload.get('end_date', season.end_date); season.schedule_status = payload.get('schedule_status', season.schedule_status); season.is_active = bool(payload.get('is_active', season.is_active))
     db.commit(); db.refresh(season); return {"id": season.id, "name": season.name}
+
+
+def _validate_season_publishability(db: Session, season_id: uuid.UUID) -> dict[str, list[str]]:
+    games = db.query(Game).join(Game.home_team).filter(Game.season_id == season_id).all()
+    hard_errors: list[str] = []
+    warnings: list[str] = []
+    team_time: set[tuple[uuid.UUID, date, time]] = set()
+    field_time: set[tuple[uuid.UUID, date, time]] = set()
+    matchup_counts: dict[tuple[uuid.UUID, uuid.UUID], int] = {}
+    for g in games:
+        ht = (g.home_team_id, g.game_date, g.kickoff_time)
+        at = (g.away_team_id, g.game_date, g.kickoff_time)
+        if ht in team_time or at in team_time:
+            hard_errors.append('team double-bookings detected')
+        team_time.add(ht); team_time.add(at)
+        if g.field_id:
+            ft = (g.field_id, g.game_date, g.kickoff_time)
+            if ft in field_time:
+                hard_errors.append('field double-bookings detected')
+            field_time.add(ft)
+        div = g.home_team.division if g.home_team else None
+        if div and g.field and g.field.layout_type and div.required_field_layout_type != g.field.layout_type:
+            hard_errors.append('invalid field type detected')
+        pair = tuple(sorted([g.home_team_id, g.away_team_id]))
+        matchup_counts[pair] = matchup_counts.get(pair, 0) + 1
+    if not games:
+        hard_errors.append('missing required games')
+    if any(v > 1 for v in matchup_counts.values()):
+        warnings.append('repeat matchups detected')
+    return {'hard_errors': sorted(set(hard_errors)), 'warnings': sorted(set(warnings))}
+
+
+@router.post('/seasons/{season_id}/publish-schedule', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+def publish_schedule(season_id: uuid.UUID, db: Session = Depends(get_db)):
+    season = db.query(Season).filter(Season.id == season_id).first()
+    if not season: raise HTTPException(404, 'Season not found')
+    validation = _validate_season_publishability(db, season_id)
+    if validation['hard_errors']:
+        raise HTTPException(status_code=400, detail={'error': 'publish_validation_failed', 'hard_errors': validation['hard_errors'], 'warnings': validation['warnings']})
+    season.schedule_status = 'published'
+    db.commit()
+    return {'ok': True, 'season_id': str(season_id), 'schedule_status': season.schedule_status, 'warnings': validation['warnings']}
+
+
+@router.post('/seasons/{season_id}/unpublish-schedule', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+def unpublish_schedule(season_id: uuid.UUID, db: Session = Depends(get_db)):
+    season = db.query(Season).filter(Season.id == season_id).first()
+    if not season: raise HTTPException(404, 'Season not found')
+    season.schedule_status = 'draft'
+    db.commit()
+    return {'ok': True, 'season_id': str(season_id), 'schedule_status': season.schedule_status}
 
 @router.post('/weeks', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def create_week(payload: dict, db: Session = Depends(get_db)):
@@ -4929,22 +4980,25 @@ def run_same_community_home_field_repair(payload: dict, db: Session = Depends(ge
     }
 
 @router.get('/public/games', response_model=PagedResponse[PublicGameRead])
-def list_public_games(host_location_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, division_id: uuid.UUID | None = None, week_id: uuid.UUID | None = None, team_id: uuid.UUID | None = None, status_code: str | None = None, page: int = 1, page_size: int = 50, db: Session = Depends(get_db)):
+@router.get('/public/schedule', response_model=PagedResponse[PublicGameRead])
+def list_public_games(season_id: uuid.UUID | None = None, host_location_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, division_id: uuid.UUID | None = None, week_id: uuid.UUID | None = None, team_id: uuid.UUID | None = None, status_code: str | None = None, date: date | None = None, page: int = 1, page_size: int = 50, db: Session = Depends(get_db)):
     home_team = aliased(Team); away_team = aliased(Team)
-    q = db.query(Game).join(Game.status).join(Game.field).join(Field.host_location).join(HostLocation.organization).join(home_team, Game.home_team).join(away_team, Game.away_team)
-    q = q.filter(GameStatus.code == 'published')
+    q = db.query(Game).join(Game.season).join(Game.status).join(Game.field).join(Field.host_location).join(HostLocation.organization).join(home_team, Game.home_team).join(away_team, Game.away_team)
+    q = q.filter(Season.schedule_status == 'published')
+    if season_id: q = q.filter(Game.season_id == season_id)
     if host_location_id: q = q.filter(Field.host_location_id == host_location_id)
     if organization_id: q = q.filter(HostLocation.organization_id == organization_id)
     if division_id: q = q.filter(home_team.division_id == division_id)
     if week_id: q = q.filter(Game.week_id == week_id)
     if team_id: q = q.filter((Game.home_team_id == team_id) | (Game.away_team_id == team_id))
+    if date: q = q.filter(Game.game_date == date)
     if status_code: q = q.filter(GameStatus.code == status_code)
     total = q.count(); items = q.order_by(Game.game_date, Game.kickoff_time).offset((page - 1) * page_size).limit(page_size).all()
     return PagedResponse(items=[PublicGameRead(id=g.id,game_date=g.game_date,kickoff_time=g.kickoff_time,host_location_id=g.field.host_location.id,host_location_name=g.field.host_location.name,field_id=g.field.id,field_name=g.field.name,organization_id=g.field.host_location.organization.id,organization_name=g.field.host_location.organization.name,division_id=g.home_team.division_id,division_name=g.home_team.division.name,week_id=g.week_id,week_number=(g.week.week_number if g.week else None),home_team_id=g.home_team_id,home_team_name=g.home_team.name,away_team_id=g.away_team_id,away_team_name=g.away_team.name,game_status_id=g.game_status_id,game_status_code=g.status.code,game_status_label=g.status.label) for g in items], total=total, page=page, page_size=page_size)
 
 @router.get('/public/schedule-filters')
 def list_public_schedule_filters(db: Session = Depends(get_db)):
-    games = db.query(Game).join(Game.status).join(Game.field).join(Field.host_location).join(HostLocation.organization).join(Game.home_team).filter(GameStatus.code == 'published').all()
+    games = db.query(Game).join(Game.season).join(Game.status).join(Game.field).join(Field.host_location).join(HostLocation.organization).join(Game.home_team).filter(Season.schedule_status == 'published').all()
     host_locations = {(g.field.host_location.id, g.field.host_location.name) for g in games}; organizations = {(g.field.host_location.organization.id, g.field.host_location.organization.name) for g in games}; divisions = {(g.home_team.division.id, g.home_team.division.name) for g in games}; weeks = {(g.week.id, g.week.week_number) for g in games}; teams = {(g.home_team.id, g.home_team.name) for g in games} | {(g.away_team.id, g.away_team.name) for g in games}; statuses = {(g.status.code, g.status.label) for g in games}
     return {'host_locations': [{'id': item[0], 'name': item[1]} for item in sorted(host_locations, key=lambda x: x[1])], 'organizations': [{'id': item[0], 'name': item[1]} for item in sorted(organizations, key=lambda x: x[1])], 'divisions': [{'id': item[0], 'name': item[1]} for item in sorted(divisions, key=lambda x: x[1])], 'weeks': [{'id': item[0], 'week_number': item[1]} for item in sorted(weeks, key=lambda x: x[1])], 'teams': [{'id': item[0], 'name': item[1]} for item in sorted(teams, key=lambda x: x[1])], 'statuses': [{'code': item[0], 'label': item[1]} for item in sorted(statuses, key=lambda x: x[1])]}
 
