@@ -1,14 +1,14 @@
 """add season schedule status
 
 Revision ID: 20260527_0015
-Revises: 20260526_0014_field_config_option_area_fk_cascade
+Revises: 20260526_0014
 Create Date: 2026-05-27
 """
 from alembic import op
 import sqlalchemy as sa
 
 revision = '20260527_0015'
-down_revision = '20260526_0014_field_config_option_area_fk_cascade'
+down_revision = '20260526_0014'
 branch_labels = None
 depends_on = None
 
