@@ -8,7 +8,7 @@ import { getDivisionLabel } from '@/lib/divisionLabel';
 const tabs = ['By Date', 'By Host Location', 'By Team', 'By Division'] as const;
 type TabKey = (typeof tabs)[number];
 
-type Severity = 'OK' | 'Warning' | 'Issue';
+type Severity = 'OK' | 'Info' | 'Warning' | 'Issue';
 
 export default function ScheduleManagementPage() {
   const token = getToken();
@@ -125,6 +125,7 @@ export default function ScheduleManagementPage() {
 
   const statusClass = (status: Severity) => {
     if (status === 'OK') return 'bg-emerald-100 text-emerald-700';
+    if (status === 'Info') return 'bg-sky-100 text-sky-700';
     if (status === 'Warning') return 'bg-amber-100 text-amber-700';
     return 'bg-red-100 text-red-700';
   };
@@ -161,29 +162,22 @@ export default function ScheduleManagementPage() {
 
     const issueSummary = [
       { key: 'conflicts', label: 'Conflicts', count: conflicts.length, severity: conflicts.length > 0 ? 'Issue' : 'OK', details: conflicts.map((c: any) => c.message) },
-      { key: 'repeat_matchups', label: 'Repeat Matchups', count: repeat.length, severity: repeat.length > 0 ? 'Warning' : 'OK', details: repeat.map((r: any) => `${r.team_a} vs ${r.team_b} (${r.games} games)`) },
+      { key: 'repeat_matchups', label: 'Repeat Matchups', count: repeat.length, severity: repeat.length > 0 ? 'Info' : 'OK', details: repeat.map((r: any) => `${r.team_a} vs ${r.team_b} (${r.games} games)`) },
       { key: 'zero_games', label: 'Teams with Zero Games', count: zeroGames.length, severity: zeroGames.length > 0 ? 'Issue' : 'OK', details: zeroGames.map((r: any) => `${r.team_name} (${r.division_name})`) },
-      { key: 'uneven_counts', label: 'Uneven Game Counts', count: uneven.length, severity: uneven.length > 0 ? 'Warning' : 'OK', details: uneven.map((r: any) => `${r.team_name}: ${r.games_scheduled} games (division avg ${r.division_average})`) },
-      { key: 'double_headers', label: 'Double Headers', count: doubleHeaders.length, severity: doubleHeaders.length > 0 ? 'Warning' : 'OK', details: doubleHeaders.map((r: any) => `${r.team_name} on ${r.date}: ${r.games} games`) },
+      { key: 'uneven_counts', label: 'Uneven Game Counts', count: uneven.length, severity: uneven.length > 0 ? 'Info' : 'OK', details: uneven.map((r: any) => `${r.team_name}: ${r.games_scheduled} games (division avg ${r.division_average})`) },
+      { key: 'double_headers', label: 'Double Headers', count: doubleHeaders.length, severity: doubleHeaders.length > 0 ? 'Info' : 'OK', details: doubleHeaders.map((r: any) => `${r.team_name} on ${r.date}: ${r.games} games`) },
       { key: 'non_back_to_back_double_headers', label: 'Non-Back-to-Back Double Headers', count: nonBackToBack.length, severity: nonBackToBack.length > 0 ? 'Issue' : 'OK', details: nonBackToBack.map((r: any) => `${r.team_name} on ${r.date}`) },
-      { key: 'low_field_utilization', label: 'Low Field Utilization', count: lowUtilization.length, severity: lowUtilization.length > 0 ? 'Warning' : 'OK', details: lowUtilization.map((r: any) => `${r.host_location_name} ${r.date}: ${r.utilization_percent}%`) },
+      { key: 'low_field_utilization', label: 'Low Field Utilization', count: lowUtilization.length, severity: lowUtilization.length > 0 ? 'Info' : 'OK', details: lowUtilization.map((r: any) => `${r.host_location_name} ${r.date}: ${r.utilization_percent}%`) },
     ] as Array<{ key: string; label: string; count: number; severity: Severity; details: string[] }>;
 
-    const issueCount = issueSummary.filter((i) => i.severity === 'Issue').reduce((s, i) => s + i.count, 0);
-    const avoidableWarningKeys = new Set(['repeat_matchups', 'uneven_counts']);
-    const warningCount = issueSummary
-      .filter((i) => i.severity === 'Warning' && avoidableWarningKeys.has(i.key))
-      .reduce((s, i) => s + i.count, 0);
+    const hardErrorCount = issueSummary.filter((i) => i.severity === 'Issue').reduce((s, i) => s + i.count, 0);
 
     let healthLabel = 'Excellent';
     let healthClass = 'bg-emerald-100 text-emerald-800 border-emerald-300';
 
-    if (issueCount > 0) {
+    if (hardErrorCount > 0) {
       healthLabel = 'Blocked';
       healthClass = 'bg-red-100 text-red-800 border-red-300';
-    } else if (warningCount > 0) {
-      healthLabel = warningCount >= 5 ? 'Needs Review' : 'Good';
-      healthClass = warningCount >= 5 ? 'bg-orange-100 text-orange-800 border-orange-300' : 'bg-amber-100 text-amber-800 border-amber-300';
     }
 
     return { issueSummary, healthLabel, healthClass };
