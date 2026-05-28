@@ -4938,14 +4938,27 @@ def optimize_schedule(payload: dict, db: Session = Depends(get_db)):
     preserve_two_location_limit = bool(payload.get('preserve_two_location_limit', True))
     dry_run = bool(payload.get('dry_run', True))
 
-    diagnostics = run_post_schedule_repair_pass(
-        db,
-        season_id,
-        optimize_same_community_home=optimize_same_community_home,
-        repair_double_headers=repair_double_headers,
-        reduce_repeat_matchups=reduce_repeat_matchups,
-        preserve_two_location_limit=preserve_two_location_limit,
-    )
+    try:
+        diagnostics = run_post_schedule_repair_pass(
+            db,
+            season_id,
+            optimize_same_community_home=optimize_same_community_home,
+            repair_double_headers=repair_double_headers,
+            reduce_repeat_matchups=reduce_repeat_matchups,
+            preserve_two_location_limit=preserve_two_location_limit,
+        )
+    except Exception as exc:
+        db.rollback()
+        logger.exception('Schedule optimization failed for season_id=%s', season_id)
+        return {
+            'ran': False,
+            'dry_run': dry_run,
+            'summary': {'error': str(exc)},
+            'proposed_changes': [],
+            'rejected_changes': [],
+            'remaining_violations': [],
+            'warnings': [f'Optimization failed: {exc}'],
+        }
 
     proposed_changes = list((diagnostics.get('proposed_changes') or []))
     rejected_changes = list((diagnostics.get('rejected_changes') or []))
@@ -4963,6 +4976,7 @@ def optimize_schedule(payload: dict, db: Session = Depends(get_db)):
         'proposed_changes': proposed_changes,
         'rejected_changes': rejected_changes,
         'remaining_violations': diagnostics.get('remaining_violations') or [],
+        'warnings': diagnostics.get('warnings') or [],
     }
 @router.post('/manual-schedule-builder/repair/same-community-home-fields', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def run_same_community_home_field_repair(payload: dict, db: Session = Depends(get_db)):
@@ -5026,6 +5040,48 @@ def _required_field_type_for_division(division: Division | None) -> str:
     layout_type = (division.required_field_layout_type or '').strip().upper()
     large_layout_tokens = ('FIFTY_THREE', '53', 'LARGE', 'FULL')
     return 'LARGE' if any(token in layout_type for token in large_layout_tokens) else 'SMALL'
+
+
+def _game_required_field_type(game: Game | None) -> str | None:
+    """Return required field type for a game based on division settings."""
+    if not game:
+        return None
+    division = getattr(game, 'division', None)
+    if not division:
+        home_team = getattr(game, 'home_team', None)
+        division = getattr(home_team, 'division', None) if home_team else None
+    if not division:
+        away_team = getattr(game, 'away_team', None)
+        division = getattr(away_team, 'division', None) if away_team else None
+    if not division:
+        return None
+    required_type = _required_field_type_for_division(division)
+    return required_type.strip().upper() if required_type else None
+
+
+def _slot_field_type(slot: GameSlot | None) -> str | None:
+    """Return actual field type for a slot from best available field references."""
+    if not slot:
+        return None
+    slot_type = getattr(slot, 'field_type', None)
+    if slot_type:
+        return str(slot_type).strip().upper()
+    field_instance = getattr(slot, 'field_instance', None)
+    if field_instance:
+        instance_type = getattr(field_instance, 'field_type', None)
+        if instance_type:
+            return str(instance_type).strip().upper()
+        area = getattr(field_instance, 'physical_field_area', None)
+        if area:
+            area_type = getattr(area, 'field_type', None)
+            if area_type:
+                return str(area_type).strip().upper()
+        config = getattr(field_instance, 'field_config_option', None)
+        if config:
+            config_type = getattr(config, 'field_type', None)
+            if config_type:
+                return str(config_type).strip().upper()
+    return None
 
 
 def _enforce_host_owner_home_team(
@@ -5241,6 +5297,7 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
 
     def validate_schedule_integrity(games: list[Game], *, enforce_double_header_preference: bool = False) -> dict[str, object]:
         errors: list[str] = []
+        warnings: list[str] = []
         team_time_slots: dict[tuple[uuid.UUID, date, time], str] = {}
         field_time_slots: dict[tuple[uuid.UUID | None, date, time], str] = {}
         game_ids_seen: set[uuid.UUID] = set()
@@ -5258,8 +5315,12 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
             if slot.assigned_game_id != g.id:
                 errors.append(f'game {g.id} has inconsistent slot assignment')
                 continue
-            if slot.field_type and g.field_type and slot.field_type != g.field_type:
-                errors.append(f'game {g.id} has invalid field type assignment')
+            required_type = _game_required_field_type(g)
+            actual_type = _slot_field_type(slot)
+            if required_type and actual_type and required_type != actual_type:
+                errors.append(f'game {g.id} has invalid field type assignment required={required_type} actual={actual_type}')
+            elif not required_type or not actual_type:
+                warnings.append(f'Unable to determine field type for game/slot game_id={g.id} slot_id={slot.id}')
             if not g.game_date or not g.kickoff_time:
                 errors.append(f'game {g.id} missing date/time')
                 continue
@@ -5303,7 +5364,7 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
                 if a.host_location_id and b.host_location_id and a.host_location_id != b.host_location_id:
                     errors.append(f'double-header location violation: team {tid} spans different host locations')
 
-        return {'valid': not errors, 'errors': errors}
+        return {'valid': not errors, 'errors': errors, 'warnings': warnings}
 
     def _collect_weekly_pairs() -> list[tuple[uuid.UUID, uuid.UUID, list[Game]]]:
         by_key: dict[tuple[uuid.UUID, uuid.UUID], list[Game]] = {}
@@ -5545,6 +5606,7 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
             'violations_remaining': same_remaining,
             'unrepaired_reasons': same_unrepaired,
         },
+        'warnings': final_validation.get('warnings') or [],
     }
 
 
