@@ -363,7 +363,7 @@ class PublicGameRead(BaseModel):
     id: uuid.UUID
     game_date: date
     kickoff_time: time
-    host_location_id: uuid.UUID
+    host_location_id: uuid.UUID | None
     host_location_name: str
     field_id: uuid.UUID | None
     field_name: str
@@ -390,3 +390,4 @@ class PagedResponse(GenericModel, Generic[T]):
     total: int
     page: int
     page_size: int
+    message: str | None = None

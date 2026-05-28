@@ -26,14 +26,17 @@ export default function PublicSchedulePage() {
   const [filters, setFilters] = useState<Record<string, string>>({});
   const [options, setOptions] = useState<any>({ host_locations: [], organizations: [], divisions: [], weeks: [], teams: [], statuses: [] });
   const [loading, setLoading] = useState(true);
+  const [message, setMessage] = useState('');
   const load = async (activeFilters: Record<string, string> = filters) => {
     setLoading(true);
-    const q = new URLSearchParams(Object.fromEntries(Object.entries(activeFilters).filter(([, v]) => v)));
+    const q = new URLSearchParams({ ...Object.fromEntries(Object.entries(activeFilters).filter(([, v]) => v)), page_size: '1000' });
     const [gamesRes, optionsRes] = await Promise.all([
       fetch(`${API_URL}/public/schedule?${q.toString()}`),
       fetch(`${API_URL}/public/schedule/options`),
     ]);
-    setGames(((await gamesRes.json()).items || []));
+    const gamesPayload = await gamesRes.json();
+    setGames(gamesPayload.items || []);
+    setMessage(gamesPayload.message || '');
     setOptions(await optionsRes.json());
     setLoading(false);
   };
@@ -52,7 +55,7 @@ export default function PublicSchedulePage() {
     </div>
     <div className='flex flex-wrap gap-2'><button className='rounded bg-slate-800 px-3 py-2 text-white' onClick={() => load(filters)}>Apply Filters</button><button className='rounded border px-3 py-2' onClick={()=>{ setFilters({}); load({}); }}>Reset</button><button className='rounded border px-3 py-2' onClick={()=>window.print()}>Print / PDF</button><a className='rounded border px-3 py-2' href={`${API_URL}/schedule-management/export.csv`} target='_blank'>Export CSV</a></div>
     {loading && <div className='rounded border p-4'>Loading published schedule...</div>}
-    {empty && <div className='rounded border p-4'>{hasActiveFilters ? 'No games match the selected filters.' : 'No published games are currently available.'}</div>}
+    {empty && <div className='rounded border p-4'>{message || (hasActiveFilters ? 'No games match the selected filters.' : 'No published schedule is currently available.')}</div>}
     {!loading && games.length>0 && <div className='overflow-x-auto rounded border'><table className='min-w-full text-sm'><thead className='bg-slate-100 text-left'><tr><th className='p-2'>Date</th><th className='p-2'>Time</th><th className='p-2'>Host location</th><th className='p-2'>Field</th><th className='p-2'>Division</th><th className='p-2'>Home team</th><th className='p-2'>Away team</th><th className='p-2'>Game status</th></tr></thead><tbody>{games.map(g=><tr key={g.id} className='border-t'><td className='p-2'>{g.game_date}</td><td className='p-2'>{g.kickoff_time}</td><td className='p-2'>{g.host_location_name}</td><td className='p-2'>{g.field_name}</td><td className='p-2'>{g.division_name}</td><td className='p-2'>{g.home_team_name}</td><td className='p-2'>{g.away_team_name}</td><td className='p-2'>{g.game_status_label}</td></tr>)}</tbody></table></div>}
   </div>;
 }
