@@ -5084,7 +5084,11 @@ def run_same_community_home_field_repair(payload: dict, db: Session = Depends(ge
 def list_public_games(season_id: uuid.UUID | None = None, host_location_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, division_id: uuid.UUID | None = None, week_id: uuid.UUID | None = None, team_id: uuid.UUID | None = None, status_code: str | None = None, date: date | None = None, page: int = 1, page_size: int = 50, db: Session = Depends(get_db)):
     home_team = aliased(Team); away_team = aliased(Team)
     q = db.query(Game).join(Game.season).join(Game.status).join(Game.field).join(Field.host_location).join(HostLocation.organization).join(home_team, Game.home_team).join(away_team, Game.away_team)
-    q = q.filter(Season.schedule_status == 'published')
+    q = q.filter(func.lower(Season.schedule_status) == 'published')
+    published_seasons = db.query(Season.id).filter(func.lower(Season.schedule_status) == 'published').all()
+    logger.info("[PUBLIC SCHEDULE] published_seasons=%s", [str(row.id) for row in published_seasons])
+    total_games_before_filters = q.count()
+    logger.info("[PUBLIC SCHEDULE] total_games_before_filters=%s", total_games_before_filters)
     if season_id: q = q.filter(Game.season_id == season_id)
     if host_location_id: q = q.filter(Field.host_location_id == host_location_id)
     if organization_id: q = q.filter(HostLocation.organization_id == organization_id)
@@ -5096,44 +5100,83 @@ def list_public_games(season_id: uuid.UUID | None = None, host_location_id: uuid
         q = q.filter(func.lower(GameStatus.code) == status_code.strip().lower())
     else:
         q = q.filter(func.lower(GameStatus.code).in_(['scheduled', 'active']))
-    total = q.count(); items = q.order_by(Game.game_date, Game.kickoff_time).offset((page - 1) * page_size).limit(page_size).all()
+    total = q.count()
+    logger.info(
+        "[PUBLIC SCHEDULE] filters=%s",
+        {
+            'season_id': str(season_id) if season_id else None,
+            'host_location_id': str(host_location_id) if host_location_id else None,
+            'organization_id': str(organization_id) if organization_id else None,
+            'division_id': str(division_id) if division_id else None,
+            'week_id': str(week_id) if week_id else None,
+            'team_id': str(team_id) if team_id else None,
+            'status_code': status_code,
+            'date': str(date) if date else None,
+        },
+    )
+    logger.info("[PUBLIC SCHEDULE] games_after_filters=%s", total)
+    items = q.order_by(Game.game_date, Game.kickoff_time).offset((page - 1) * page_size).limit(page_size).all()
     return PagedResponse(items=[PublicGameRead(id=g.id,game_date=g.game_date,kickoff_time=g.kickoff_time,host_location_id=g.field.host_location.id,host_location_name=g.field.host_location.name,field_id=g.field.id,field_name=g.field.name,organization_id=g.field.host_location.organization.id,organization_name=g.field.host_location.organization.name,division_id=g.home_team.division_id,division_name=g.home_team.division.name,week_id=g.week_id,week_number=(g.week.week_number if g.week else None),home_team_id=g.home_team_id,home_team_name=g.home_team.name,away_team_id=g.away_team_id,away_team_name=g.away_team.name,game_status_id=g.game_status_id,game_status_code=g.status.code,game_status_label=g.status.label) for g in items], total=total, page=page, page_size=page_size)
 
 
 @router.get('/public/schedule/debug')
-def public_schedule_debug(season_id: uuid.UUID | None = None, db: Session = Depends(get_db)):
+def public_schedule_debug(season_id: uuid.UUID | None = None, host_location_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, division_id: uuid.UUID | None = None, week_id: uuid.UUID | None = None, team_id: uuid.UUID | None = None, status_code: str | None = None, date: date | None = None, db: Session = Depends(get_db)):
     if season_id:
         season = db.query(Season).filter(Season.id == season_id).first()
     else:
         season = db.query(Season).filter(Season.is_active.is_(True)).order_by(Season.start_date.desc()).first()
 
-    published_seasons = db.query(Season).filter(Season.schedule_status == 'published').order_by(Season.start_date.desc()).all()
+    published_seasons = db.query(Season).filter(func.lower(Season.schedule_status) == 'published').order_by(Season.start_date.desc()).all()
 
     if not season:
         return {
             'published_seasons': [{'id': str(s.id), 'name': s.name, 'schedule_status': s.schedule_status} for s in published_seasons],
-            'current_season_status': None,
-            'total_games_for_season': 0,
-            'games_returned_by_public_query': 0,
-            'filters_applied': {'season_schedule_status': 'published', 'default_game_status_codes': ['scheduled', 'active']},
+            'selected_season_id': str(season_id) if season_id else None,
+            'season_schedule_status': None,
+            'total_games_for_published_season': 0,
+            'games_after_status_filter': 0,
+            'games_after_public_filters': 0,
+            'filters_applied': {},
         }
 
-    total_games_for_season = db.query(Game).filter(Game.season_id == season.id).count()
-    public_games_count = db.query(func.count(Game.id)).join(Game.season).join(Game.status).filter(
+    total_games_for_published_season = db.query(Game).join(Game.season).filter(
         Game.season_id == season.id,
-        Season.schedule_status == 'published',
+        func.lower(Season.schedule_status) == 'published',
+    ).count()
+    games_after_status_filter = db.query(func.count(Game.id)).join(Game.season).join(Game.status).filter(
+        Game.season_id == season.id,
+        func.lower(Season.schedule_status) == 'published',
         func.lower(GameStatus.code).in_(['scheduled', 'active']),
     ).scalar() or 0
+    filtered_q = db.query(Game.id).join(Game.season).join(Game.status).join(Game.field).join(Field.host_location).join(HostLocation.organization).join(home_team := aliased(Team), Game.home_team).join(away_team := aliased(Team), Game.away_team).filter(
+        Game.season_id == season.id,
+        func.lower(Season.schedule_status) == 'published',
+        func.lower(GameStatus.code).in_(['scheduled', 'active']),
+    )
+    if host_location_id: filtered_q = filtered_q.filter(Field.host_location_id == host_location_id)
+    if organization_id: filtered_q = filtered_q.filter(HostLocation.organization_id == organization_id)
+    if division_id: filtered_q = filtered_q.filter(home_team.division_id == division_id)
+    if week_id: filtered_q = filtered_q.filter(Game.week_id == week_id)
+    if team_id: filtered_q = filtered_q.filter((Game.home_team_id == team_id) | (Game.away_team_id == team_id))
+    if date: filtered_q = filtered_q.filter(Game.game_date == date)
+    if status_code: filtered_q = filtered_q.filter(func.lower(GameStatus.code) == status_code.strip().lower())
+    games_after_public_filters = filtered_q.count()
 
     return {
         'published_seasons': [{'id': str(s.id), 'name': s.name, 'schedule_status': s.schedule_status} for s in published_seasons],
-        'current_season_status': season.schedule_status,
-        'total_games_for_season': total_games_for_season,
-        'games_returned_by_public_query': int(public_games_count),
+        'selected_season_id': str(season.id),
+        'season_schedule_status': season.schedule_status,
+        'total_games_for_published_season': int(total_games_for_published_season),
+        'games_after_status_filter': int(games_after_status_filter),
+        'games_after_public_filters': int(games_after_public_filters),
         'filters_applied': {
-            'season_id': str(season.id),
-            'season_schedule_status': 'published',
-            'default_game_status_codes': ['scheduled', 'active'],
+            'host_location_id': str(host_location_id) if host_location_id else None,
+            'organization_id': str(organization_id) if organization_id else None,
+            'division_id': str(division_id) if division_id else None,
+            'week_id': str(week_id) if week_id else None,
+            'team_id': str(team_id) if team_id else None,
+            'status_code': status_code,
+            'date': str(date) if date else None,
         },
     }
 
@@ -5796,9 +5839,10 @@ def schedule_publish_diagnostics(season_id: uuid.UUID | None = None, db: Session
         .all()
     )
     total = int(sum(counts.values()))
-    published = int(counts.get('published', 0))
+    schedule_is_published = str(season.schedule_status or '').lower() == 'published'
+    published = total if schedule_is_published else int(counts.get('published', 0))
     archived = int(counts.get('archived', 0))
-    draft = max(total - published - archived, 0)
+    draft = 0 if schedule_is_published else max(total - published - archived, 0)
     return {
         'season_id': str(season.id),
         'season_name': season.name,
