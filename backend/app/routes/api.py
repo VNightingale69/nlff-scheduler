@@ -5115,7 +5115,51 @@ def list_public_games(season_id: uuid.UUID | None = None, host_location_id: uuid
     logger.info("[PUBLIC SCHEDULE] games_after_week_filter=%s", games_after_week_filter)
 
     if team_id:
-        q = q.filter(or_(Game.home_team_id == team_id, Game.away_team_id == team_id))
+        logger.info("[PUBLIC] requested team_id=%s", str(team_id))
+        total_in_scope = q.count()
+        logger.info("[PUBLIC] games in published season=%s", total_in_scope)
+        logger.info("[PUBLIC] games in week=%s", games_after_week_filter)
+
+        home_count = q.filter(Game.home_team_id == team_id).count()
+        away_count = q.filter(Game.away_team_id == team_id).count()
+
+        selected_team = db.query(Team).filter(Team.id == team_id).first()
+        name_count = 0
+        if selected_team and selected_team.name:
+            normalized_team_name = selected_team.name.strip().lower()
+            name_count = q.filter(
+                or_(
+                    func.lower(home_team.name) == normalized_team_name,
+                    func.lower(away_team.name) == normalized_team_name,
+                )
+            ).count()
+
+        logger.info("[PUBLIC] games where home_team_id matches=%s", home_count)
+        logger.info("[PUBLIC] games where away_team_id matches=%s", away_count)
+        logger.info("[PUBLIC] games where team name matches=%s", name_count)
+
+        sample_game = q.order_by(Game.game_date, Game.kickoff_time).first()
+        if sample_game:
+            logger.info(
+                "[PUBLIC] sample scheduled game id=%s home_team_id=%s home_team_name=%s away_team_id=%s away_team_name=%s week_id=%s season_id=%s",
+                str(sample_game.id),
+                str(sample_game.home_team_id) if sample_game.home_team_id else None,
+                sample_game.home_team.name if sample_game.home_team else None,
+                str(sample_game.away_team_id) if sample_game.away_team_id else None,
+                sample_game.away_team.name if sample_game.away_team else None,
+                str(sample_game.week_id) if sample_game.week_id else None,
+                str(sample_game.season_id) if sample_game.season_id else None,
+            )
+
+        team_match_predicate = or_(Game.home_team_id == team_id, Game.away_team_id == team_id)
+        if selected_team and selected_team.name:
+            normalized_team_name = selected_team.name.strip().lower()
+            team_match_predicate = or_(
+                team_match_predicate,
+                func.lower(home_team.name) == normalized_team_name,
+                func.lower(away_team.name) == normalized_team_name,
+            )
+        q = q.filter(team_match_predicate)
     games_after_team_filter = q.count()
     logger.info("[PUBLIC SCHEDULE] games_after_team_filter=%s", games_after_team_filter)
 
@@ -5212,7 +5256,13 @@ def list_public_schedule_filters(db: Session = Depends(get_db)):
     organizations = db.query(Organization).filter(Organization.is_active.is_(True)).order_by(Organization.name).all()
     divisions = db.query(Division).filter(Division.is_active.is_(True)).order_by(Division.sort_order, Division.name).all()
     weeks = db.query(Week).join(Week.season).filter(Season.is_active.is_(True)).order_by(Week.start_date, Week.week_number).all()
-    teams = db.query(Team).filter(Team.is_active.is_(True)).order_by(Team.name).all()
+    teams = db.query(Team).join(
+        Game,
+        or_(Game.home_team_id == Team.id, Game.away_team_id == Team.id),
+    ).join(Season, Season.id == Game.season_id).filter(
+        Team.is_active.is_(True),
+        func.lower(Season.schedule_status).in_(['published']),
+    ).distinct().order_by(Team.name).all()
     statuses = db.query(GameStatus).filter(GameStatus.is_active.is_(True)).order_by(GameStatus.label).all()
 
     return {
