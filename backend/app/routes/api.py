@@ -553,19 +553,29 @@ def get_schedule_readiness(current_user: User = Depends(get_current_user), db: S
     small_slots = int(open_slot_counts.get('SMALL', 0) or 0)
     large_slots = int(open_slot_counts.get('LARGE', 0) or 0)
 
+    scheduled_game_counts = dict(
+        db.query(Team.division_id, func.count(Game.id))
+        .select_from(Game)
+        .join(Team, Game.home_team_id == Team.id)
+        .group_by(Team.division_id)
+        .all()
+    )
+
     rows: list[ScheduleReadinessDivisionRow] = []
     total_teams = 0
-    total_games_needed = 0
+    total_minimum_unique_matchups = 0
+    total_target_scheduled_games = 0
 
     for row in division_rows:
         teams = int(row.team_count or 0)
-        games_needed = (teams * (teams - 1)) // 2
+        minimum_unique_matchups = (teams * (teams - 1)) // 2
+        target_scheduled_games = int(scheduled_game_counts.get(row.division_id, 0) or 0)
         required_field_type = 'SMALL' if row.required_field_layout_type == 'THIRTY_YARD_WIDTH' else 'LARGE'
         available_matching_slots = small_slots if required_field_type == 'SMALL' else large_slots
 
         if teams == 0:
             status = 'NO TEAMS'
-        elif available_matching_slots >= games_needed:
+        elif available_matching_slots >= minimum_unique_matchups:
             status = 'READY'
         else:
             status = 'SHORT'
@@ -575,12 +585,14 @@ def get_schedule_readiness(current_user: User = Depends(get_current_user), db: S
             division_label=f"{row.division_group.title()} {row.division_name}",
             field_type_required=required_field_type,
             number_of_teams=teams,
-            estimated_games_needed=games_needed,
+            minimum_unique_matchups=minimum_unique_matchups,
+            target_scheduled_games=target_scheduled_games,
             available_matching_slots=available_matching_slots,
             status=status,
         ))
         total_teams += teams
-        total_games_needed += games_needed
+        total_minimum_unique_matchups += minimum_unique_matchups
+        total_target_scheduled_games += target_scheduled_games
 
     active_host_ids = {host_id for (host_id,) in db.query(HostLocation.id).filter(HostLocation.is_active.is_(True)).all()}
     active_setup_host_ids = {host_id for (host_id,) in db.query(PhysicalFieldArea.host_location_id).filter(PhysicalFieldArea.is_active.is_(True)).distinct().all()}
@@ -593,7 +605,8 @@ def get_schedule_readiness(current_user: User = Depends(get_current_user), db: S
         rows=rows,
         totals=ScheduleReadinessTotals(
             total_teams=total_teams,
-            total_games_needed=total_games_needed,
+            total_minimum_unique_matchups=total_minimum_unique_matchups,
+            total_target_scheduled_games=total_target_scheduled_games,
             total_small_field_slots=small_slots,
             total_large_field_slots=large_slots,
             total_open_slots=small_slots + large_slots,
