@@ -1,12 +1,16 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { apiFetch } from '@/lib/api';
 import { getToken } from '@/lib/auth';
 import { formatDisplayDate, formatDisplayTime, formatDisplayTimestamp } from '@/lib/displayFormat';
 
 export default function GeneratedSlotsPage() {
   const token = getToken();
+  const searchParams = useSearchParams();
+  const startDate = searchParams.get('start_date') || '';
+  const endDate = searchParams.get('end_date') || '';
   const [hosts, setHosts] = useState<any[]>([]);
   const [hostId, setHostId] = useState('');
   const [slots, setSlots] = useState<any[]>([]);
@@ -41,6 +45,8 @@ export default function GeneratedSlotsPage() {
       await loadHostData(hostId);
     })();
   }, [hostId]);
+
+  const visibleSlots = useMemo(() => slots.filter((slot: any) => (!startDate || slot.available_date >= startDate) && (!endDate || slot.available_date <= endDate)), [slots, startDate, endDate]);
 
   const onGenerate = async () => {
     setIsGenerating(true);
@@ -82,7 +88,8 @@ export default function GeneratedSlotsPage() {
       </div>
       {message ? <div className='rounded border border-green-200 bg-green-50 p-2 text-sm text-green-700'>{message}</div> : null}
       {error ? <div className='rounded border border-red-200 bg-red-50 p-2 text-sm text-red-700'>{error}</div> : null}
-      <div className='text-sm text-slate-700'>Debug: {fieldInstances.length} field instances, {slots.length} generated slots.</div>
+      {startDate || endDate ? <div className='rounded border bg-blue-50 p-2 text-sm text-blue-800'>Filtered to week date range: {formatDisplayDate(startDate)} – {formatDisplayDate(endDate)}</div> : null}
+      <div className='text-sm text-slate-700'>Debug: {fieldInstances.length} field instances, {visibleSlots.length} generated slots.</div>
       {results.length > 0 ? (
         <div className='rounded border p-3 text-sm'>
           <h2 className='mb-2 font-semibold'>Generation Summary</h2>
@@ -109,7 +116,7 @@ export default function GeneratedSlotsPage() {
         <table className='min-w-full text-sm'>
           <thead><tr className='border-b text-left'><th className='p-2'>Date</th><th className='p-2'>Host Location</th><th className='p-2'>Field Instance</th><th className='p-2'>Field Type</th><th className='p-2'>Start Time</th><th className='p-2'>End Time</th><th className='p-2'>Status</th></tr></thead>
           <tbody>
-            {slots.map((slot: any) => (
+            {visibleSlots.map((slot: any) => (
               <tr key={slot.id} className='border-b'>
                 <td className='p-2'>{formatDisplayDate(slot.available_date)}</td>
                 <td className='p-2'>{slot.host_location_name}</td>
