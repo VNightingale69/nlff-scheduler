@@ -17,6 +17,9 @@ type ReadinessRow = {
 
 type HostDateReadiness = {
   host_date: string;
+  community_id: string | null;
+  community_name: string | null;
+  selected_host_locations: string[];
   host_sites_available: number;
   generated_slots: number;
   games_assigned: number;
@@ -26,12 +29,17 @@ type HostDateReadiness = {
   host_sites: Array<{
     host_location_id: string;
     host_location_name: string;
+    community_id: string | null;
+    community_name: string | null;
     surface_type: string;
     selected_turf_layout: string | null;
+    grass_field_capacity: number;
     active_fields: string[];
     field_counts_by_size: Record<string, number>;
+    total_field_capacity_by_size: Record<string, number>;
     generated_slots: number;
     games_assigned: number;
+    games_assigned_by_location: number;
     games_unscheduled: number;
     divisions_supported: string[];
     warnings: string[];
@@ -106,7 +114,11 @@ export default function ScheduleReadinessPage() {
             {hostDates.map((day) => (
               <div key={day.host_date} className='rounded border bg-slate-50 p-3 text-sm'>
                 <div className='flex flex-wrap items-center justify-between gap-2'>
-                  <div className='font-semibold'>{day.host_date}</div>
+                  <div>
+                    <div className='font-semibold'>{day.host_date}</div>
+                    <div className='text-slate-600'>Community: {day.community_name || 'Multiple communities'}</div>
+                    <div className='text-slate-600'>Selected host locations: {day.selected_host_locations?.length ? day.selected_host_locations.join(', ') : '—'}</div>
+                  </div>
                   <div>{day.host_sites_available} host site(s) • {day.generated_slots} generated slots • {day.games_assigned} assigned • {day.games_unscheduled} unscheduled</div>
                 </div>
                 {day.warnings.length ? <ul className='mt-2 list-disc pl-5 text-amber-800'>{day.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul> : null}
@@ -114,10 +126,11 @@ export default function ScheduleReadinessPage() {
                   {day.host_sites.map((site) => (
                     <div key={site.host_location_id} className='rounded border bg-white p-3'>
                       <div className='font-medium'>{site.host_location_name}</div>
-                      <div className='text-slate-600'>{site.surface_type}</div>
-                      <div>Layout: {site.selected_turf_layout || 'Configured grass fields'}</div>
-                      <div>Fields: {site.field_counts_by_size.SMALL || 0} Small / {site.field_counts_by_size.MEDIUM || 0} Medium / {site.field_counts_by_size.LARGE || 0} Large</div>
-                      <div>Slots: {site.generated_slots} • Assigned: {site.games_assigned} • Unscheduled: {site.games_unscheduled}</div>
+                      <div className='text-slate-600'>Community: {site.community_name || '—'} • Surface: {site.surface_type}</div>
+                      <div>Auto-selected turf layout: {site.selected_turf_layout || '—'}</div>
+                      <div>Grass field capacity: {site.grass_field_capacity || 0}</div>
+                      <div>Total field capacity by size: {site.field_counts_by_size.SMALL || 0} Small / {site.field_counts_by_size.MEDIUM || 0} Medium / {site.field_counts_by_size.LARGE || 0} Large</div>
+                      <div>Slots: {site.generated_slots} • Games assigned by location: {site.games_assigned_by_location ?? site.games_assigned} • Unscheduled: {site.games_unscheduled}</div>
                       <div>Divisions: {site.divisions_supported.length ? site.divisions_supported.join(', ') : '—'}</div>
                       <div>{site.auto_select_turf_layout ? 'Auto-select layout enabled' : 'Manual layout'}{site.lock_selected_layout ? ' • Layout locked' : ''}</div>
                       {site.active_fields.length ? <div>Active fields: {site.active_fields.join(', ')}</div> : null}

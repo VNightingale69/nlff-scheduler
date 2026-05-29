@@ -93,3 +93,52 @@ class ScheduleReadinessTest(unittest.TestCase):
 
         self.assertEqual(scheduled_row.minimum_unique_matchups, 6)
         self.assertEqual(scheduled_row.target_scheduled_games, 1)
+
+class MultiLocationHostingAvailabilityTest(unittest.TestCase):
+    def setUp(self):
+        engine = create_engine('sqlite+pysqlite:///:memory:', future=True)
+        Base.metadata.create_all(engine)
+        self.db: Session = sessionmaker(bind=engine)()
+        self.org = Organization(id=uuid.uuid4(), name='Dual Surface Community', is_active=True)
+        self.db.add(self.org)
+        self.db.commit()
+
+    def tearDown(self):
+        self.db.close()
+
+    def test_same_community_date_combines_grass_and_auto_turf_capacity(self):
+        from app.models import Field, HostLocation, HostLocationConfiguration, HostingAvailability
+        from app.routes.api import _regenerate_generated_slots
+
+        host_date = date(2026, 9, 6)
+        grass_host = HostLocation(id=uuid.uuid4(), organization_id=self.org.id, name='Community Grass', surface_type='GRASS_FIELD', is_active=True)
+        turf_host = HostLocation(id=uuid.uuid4(), organization_id=self.org.id, name='Community Turf', surface_type='TURF_STADIUM', is_active=True)
+        grass_field = Field(id=uuid.uuid4(), host_location_id=grass_host.id, name='Grass Small', layout_type='SMALL', is_active=True)
+        turf_large = HostLocationConfiguration(id=uuid.uuid4(), host_location_id=turf_host.id, configuration_name='TWO_LARGE', is_active=True)
+        turf_small = HostLocationConfiguration(id=uuid.uuid4(), host_location_id=turf_host.id, configuration_name='THREE_SMALL', is_active=True)
+        grass_availability = HostingAvailability(
+            id=uuid.uuid4(), organization_id=self.org.id, host_location_id=grass_host.id,
+            available_date=host_date, start_time=time(9, 0), end_time=time(11, 0), is_available=True,
+        )
+        turf_availability = HostingAvailability(
+            id=uuid.uuid4(), organization_id=self.org.id, host_location_id=turf_host.id,
+            selected_configuration_id=None, auto_select_turf_layout=True, lock_selected_layout=False,
+            available_date=host_date, start_time=time(9, 0), end_time=time(11, 0), is_available=True,
+        )
+        self.db.add_all([grass_host, turf_host, grass_field, turf_large, turf_small, grass_availability, turf_availability])
+        self.db.commit()
+
+        _regenerate_generated_slots(self.db, grass_availability, grass_host.id)
+        _regenerate_generated_slots(self.db, turf_availability, turf_host.id)
+        self.db.commit()
+
+        response = get_schedule_readiness(current_user=None, db=self.db)
+        host_day = next(row for row in response.host_dates if row.host_date == host_date)
+
+        self.assertEqual(host_day.community_name, 'Dual Surface Community')
+        self.assertCountEqual(host_day.selected_host_locations, ['Community Grass', 'Community Turf'])
+        self.assertEqual(sum(host_day.field_counts_by_size.values()), 3)
+        grass_site = next(site for site in host_day.host_sites if site.host_location_name == 'Community Grass')
+        turf_site = next(site for site in host_day.host_sites if site.host_location_name == 'Community Turf')
+        self.assertEqual(grass_site.grass_field_capacity, 1)
+        self.assertIsNotNone(turf_site.selected_turf_layout)

@@ -320,12 +320,17 @@ class ScheduleReadinessTotals(BaseModel):
 class ScheduleReadinessHostSiteRow(BaseModel):
     host_location_id: uuid.UUID
     host_location_name: str
+    community_id: uuid.UUID | None = None
+    community_name: str | None = None
     surface_type: str
     selected_turf_layout: str | None = None
+    grass_field_capacity: int = 0
     active_fields: list[str] = []
     field_counts_by_size: dict[str, int]
+    total_field_capacity_by_size: dict[str, int] = {}
     generated_slots: int
     games_assigned: int
+    games_assigned_by_location: int = 0
     games_unscheduled: int
     divisions_supported: list[str] = []
     warnings: list[str] = []
@@ -335,6 +340,9 @@ class ScheduleReadinessHostSiteRow(BaseModel):
 
 class ScheduleReadinessHostDateRow(BaseModel):
     host_date: date
+    community_id: uuid.UUID | None = None
+    community_name: str | None = None
+    selected_host_locations: list[str] = []
     host_sites_available: int
     generated_slots: int
     games_assigned: int
