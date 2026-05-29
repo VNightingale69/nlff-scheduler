@@ -6,7 +6,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import Base
-from app.models import Division, Game, GameStatus, Organization, OrganizationDivisionParticipation, Season, Team, Week
+from app.models import Division, Game, GameStatus, Organization, OrganizationDivisionParticipation, Season, Team, TurfWave, Week
 from app.routes.api import get_schedule_readiness
 
 
@@ -239,10 +239,19 @@ class TurfMixedLayoutPlanningTest(unittest.TestCase):
         early_field_names = {slot.field_instance.field_name for slot in slots if slot.start_time < time(11, 0)}
         late_field_names = {slot.field_instance.field_name for slot in slots if slot.start_time >= time(11, 0)}
         self.assertGreater(metrics['new_slots_created'], 0)
-        self.assertTrue(all(name.startswith('ONE_MEDIUM_TWO_SMALL Block 1') for name in early_field_names))
-        self.assertTrue(all(name.startswith('TWO_LARGE Block 2') for name in late_field_names))
+        self.assertTrue(all(name.startswith('Wave 1 ONE_MEDIUM_TWO_SMALL') for name in early_field_names))
+        self.assertTrue(all(name.startswith('Wave 2 TWO_LARGE') for name in late_field_names))
         self.assertEqual({slot.field_type for slot in slots if slot.start_time == time(9, 0)}, {'SMALL', 'MEDIUM'})
         self.assertEqual({slot.field_type for slot in slots if slot.start_time == time(11, 0)}, {'LARGE'})
+        waves = self.db.query(TurfWave).filter(TurfWave.host_location_id == host.id).order_by(TurfWave.sequence_number).all()
+        self.assertEqual([wave.wave_intent for wave in waves], ['SMALL_MEDIUM', 'LARGE'])
+        self.assertEqual([wave.preferred_layout_code for wave in waves], ['ONE_MEDIUM_TWO_SMALL', 'TWO_LARGE'])
+        self.assertTrue(all(slot.turf_wave_id for slot in slots))
+
+        readiness = get_schedule_readiness(current_user=None, db=self.db)
+        turf_site = next(site for day in readiness.host_dates for site in day.host_sites if site.host_location_id == host.id)
+        self.assertEqual([wave.preferred_layout_code for wave in turf_site.turf_wave_plan], ['ONE_MEDIUM_TWO_SMALL', 'TWO_LARGE'])
+        self.assertEqual(turf_site.turf_wave_plan[0].slot_level_configurations[0].slot_level_configuration, 'ONE_MEDIUM_TWO_SMALL')
 
     def test_locked_turf_layout_does_not_create_mixed_dynamic_blocks(self):
         from app.models import GameSlot
@@ -260,4 +269,4 @@ class TurfMixedLayoutPlanningTest(unittest.TestCase):
 
         slots = self.db.query(GameSlot).join(GameSlot.field_instance).filter(GameSlot.host_location_id == host.id).all()
         self.assertEqual({slot.field_type for slot in slots}, {'SMALL'})
-        self.assertTrue(all(not slot.field_instance.field_name.startswith('ONE_MEDIUM_TWO_SMALL') for slot in slots))
+        self.assertTrue(all(not slot.field_instance.field_name.startswith('Wave 1 ONE_MEDIUM_TWO_SMALL') for slot in slots))

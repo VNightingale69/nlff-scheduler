@@ -221,6 +221,30 @@ class HostingAvailability(Base, TimestampMixin):
     __table_args__ = (UniqueConstraint('field_id', 'physical_field_area_id', 'available_date', 'start_time', 'end_time', 'layout_type', 'slot_index', name='uq_field_availability_slot'),)
 
 
+class TurfWave(Base, TimestampMixin):
+    __tablename__ = 'turf_waves'
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    host_location_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('host_locations.id'), nullable=False)
+    hosting_availability_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('hosting_availabilities.id'), nullable=False)
+    week_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('weeks.id'), nullable=True)
+    host_date: Mapped[Date] = mapped_column(Date, nullable=False)
+    sequence_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    wave_intent: Mapped[str] = mapped_column(String(40), nullable=False)
+    preferred_layout_code: Mapped[str] = mapped_column(String(80), nullable=False)
+    start_time: Mapped[Time] = mapped_column(Time, nullable=False)
+    end_time: Mapped[Time] = mapped_column(Time, nullable=False)
+    transition_before_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    transition_after_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    notes: Mapped[str | None] = mapped_column(Text)
+    host_location = relationship('HostLocation')
+    hosting_availability = relationship('HostingAvailability')
+    week = relationship('Week')
+    __table_args__ = (
+        UniqueConstraint('hosting_availability_id', 'sequence_number', name='uq_turf_wave_availability_sequence'),
+        Index('ix_turf_waves_host_date', 'host_location_id', 'host_date'),
+    )
+
+
 class FieldInstance(Base, TimestampMixin):
     __tablename__ = 'field_instances'
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -246,9 +270,11 @@ class GameSlot(Base, TimestampMixin):
     field_type: Mapped[str] = mapped_column(String(10), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default='OPEN')
     assigned_game_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('games.id'))
+    turf_wave_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('turf_waves.id'))
     field_instance = relationship('FieldInstance')
     host_location = relationship('HostLocation')
     assigned_game = relationship('Game')
+    turf_wave = relationship('TurfWave')
     __table_args__ = (UniqueConstraint('field_instance_id', 'start_time', 'end_time', name='uq_game_slot_instance_time'),)
 
 class GameStatus(Base, TimestampMixin):

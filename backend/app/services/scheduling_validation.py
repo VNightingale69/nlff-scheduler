@@ -11,6 +11,31 @@ from app.schemas import GameCreate, GameValidationResponse, ValidationMessage
 
 GAME_DURATION_MINUTES = 60
 
+TURF_APPROVED_LAYOUTS_BY_SMALL_MEDIUM_LARGE = {
+    (0, 0, 2): 'TWO_LARGE',
+    (2, 1, 0): 'ONE_MEDIUM_TWO_SMALL',
+    (0, 1, 1): 'ONE_LARGE_ONE_MEDIUM',
+    (0, 2, 0): 'TWO_MEDIUM',
+    (3, 0, 0): 'THREE_SMALL',
+    (1, 0, 1): 'ONE_LARGE_ONE_SMALL',
+    (1, 1, 0): 'ONE_MEDIUM_ONE_SMALL',
+}
+
+
+def _turf_slot_layout_code(slots: list[GameSlot], proposed_slot: GameSlot | None = None) -> str | None:
+    counts = {'SMALL': 0, 'MEDIUM': 0, 'LARGE': 0}
+    seen_slot_ids = set()
+    for slot in slots:
+        seen_slot_ids.add(slot.id)
+        size = _normalize_field_size(slot.field_type)
+        if size in counts:
+            counts[size] += 1
+    if proposed_slot and proposed_slot.id not in seen_slot_ids:
+        proposed_size = _normalize_field_size(proposed_slot.field_type)
+        if proposed_size in counts:
+            counts[proposed_size] += 1
+    return TURF_APPROVED_LAYOUTS_BY_SMALL_MEDIUM_LARGE.get((counts['SMALL'], counts['MEDIUM'], counts['LARGE']))
+
 
 def _normalize_field_size(value: str | None) -> str | None:
     normalized = str(value or '').strip().upper().replace('-', '_').replace(' ', '_')
@@ -130,12 +155,29 @@ def validate_game(db: Session, payload: GameCreate, game_id: uuid.UUID | None = 
             .all()
         )
         slot_match = False
+        matching_slot = None
         for slot in availability:
             slot_start = datetime.combine(slot.slot_date, slot.start_time)
             slot_end = datetime.combine(slot.slot_date, slot.end_time)
             if game_start >= slot_start and game_end <= slot_end:
                 slot_match = True
+                matching_slot = slot
                 break
+        if matching_slot and host and (host.surface_type or 'GRASS_FIELD') == 'TURF_STADIUM':
+            host_time_slots = db.query(GameSlot).filter(
+                GameSlot.host_location_id == host.id,
+                GameSlot.slot_date == matching_slot.slot_date,
+                GameSlot.start_time == matching_slot.start_time,
+            ).all()
+            if not _turf_slot_layout_code(host_time_slots, matching_slot):
+                hard_conflicts.append(ValidationMessage(code='unsupported_turf_slot_configuration', message='Manual turf assignment must resolve to an approved slot-level configuration within the 120-yard footprint.'))
+            if matching_slot.turf_wave:
+                wave_start = datetime.combine(matching_slot.slot_date, matching_slot.turf_wave.start_time)
+                wave_end = datetime.combine(matching_slot.slot_date, matching_slot.turf_wave.end_time)
+                transition_start = wave_start - timedelta(minutes=matching_slot.turf_wave.transition_before_minutes or 0)
+                transition_end = wave_end + timedelta(minutes=matching_slot.turf_wave.transition_after_minutes or 0)
+                if game_start < wave_start or game_end > wave_end or (game_start < transition_start or game_end > transition_end):
+                    hard_conflicts.append(ValidationMessage(code='outside_turf_wave', message='Game must be inside the selected turf wave and outside transition periods.'))
         if not slot_match:
             hard_conflicts.append(
                 ValidationMessage(code='outside_availability', message='Game must be within a generated field instance slot.')
