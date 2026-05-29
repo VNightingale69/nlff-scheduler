@@ -267,6 +267,107 @@ def _grass_field_templates_for_host(db: Session, host_location_id: uuid.UUID) ->
     return templates
 
 
+
+def _grass_capacity_limits_for_host(db: Session, host: HostLocation) -> dict[str, int]:
+    configured_limits = {
+        FIELD_SIZE_SMALL: max(int(getattr(host, 'max_small_fields', 0) or 0), 0),
+        FIELD_SIZE_MEDIUM: max(int(getattr(host, 'max_medium_fields', 0) or 0), 0),
+        FIELD_SIZE_LARGE: max(int(getattr(host, 'max_large_fields', 0) or 0), 0),
+    }
+    max_total = max(int(getattr(host, 'max_total_fields', 0) or 0), 0)
+    if any(configured_limits.values()) or max_total:
+        if max_total:
+            configured_limits = {size: (limit if limit > 0 else max_total) for size, limit in configured_limits.items()}
+        configured_limits['TOTAL'] = max_total or sum(configured_limits.values())
+        return configured_limits
+
+    legacy_counts = {FIELD_SIZE_SMALL: 0, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_LARGE: 0}
+    for _field_name, field_size in _grass_field_templates_for_host(db, host.id):
+        if field_size in legacy_counts:
+            legacy_counts[field_size] += 1
+    legacy_counts['TOTAL'] = sum(legacy_counts.values())
+    return legacy_counts
+
+
+def _grass_demand_counts_for_date(db: Session, host: HostLocation, available_date: date) -> dict[str, int]:
+    counts = {FIELD_SIZE_SMALL: 0, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_LARGE: 0}
+    game_rows = (
+        db.query(Game, Division)
+        .join(Team, Game.home_team_id == Team.id)
+        .join(Division, Team.division_id == Division.id)
+        .filter(
+            Game.game_date == available_date,
+            Team.organization_id == host.organization_id,
+        )
+        .all()
+    )
+    for _game, division in game_rows:
+        required = _required_field_type_for_division(division)
+        if required in counts:
+            counts[required] += 1
+    return counts
+
+
+def _grass_setup_forecast_for_availability(db: Session, host: HostLocation, availability: HostingAvailability) -> dict[str, object]:
+    slot_count_per_field = _hours_between(availability.start_time, availability.end_time, availability.available_date)
+    demand_counts = _grass_demand_counts_for_date(db, host, availability.available_date)
+    requested = {
+        size: math.ceil(max(int(demand_counts.get(size, 0) or 0), 0) / slot_count_per_field)
+        for size in FIELD_SIZE_ORDER
+    }
+    capacity = _grass_capacity_limits_for_host(db, host)
+    warnings: list[str] = []
+    forecast = {size: min(requested[size], max(int(capacity.get(size, 0) or 0), 0)) for size in FIELD_SIZE_ORDER}
+
+    for size in FIELD_SIZE_ORDER:
+        if requested[size] > max(int(capacity.get(size, 0) or 0), 0):
+            warnings.append(f'{size.title()} grass field forecast exceeds configured capacity; capped at {capacity.get(size, 0)}.')
+
+    total_capacity = max(int(capacity.get('TOTAL', 0) or 0), 0)
+    if total_capacity and sum(forecast.values()) > total_capacity:
+        warnings.append(f'Grass field forecast exceeds total configured capacity; capped at {total_capacity}.')
+        for size in (FIELD_SIZE_SMALL, FIELD_SIZE_MEDIUM, FIELD_SIZE_LARGE):
+            while sum(forecast.values()) > total_capacity and forecast[size] > 0:
+                forecast[size] -= 1
+
+    if not any(requested.values()):
+        # Legacy/no-demand setup: keep fixed active grass fields available for manually built schedules.
+        legacy_counts = {FIELD_SIZE_SMALL: 0, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_LARGE: 0}
+        for _field_name, field_size in _grass_field_templates_for_host(db, host.id):
+            if field_size in legacy_counts:
+                legacy_counts[field_size] += 1
+        if any(legacy_counts.values()):
+            forecast = {size: min(legacy_counts[size], max(int(capacity.get(size, 0) or 0), 0)) for size in FIELD_SIZE_ORDER}
+
+    requested_total = sum(requested.values())
+    forecast_total = sum(forecast.values())
+    if requested_total == 0 or forecast_total >= requested_total:
+        capacity_status = 'ok'
+    elif forecast_total > 0:
+        capacity_status = 'capped'
+    else:
+        capacity_status = 'none_available'
+        if any(demand_counts.values()):
+            warnings.append('No grass field capacity is configured for forecasted grass demand.')
+
+    return {
+        'demand': demand_counts,
+        'requested': requested,
+        'forecast': forecast,
+        'capacity': {size: max(int(capacity.get(size, 0) or 0), 0) for size in FIELD_SIZE_ORDER},
+        'total_capacity': total_capacity,
+        'capacity_status': capacity_status,
+        'warnings': sorted(set(warnings)),
+    }
+
+
+def _grass_field_templates_from_forecast(forecast: dict[str, int]) -> list[tuple[str, str]]:
+    templates: list[tuple[str, str]] = []
+    for size in FIELD_SIZE_ORDER:
+        for index in range(1, max(int(forecast.get(size, 0) or 0), 0) + 1):
+            templates.append((f'Grass {size.title()} {index}', size))
+    return templates
+
 def _grass_capacity_for_community_date(db: Session, organization_id: uuid.UUID, available_date: date) -> dict[str, int]:
     capacity = {FIELD_SIZE_SMALL: 0, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_LARGE: 0}
     grass_rows = (
@@ -281,12 +382,10 @@ def _grass_capacity_for_community_date(db: Session, organization_id: uuid.UUID, 
         .all()
     )
     for availability, host in grass_rows:
-        start_dt = datetime.combine(availability.available_date, availability.start_time)
-        end_dt = datetime.combine(availability.available_date, availability.end_time)
-        slot_count_per_field = max(math.ceil((end_dt - start_dt).total_seconds() / 3600), 1)
-        for _field_name, field_size in _grass_field_templates_for_host(db, host.id):
-            if field_size in capacity:
-                capacity[field_size] += slot_count_per_field
+        slot_count_per_field = _hours_between(availability.start_time, availability.end_time, availability.available_date)
+        forecast = _grass_setup_forecast_for_availability(db, host, availability)['forecast']
+        for field_size in FIELD_SIZE_ORDER:
+            capacity[field_size] += int(forecast.get(field_size, 0) or 0) * slot_count_per_field
     return capacity
 
 
@@ -607,7 +706,8 @@ def _regenerate_generated_slots(db: Session, availability: HostingAvailability, 
         if field.is_active and field_size:
             templates = [(field.name, field_size)]
     elif host and surface_type == 'GRASS_FIELD':
-        templates = _grass_field_templates_for_host(db, host.id)
+        forecast = _grass_setup_forecast_for_availability(db, host, availability)
+        templates = _grass_field_templates_from_forecast(forecast['forecast'])
     else:
         configuration_name = availability.layout_type or (option.name if option else None)
         if option and not option.is_active:
@@ -1385,8 +1485,13 @@ def _build_host_date_readiness(db: Session) -> list[ScheduleReadinessHostDateRow
             selected_layout = ', '.join(sorted(site['layouts'])) if site['layouts'] else None
             is_grass_site = (host.surface_type or 'GRASS_FIELD') != 'TURF_STADIUM'
             turf_wave_plan = [] if is_grass_site else _build_turf_wave_plan_for_site(db, host, host_date)
+            grass_forecast = None
+            if is_grass_site and availability:
+                grass_forecast = _grass_setup_forecast_for_availability(db, host, availability)
+                warnings.extend(grass_forecast['warnings'])
             for wave in turf_wave_plan:
                 warnings.extend(wave.warnings)
+            forecast_counts = grass_forecast['forecast'] if grass_forecast else {FIELD_SIZE_SMALL: 0, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_LARGE: 0}
             host_sites.append(ScheduleReadinessHostSiteRow(
                 host_location_id=host.id,
                 host_location_name=host.name,
@@ -1395,6 +1500,11 @@ def _build_host_date_readiness(db: Session) -> list[ScheduleReadinessHostDateRow
                 surface_type=host.surface_type or 'GRASS_FIELD',
                 selected_turf_layout=selected_layout if not is_grass_site else None,
                 grass_field_capacity=sum(site['field_counts'].values()) if is_grass_site else 0,
+                small_fields_to_line=int(forecast_counts.get(FIELD_SIZE_SMALL, 0) or 0) if is_grass_site else 0,
+                medium_fields_to_line=int(forecast_counts.get(FIELD_SIZE_MEDIUM, 0) or 0) if is_grass_site else 0,
+                large_fields_to_line=int(forecast_counts.get(FIELD_SIZE_LARGE, 0) or 0) if is_grass_site else 0,
+                total_fields_to_line=sum(int(forecast_counts.get(size, 0) or 0) for size in FIELD_SIZE_ORDER) if is_grass_site else 0,
+                capacity_status=grass_forecast['capacity_status'] if grass_forecast else ('not_applicable' if not is_grass_site else 'unknown'),
                 active_fields=sorted(site['field_names']) if is_grass_site else [],
                 field_counts_by_size=site['field_counts'],
                 total_field_capacity_by_size=site['field_counts'],

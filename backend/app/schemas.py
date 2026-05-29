@@ -100,6 +100,10 @@ class HostLocationCreate(BaseModel):
     name: str
     address: str | None = None
     surface_type: str = 'GRASS_FIELD'
+    max_small_fields: int = 0
+    max_medium_fields: int = 0
+    max_large_fields: int = 0
+    max_total_fields: int = 0
     address_line1: str | None = None
     address_line2: str | None = None
     city: str | None = None
@@ -375,6 +379,11 @@ class ScheduleReadinessHostSiteRow(BaseModel):
     surface_type: str
     selected_turf_layout: str | None = None
     grass_field_capacity: int = 0
+    small_fields_to_line: int = 0
+    medium_fields_to_line: int = 0
+    large_fields_to_line: int = 0
+    total_fields_to_line: int = 0
+    capacity_status: str = 'not_applicable'
     active_fields: list[str] = []
     field_counts_by_size: dict[str, int]
     total_field_capacity_by_size: dict[str, int] = {}
