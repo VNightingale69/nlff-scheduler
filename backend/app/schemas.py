@@ -391,7 +391,9 @@ class HostingBalanceRow(BaseModel):
 
 class HostingRotationRow(BaseModel):
     week: str
+    available_communities: list[str] = []
     selected_host_communities: list[str] = []
+    skipped_communities: list[dict] = []
     rotation_ranking: list[dict] = []
     reason_selected: list[str] = []
     reason_skipped: list[str] = []
