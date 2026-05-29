@@ -4,127 +4,234 @@ import Toast from './Toast';
 import { apiFetch } from '@/lib/api';
 import { getToken } from '@/lib/auth';
 
-const STADIUM_TYPE = 'STADIUM_SITE';
-const GRASS_TYPE = 'GRASS_PARK_SITE';
-const FIELD_SPACE_TYPE_OPTIONS = [
-  { label: 'Stadium Site', value: STADIUM_TYPE },
-  { label: 'Grass/Park Site', value: GRASS_TYPE },
-];
-const STADIUM_OPTIONS = [
-  { name: '2x53', title: 'Two Large Fields', help: 'Used for 5th–8th Grade', thirty: 0, fiftyThree: 2 },
-  { name: '1x53_plus_2x30', title: 'One Large Field + Two Small Fields', help: 'Used for mixed grade hosting', thirty: 2, fiftyThree: 1 },
-  { name: '3x30', title: 'Three Small Fields', help: 'Used for K–4th Grade', thirty: 3, fiftyThree: 0 },
-];
+const TURF_STADIUM = 'TURF_STADIUM';
+const GRASS_FIELD = 'GRASS_FIELD';
+const FIELD_TYPES = ['SMALL', 'MEDIUM', 'LARGE'];
 
-const setupLabel = (name: string) => {
-  if (name === 'grass_custom') return 'Custom Grass/Park Setup';
-  return STADIUM_OPTIONS.find((o) => o.name === name)?.title || name;
+const DIVISION_COMPATIBILITY = {
+  SMALL: ['K/1 Coed', 'K/1 Girls', '2nd/3rd Coed', '2nd/3rd Girls'],
+  MEDIUM: ['4th/5th Coed', '4th/5th Girls'],
+  LARGE: ['6th/7th Coed', '6th/7th Girls', '6th/7th/8th Girls', '8th Coed', '8th Girls, if applicable'],
 };
 
-const defaultForm = { host_location_id: '', field_space_type: STADIUM_TYPE, notes: '', is_active: true, grass30: 0, grass53: 0 };
+const TURF_LAYOUTS = [
+  { name: 'TWO_LARGE', title: 'Two Large Fields', spaceUsed: 120, remaining: 0, large: 2, medium: 0, small: 0 },
+  { name: 'ONE_MEDIUM_TWO_SMALL', title: 'One Medium Field + Two Small Fields', spaceUsed: 120, remaining: 0, large: 0, medium: 1, small: 2 },
+  { name: 'ONE_LARGE_ONE_MEDIUM', title: 'One Large Field + One Medium Field', spaceUsed: 115, remaining: 5, large: 1, medium: 1, small: 0 },
+  { name: 'TWO_MEDIUM', title: 'Two Medium Fields', spaceUsed: 110, remaining: 10, large: 0, medium: 2, small: 0 },
+  { name: 'THREE_SMALL', title: 'Three Small Fields', spaceUsed: 100, remaining: 20, large: 0, medium: 0, small: 3 },
+  { name: 'ONE_LARGE_ONE_SMALL', title: 'One Large Field + One Small Field', spaceUsed: 90, remaining: 30, large: 1, medium: 0, small: 1 },
+  { name: 'ONE_MEDIUM_ONE_SMALL', title: 'One Medium Field + One Small Field', spaceUsed: 85, remaining: 35, large: 0, medium: 1, small: 1 },
+];
+
+const formatSurfaceType = (value?: string) => value === TURF_STADIUM ? 'Turf Stadium' : value === GRASS_FIELD ? 'Grass Field' : 'Not set';
+const layoutLabel = (name?: string) => TURF_LAYOUTS.find((layout) => layout.name === name)?.title || name || '—';
+const fieldTypeLabel = (value?: string) => value ? value.charAt(0).toUpperCase() + value.slice(1).toLowerCase() : '—';
+const configuredFieldsText = (count: number) => `${count} active configured field${count === 1 ? '' : 's'}`;
+
+const supportedGroups = (layout: typeof TURF_LAYOUTS[number]) => {
+  const groups: string[] = [];
+  if (layout.small) groups.push('K/1', '2nd/3rd');
+  if (layout.medium) groups.push('4th/5th');
+  if (layout.large) groups.push('6th/7th', '8th');
+  return groups.join(', ');
+};
 
 export default function FieldAreaManager() {
   const token = getToken();
-  const [message, setMessage] = useState(''); const [type, setType] = useState<'ok' | 'err'>('ok');
-  const [orgs, setOrgs] = useState<any[]>([]); const [hosts, setHosts] = useState<any[]>([]); const [areas, setAreas] = useState<any[]>([]); const [configs, setConfigs] = useState<any[]>([]);
+  const [message, setMessage] = useState('');
+  const [type, setType] = useState<'ok' | 'err'>('ok');
+  const [orgs, setOrgs] = useState<any[]>([]);
+  const [hosts, setHosts] = useState<any[]>([]);
+  const [turfConfigs, setTurfConfigs] = useState<any[]>([]);
+  const [fields, setFields] = useState<any[]>([]);
   const [orgId, setOrgId] = useState('');
-  const [form, setForm] = useState<any>(defaultForm);
-  const [stadiumSelections, setStadiumSelections] = useState<Record<string, boolean>>({});
-  const [editingAreaId, setEditingAreaId] = useState<string | null>(null);
+  const [hostId, setHostId] = useState('');
+  const [selectedLayout, setSelectedLayout] = useState('');
+  const [fieldForm, setFieldForm] = useState({ name: '', layout_type: '', is_active: true });
+  const [editingFieldId, setEditingFieldId] = useState<string | null>(null);
 
-  const load = async () => { const [o, h, a, c] = await Promise.all([apiFetch('/organizations?page_size=500', {}, token), apiFetch('/host-locations?page_size=500', {}, token), apiFetch('/physical-field-areas?page_size=500', {}, token), apiFetch('/field-configuration-options?page_size=2000', {}, token)]); setOrgs(o.items || []); setHosts(h.items || []); setAreas(a.items || []); setConfigs(c.items || []); };
+  const load = async () => {
+    const [o, h, c, f] = await Promise.all([
+      apiFetch('/organizations?page_size=500', {}, token),
+      apiFetch('/host-locations?page_size=500', {}, token),
+      apiFetch('/host-location-configurations?page_size=2000', {}, token),
+      apiFetch('/fields?page_size=2000', {}, token),
+    ]);
+    setOrgs((o as any).items || []);
+    setHosts((h as any).items || []);
+    setTurfConfigs((c as any).items || []);
+    setFields((f as any).items || []);
+  };
+
   useEffect(() => { load().catch((e: any) => { setType('err'); setMessage(e.message || 'Failed to load'); }); }, []);
+
   const hostOptions = useMemo(() => hosts.filter((h: any) => !orgId || h.organization_id === orgId), [hosts, orgId]);
-  const visibleAreas = useMemo(() => areas.filter((a: any) => !form.host_location_id || a.host_location_id === form.host_location_id), [areas, form.host_location_id]);
-  const configByArea = useMemo(() => configs.reduce((m: any, c: any) => ((m[c.physical_field_area_id] = [...(m[c.physical_field_area_id] || []), c]), m), {}), [configs]);
+  const selectedHost = useMemo(() => hosts.find((h: any) => h.id === hostId), [hosts, hostId]);
+  const configsByHost = useMemo(() => turfConfigs.reduce((map: any, config: any) => ({ ...map, [config.host_location_id]: [...(map[config.host_location_id] || []), config] }), {}), [turfConfigs]);
+  const fieldsByHost = useMemo(() => fields.reduce((map: any, field: any) => ({ ...map, [field.host_location_id]: [...(map[field.host_location_id] || []), field] }), {}), [fields]);
+  const selectedHostFields = fieldsByHost[hostId] || [];
+  const tableHosts = useMemo(() => hosts.filter((h: any) => (!orgId || h.organization_id === orgId) && (!hostId || h.id === hostId)), [hosts, orgId, hostId]);
+  const orgNameById = useMemo(() => Object.fromEntries(orgs.map((org: any) => [org.id, org.name])), [orgs]);
 
-  const cancelEdit = () => {
-    setEditingAreaId(null);
-    setForm(defaultForm);
-    setStadiumSelections({});
+  const onHostChange = (nextHostId: string) => {
+    const host = hosts.find((h: any) => h.id === nextHostId);
+    setHostId(nextHostId);
+    if (host?.organization_id) setOrgId(host.organization_id);
+    const activeConfig = (configsByHost[nextHostId] || []).find((config: any) => config.is_active) || (configsByHost[nextHostId] || [])[0];
+    setSelectedLayout(host?.surface_type === TURF_STADIUM ? activeConfig?.configuration_name || '' : '');
+    setFieldForm({ name: '', layout_type: '', is_active: true });
+    setEditingFieldId(null);
   };
 
-  const editArea = (area: any) => {
-    const host = hosts.find((h: any) => h.id === area.host_location_id);
-    const areaConfigs = configByArea[area.id] || [];
-    const isGrass = area.field_space_type === GRASS_TYPE;
-    const grass = areaConfigs.find((c: any) => c.name === 'grass_custom') || areaConfigs[0];
-    const selected: Record<string, boolean> = {};
-    for (const c of areaConfigs) selected[c.name] = true;
-
-    setOrgId(host?.organization_id || '');
-    setForm({
-      host_location_id: area.host_location_id,
-      field_space_type: area.field_space_type,
-      notes: area.notes || '',
-      is_active: area.is_active,
-      grass30: isGrass ? (grass?.thirty_yard_capacity || 0) : 0,
-      grass53: isGrass ? (grass?.fifty_three_yard_capacity || 0) : 0,
-    });
-    setStadiumSelections(isGrass ? {} : selected);
-    setEditingAreaId(area.id);
-  };
-
-  const save = async () => {
+  const saveTurfConfiguration = async () => {
     try {
-      if (!form.host_location_id) { setType('err'); setMessage('Hosting site is required.'); return; }
-      let areaId = editingAreaId;
-      const areaPayload = { host_location_id: form.host_location_id, name: 'Field Setup', field_space_type: form.field_space_type, supports_dynamic_configuration: form.field_space_type === STADIUM_TYPE, notes: form.notes || null, is_active: form.is_active };
-      if (editingAreaId) {
-        const updatedArea = await apiFetch(`/physical-field-areas/${editingAreaId}`, { method: 'PUT', body: JSON.stringify(areaPayload) }, token);
-        areaId = updatedArea.id;
+      if (!selectedHost) { setType('err'); setMessage('Hosting site is required.'); return; }
+      if (selectedHost.surface_type !== TURF_STADIUM) { setType('err'); setMessage('Turf layouts are only available for Turf Stadium locations.'); return; }
+      if (!TURF_LAYOUTS.some((layout) => layout.name === selectedLayout)) { setType('err'); setMessage('Select one approved turf stadium layout.'); return; }
+      const existing = configsByHost[selectedHost.id] || [];
+      const matching = existing.find((config: any) => config.configuration_name === selectedLayout);
+      for (const config of existing) {
+        if (config.id !== matching?.id) await apiFetch(`/host-location-configurations/${config.id}`, { method: 'DELETE' }, token);
+      }
+      if (matching) {
+        await apiFetch(`/host-location-configurations/${matching.id}`, { method: 'PUT', body: JSON.stringify({ host_location_id: selectedHost.id, configuration_name: selectedLayout, is_active: true }) }, token);
       } else {
-        const area = await apiFetch('/physical-field-areas', { method: 'POST', body: JSON.stringify(areaPayload) }, token);
-        areaId = area.id;
+        await apiFetch('/host-location-configurations', { method: 'POST', body: JSON.stringify({ host_location_id: selectedHost.id, configuration_name: selectedLayout, is_active: true }) }, token);
       }
-
-      const currentConfigs = editingAreaId ? (configByArea[editingAreaId] || []) : [];
-      if (editingAreaId) {
-        for (const c of currentConfigs) await apiFetch(`/field-configuration-options/${c.id}`, { method: 'DELETE' }, token);
-      }
-
-      const configPayloads: any[] = [];
-      if (form.field_space_type === STADIUM_TYPE) { for (const o of STADIUM_OPTIONS) if (stadiumSelections[o.name]) configPayloads.push({ physical_field_area_id: areaId, name: o.name, thirty_yard_capacity: o.thirty, fifty_three_yard_capacity: o.fiftyThree, is_active: form.is_active }); }
-      else configPayloads.push({ physical_field_area_id: areaId, name: 'grass_custom', thirty_yard_capacity: Number(form.grass30) || 0, fifty_three_yard_capacity: Number(form.grass53) || 0, is_active: form.is_active });
-
-      if (!configPayloads.length) { setType('err'); setMessage('Select at least one available layout.'); return; }
-      for (const payload of configPayloads) await apiFetch('/field-configuration-options', { method: 'POST', body: JSON.stringify(payload) }, token);
-
-      setType('ok'); setMessage(editingAreaId ? 'Hosting site field setup updated.' : 'Hosting site field setup saved.');
-      cancelEdit();
+      setType('ok'); setMessage('Turf stadium field configuration saved.');
       await load();
     } catch (e: any) { setType('err'); setMessage(e.message || 'Save failed'); }
   };
 
-  const toggleActive = async (area: any) => {
-    const nextActive = !area.is_active;
-    if (!nextActive) {
-      const confirmed = window.confirm('This location will no longer be available for scheduling unless another active field setup exists.');
-      if (!confirmed) return;
-    }
-    await apiFetch(`/physical-field-areas/${area.id}`, { method: 'PUT', body: JSON.stringify({ ...area, is_active: nextActive }) }, token);
-    const rows = configByArea[area.id] || [];
-    for (const row of rows) await apiFetch(`/field-configuration-options/${row.id}`, { method: 'PUT', body: JSON.stringify({ ...row, is_active: nextActive }) }, token);
-    setType('ok'); setMessage(`Setup marked as ${nextActive ? 'active' : 'inactive'}.`);
-    await load();
+  const resetFieldForm = () => {
+    setFieldForm({ name: '', layout_type: '', is_active: true });
+    setEditingFieldId(null);
+  };
+
+  const editField = (field: any) => {
+    setFieldForm({ name: field.name || '', layout_type: field.layout_type || '', is_active: Boolean(field.is_active) });
+    setEditingFieldId(field.id);
+  };
+
+  const saveField = async () => {
+    try {
+      if (!selectedHost) { setType('err'); setMessage('Hosting site is required.'); return; }
+      if (selectedHost.surface_type !== GRASS_FIELD) { setType('err'); setMessage('Manual fields are only available for Grass Field locations.'); return; }
+      if (!fieldForm.name.trim()) { setType('err'); setMessage('Field name is required.'); return; }
+      if (!FIELD_TYPES.includes(fieldForm.layout_type)) { setType('err'); setMessage('Every configured field must have a field type.'); return; }
+      const payload = { host_location_id: selectedHost.id, physical_field_area_id: null, name: fieldForm.name.trim(), layout_type: fieldForm.layout_type, is_active: fieldForm.is_active, notes: null };
+      if (editingFieldId) await apiFetch(`/fields/${editingFieldId}`, { method: 'PUT', body: JSON.stringify(payload) }, token);
+      else await apiFetch('/fields', { method: 'POST', body: JSON.stringify(payload) }, token);
+      setType('ok'); setMessage(editingFieldId ? 'Field updated.' : 'Field added.');
+      resetFieldForm();
+      await load();
+    } catch (e: any) { setType('err'); setMessage(e.message || 'Save failed'); }
+  };
+
+  const deactivateField = async (field: any) => {
+    try {
+      await apiFetch(`/fields/${field.id}`, { method: 'PUT', body: JSON.stringify({ ...field, layout_type: field.layout_type, is_active: false }) }, token);
+      setType('ok'); setMessage('Field deactivated. Inactive fields are not available for slot generation.');
+      await load();
+    } catch (e: any) { setType('err'); setMessage(e.message || 'Unable to deactivate field'); }
   };
 
   return <div className='space-y-4'>
-    <Toast message={message} type={type} /><h1 className='text-2xl font-bold'>Hosting Site Field Setup</h1>
-    <section className='rounded border p-4'><h2 className='mb-2 font-semibold'>1. Choose Hosting Site</h2>
+    <Toast message={message} type={type} />
+    <h1 className='text-2xl font-bold'>Host Location Field Configuration</h1>
+
+    <section className='rounded border p-4'>
+      <h2 className='mb-2 font-semibold'>1. Choose Host Location</h2>
       <div className='grid gap-2 md:grid-cols-2'>
-        <select className='rounded border p-2' value={orgId} onChange={e => setOrgId(e.target.value)}><option value=''>Select organization</option>{orgs.map((o: any) => <option key={o.id} value={o.id}>{o.name}</option>)}</select>
-        <select className='rounded border p-2' value={form.host_location_id} onChange={e => setForm({ ...form, host_location_id: e.target.value })}><option value=''>Select hosting site</option>{hostOptions.map((h: any) => <option key={h.id} value={h.id}>{h.name}</option>)}</select>
-        <select className='rounded border p-2' value={form.field_space_type} onChange={e => setForm({ ...form, field_space_type: e.target.value })}>{FIELD_SPACE_TYPE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select>
-        <input className='rounded border p-2' placeholder='Notes about lining or setup' value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })} />
+        <select className='rounded border p-2' value={orgId} onChange={(e) => { setOrgId(e.target.value); setHostId(''); setSelectedLayout(''); resetFieldForm(); }}>
+          <option value=''>Select Organization</option>
+          {orgs.map((org: any) => <option key={org.id} value={org.id}>{org.name}</option>)}
+        </select>
+        <select className='rounded border p-2' value={hostId} onChange={(e) => onHostChange(e.target.value)}>
+          <option value=''>Select Hosting Site</option>
+          {hostOptions.map((host: any) => <option key={host.id} value={host.id}>{host.name}</option>)}
+        </select>
       </div>
-      <label className='mt-3 flex items-center gap-2 text-sm'><input type='checkbox' checked={form.is_active} onChange={e => setForm({ ...form, is_active: e.target.checked })} />Active setup</label>
-      {form.field_space_type === STADIUM_TYPE ? <div className='mt-4'><p className='text-sm font-medium'>How can this stadium typically be configured?</p><div className='mt-2 grid gap-3 md:grid-cols-3'>{STADIUM_OPTIONS.map((o) => <button type='button' key={o.name} onClick={() => setStadiumSelections({ ...stadiumSelections, [o.name]: !stadiumSelections[o.name] })} className={`rounded border p-3 text-left ${stadiumSelections[o.name] ? 'border-emerald-600 bg-emerald-50' : ''}`}><p className='font-semibold'>{o.title}</p><p className='text-xs text-slate-600'>{o.help}</p><p className='mt-1 text-xs'>Small Field: {o.thirty} · Large Field: {o.fiftyThree}</p></button>)}</div></div> : <div className='mt-4 space-y-2'><p className='text-sm font-medium'>What field sizes can this park support?</p><div className='grid gap-2 md:grid-cols-2'><input type='number' min={0} className='rounded border p-2' placeholder='Number of Small Fields' value={form.grass30} onChange={e => setForm({ ...form, grass30: e.target.value })} /><input type='number' min={0} className='rounded border p-2' placeholder='Number of Large Fields' value={form.grass53} onChange={e => setForm({ ...form, grass53: e.target.value })} /></div></div>}
-      <div className='mt-3 flex gap-2'>
-        <button className='rounded bg-emerald-700 px-4 py-2 text-white' onClick={save}>{editingAreaId ? 'Update Field Setup' : 'Save Field Setup'}</button>
-        {editingAreaId && <button className='rounded border px-4 py-2' onClick={cancelEdit}>Cancel Edit</button>}
+      {selectedHost && <div className='mt-3 rounded bg-slate-100 px-3 py-2 text-sm font-medium'>Surface Type: {formatSurfaceType(selectedHost.surface_type)}</div>}
+      {selectedHost && <p className='mt-2 text-sm text-slate-600'>Surface type is read-only here and is managed from Host Locations.</p>}
+    </section>
+
+    {selectedHost?.surface_type === TURF_STADIUM && <section className='rounded border p-4'>
+      <h2 className='font-semibold'>Approved Turf Stadium Layouts</h2>
+      <p className='text-sm text-slate-600'>Select exactly one approved layout. Layouts that exceed the 120-yard stadium footprint are not available.</p>
+      <div className='mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-3'>
+        {TURF_LAYOUTS.map((layout) => <button type='button' key={layout.name} onClick={() => setSelectedLayout(layout.name)} className={`rounded border p-3 text-left ${selectedLayout === layout.name ? 'border-emerald-600 bg-emerald-50' : 'bg-white'}`}>
+          <p className='font-semibold'>{layout.title}</p>
+          <p className='mt-1 text-sm'>Space Used: {layout.spaceUsed} yards</p>
+          <p className='text-sm'>Remaining: {layout.remaining} yards</p>
+          <p className='text-sm'>Fields: {[layout.large ? `${layout.large} Large` : '', layout.medium ? `${layout.medium} Medium` : '', layout.small ? `${layout.small} Small` : ''].filter(Boolean).join(', ')}</p>
+          <p className='mt-1 text-xs text-slate-600'>Supports: {supportedGroups(layout)}</p>
+        </button>)}
+      </div>
+      <button className='mt-3 rounded bg-emerald-700 px-4 py-2 text-white' onClick={saveTurfConfiguration}>Save Turf Stadium Layout</button>
+    </section>}
+
+    {selectedHost?.surface_type === GRASS_FIELD && <section className='rounded border p-4'>
+      <div className='flex flex-wrap items-center justify-between gap-2'>
+        <div>
+          <h2 className='font-semibold'>Manual Grass Field Setup</h2>
+          <p className='text-sm text-slate-600'>Grass field locations use active configured fields for slot generation and must have at least one active field before hosting availability can use them.</p>
+        </div>
+        <button className='rounded border px-3 py-2 text-sm' onClick={resetFieldForm}>Add Field</button>
+      </div>
+      <div className='mt-3 grid gap-2 md:grid-cols-4'>
+        <input className='rounded border p-2' placeholder='Field Name' value={fieldForm.name} onChange={(e) => setFieldForm({ ...fieldForm, name: e.target.value })} />
+        <select className='rounded border p-2' value={fieldForm.layout_type} onChange={(e) => setFieldForm({ ...fieldForm, layout_type: e.target.value })}>
+          <option value=''>Field Type</option>
+          {FIELD_TYPES.map((fieldType) => <option key={fieldType} value={fieldType}>{fieldTypeLabel(fieldType)}</option>)}
+        </select>
+        <label className='flex items-center gap-2 rounded border p-2 text-sm'><input type='checkbox' checked={fieldForm.is_active} onChange={(e) => setFieldForm({ ...fieldForm, is_active: e.target.checked })} />Active</label>
+        <button className='rounded bg-emerald-700 px-4 py-2 text-white' onClick={saveField}>{editingFieldId ? 'Update Field' : 'Add Field'}</button>
+      </div>
+      <div className='mt-4 overflow-x-auto'>
+        <table className='w-full text-sm'>
+          <thead><tr><th className='border p-2 text-left'>Field Name</th><th className='border p-2 text-left'>Field Type</th><th className='border p-2 text-left'>Active</th><th className='border p-2 text-left'>Actions</th></tr></thead>
+          <tbody>{selectedHostFields.length ? selectedHostFields.map((field: any) => <tr key={field.id}><td className='border p-2'>{field.name}</td><td className='border p-2'>{fieldTypeLabel(field.layout_type)}</td><td className='border p-2'>{field.is_active ? 'Active' : 'Inactive'}</td><td className='border p-2'><div className='flex gap-2'><button className='rounded border px-2 py-1 text-xs' onClick={() => editField(field)}>Edit Field</button><button className='rounded border px-2 py-1 text-xs' disabled={!field.is_active} onClick={() => deactivateField(field)}>Deactivate Field</button></div></td></tr>) : <tr><td className='border p-3 text-center text-slate-500' colSpan={4}>No fields configured.</td></tr>}</tbody>
+        </table>
+      </div>
+      <div className='mt-3 rounded bg-slate-50 p-3 text-xs text-slate-700'>
+        <p className='font-semibold'>Division compatibility by field type</p>
+        <p>Small: {DIVISION_COMPATIBILITY.SMALL.join(', ')}</p>
+        <p>Medium: {DIVISION_COMPATIBILITY.MEDIUM.join(', ')}</p>
+        <p>Large: {DIVISION_COMPATIBILITY.LARGE.join(', ')}</p>
+      </div>
+    </section>}
+
+    <section className='rounded border p-4'>
+      <h2 className='mb-2 font-semibold'>Current Hosting Site Setups</h2>
+      <div className='overflow-x-auto'>
+        <table className='w-full text-sm'>
+          <thead><tr><th className='border p-2 text-left'>Organization</th><th className='border p-2 text-left'>Host Location</th><th className='border p-2 text-left'>Surface Type</th><th className='border p-2 text-left'>Available Layout / Configured Fields</th><th className='border p-2 text-left'>Large Fields</th><th className='border p-2 text-left'>Medium Fields</th><th className='border p-2 text-left'>Small Fields</th><th className='border p-2 text-left'>Status</th><th className='border p-2 text-left'>Actions</th></tr></thead>
+          <tbody>{tableHosts.map((host: any) => {
+            const hostConfigs = configsByHost[host.id] || [];
+            const activeConfig = hostConfigs.find((config: any) => config.is_active) || hostConfigs[0];
+            const hostFields = fieldsByHost[host.id] || [];
+            const activeFields = hostFields.filter((field: any) => field.is_active);
+            const surfaceType = host.surface_type || GRASS_FIELD;
+            const counts = surfaceType === TURF_STADIUM ? { large: activeConfig?.large_field_count || 0, medium: activeConfig?.medium_field_count || 0, small: activeConfig?.small_field_count || 0 } : {
+              large: activeFields.filter((field: any) => field.layout_type === 'LARGE').length,
+              medium: activeFields.filter((field: any) => field.layout_type === 'MEDIUM').length,
+              small: activeFields.filter((field: any) => field.layout_type === 'SMALL').length,
+            };
+            const isReady = surfaceType === TURF_STADIUM ? Boolean(activeConfig?.is_active) : activeFields.length > 0;
+            return <tr key={host.id}>
+              <td className='border p-2'>{orgNameById[host.organization_id] || 'Unknown'}</td>
+              <td className='border p-2'>{host.name}</td>
+              <td className='border p-2'>{formatSurfaceType(surfaceType)}</td>
+              <td className='border p-2'>{surfaceType === TURF_STADIUM ? layoutLabel(activeConfig?.configuration_name) : configuredFieldsText(activeFields.length)}</td>
+              <td className='border p-2'>{counts.large}</td><td className='border p-2'>{counts.medium}</td><td className='border p-2'>{counts.small}</td>
+              <td className='border p-2'>{isReady ? 'Active' : 'Needs setup'}</td>
+              <td className='border p-2'><button className='rounded border px-2 py-1 text-xs' onClick={() => onHostChange(host.id)}>Edit</button></td>
+            </tr>;
+          })}</tbody>
+        </table>
       </div>
     </section>
-    <section className='rounded border p-4'><h2 className='mb-2 font-semibold'>Current Hosting Site Setups</h2><div className='overflow-x-auto'><table className='w-full text-sm'><thead><tr><th className='border p-2 text-left'>Hosting Site</th><th className='border p-2 text-left'>Site Type</th><th className='border p-2 text-left'>Available Layout</th><th className='border p-2 text-left'>Small / Large</th><th className='border p-2'>Status</th><th className='border p-2 text-left'>Actions</th></tr></thead><tbody>{visibleAreas.map((a: any) => { const host = hosts.find((h: any) => h.id === a.host_location_id); const rows = (configByArea[a.id] || []); return <tr key={a.id}><td className='border p-2'>{host?.name || 'Unknown'}</td><td className='border p-2'>{a.field_space_type === STADIUM_TYPE ? 'Stadium Site' : 'Grass/Park Site'}</td><td className='border p-2'>{rows.map((r: any) => setupLabel(r.name)).join(', ') || '—'}</td><td className='border p-2'>{rows.map((r: any) => `${r.thirty_yard_capacity} Small / ${r.fifty_three_yard_capacity} Large`).join(' • ') || '—'}</td><td className='border p-2 text-center'>{a.is_active ? 'Active' : 'Inactive'}</td><td className='border p-2'><div className='flex gap-2'><button className='rounded border px-2 py-1 text-xs' onClick={() => editArea(a)}>Edit</button><button className='rounded border px-2 py-1 text-xs' onClick={() => toggleActive(a)}>{a.is_active ? 'Mark Inactive' : 'Mark Active'}</button></div></td></tr>; })}</tbody></table></div></section>
   </div>;
 }

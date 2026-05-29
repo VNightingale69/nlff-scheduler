@@ -28,7 +28,7 @@ const displayHour = (hour: number) => formatDisplayTime(`${hour === 24 ? 0 : hou
 
 const formatDateLabel = (date: string) => formatDisplayDate(date);
 
-const layoutLabel = (layout: string) => (layout === '2x53' || layout === 'TWO_LARGE' ? '2 Large' : layout === '1x53_plus_2x30' || layout === 'ONE_MEDIUM_TWO_SMALL' ? '1 Medium + 2 Small' : layout === 'ONE_LARGE_ONE_MEDIUM' ? '1 Large + 1 Medium' : layout === 'TWO_MEDIUM' ? '2 Medium' : layout === '3x30' || layout === 'THREE_SMALL' ? '3 Small' : layout === 'ONE_LARGE_ONE_SMALL' ? '1 Large + 1 Small' : layout === 'ONE_MEDIUM_ONE_SMALL' ? '1 Medium + 1 Small' : 'Custom Layout');
+const layoutLabel = (layout: string) => (layout === '2x53' || layout === 'TWO_LARGE' ? '2 Large' : layout === 'ONE_MEDIUM_TWO_SMALL' ? '1 Medium + 2 Small' : layout === 'ONE_LARGE_ONE_MEDIUM' ? '1 Large + 1 Medium' : layout === 'TWO_MEDIUM' ? '2 Medium' : layout === '3x30' || layout === 'THREE_SMALL' ? '3 Small' : layout === 'ONE_LARGE_ONE_SMALL' ? '1 Large + 1 Small' : layout === 'ONE_MEDIUM_ONE_SMALL' ? '1 Medium + 1 Small' : 'Custom Layout');
 const weekForDate = (date: string) => HOSTING_DATES.findIndex((d) => d.date === date) + 1;
 
 const STATUS_BADGE: Record<string, string> = {
@@ -610,7 +610,7 @@ export default function HostingAvailabilityManager() {
         <div className='mb-3 grid gap-2 md:grid-cols-4'>
           <input type='date' className='rounded border p-2' value={savedDateFilter} onChange={(e) => setSavedDateFilter(e.target.value)} />
           <select className='rounded border p-2' value={savedSiteTypeFilter} onChange={(e) => setSavedSiteTypeFilter(e.target.value)}><option value=''>All Site Types</option><option value='TURF_STADIUM'>Turf Stadium</option><option value='GRASS_FIELD'>Grass Field</option><option value='STADIUM_SITE'>Legacy Stadium Site</option><option value='GRASS_PARK_SITE'>Legacy Grass/Park Site</option></select>
-          <select className='rounded border p-2' value={savedLayoutFilter} onChange={(e) => setSavedLayoutFilter(e.target.value)}><option value=''>All Layouts</option><option value='2x53'>Two Large Fields</option><option value='1x53_plus_2x30'>One Large Field + Two Small Fields</option><option value='3x30'>Three Small Fields</option><option value='TWO_LARGE'>Two Large</option><option value='ONE_MEDIUM_TWO_SMALL'>One Medium + Two Small</option><option value='TWO_MEDIUM'>Two Medium</option><option value='THREE_SMALL'>Three Small</option><option value='ONE_LARGE_ONE_MEDIUM'>One Large + One Medium</option><option value='ONE_LARGE_ONE_SMALL'>One Large + One Small</option><option value='ONE_MEDIUM_ONE_SMALL'>One Medium + One Small</option></select>
+          <select className='rounded border p-2' value={savedLayoutFilter} onChange={(e) => setSavedLayoutFilter(e.target.value)}><option value=''>All Layouts</option><option value='2x53'>Two Large Fields</option><option value='3x30'>Three Small Fields</option><option value='TWO_LARGE'>Two Large</option><option value='ONE_MEDIUM_TWO_SMALL'>One Medium + Two Small</option><option value='TWO_MEDIUM'>Two Medium</option><option value='THREE_SMALL'>Three Small</option><option value='ONE_LARGE_ONE_MEDIUM'>One Large + One Medium</option><option value='ONE_LARGE_ONE_SMALL'>One Large + One Small</option><option value='ONE_MEDIUM_ONE_SMALL'>One Medium + One Small</option></select>
         </div>
         {!hostId ? <p className='text-slate-500'>Select a hosting site to view saved availability.</p> : !savedAvailability.length ? <p className='text-slate-500'>No saved availability has been entered for this hosting site.</p> : <div className='space-y-3'>{savedAvailability.map((entry: any, idx: number) => (
           <div key={`${entry.available_date}-${idx}`} className='rounded border bg-slate-50 p-3 text-sm'>
@@ -669,7 +669,7 @@ export default function HostingAvailabilityManager() {
                 <div key={`summary-${area.id}-${date}`} className='rounded border bg-slate-50 p-3 text-sm'>
                   <div className='font-medium'>{HOSTING_DATES.find((x) => x.date === date)?.label || date}</div>
                   <div>{selectedHost.name}</div>
-                  <div>{selectedCfg?.name === '2x53' ? 'Two Large Fields' : selectedCfg?.name === '1x53_plus_2x30' ? 'One Large + Two Small Fields' : selectedCfg?.name === '3x30' ? 'Three Small Fields' : 'Custom Layout'}</div>
+                  <div>{layoutLabel(selectedCfg?.name || '')}</div>
                   <div className='mt-1'>Available:</div>
                   <ul className='list-disc pl-6'>
                     {ranges.map((r, i) => <li key={i}>{displayHour(r.start)}–{displayHour(r.end)}</li>)}
