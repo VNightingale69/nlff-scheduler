@@ -19,6 +19,15 @@ type HostLocation = {
   zip_code?: string;
   surface_type?: string;
   notes?: string;
+  field_area_name?: string;
+  setup_constraints?: string;
+  max_small_fields?: number;
+  max_medium_fields?: number;
+  max_large_fields?: number;
+  max_total_fields?: number;
+  can_support_small?: boolean;
+  can_support_medium?: boolean;
+  can_support_large?: boolean;
   is_active?: boolean;
   has_active_field_setup?: boolean;
   effective_is_active?: boolean;
@@ -199,6 +208,15 @@ export default function HostLocationsAdminPage() {
         zip_code: form.zip_code?.trim(),
         surface_type: form.surface_type || 'GRASS_FIELD',
         notes: form.notes?.trim() || null,
+        field_area_name: form.field_area_name?.trim() || null,
+        setup_constraints: form.setup_constraints?.trim() || null,
+        max_small_fields: Number(form.max_small_fields || 0),
+        max_medium_fields: Number(form.max_medium_fields || 0),
+        max_large_fields: Number(form.max_large_fields || 0),
+        max_total_fields: Number(form.max_total_fields || 0),
+        can_support_small: form.can_support_small !== false,
+        can_support_medium: form.can_support_medium !== false,
+        can_support_large: form.can_support_large !== false,
         ...(form.is_active !== undefined ? { is_active: Boolean(form.is_active) } : {}),
       };
 
@@ -322,6 +340,23 @@ export default function HostLocationsAdminPage() {
         <FormField label='State' type='text' value={form.state ?? 'WI'} onChange={(value) => setForm({ ...form, state: String(value) })} />
         <FormField label='Surface Type' type='select' value={form.surface_type ?? 'GRASS_FIELD'} options={SURFACE_TYPES} onChange={(value) => setForm({ ...form, surface_type: String(value) })} />
         <FormField label='Notes' type='textarea' value={form.notes ?? ''} onChange={(value) => setForm({ ...form, notes: String(value) })} />
+        {(form.surface_type ?? 'GRASS_FIELD') === 'GRASS_FIELD' ? (
+          <div className='grid gap-3 rounded border bg-emerald-50/50 p-3 md:col-span-2 md:grid-cols-2'>
+            <div className='md:col-span-2'>
+              <h2 className='font-semibold'>Grass Field Physical Capacity</h2>
+              <p className='text-sm text-slate-600'>Grass fields are fixed for the host date. Define the maximum number of Small, Medium, and Large fields this location can line before games start.</p>
+            </div>
+            <FormField label='Field Area Name' type='text' value={form.field_area_name ?? ''} onChange={(value) => setForm({ ...form, field_area_name: String(value) })} />
+            <FormField label='Setup Constraints' type='textarea' value={form.setup_constraints ?? ''} onChange={(value) => setForm({ ...form, setup_constraints: String(value) })} />
+            <FormField label='Maximum Small Fields' type='number' value={form.max_small_fields ?? 0} onChange={(value) => setForm({ ...form, max_small_fields: Number(value) })} />
+            <FormField label='Maximum Medium Fields' type='number' value={form.max_medium_fields ?? 0} onChange={(value) => setForm({ ...form, max_medium_fields: Number(value) })} />
+            <FormField label='Maximum Large Fields' type='number' value={form.max_large_fields ?? 0} onChange={(value) => setForm({ ...form, max_large_fields: Number(value) })} />
+            <FormField label='Maximum Total Fields' type='number' value={form.max_total_fields ?? 0} onChange={(value) => setForm({ ...form, max_total_fields: Number(value) })} />
+            <FormField label='Can Support Small' type='checkbox' value={form.can_support_small !== false} onChange={(value) => setForm({ ...form, can_support_small: Boolean(value) })} />
+            <FormField label='Can Support Medium' type='checkbox' value={form.can_support_medium !== false} onChange={(value) => setForm({ ...form, can_support_medium: Boolean(value) })} />
+            <FormField label='Can Support Large' type='checkbox' value={form.can_support_large !== false} onChange={(value) => setForm({ ...form, can_support_large: Boolean(value) })} />
+          </div>
+        ) : null}
         <div className='flex flex-col gap-1'>
           <FormField
             label='Zip Code'
@@ -374,7 +409,7 @@ export default function HostLocationsAdminPage() {
                   <td className='px-3 py-2'>{(item as any).location}</td>
                   <td className='px-3 py-2'>{item.zip_code || '-'}</td>
                   <td className='px-3 py-2'>{SURFACE_TYPES.find((surface) => surface.value === item.surface_type)?.label || item.surface_type || 'Other'}</td>
-                  <td className='px-3 py-2'><div className='flex flex-col gap-1'>{item.surface_type === 'TURF_STADIUM' ? <>{(configsByHostId[item.id] || []).length ? (configsByHostId[item.id] || []).map((config: any) => <span key={config.id}>{configLabel(config.configuration_name)} — {config.space_used_yards ?? 0} used / {config.remaining_yards ?? 0} remaining ({(config.field_instances || []).join(', ')}){config.is_active ? '' : ' (Inactive)'}</span>) : <span className='text-slate-500'>No turf configuration selected</span>}<div className='mt-1 flex flex-wrap gap-1'>{HOST_CONFIG_OPTIONS.filter((option) => !(configsByHostId[item.id] || []).some((config: any) => config.configuration_name === option.value)).map((option) => <button key={option.value} type='button' className='rounded border px-2 py-0.5 text-xs text-emerald-700' title={`${option.used} yards used, ${option.remaining} yards remaining`} onClick={async () => { await apiFetch('/host-location-configurations', { method: 'POST', body: JSON.stringify({ host_location_id: item.id, configuration_name: option.value, is_active: true }) }, getToken()); load(); }}>+ {option.label}</button>)}</div></> : <span className='text-slate-600'>Manual grass fields: Small / Medium / Large</span>}</div></td>
+                  <td className='px-3 py-2'><div className='flex flex-col gap-1'>{item.surface_type === 'TURF_STADIUM' ? <>{(configsByHostId[item.id] || []).length ? (configsByHostId[item.id] || []).map((config: any) => <span key={config.id}>{configLabel(config.configuration_name)} — {config.space_used_yards ?? 0} used / {config.remaining_yards ?? 0} remaining ({(config.field_instances || []).join(', ')}){config.is_active ? '' : ' (Inactive)'}</span>) : <span className='text-slate-500'>No turf configuration selected</span>}<div className='mt-1 flex flex-wrap gap-1'>{HOST_CONFIG_OPTIONS.filter((option) => !(configsByHostId[item.id] || []).some((config: any) => config.configuration_name === option.value)).map((option) => <button key={option.value} type='button' className='rounded border px-2 py-0.5 text-xs text-emerald-700' title={`${option.used} yards used, ${option.remaining} yards remaining`} onClick={async () => { await apiFetch('/host-location-configurations', { method: 'POST', body: JSON.stringify({ host_location_id: item.id, configuration_name: option.value, is_active: true }) }, getToken()); load(); }}>+ {option.label}</button>)}</div></> : <span className='text-slate-600'>Grass forecast capacity: {item.max_small_fields ?? 0} Small / {item.max_medium_fields ?? 0} Medium / {item.max_large_fields ?? 0} Large • {item.max_total_fields ?? 0} total</span>}</div></td>
                   <td className='px-3 py-2'><div className='flex flex-col gap-1'><span>{item.status_label || ((item.effective_is_active ?? item.is_active) ? 'Active' : 'Inactive/Unavailable')}</span>{item.status_warning ? <span className='inline-flex w-fit rounded bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800'>{item.status_warning}</span> : null}</div></td>
                   <td className='space-x-2 px-3 py-2'>
                     <button className='text-blue-700' onClick={() => edit(item)}>Edit</button>

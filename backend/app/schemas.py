@@ -106,6 +106,15 @@ class HostLocationCreate(BaseModel):
     state: str | None = None
     zip_code: str | None = None
     notes: str | None = None
+    field_area_name: str | None = None
+    setup_constraints: str | None = None
+    max_small_fields: int = 0
+    max_medium_fields: int = 0
+    max_large_fields: int = 0
+    max_total_fields: int = 0
+    can_support_small: bool = True
+    can_support_medium: bool = True
+    can_support_large: bool = True
     is_active: bool = True
 
 class HostLocationRead(BaseSchema, HostLocationCreate):
@@ -335,6 +344,23 @@ class ScheduleReadinessTotals(BaseModel):
 
 
 
+class GrassFieldSetupForecast(BaseModel):
+    host_location: str
+    hosting_date: date
+    small_fields_to_line: int = 0
+    medium_fields_to_line: int = 0
+    large_fields_to_line: int = 0
+    total_fields_to_line: int = 0
+    capacity_limit: int = 0
+    capacity_status: str = 'Valid'
+    games_supported_by_field_size: dict[str, int] = {}
+    games_that_could_not_fit: dict[str, int] = {}
+    demand_by_field_size: dict[str, int] = {}
+    slots_per_field: int = 0
+    recommendation_message: str | None = None
+    warnings: list[str] = []
+
+
 class ScheduleReadinessHostSiteRow(BaseModel):
     host_location_id: uuid.UUID
     host_location_name: str
@@ -344,6 +370,7 @@ class ScheduleReadinessHostSiteRow(BaseModel):
     selected_turf_layout: str | None = None
     grass_field_capacity: int = 0
     active_fields: list[str] = []
+    grass_setup_forecast: GrassFieldSetupForecast | None = None
     field_counts_by_size: dict[str, int]
     total_field_capacity_by_size: dict[str, int] = {}
     generated_slots: int

@@ -35,6 +35,19 @@ type HostDateReadiness = {
     selected_turf_layout: string | null;
     grass_field_capacity: number;
     active_fields: string[];
+    grass_setup_forecast?: {
+      small_fields_to_line: number;
+      medium_fields_to_line: number;
+      large_fields_to_line: number;
+      total_fields_to_line: number;
+      capacity_limit: number;
+      capacity_status: string;
+      games_supported_by_field_size: Record<string, number>;
+      games_that_could_not_fit: Record<string, number>;
+      demand_by_field_size: Record<string, number>;
+      recommendation_message?: string | null;
+      warnings: string[];
+    } | null;
     field_counts_by_size: Record<string, number>;
     total_field_capacity_by_size: Record<string, number>;
     generated_slots: number;
@@ -193,8 +206,18 @@ export default function ScheduleReadinessPage() {
                       <div className='font-medium'>{site.host_location_name}</div>
                       <div className='text-slate-600'>Community: {site.community_name || '—'} • Surface: {site.surface_type}</div>
                       <div>Auto-selected turf layout: {site.selected_turf_layout || '—'}</div>
-                      <div>Grass field capacity: {site.grass_field_capacity || 0}</div>
-                      <div>Total field capacity by size: {site.field_counts_by_size.SMALL || 0} Small / {site.field_counts_by_size.MEDIUM || 0} Medium / {site.field_counts_by_size.LARGE || 0} Large</div>
+                      {site.surface_type === 'GRASS_FIELD' && site.grass_setup_forecast ? (
+                        <div className='my-2 rounded border border-emerald-200 bg-emerald-50 p-2'>
+                          <div className='font-semibold'>Grass Field Setup Forecast</div>
+                          <div>{site.grass_setup_forecast.recommendation_message}</div>
+                          <div>Fields to line: {site.grass_setup_forecast.small_fields_to_line} Small / {site.grass_setup_forecast.medium_fields_to_line} Medium / {site.grass_setup_forecast.large_fields_to_line} Large ({site.grass_setup_forecast.total_fields_to_line} total)</div>
+                          <div>Capacity limit: {site.grass_setup_forecast.capacity_limit} • Status: <span className={site.grass_setup_forecast.capacity_status === 'Valid' ? 'font-semibold text-emerald-700' : 'font-semibold text-rose-700'}>{site.grass_setup_forecast.capacity_status}</span></div>
+                          <div>Demand: {site.grass_setup_forecast.demand_by_field_size.SMALL || 0} Small / {site.grass_setup_forecast.demand_by_field_size.MEDIUM || 0} Medium / {site.grass_setup_forecast.demand_by_field_size.LARGE || 0} Large games</div>
+                          <div>Games supported: {site.grass_setup_forecast.games_supported_by_field_size.SMALL || 0} Small / {site.grass_setup_forecast.games_supported_by_field_size.MEDIUM || 0} Medium / {site.grass_setup_forecast.games_supported_by_field_size.LARGE || 0} Large</div>
+                          <div>Games that could not fit: {site.grass_setup_forecast.games_that_could_not_fit.SMALL || 0} Small / {site.grass_setup_forecast.games_that_could_not_fit.MEDIUM || 0} Medium / {site.grass_setup_forecast.games_that_could_not_fit.LARGE || 0} Large</div>
+                        </div>
+                      ) : <div>Grass field capacity: {site.grass_field_capacity || 0}</div>}
+                      <div>Total field capacity by size: {site.total_field_capacity_by_size.SMALL ?? site.field_counts_by_size.SMALL ?? 0} Small / {site.total_field_capacity_by_size.MEDIUM ?? site.field_counts_by_size.MEDIUM ?? 0} Medium / {site.total_field_capacity_by_size.LARGE ?? site.field_counts_by_size.LARGE ?? 0} Large</div>
                       <div>Slots: {site.generated_slots} • Games assigned by location: {site.games_assigned_by_location ?? site.games_assigned} • Unscheduled: {site.games_unscheduled}</div>
                       <div>Divisions: {site.divisions_supported.length ? site.divisions_supported.join(', ') : '—'}</div>
                       <div>{site.auto_select_turf_layout ? 'Auto-select layout enabled' : 'Manual layout'}{site.lock_selected_layout ? ' • Layout locked' : ''}</div>

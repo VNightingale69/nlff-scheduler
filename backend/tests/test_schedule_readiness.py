@@ -6,7 +6,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import Base
-from app.models import Division, Game, GameStatus, Organization, OrganizationDivisionParticipation, Season, Team, Week
+from app.models import Division, FieldInstance, Game, GameStatus, Organization, OrganizationDivisionParticipation, Season, Team, Week
 from app.routes.api import get_schedule_readiness
 
 
@@ -142,3 +142,97 @@ class MultiLocationHostingAvailabilityTest(unittest.TestCase):
         turf_site = next(site for site in host_day.host_sites if site.host_location_name == 'Community Turf')
         self.assertEqual(grass_site.grass_field_capacity, 1)
         self.assertIsNotNone(turf_site.selected_turf_layout)
+
+class GrassFieldForecastTest(unittest.TestCase):
+    def setUp(self):
+        engine = create_engine('sqlite+pysqlite:///:memory:', future=True)
+        Base.metadata.create_all(engine)
+        self.db: Session = sessionmaker(bind=engine)()
+        self.org = Organization(id=uuid.uuid4(), name='Westosha', is_active=True)
+        self.status = GameStatus(id=uuid.uuid4(), code='SCHEDULED', label='Scheduled', is_active=True)
+        self.season = Season(id=uuid.uuid4(), name='Fall', start_date=date(2026, 9, 1), end_date=date(2026, 11, 1), is_active=True)
+        self.week = Week(id=uuid.uuid4(), season_id=self.season.id, week_number=1, start_date=date(2026, 9, 13), end_date=date(2026, 9, 19))
+        self.small_division = Division(id=uuid.uuid4(), division_group='coed', name='K 1st', sort_order=1, required_field_layout_type='THIRTY_YARD_WIDTH', is_active=True)
+        self.medium_division = Division(id=uuid.uuid4(), division_group='coed', name='4th 5th', sort_order=2, required_field_layout_type='FORTY_YARD_WIDTH', is_active=True)
+        self.large_division = Division(id=uuid.uuid4(), division_group='coed', name='8th', sort_order=3, required_field_layout_type='FIFTY_THREE_YARD_WIDTH', is_active=True)
+        self.db.add_all([self.org, self.status, self.season, self.week, self.small_division, self.medium_division, self.large_division])
+        self.db.flush()
+        self.small_teams = self._teams(self.small_division, 20)
+        self.medium_teams = self._teams(self.medium_division, 10)
+        self.large_teams = self._teams(self.large_division, 14)
+        self.db.add_all([*self.small_teams, *self.medium_teams, *self.large_teams])
+        self.db.commit()
+
+    def tearDown(self):
+        self.db.close()
+
+    def _teams(self, division: Division, count: int):
+        return [Team(id=uuid.uuid4(), organization_id=self.org.id, division_id=division.id, name=f'{division.name} Team {index}', is_active=True) for index in range(count)]
+
+    def _add_games(self, teams, game_count: int):
+        for index in range(game_count):
+            self.db.add(Game(
+                id=uuid.uuid4(),
+                season_id=self.season.id,
+                week_id=self.week.id,
+                home_team_id=teams[(index * 2) % len(teams)].id,
+                away_team_id=teams[(index * 2 + 1) % len(teams)].id,
+                game_status_id=self.status.id,
+                game_date=date(2026, 9, 13),
+                kickoff_time=time(9, 0),
+            ))
+        self.db.commit()
+
+    def test_grass_forecast_generates_fixed_field_instances_by_size(self):
+        from app.models import HostLocation, HostingAvailability
+        from app.routes.api import _regenerate_generated_slots
+
+        self._add_games(self.small_teams, 10)
+        self._add_games(self.medium_teams, 5)
+        self._add_games(self.large_teams, 7)
+        grass_host = HostLocation(
+            id=uuid.uuid4(), organization_id=self.org.id, name='Westosha Grass Fields', surface_type='GRASS_FIELD',
+            max_small_fields=2, max_medium_fields=1, max_large_fields=1, max_total_fields=4, is_active=True,
+        )
+        availability = HostingAvailability(
+            id=uuid.uuid4(), organization_id=self.org.id, host_location_id=grass_host.id,
+            available_date=date(2026, 9, 13), start_time=time(9, 0), end_time=time(17, 0), is_available=True,
+        )
+        self.db.add_all([grass_host, availability]); self.db.commit()
+
+        metrics = _regenerate_generated_slots(self.db, availability, grass_host.id)
+        self.db.commit()
+
+        self.assertEqual(metrics['new_slots_created'], 32)
+        instances = self.db.query(FieldInstance).filter_by(host_location_id=grass_host.id).order_by(FieldInstance.field_name).all()
+        self.assertEqual(sorted((instance.field_name, instance.field_type) for instance in instances), [
+            ('Grass Large Field 1', 'LARGE'),
+            ('Grass Medium Field 1', 'MEDIUM'),
+            ('Grass Small Field 1', 'SMALL'),
+            ('Grass Small Field 2', 'SMALL'),
+        ])
+        response = get_schedule_readiness(current_user=None, db=self.db)
+        site = response.host_dates[0].host_sites[0]
+        self.assertEqual(site.grass_setup_forecast.capacity_status, 'Valid')
+        self.assertEqual(site.grass_setup_forecast.small_fields_to_line, 2)
+        self.assertEqual(site.grass_setup_forecast.medium_fields_to_line, 1)
+        self.assertEqual(site.grass_setup_forecast.large_fields_to_line, 1)
+
+    def test_grass_forecast_blocks_slots_when_capacity_exceeded(self):
+        from app.models import HostLocation, HostingAvailability
+        from app.routes.api import _regenerate_generated_slots
+
+        self._add_games(self.small_teams, 10)
+        grass_host = HostLocation(
+            id=uuid.uuid4(), organization_id=self.org.id, name='Tiny Grass', surface_type='GRASS_FIELD',
+            max_small_fields=1, max_medium_fields=0, max_large_fields=0, max_total_fields=1, is_active=True,
+        )
+        availability = HostingAvailability(
+            id=uuid.uuid4(), organization_id=self.org.id, host_location_id=grass_host.id,
+            available_date=date(2026, 9, 13), start_time=time(9, 0), end_time=time(17, 0), is_available=True,
+        )
+        self.db.add_all([grass_host, availability]); self.db.commit()
+
+        metrics = _regenerate_generated_slots(self.db, availability, grass_host.id)
+
+        self.assertEqual(metrics['new_slots_created'], 0)
