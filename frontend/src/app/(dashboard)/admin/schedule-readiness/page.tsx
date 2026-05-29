@@ -135,8 +135,9 @@ export default function ScheduleReadinessPage() {
           <div className='space-y-2'>
             {hostingRotation.map((row) => <div key={row.week} className='rounded border bg-slate-50 p-3 text-sm'>
               <div className='font-medium'>{row.week}</div>
+              <div>Available communities: {row.available_communities?.length ? row.available_communities.join(', ') : '—'}</div>
               <div>Selected host communities: {row.selected_host_communities?.length ? row.selected_host_communities.join(', ') : '—'}</div>
-              <div className='mt-1 text-slate-600'>Rotation ranking: {(row.rotation_ranking || []).map((rank: any, index: number) => `${index + 1}. ${rank.community} (${rank.status}, delta ${rank.hosting_delta}, capacity ${rank.capacity_score})`).join(' • ') || '—'}</div>
+              <div className='mt-1 text-slate-600'>Rotation ranking: {(row.rotation_ranking || []).map((rank: any, index: number) => `${index + 1}. ${rank.community} (weeks ${rank.host_weeks_used}, last ${rank.last_hosted_week_number ? `W${rank.last_hosted_week_number}` : '—'}, games ${rank.games_hosted_season_to_date ?? rank.games_hosted}, expected ${rank.expected_games_hosted}, delta ${rank.hosting_delta}, capacity ${rank.capacity_score}, fit ${rank.capacity_fit_result})`).join(' • ') || '—'}</div>
               {row.reason_selected?.length ? <ul className='mt-2 list-disc pl-5 text-green-800'>{row.reason_selected.map((reason: string) => <li key={reason}>{reason}</li>)}</ul> : null}
               {row.reason_skipped?.length ? <ul className='mt-2 list-disc pl-5 text-amber-800'>{row.reason_skipped.map((reason: string) => <li key={reason}>{reason}</li>)}</ul> : null}
             </div>)}
