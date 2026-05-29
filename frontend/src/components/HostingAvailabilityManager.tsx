@@ -7,16 +7,6 @@ import { formatDisplayDate, formatDisplayTime } from '@/lib/displayFormat';
 import Toast from './Toast';
 import { useSearchParams } from 'next/navigation';
 
-const HOSTING_DATES = [
-  { date: '2026-09-06', label: '09/06/2026' },
-  { date: '2026-09-13', label: '09/13/2026' },
-  { date: '2026-09-20', label: '09/20/2026' },
-  { date: '2026-09-27', label: '09/27/2026' },
-  { date: '2026-10-04', label: '10/04/2026' },
-  { date: '2026-10-11', label: '10/11/2026' },
-  { date: '2026-10-18', label: '10/18/2026 — Playoffs' },
-  { date: '2026-10-25', label: '10/25/2026 — Championships' },
-] as const;
 const STADIUM_TYPE = 'STADIUM_SITE';
 const HOURS = [9, 10, 11, 12, 13, 14, 15, 16];
 
@@ -29,7 +19,6 @@ const displayHour = (hour: number) => formatDisplayTime(`${hour === 24 ? 0 : hou
 const formatDateLabel = (date: string) => formatDisplayDate(date);
 
 const layoutLabel = (layout: string) => (layout === 'Active Grass Fields' ? 'Active Grass Fields' : layout === 'Auto Select Best Layout' ? 'Auto Select Best Layout' : layout === '2x53' || layout === 'TWO_LARGE' ? '2 Large' : layout === 'ONE_MEDIUM_TWO_SMALL' ? '1 Medium + 2 Small' : layout === 'ONE_LARGE_ONE_MEDIUM' ? '1 Large + 1 Medium' : layout === 'TWO_MEDIUM' ? '2 Medium' : layout === '3x30' || layout === 'THREE_SMALL' ? '3 Small' : layout === 'ONE_LARGE_ONE_SMALL' ? '1 Large + 1 Small' : layout === 'ONE_MEDIUM_ONE_SMALL' ? '1 Medium + 1 Small' : 'Custom Layout');
-const weekForDate = (date: string) => HOSTING_DATES.findIndex((d) => d.date === date) + 1;
 
 const STATUS_BADGE: Record<string, string> = {
   Hosting: 'bg-emerald-100 text-emerald-800',
@@ -70,15 +59,33 @@ const INDICATOR_DEFINITIONS: Record<string, string> = {
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+type SeasonWeek = {
+  id: string;
+  season_id: string;
+  week_number: number;
+  label?: string | null;
+  start_date: string;
+  end_date: string;
+  primary_game_date?: string | null;
+  status: string;
+};
+
+const VISIBLE_WEEK_STATUSES = new Set(['draft', 'active', 'locked']);
+const titleCase = (value: string) => value ? value.charAt(0).toUpperCase() + value.slice(1) : '';
+
 export default function HostingAvailabilityManager() {
   const [message, setMessage] = useState('');
   const [type, setType] = useState<'ok' | 'err'>('ok');
+  const [seasons, setSeasons] = useState<any[]>([]);
+  const [seasonId, setSeasonId] = useState('');
+  const [weeks, setWeeks] = useState<SeasonWeek[]>([]);
+  const [showCancelledWeeks, setShowCancelledWeeks] = useState(false);
   const [orgs, setOrgs] = useState<any[]>([]);
   const [hosts, setHosts] = useState<any[]>([]);
   const [areas, setAreas] = useState<any[]>([]);
   const [configs, setConfigs] = useState<any[]>([]);
   const [hostConfigs, setHostConfigs] = useState<any[]>([]);
-  const [selectedDates, setSelectedDates] = useState<string[]>([]);
+  const [selectedWeekIds, setSelectedWeekIds] = useState<string[]>([]);
   const [orgId, setOrgId] = useState('');
   const [hostId, setHostId] = useState('');
   const [selectedSlots, setSelectedSlots] = useState<Record<string, boolean>>({});
@@ -104,13 +111,17 @@ export default function HostingAvailabilityManager() {
     (async () => {
       setLoading(true);
       try {
-        const [o, h, a, c, hc]: any[] = await Promise.all([
+        const [seasonResponse, o, h, a, c, hc]: any[] = await Promise.all([
+          apiFetch('/seasons?page_size=200', {}, token),
           apiFetch('/organizations?page_size=500', {}, token),
           apiFetch('/host-locations?page_size=500&is_active=true', {}, token),
           apiFetch('/physical-field-areas?page_size=1000', {}, token),
           apiFetch('/field-configuration-options?page_size=2000', {}, token),
           apiFetch('/host-location-configurations?page_size=2000', {}, token),
         ]);
+        const seasonItems = seasonResponse.items || [];
+        setSeasons(seasonItems);
+        setSeasonId((current) => current || seasonItems[0]?.id || '');
         setOrgs(o.items || []);
         setHosts(h.items || []);
         setAreas(a.items || []);
@@ -140,6 +151,44 @@ export default function HostingAvailabilityManager() {
   useEffect(() => {
     if (!hostOptions.some((h: any) => h.id === hostId)) setHostId('');
   }, [hostOptions, hostId]);
+
+
+  useEffect(() => {
+    if (!seasonId) {
+      setWeeks([]);
+      setSelectedWeekIds([]);
+      return;
+    }
+    apiFetch(`/weeks?season_id=${seasonId}&page_size=500`, {}, token)
+      .then((data: any) => {
+        setWeeks(data.items || []);
+        setSelectedWeekIds((prev) => prev.filter((weekId) => (data.items || []).some((week: SeasonWeek) => week.id === weekId)));
+      })
+      .catch((e: any) => {
+        setWeeks([]);
+        setSelectedWeekIds([]);
+        setType('err');
+        setMessage(e?.message || 'Unable to load season weeks.');
+      });
+  }, [seasonId, token]);
+
+  const visibleWeeks = useMemo(
+    () => weeks.filter((week) => VISIBLE_WEEK_STATUSES.has(String(week.status || '').toLowerCase()) || (showCancelledWeeks && String(week.status || '').toLowerCase() === 'cancelled')),
+    [weeks, showCancelledWeeks],
+  );
+  const selectedWeeks = useMemo(() => selectedWeekIds.map((weekId) => weeks.find((week) => week.id === weekId)).filter(Boolean) as SeasonWeek[], [selectedWeekIds, weeks]);
+  const selectedDates = useMemo(() => selectedWeeks.map((week) => week.primary_game_date).filter(Boolean) as string[], [selectedWeeks]);
+  const weekByDate = useMemo(() => new Map(weeks.filter((week) => week.primary_game_date).map((week) => [week.primary_game_date as string, week])), [weeks]);
+  const weekById = useMemo(() => new Map(weeks.map((week) => [week.id, week])), [weeks]);
+  const weekForDate = (date: string) => weekByDate.get(date)?.week_number || 0;
+  const weekLabelForDate = (date: string) => {
+    const week = weekByDate.get(date);
+    return week ? `Week ${week.week_number}${week.label ? ` — ${week.label}` : ''}` : formatDateLabel(date);
+  };
+  const toggleWeek = (week: SeasonWeek) => {
+    if (!week.primary_game_date) return;
+    setSelectedWeekIds((prev) => (prev.includes(week.id) ? prev.filter((weekId) => weekId !== week.id) : [...prev, week.id]));
+  };
 
   const getSelectedConfigId = (areaId: string, date: string, defaultConfigId: string) =>
     activeConfigByAreaDate[layoutKey(areaId, date)] || defaultConfigId;
@@ -177,6 +226,7 @@ export default function HostingAvailabilityManager() {
 
   const loadSavedAvailability = async () => {
     const params = new URLSearchParams();
+    if (seasonId) params.set('season_id', seasonId);
     if (orgId) params.set('organization_id', orgId);
     if (hostId) params.set('host_location_id', hostId);
     if (savedDateFilter) params.set('available_date', savedDateFilter);
@@ -206,10 +256,10 @@ export default function HostingAvailabilityManager() {
 
   useEffect(() => {
     loadSavedAvailability().catch(() => setSavedAvailability([]));
-  }, [hostId, orgId, savedDateFilter, savedSiteTypeFilter, savedLayoutFilter]);
+  }, [hostId, orgId, savedDateFilter, savedSiteTypeFilter, savedLayoutFilter, seasonId]);
 
   const editSaved = (entry: any) => {
-    setSelectedDates([entry.available_date]);
+    if (entry.week_id) setSelectedWeekIds([entry.week_id]);
     const nextSlots: Record<string, boolean> = {};
     const nextConfigs: Record<string, string> = {};
     const nextAutoSelect: Record<string, boolean> = {};
@@ -250,7 +300,7 @@ export default function HostingAvailabilityManager() {
   const save = async () => {
     if (!selectedDates.length || !hostId || (!visibleAreas.length && (selectedHost?.surface_type === 'TURF_STADIUM' || selectedHost?.surface_type === STADIUM_TYPE) && !hostConfigsForSelectedHost.length)) {
       setType('err');
-      setMessage('Select dates, hosting site, and field configuration first.');
+      setMessage('Select season weeks with Primary Game Dates, hosting site, and field configuration first.');
       return;
     }
     setSaving(true);
@@ -258,13 +308,16 @@ export default function HostingAvailabilityManager() {
       const slots: any[] = [];
       if (!visibleAreas.length && hostId) {
         const isTurfHost = selectedHost?.surface_type === 'TURF_STADIUM' || selectedHost?.surface_type === STADIUM_TYPE;
-        for (const d of selectedDates) {
+        for (const week of selectedWeeks) {
+          const d = week.primary_game_date as string;
           const configId = getSelectedConfigId(hostId, d, hostConfigsForSelectedHost[0]?.id || '');
           const autoSelectLayout = isTurfHost ? getAutoSelectLayout(hostId, d) : false;
           const lockSelectedLayout = isTurfHost ? getLockLayout(hostId, d) : false;
           if (isTurfHost && (!autoSelectLayout || lockSelectedLayout) && !configId) continue;
           for (const range of summaryRanges(hostId, d)) {
             slots.push({
+              season_id: seasonId,
+              week_id: week.id,
               organization_id: orgId,
               host_location_id: hostId,
               selected_configuration_id: isTurfHost && (!autoSelectLayout || lockSelectedLayout) ? configId : null,
@@ -280,12 +333,15 @@ export default function HostingAvailabilityManager() {
       }
       for (const area of visibleAreas) {
         const cfgs = configsByArea[area.id] || [];
-        for (const d of selectedDates) {
+        for (const week of selectedWeeks) {
+          const d = week.primary_game_date as string;
           const configId = getSelectedConfigId(area.id, d, cfgs[0]?.id || '');
           if (!configId) continue;
           for (const h of HOURS) {
             if (selectedSlots[slotKey(area.id, d, h)]) {
               slots.push({
+                season_id: seasonId,
+                week_id: week.id,
                 physical_field_area_id: area.id,
                 field_configuration_option_id: configId,
                 auto_select_turf_layout: false,
@@ -314,7 +370,7 @@ export default function HostingAvailabilityManager() {
 
   const summaryRows = useMemo(() => {
     const rows = savedAvailability.map((entry: any) => {
-      const week = weekForDate(entry.available_date);
+      const week = entry.week_number || weekForDate(entry.available_date);
       const smallFieldCount = entry.smallFieldCount ?? entry.small_field_count ?? entry.small_field_capacity ?? 0;
       const largeFieldCount = entry.largeFieldCount ?? entry.large_field_count ?? entry.large_field_capacity ?? 0;
       const starts = (entry.time_ranges || []).map((r: any) => Number(r.start_time.slice(0, 2)));
@@ -381,12 +437,12 @@ export default function HostingAvailabilityManager() {
       };
     });
     return rows.sort((a: any, b: any) => (a.week - b.week) || (a.firstStart - b.firstStart) || String(a.organization_name || '').localeCompare(String(b.organization_name || '')));
-  }, [savedAvailability]);
+  }, [savedAvailability, weekByDate]);
 
   const dashboardMetrics = useMemo(() => {
-    const weeks = new Set(summaryRows.map((r: any) => r.week));
-    const weeksMissingHosts = HOSTING_DATES.map((d) => weekForDate(d.date)).filter((w) => w > 0 && !weeks.has(w));
-    const weeksMissingLarge = HOSTING_DATES.map((d) => weekForDate(d.date)).filter((w) => w > 0 && !summaryRows.some((r: any) => r.week === w && (r.large_field_capacity || 0) > 0));
+    const hostedWeeks = new Set(summaryRows.map((r: any) => r.week));
+    const weeksMissingHosts = visibleWeeks.map((week) => week.week_number).filter((w) => w > 0 && !hostedWeeks.has(w));
+    const weeksMissingLarge = visibleWeeks.map((week) => week.week_number).filter((w) => w > 0 && !summaryRows.some((r: any) => r.week === w && (r.large_field_capacity || 0) > 0));
     return {
       totalHostDates: summaryRows.length,
       totalCommunitiesHosting: new Set(summaryRows.map((r: any) => r.organization_name || r.host_location_name)).size,
@@ -395,7 +451,7 @@ export default function HostingAvailabilityManager() {
       weeksMissingHosts,
       weeksMissingLarge,
     };
-  }, [summaryRows]);
+  }, [summaryRows, visibleWeeks]);
 
   const organizationsById = useMemo(() => new Map(orgs.map((o: any) => [o.id, o.name])), [orgs]);
 
@@ -419,16 +475,16 @@ export default function HostingAvailabilityManager() {
 
     return communities.map(({ organizationId, communityName }: any) => {
       const byWeek: Record<number, string> = {};
-      HOSTING_DATES.forEach((d) => {
-        const w = weekForDate(d.date);
-        const rows = summaryRows.filter((r: any) => r.organization_id === organizationId && r.available_date === d.date);
+      visibleWeeks.forEach((week) => {
+        const w = week.week_number;
+        const rows = summaryRows.filter((r: any) => r.organization_id === organizationId && (r.week_id === week.id || r.available_date === week.primary_game_date));
         if (!rows.length) byWeek[w] = 'Away';
         else if (rows.every((r: any) => r.readiness === 'READY')) byWeek[w] = 'Hosting';
         else byWeek[w] = 'Partial';
       });
             return { community: communityName, byWeek };
     });
-  }, [hosts, summaryRows, organizationsById]);
+  }, [hosts, summaryRows, organizationsById, visibleWeeks]);
   const splitHostWeeks = useMemo(() => {
     const byWeek = new Map<number, Set<string>>();
     summaryRows.forEach((row: any) => {
@@ -440,12 +496,11 @@ export default function HostingAvailabilityManager() {
       byWeek.get(week)!.add(orgKey);
     });
     const result: Record<number, boolean> = {};
-    HOSTING_DATES.forEach((d) => {
-      const w = weekForDate(d.date);
-      result[w] = (byWeek.get(w)?.size || 0) > 1;
+    visibleWeeks.forEach((week) => {
+      result[week.week_number] = (byWeek.get(week.week_number)?.size || 0) > 1;
     });
     return result;
-  }, [summaryRows]);
+  }, [summaryRows, visibleWeeks]);
 
   const readinessChecks = useMemo(() => {
     const projectedSmallGames = 12;
@@ -535,10 +590,10 @@ export default function HostingAvailabilityManager() {
           <div className='overflow-auto'>
             <h3 className='mb-2 font-medium'>Weekly hosting matrix</h3>
             <table className='min-w-full text-sm'>
-              <thead><tr className='border-b text-left'><th className='p-2'>Community</th>{HOSTING_DATES.map((d) => <th key={d.date} className='p-2'>W{weekForDate(d.date)}</th>)}<th className='p-2'>Split Host Week</th></tr></thead>
+              <thead><tr className='border-b text-left'><th className='p-2'>Community</th>{visibleWeeks.map((week) => <th key={week.id} className='p-2'>W{week.week_number}</th>)}<th className='p-2'>Split Host Week</th></tr></thead>
               <tbody>
                 {weeklyMatrix.map((row: any) => (
-                  <tr key={row.community} className='border-b'><td className='p-2 font-medium'>{row.community}</td>{HOSTING_DATES.map((d) => { const status = row.byWeek[weekForDate(d.date)] || 'Away'; return <td key={d.date} className='p-2'><span className={`rounded px-2 py-1 text-xs ${STATUS_BADGE[status]}`}>{status}</span></td>; })}<td className='p-2 text-xs text-slate-700'><ul className='space-y-1'>{HOSTING_DATES.map((d) => { const week = weekForDate(d.date); if (!splitHostWeeks[week]) return null; return <li key={`split-${row.community}-${week}`}>W{week}: Split Host Week: Yes</li>; })}</ul></td></tr>
+                  <tr key={row.community} className='border-b'><td className='p-2 font-medium'>{row.community}</td>{visibleWeeks.map((week) => { const status = row.byWeek[week.week_number] || 'Away'; return <td key={week.id} className='p-2'><span className={`rounded px-2 py-1 text-xs ${STATUS_BADGE[status]}`}>{status}</span></td>; })}<td className='p-2 text-xs text-slate-700'><ul className='space-y-1'>{visibleWeeks.map((week) => splitHostWeeks[week.week_number] ? <li key={`split-${row.community}-${week.id}`}>W{week.week_number}: Split Host Week: Yes</li> : null)}</ul></td></tr>
                 ))}
               </tbody>
             </table>
@@ -568,21 +623,42 @@ export default function HostingAvailabilityManager() {
       </section>
 
       <section className='rounded border p-4'>
-        <h2 className='mb-2 font-semibold'>4. Select Hosting Dates</h2>
-        <div className='grid gap-2 md:grid-cols-2 lg:grid-cols-4'>
-          {HOSTING_DATES.map((d) => (
-            <button key={d.date} onClick={() => setSelectedDates((p) => (p.includes(d.date) ? p.filter((x) => x !== d.date) : [...p, d.date]))} className={`rounded border p-3 text-left ${selectedDates.includes(d.date) ? 'border-emerald-600 bg-emerald-50' : ''}`}>
-              {d.label}
-            </button>
-          ))}
+        <div className='mb-3 flex flex-col gap-3 md:flex-row md:items-end md:justify-between'>
+          <div>
+            <h2 className='mb-2 font-semibold'>4. Select Hosting Dates</h2>
+            <select value={seasonId} onChange={(e) => setSeasonId(e.target.value)} className='w-full rounded border p-2 md:w-80'>
+              <option value=''>Select season</option>
+              {seasons.map((season: any) => <option key={season.id} value={season.id}>{season.name}</option>)}
+            </select>
+          </div>
+          <label className='inline-flex items-center gap-2 text-sm text-slate-700'>
+            <input type='checkbox' checked={showCancelledWeeks} onChange={(e) => setShowCancelledWeeks(e.target.checked)} />
+            Show Cancelled Weeks
+          </label>
         </div>
+        {!seasonId ? <p className='text-slate-500'>Select a season to load week records.</p> : !visibleWeeks.length ? <p className='text-slate-500'>No selectable weeks found for this season.</p> : (
+          <div className='grid gap-2 md:grid-cols-2 lg:grid-cols-4'>
+            {visibleWeeks.map((week) => {
+              const hasPrimaryDate = Boolean(week.primary_game_date);
+              const selected = selectedWeekIds.includes(week.id);
+              return (
+                <button key={week.id} disabled={!hasPrimaryDate} onClick={() => toggleWeek(week)} className={`rounded border p-3 text-left transition ${selected ? 'border-emerald-600 bg-emerald-50' : 'bg-white'} ${!hasPrimaryDate ? 'cursor-not-allowed border-amber-300 bg-amber-50 opacity-80' : 'hover:border-emerald-500'}`}>
+                  <div className='font-semibold'>Week {week.week_number}</div>
+                  <div className={hasPrimaryDate ? 'text-lg font-medium' : 'font-medium text-amber-700'}>{hasPrimaryDate ? formatDateLabel(week.primary_game_date as string) : 'Missing Primary Game Date'}</div>
+                  <div className='text-sm text-slate-700'>{week.label || `Week ${week.week_number}`}</div>
+                  <div className='mt-2 inline-flex rounded bg-slate-100 px-2 py-1 text-xs font-medium text-slate-700'>{titleCase(week.status || 'draft')}</div>
+                </button>
+              );
+            })}
+          </div>
+        )}
       </section>
 
       <section className='rounded border p-4 overflow-auto'>
         <h2 className='mb-2 font-semibold'>5–7. Hourly Availability + Layout Selection</h2>
         {loading || !hostId || !selectedDates.length ? <p className='text-slate-500'>Select hosting site and dates.</p> : selectedDates.map((date) => (
           <div key={date} className='mb-4'>
-            <h3 className='mb-2 font-medium'>{HOSTING_DATES.find((x) => x.date === date)?.label || date}</h3>
+            <h3 className='mb-2 font-medium'>{weekLabelForDate(date)} — {formatDateLabel(date)}</h3>
             {(visibleAreas.length ? visibleAreas : (selectedHost ? [{ id: selectedHost.id, name: selectedHost.name, field_space_type: selectedHost.surface_type, hostLevel: true }] : [])).map((area: any) => {
               const cfgs = area.hostLevel ? hostConfigsForSelectedHost.map((c: any) => ({ ...c, name: c.configuration_name, physical_field_area_id: area.id })) : (configsByArea[area.id] || []);
               const defaultCfg = cfgs[0]?.id || '';
@@ -696,7 +772,7 @@ export default function HostingAvailabilityManager() {
               if (!ranges.length) return null;
               return (
                 <div key={`summary-${area.id}-${date}`} className='rounded border bg-slate-50 p-3 text-sm'>
-                  <div className='font-medium'>{HOSTING_DATES.find((x) => x.date === date)?.label || date}</div>
+                  <div className='font-medium'>{weekLabelForDate(date)} — {formatDateLabel(date)}</div>
                   <div>{selectedHost.name}</div>
                   <div>{isTurfArea ? (getAutoSelectLayout(area.id, date) && !getLockLayout(area.id, date) ? 'Scheduler will auto-select best turf layout' : `Locked layout: ${layoutLabel(selectedCfg?.name || '')}`) : 'Active configured grass fields will be used'}</div>
                   <div className='mt-1'>Available:</div>

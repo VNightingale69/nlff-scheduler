@@ -205,6 +205,8 @@ class WeekRead(BaseSchema, WeekCreate):
     pass
 
 class HostingAvailabilityCreate(BaseModel):
+    season_id: uuid.UUID | None = None
+    week_id: uuid.UUID | None = None
     organization_id: uuid.UUID | None = None
     host_location_id: uuid.UUID | None = None
     selected_configuration_id: uuid.UUID | None = None
@@ -218,6 +220,8 @@ class HostingAvailabilityCreate(BaseModel):
     layout_type: str | None = None
     slot_index: int | None = None
     available_date: date
+    primary_game_date: date | None = None
+    active: bool = True
     start_time: time
     end_time: time
     is_available: bool = True
@@ -228,6 +232,8 @@ class HostingAvailabilityRead(BaseSchema, HostingAvailabilityCreate):
 
 
 class HostingAvailabilityBulkSlot(BaseModel):
+    season_id: uuid.UUID | None = None
+    week_id: uuid.UUID | None = None
     organization_id: uuid.UUID | None = None
     host_location_id: uuid.UUID | None = None
     selected_configuration_id: uuid.UUID | None = None
@@ -241,6 +247,8 @@ class HostingAvailabilityBulkSlot(BaseModel):
     layout_type: str | None = None
     slot_index: int | None = None
     available_date: date
+    primary_game_date: date | None = None
+    active: bool = True
     start_time: time
     end_time: time
     is_available: bool = True
@@ -267,6 +275,12 @@ class SavedAvailabilityRange(BaseModel):
 
 class SavedAvailabilityEntry(BaseModel):
     id: uuid.UUID
+    season_id: uuid.UUID | None = None
+    week_id: uuid.UUID | None = None
+    week_number: int | None = None
+    week_label: str | None = None
+    week_status: str | None = None
+    primary_game_date: date | None = None
     available_date: date
     organization_id: uuid.UUID | None = None
     organization_name: str | None = None

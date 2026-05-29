@@ -189,6 +189,8 @@ class Week(Base, TimestampMixin):
 class HostingAvailability(Base, TimestampMixin):
     __tablename__ = 'hosting_availabilities'
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    season_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('seasons.id'))
+    week_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('weeks.id'))
     organization_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('organizations.id'))
     host_location_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('host_locations.id'))
     selected_configuration_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('host_location_configurations.id'))
@@ -202,10 +204,14 @@ class HostingAvailability(Base, TimestampMixin):
     layout_type: Mapped[str | None] = mapped_column(String(100))
     slot_index: Mapped[int | None] = mapped_column(Integer)
     available_date: Mapped[Date] = mapped_column(Date, nullable=False)
+    primary_game_date: Mapped[Date | None] = mapped_column(Date, nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     start_time: Mapped[Time] = mapped_column(Time, nullable=False)
     end_time: Mapped[Time] = mapped_column(Time, nullable=False)
     is_available: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     notes: Mapped[str | None] = mapped_column(Text)
+    season = relationship('Season')
+    week = relationship('Week')
     organization = relationship('Organization')
     host_location = relationship('HostLocation')
     selected_configuration = relationship('HostLocationConfiguration')

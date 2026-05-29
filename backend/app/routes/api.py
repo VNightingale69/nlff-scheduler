@@ -8,7 +8,7 @@ from fastapi.responses import StreamingResponse
 import logging
 from datetime import date, datetime, time, timedelta
 
-from sqlalchemy import String, and_, delete, func, or_, select, text
+from sqlalchemy import String, and_, delete, func, inspect as sa_inspect, or_, select, text
 from sqlalchemy.exc import ProgrammingError, SQLAlchemyError
 from sqlalchemy.orm import Session, aliased
 
@@ -1519,8 +1519,38 @@ def _resolve_availability_host_and_validate(payload, current_user: User, db: Ses
     return host, field, area, config
 
 
+def _hosting_availability_has_week_id(db: Session) -> bool:
+    return 'week_id' in {column['name'] for column in sa_inspect(db.bind).get_columns('hosting_availabilities')}
+
+
+def _validate_availability_week(payload, db: Session) -> Week:
+    week_id = getattr(payload, 'week_id', None)
+    if not week_id:
+        if _hosting_availability_has_week_id(db):
+            raise HTTPException(400, 'week_id is required for hosting availability')
+        legacy_week = db.query(Week).filter(Week.primary_game_date == payload.available_date).first()
+        if not legacy_week or not legacy_week.primary_game_date:
+            raise HTTPException(400, 'week_id is required for hosting availability')
+        payload.week_id = legacy_week.id
+        payload.season_id = legacy_week.season_id
+        payload.primary_game_date = legacy_week.primary_game_date
+        return legacy_week
+    week = db.query(Week).filter(Week.id == week_id).first()
+    if not week:
+        raise HTTPException(400, 'Invalid weekId for hosting availability')
+    if not week.primary_game_date:
+        raise HTTPException(400, 'Hosting availability cannot be created because the week has no Primary Game Date')
+    if getattr(payload, 'season_id', None) and payload.season_id != week.season_id:
+        raise HTTPException(400, 'weekId does not belong to the selected season')
+    if getattr(payload, 'available_date', None) and payload.available_date != week.primary_game_date:
+        payload.available_date = week.primary_game_date
+    payload.primary_game_date = week.primary_game_date
+    payload.season_id = week.season_id
+    return week
+
 @router.post('/hosting-availabilities', response_model=HostingAvailabilityRead, dependencies=[Depends(get_current_user)])
 def create_hosting_availability(payload: HostingAvailabilityCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    week = _validate_availability_week(payload, db)
     host, field, area, config = _resolve_availability_host_and_validate(payload, current_user, db)
     x = HostingAvailability(**payload.model_dump())
     x.organization_id = host.organization_id
@@ -1548,6 +1578,7 @@ def list_hosting_availabilities(field_id: uuid.UUID | None = None, field_ids: st
 def upd_hosting_availability(item_id: uuid.UUID, payload: HostingAvailabilityCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     x = db.query(HostingAvailability).filter(HostingAvailability.id == item_id).first()
     if not x: raise HTTPException(404, 'Hosting availability not found')
+    week = _validate_availability_week(payload, db)
     host, field, area, config = _resolve_availability_host_and_validate(payload, current_user, db)
     for k, v in payload.model_dump().items(): setattr(x, k, v)
     x.organization_id = host.organization_id
@@ -1574,12 +1605,13 @@ def bulk_upsert_hosting_availabilities(payload: HostingAvailabilityBulkUpsertReq
     created = 0
     updated = 0
     for slot in payload.slots:
+        week = _validate_availability_week(slot, db)
         host, field, area, config = _resolve_availability_host_and_validate(slot, current_user, db)
         existing_query = db.query(HostingAvailability).filter(
             HostingAvailability.host_location_id == host.id,
             HostingAvailability.field_id == slot.field_id,
             HostingAvailability.physical_field_area_id == slot.physical_field_area_id,
-            HostingAvailability.available_date == slot.available_date,
+            HostingAvailability.week_id == slot.week_id,
             HostingAvailability.start_time == slot.start_time,
             HostingAvailability.end_time == slot.end_time,
             HostingAvailability.layout_type == slot.layout_type,
@@ -1590,6 +1622,11 @@ def bulk_upsert_hosting_availabilities(payload: HostingAvailabilityBulkUpsertReq
             existing_query = existing_query.filter(HostingAvailability.selected_configuration_id == slot.selected_configuration_id)
         existing = existing_query.first()
         if existing:
+            existing.season_id = week.season_id
+            existing.week_id = week.id
+            existing.available_date = week.primary_game_date
+            existing.primary_game_date = week.primary_game_date
+            existing.active = slot.active
             existing.is_available = slot.is_available
             existing.notes = slot.notes
             existing.selected_configuration_id = slot.selected_configuration_id
@@ -1601,6 +1638,10 @@ def bulk_upsert_hosting_availabilities(payload: HostingAvailabilityBulkUpsertReq
             _regenerate_generated_slots(db, existing, host.id)
         else:
             availability = HostingAvailability(**slot.model_dump())
+            availability.season_id = week.season_id
+            availability.week_id = week.id
+            availability.available_date = week.primary_game_date
+            availability.primary_game_date = week.primary_game_date
             availability.organization_id = host.organization_id
             availability.host_location_id = host.id
             db.add(availability)
@@ -1619,9 +1660,26 @@ def bulk_upsert_hosting_availabilities(payload: HostingAvailabilityBulkUpsertReq
         generated_field_instances=generated_field_instances.count(),
         generated_slots=generated_slots.count(),
     )
+
+
+def _availability_week_fields(row: HostingAvailability) -> dict:
+    week = row.week
+    effective_date = (week.primary_game_date if week and week.primary_game_date else row.primary_game_date or row.available_date)
+    return {
+        'season_id': week.season_id if week else row.season_id,
+        'week_id': week.id if week else row.week_id,
+        'week_number': week.week_number if week else None,
+        'week_label': week.label if week else None,
+        'week_status': week.status if week else None,
+        'primary_game_date': effective_date,
+        'available_date': effective_date,
+    }
+
 @router.get('/hosting-availabilities/saved', response_model=SavedAvailabilityResponse, dependencies=[Depends(get_current_user)])
-def list_saved_hosting_availability(organization_id: uuid.UUID | None = None, host_location_id: uuid.UUID | None = None, site_type: str | None = None, layout: str | None = None, available_date: str | None = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def list_saved_hosting_availability(season_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, host_location_id: uuid.UUID | None = None, site_type: str | None = None, layout: str | None = None, available_date: str | None = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     q = db.query(HostingAvailability).join(HostingAvailability.physical_field_area).join(PhysicalFieldArea.host_location).outerjoin(HostingAvailability.field_configuration_option).filter(HostingAvailability.is_available.is_(True))
+    if season_id:
+        q = q.filter(HostingAvailability.season_id == season_id)
     if current_user.role.name == ROLE_COMMUNITY_SCHEDULER:
         q = q.filter(HostLocation.organization_id == current_user.organization_id)
     elif organization_id:
@@ -1696,7 +1754,7 @@ def list_saved_hosting_availability(organization_id: uuid.UUID | None = None, ho
             layout_counts['mismatch'] = layout_small + layout_medium + layout_large == 0
             grouped[key] = {
                 'id': row.id,
-                'available_date': row.available_date,
+                **_availability_week_fields(row),
                 'organization_id': host.organization_id,
                 'organization_name': host.organization.name if host.organization else None,
                 'host_location_id': host.id,
@@ -1734,6 +1792,8 @@ def list_saved_hosting_availability(organization_id: uuid.UUID | None = None, ho
         HostingAvailability.field_id.is_(None),
         HostingAvailability.physical_field_area_id.is_(None),
     )
+    if season_id:
+        direct_q = direct_q.filter(HostingAvailability.season_id == season_id)
     if current_user.role.name == ROLE_COMMUNITY_SCHEDULER:
         direct_q = direct_q.filter(HostLocation.organization_id == current_user.organization_id)
     elif organization_id:
@@ -1762,7 +1822,7 @@ def list_saved_hosting_availability(organization_id: uuid.UUID | None = None, ho
         if key not in grouped:
             grouped[key] = {
                 'id': row.id,
-                'available_date': row.available_date,
+                **_availability_week_fields(row),
                 'organization_id': host.organization_id,
                 'organization_name': host.organization.name if host.organization else None,
                 'host_location_id': host.id,
@@ -1797,6 +1857,8 @@ def list_saved_hosting_availability(organization_id: uuid.UUID | None = None, ho
         HostingAvailability.is_available.is_(True),
         HostingAvailability.field_id.is_not(None),
     )
+    if season_id:
+        field_q = field_q.filter(HostingAvailability.season_id == season_id)
     if current_user.role.name == ROLE_COMMUNITY_SCHEDULER:
         field_q = field_q.filter(HostLocation.organization_id == current_user.organization_id)
     elif organization_id:
@@ -1820,7 +1882,7 @@ def list_saved_hosting_availability(organization_id: uuid.UUID | None = None, ho
             large = 1 if field_type == FIELD_SIZE_LARGE else 0
             grouped[key] = {
                 'id': row.id,
-                'available_date': row.available_date,
+                **_availability_week_fields(row),
                 'organization_id': host.organization_id,
                 'organization_name': host.organization.name if host.organization else None,
                 'host_location_id': host.id,
@@ -1856,6 +1918,12 @@ def list_saved_hosting_availability(organization_id: uuid.UUID | None = None, ho
             ranges.append({'start_time': time(start, 0), 'end_time': time(prev + 1, 0)})
         items.append({
             'id': data['id'],
+            'season_id': data.get('season_id'),
+            'week_id': data.get('week_id'),
+            'week_number': data.get('week_number'),
+            'week_label': data.get('week_label'),
+            'week_status': data.get('week_status'),
+            'primary_game_date': data.get('primary_game_date'),
             'available_date': data['available_date'],
             'organization_id': data['organization_id'],
             'organization_name': data['organization_name'],
@@ -2294,7 +2362,7 @@ def _week_to_dict(week: Week, counts: dict[str, dict[uuid.UUID, int]] | None = N
         'label': week.label,
         'start_date': week.start_date,
         'end_date': week.end_date,
-        'primary_game_date': week.primary_game_date or week.start_date,
+        'primary_game_date': week.primary_game_date,
         'notes': week.notes,
         'status': week.status or 'draft',
         'hosting_availability_count': counts.get('hosting_availability', {}).get(week.id, 0),
@@ -2317,7 +2385,7 @@ def list_weeks(season_id:uuid.UUID|None=None, status:str|None=None, start_date:d
     weeks=q.offset((page-1)*page_size).limit(page_size).all()
     counts = {'hosting_availability': {}, 'generated_slots': {}, 'scheduled_games': {}}
     for week in weeks:
-        counts['hosting_availability'][week.id] = db.query(func.count(func.distinct(HostingAvailability.host_location_id))).filter(HostingAvailability.available_date >= week.start_date, HostingAvailability.available_date <= week.end_date, HostingAvailability.is_available.is_(True)).scalar() or 0
+        counts['hosting_availability'][week.id] = db.query(func.count(func.distinct(HostingAvailability.host_location_id))).filter(HostingAvailability.week_id == week.id, HostingAvailability.is_available.is_(True)).scalar() or 0
         counts['generated_slots'][week.id] = db.query(func.count(GameSlot.id)).filter(GameSlot.slot_date >= week.start_date, GameSlot.slot_date <= week.end_date).scalar() or 0
         counts['scheduled_games'][week.id] = db.query(func.count(Game.id)).filter(Game.week_id == week.id).scalar() or 0
     return PagedResponse(items=[_week_to_dict(x, counts) for x in weeks], total=total, page=page, page_size=page_size)
@@ -2493,8 +2561,26 @@ def update_week(week_id: uuid.UUID, payload: dict, db: Session = Depends(get_db)
         'notes': payload.get('notes', week.notes),
         'status': payload.get('status', week.status),
     }, db, week_id)
+    old_primary_game_date = week.primary_game_date
     for key, value in data.items():
         setattr(week, key, value)
+    if week.primary_game_date and week.primary_game_date != old_primary_game_date:
+        availability_ids = [item.id for item in db.query(HostingAvailability.id).filter(HostingAvailability.week_id == week.id).all()]
+        if availability_ids:
+            db.query(HostingAvailability).filter(HostingAvailability.id.in_(availability_ids)).update(
+                {HostingAvailability.available_date: week.primary_game_date, HostingAvailability.primary_game_date: week.primary_game_date},
+                synchronize_session=False,
+            )
+            db.query(FieldInstance).filter(FieldInstance.hosting_availability_id.in_(availability_ids)).update(
+                {FieldInstance.instance_date: week.primary_game_date},
+                synchronize_session=False,
+            )
+            field_instance_ids = [item.id for item in db.query(FieldInstance.id).filter(FieldInstance.hosting_availability_id.in_(availability_ids)).all()]
+            if field_instance_ids:
+                db.query(GameSlot).filter(GameSlot.field_instance_id.in_(field_instance_ids)).update(
+                    {GameSlot.slot_date: week.primary_game_date},
+                    synchronize_session=False,
+                )
     db.commit(); db.refresh(week); return _week_to_dict(week)
 
 def _to_game_read(
