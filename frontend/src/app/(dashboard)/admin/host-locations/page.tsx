@@ -17,6 +17,8 @@ type HostLocation = {
   city?: string;
   state?: string;
   zip_code?: string;
+  surface_type?: string;
+  notes?: string;
   is_active?: boolean;
   has_active_field_setup?: boolean;
   effective_is_active?: boolean;
@@ -29,6 +31,20 @@ type Organization = {
   name: string;
 };
 const STADIUM_TYPE = 'STADIUM_SITE';
+const SURFACE_TYPES = [
+  { value: 'TURF_STADIUM', label: 'Turf Stadium' },
+  { value: 'GRASS_FIELD', label: 'Grass Field' },
+  { value: 'MULTI_FIELD_COMPLEX', label: 'Multi-Field Complex' },
+  { value: 'OTHER', label: 'Other' },
+];
+const HOST_CONFIG_OPTIONS = [
+  { value: 'TWO_LARGE', label: 'Two Large' },
+  { value: 'ONE_MEDIUM_TWO_SMALL', label: 'One Medium + Two Small' },
+  { value: 'TWO_MEDIUM', label: 'Two Medium' },
+  { value: 'THREE_SMALL', label: 'Three Small' },
+  { value: 'CUSTOM', label: 'Custom' },
+];
+const configLabel = (value: string) => HOST_CONFIG_OPTIONS.find((option) => option.value === value)?.label || value;
 
 type DeleteCheck = {
   host_location_name: string;
@@ -58,6 +74,7 @@ export default function HostLocationsAdminPage() {
   const [deleteCheck, setDeleteCheck] = useState<DeleteCheck | null>(null);
   const [checkingDelete, setCheckingDelete] = useState(false);
   const [siteTypeByHostId, setSiteTypeByHostId] = useState<Record<string, string>>({});
+  const [configsByHostId, setConfigsByHostId] = useState<Record<string, any[]>>({});
   const [zipCodeError, setZipCodeError] = useState('');
 
   const orgNameById = useMemo(() => Object.fromEntries(organizations.map((x) => [x.id, x.name])), [organizations]);
@@ -77,7 +94,7 @@ export default function HostLocationsAdminPage() {
 
   const loadOrganizations = async () => {
     try {
-      const response = await apiFetch('/organizations?page_size=500', {}, getToken());
+      const response: any = await apiFetch('/organizations?page_size=500', {}, getToken());
       setOrganizations(response.items || []);
     } catch {
       setOrganizations([]);
@@ -87,12 +104,19 @@ export default function HostLocationsAdminPage() {
   const load = async () => {
     setLoading(true);
     try {
-      const [hostResponse, areaResponse] = await Promise.all([
+      const [hostResponse, areaResponse, configResponse]: any[] = await Promise.all([
         apiFetch('/host-locations?page_size=500', {}, getToken()),
         apiFetch('/physical-field-areas?page_size=1000', {}, getToken()),
+        apiFetch('/host-location-configurations?page_size=1000', {}, getToken()),
       ]);
       const hosts = hostResponse.items || [];
       const areas = areaResponse.items || [];
+      const configs = configResponse.items || [];
+      const nextConfigsByHost: Record<string, any[]> = {};
+      for (const config of configs) {
+        if (!config?.host_location_id) continue;
+        nextConfigsByHost[config.host_location_id] = [...(nextConfigsByHost[config.host_location_id] || []), config];
+      }
       const nextSiteTypes: Record<string, string> = {};
       for (const area of areas) {
         if (!area?.host_location_id || nextSiteTypes[area.host_location_id]) continue;
@@ -117,6 +141,7 @@ export default function HostLocationsAdminPage() {
           })
         : hosts;
       setSiteTypeByHostId(nextSiteTypes);
+      setConfigsByHostId(nextConfigsByHost);
       setItems(filteredHosts);
     } catch {
       setMessage('Failed to load host locations');
@@ -172,6 +197,8 @@ export default function HostLocationsAdminPage() {
         city: form.city?.trim(),
         state: form.state?.trim(),
         zip_code: form.zip_code?.trim(),
+        surface_type: form.surface_type || 'OTHER',
+        notes: form.notes?.trim() || null,
         ...(form.is_active !== undefined ? { is_active: Boolean(form.is_active) } : {}),
       };
 
@@ -183,7 +210,7 @@ export default function HostLocationsAdminPage() {
 
       setMessage(editingId ? 'Updated successfully' : 'Created successfully');
       setType('ok');
-      setForm({ is_active: true, state: 'WI' });
+      setForm({ is_active: true, state: 'WI', surface_type: 'OTHER' });
       setEditingId(null);
       setZipCodeError('');
       load();
@@ -196,7 +223,7 @@ export default function HostLocationsAdminPage() {
   };
 
   const edit = (item: HostLocation) => {
-    setForm({ ...item, address_line1: item.address_line1 || item.address || '', state: item.state || 'WI' });
+    setForm({ ...item, address_line1: item.address_line1 || item.address || '', state: item.state || 'WI', surface_type: item.surface_type || 'OTHER' });
     setEditingId(item.id);
     setZipCodeError('');
   };
@@ -206,7 +233,7 @@ export default function HostLocationsAdminPage() {
     setDeleteCheck(null);
     setCheckingDelete(true);
     try {
-      const summary = await apiFetch(`/host-locations/${item.id}/delete-check`, {}, getToken());
+      const summary: any = await apiFetch(`/host-locations/${item.id}/delete-check`, {}, getToken());
       setDeleteCheck(summary);
     } catch (e: any) {
       setMessage(e?.message || 'Failed to load dependency summary');
@@ -293,6 +320,8 @@ export default function HostLocationsAdminPage() {
         <FormField label='Address Line 2 (Optional)' type='text' value={form.address_line2 ?? ''} onChange={(value) => setForm({ ...form, address_line2: String(value) })} />
         <FormField label='City' type='text' value={form.city ?? ''} onChange={(value) => setForm({ ...form, city: String(value) })} />
         <FormField label='State' type='text' value={form.state ?? 'WI'} onChange={(value) => setForm({ ...form, state: String(value) })} />
+        <FormField label='Surface Type' type='select' value={form.surface_type ?? 'OTHER'} options={SURFACE_TYPES} onChange={(value) => setForm({ ...form, surface_type: String(value) })} />
+        <FormField label='Notes' type='textarea' value={form.notes ?? ''} onChange={(value) => setForm({ ...form, notes: String(value) })} />
         <div className='flex flex-col gap-1'>
           <FormField
             label='Zip Code'
@@ -312,7 +341,7 @@ export default function HostLocationsAdminPage() {
             {saving ? 'Saving…' : editingId ? 'Update' : 'Create'}
           </button>
           {editingId && (
-            <button className='rounded border px-4 py-2 disabled:cursor-not-allowed disabled:opacity-50' onClick={() => { setForm({ is_active: true, state: 'WI' }); setEditingId(null); setZipCodeError(''); }} disabled={saving}>
+            <button className='rounded border px-4 py-2 disabled:cursor-not-allowed disabled:opacity-50' onClick={() => { setForm({ is_active: true, state: 'WI', surface_type: 'OTHER' }); setEditingId(null); setZipCodeError(''); }} disabled={saving}>
               Cancel
             </button>
           )}
@@ -330,7 +359,8 @@ export default function HostLocationsAdminPage() {
                 <th className='px-3 py-2'>Street Address</th>
                 <th className='px-3 py-2'>Location</th>
                 <th className='px-3 py-2'>Zip Code</th>
-                <th className='px-3 py-2'>Site Type</th>
+                <th className='px-3 py-2'>Surface Type</th>
+                <th className='px-3 py-2'>Supported Configurations</th>
                 <th className='px-3 py-2'>Effective Status</th>
                 <th className='px-3 py-2'>Actions</th>
               </tr>
@@ -343,7 +373,8 @@ export default function HostLocationsAdminPage() {
                   <td className='px-3 py-2'>{item.address_line1 || '-'}</td>
                   <td className='px-3 py-2'>{(item as any).location}</td>
                   <td className='px-3 py-2'>{item.zip_code || '-'}</td>
-                  <td className='px-3 py-2'>{(item as any).site_type}</td>
+                  <td className='px-3 py-2'>{SURFACE_TYPES.find((surface) => surface.value === item.surface_type)?.label || item.surface_type || 'Other'}</td>
+                  <td className='px-3 py-2'><div className='flex flex-col gap-1'>{(configsByHostId[item.id] || []).length ? (configsByHostId[item.id] || []).map((config: any) => <span key={config.id}>{configLabel(config.configuration_name)}{config.is_active ? '' : ' (Inactive)'}</span>) : <span className='text-slate-500'>No configurations</span>}<div className='mt-1 flex flex-wrap gap-1'>{HOST_CONFIG_OPTIONS.filter((option) => !(configsByHostId[item.id] || []).some((config: any) => config.configuration_name === option.value)).map((option) => <button key={option.value} type='button' className='rounded border px-2 py-0.5 text-xs text-emerald-700' onClick={async () => { await apiFetch('/host-location-configurations', { method: 'POST', body: JSON.stringify({ host_location_id: item.id, configuration_name: option.value, is_active: true }) }, getToken()); load(); }}>+ {option.label}</button>)}</div></div></td>
                   <td className='px-3 py-2'><div className='flex flex-col gap-1'><span>{item.status_label || ((item.effective_is_active ?? item.is_active) ? 'Active' : 'Inactive/Unavailable')}</span>{item.status_warning ? <span className='inline-flex w-fit rounded bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800'>{item.status_warning}</span> : null}</div></td>
                   <td className='space-x-2 px-3 py-2'>
                     <button className='text-blue-700' onClick={() => edit(item)}>Edit</button>

@@ -6,7 +6,7 @@ from fastapi import HTTPException
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.models import Field, FieldConfigurationOption, FieldInstance, Game, GameSlot, HostLocation, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Team
+from app.models import Field, FieldConfigurationOption, FieldInstance, Game, GameSlot, HostLocation, HostLocationConfiguration, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Team
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +26,8 @@ CLEANUP_STEPS = [
     CleanupStep('games', Game, lambda db, org_id: db.query(Game).filter((Game.home_team_id.in_(db.query(Team.id).filter(Team.organization_id == org_id).subquery())) | (Game.away_team_id.in_(db.query(Team.id).filter(Team.organization_id == org_id).subquery())))),
     CleanupStep('game_slots', GameSlot, lambda db, org_id: db.query(GameSlot).filter(GameSlot.host_location_id.in_(db.query(HostLocation.id).filter(HostLocation.organization_id == org_id).subquery()))),
     CleanupStep('field_instances', FieldInstance, lambda db, org_id: db.query(FieldInstance).filter(FieldInstance.host_location_id.in_(db.query(HostLocation.id).filter(HostLocation.organization_id == org_id).subquery()))),
-    CleanupStep('hosting_availabilities', HostingAvailability, lambda db, org_id: db.query(HostingAvailability).filter((HostingAvailability.field_id.in_(db.query(Field.id).filter(Field.host_location_id.in_(db.query(HostLocation.id).filter(HostLocation.organization_id == org_id).subquery())).subquery())) | (HostingAvailability.physical_field_area_id.in_(db.query(PhysicalFieldArea.id).filter(PhysicalFieldArea.host_location_id.in_(db.query(HostLocation.id).filter(HostLocation.organization_id == org_id).subquery())).subquery())))),
+    CleanupStep('hosting_availabilities', HostingAvailability, lambda db, org_id: db.query(HostingAvailability).filter((HostingAvailability.organization_id == org_id) | (HostingAvailability.host_location_id.in_(db.query(HostLocation.id).filter(HostLocation.organization_id == org_id).subquery())) | (HostingAvailability.field_id.in_(db.query(Field.id).filter(Field.host_location_id.in_(db.query(HostLocation.id).filter(HostLocation.organization_id == org_id).subquery())).subquery())) | (HostingAvailability.physical_field_area_id.in_(db.query(PhysicalFieldArea.id).filter(PhysicalFieldArea.host_location_id.in_(db.query(HostLocation.id).filter(HostLocation.organization_id == org_id).subquery())).subquery())))),
+    CleanupStep('host_location_configurations', HostLocationConfiguration, lambda db, org_id: db.query(HostLocationConfiguration).filter(HostLocationConfiguration.host_location_id.in_(db.query(HostLocation.id).filter(HostLocation.organization_id == org_id).subquery()))),
     CleanupStep('field_configuration_options', FieldConfigurationOption, lambda db, org_id: db.query(FieldConfigurationOption).filter(FieldConfigurationOption.physical_field_area_id.in_(db.query(PhysicalFieldArea.id).filter(PhysicalFieldArea.host_location_id.in_(db.query(HostLocation.id).filter(HostLocation.organization_id == org_id).subquery())).subquery()))),
     CleanupStep('physical_field_areas', PhysicalFieldArea, lambda db, org_id: db.query(PhysicalFieldArea).filter(PhysicalFieldArea.host_location_id.in_(db.query(HostLocation.id).filter(HostLocation.organization_id == org_id).subquery()))),
     CleanupStep('fields', Field, lambda db, org_id: db.query(Field).filter(Field.host_location_id.in_(db.query(HostLocation.id).filter(HostLocation.organization_id == org_id).subquery()))),

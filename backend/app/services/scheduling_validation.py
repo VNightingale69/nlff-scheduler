@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
-from app.models import Division, Field, Game, HostLocation, HostingAvailability, Team
+from app.models import Division, Field, FieldInstance, Game, GameSlot, HostLocation, HostingAvailability, Team
 from app.schemas import GameCreate, GameValidationResponse, ValidationMessage
 
 GAME_DURATION_MINUTES = 60
@@ -28,8 +28,15 @@ def validate_game(db: Session, payload: GameCreate, game_id: uuid.UUID | None = 
 
     home_team = db.query(Team).filter(Team.id == payload.home_team_id).first()
     away_team = db.query(Team).filter(Team.id == payload.away_team_id).first()
-    field = db.query(Field).filter(Field.id == payload.field_id).first()
-    host = db.query(HostLocation).filter(HostLocation.id == field.host_location_id).first() if field else None
+    field = db.query(Field).filter(Field.id == payload.field_id).first() if payload.field_id else None
+    field_instance = db.query(FieldInstance).filter(FieldInstance.id == payload.field_instance_id).first() if payload.field_instance_id else None
+    host = None
+    if payload.host_location_id:
+        host = db.query(HostLocation).filter(HostLocation.id == payload.host_location_id).first()
+    elif field_instance:
+        host = field_instance.host_location
+    elif field:
+        host = db.query(HostLocation).filter(HostLocation.id == field.host_location_id).first()
 
     if payload.home_team_id == payload.away_team_id:
         hard_conflicts.append(ValidationMessage(code='same_team', message='Home and away teams must be different.'))
@@ -54,9 +61,9 @@ def validate_game(db: Session, payload: GameCreate, game_id: uuid.UUID | None = 
                     ValidationMessage(code='game_division_mismatch', message='Game division must match both teams division.')
                 )
 
-    if not field:
-        hard_conflicts.append(ValidationMessage(code='field_not_found', message='Field must exist.'))
-    else:
+    if not field and not field_instance:
+        hard_conflicts.append(ValidationMessage(code='field_not_found', message='Field or generated field instance must exist.'))
+    elif field:
         if not field.is_active:
             hard_conflicts.append(ValidationMessage(code='field_inactive', message='Field must be active.'))
         division = db.query(Division).filter(Division.id == home_team.division_id).first() if home_team else None
@@ -74,7 +81,27 @@ def validate_game(db: Session, payload: GameCreate, game_id: uuid.UUID | None = 
         if not host.is_active:
             hard_conflicts.append(ValidationMessage(code='host_inactive', message='Host location must be active.'))
 
-    if field and host:
+    if field_instance and host:
+        availability = (
+            db.query(GameSlot)
+            .filter(
+                GameSlot.field_instance_id == field_instance.id,
+                GameSlot.slot_date == payload.game_date,
+            )
+            .all()
+        )
+        slot_match = False
+        for slot in availability:
+            slot_start = datetime.combine(slot.slot_date, slot.start_time)
+            slot_end = datetime.combine(slot.slot_date, slot.end_time)
+            if game_start >= slot_start and game_end <= slot_end:
+                slot_match = True
+                break
+        if not slot_match:
+            hard_conflicts.append(
+                ValidationMessage(code='outside_availability', message='Game must be within a generated field instance slot.')
+            )
+    elif field and host:
         availability = (
             db.query(HostingAvailability)
             .filter(
@@ -148,7 +175,9 @@ def validate_game(db: Session, payload: GameCreate, game_id: uuid.UUID | None = 
         existing_end = existing_start + timedelta(minutes=GAME_DURATION_MINUTES)
         if not _windows_overlap(game_start, game_end, existing_start, existing_end):
             continue
-        if existing.field_id == payload.field_id:
+        if payload.field_instance_id and existing.field_instance_id == payload.field_instance_id:
+            hard_conflicts.append(ValidationMessage(code='field_overlap', message='Field instance cannot be double-booked.'))
+        elif payload.field_id and existing.field_id == payload.field_id:
             hard_conflicts.append(ValidationMessage(code='field_overlap', message='Field cannot be double-booked.'))
         if payload.home_team_id in {existing.home_team_id, existing.away_team_id} or payload.away_team_id in {
             existing.home_team_id,

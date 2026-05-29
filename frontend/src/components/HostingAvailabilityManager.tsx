@@ -28,7 +28,7 @@ const displayHour = (hour: number) => formatDisplayTime(`${hour === 24 ? 0 : hou
 
 const formatDateLabel = (date: string) => formatDisplayDate(date);
 
-const layoutLabel = (layout: string) => (layout === '2x53' ? 'Two Large Fields' : layout === '1x53_plus_2x30' ? 'One Large Field + Two Small Fields' : layout === '3x30' ? 'Three Small Fields' : 'Custom Layout');
+const layoutLabel = (layout: string) => (layout === '2x53' || layout === 'TWO_LARGE' ? 'Two Large Fields' : layout === '1x53_plus_2x30' ? 'One Large Field + Two Small Fields' : layout === 'ONE_MEDIUM_TWO_SMALL' ? 'One Medium + Two Small Fields' : layout === 'TWO_MEDIUM' ? 'Two Medium Fields' : layout === '3x30' || layout === 'THREE_SMALL' ? 'Three Small Fields' : 'Custom Layout');
 const weekForDate = (date: string) => HOSTING_DATES.findIndex((d) => d.date === date) + 1;
 
 const STATUS_BADGE: Record<string, string> = {
@@ -77,6 +77,7 @@ export default function HostingAvailabilityManager() {
   const [hosts, setHosts] = useState<any[]>([]);
   const [areas, setAreas] = useState<any[]>([]);
   const [configs, setConfigs] = useState<any[]>([]);
+  const [hostConfigs, setHostConfigs] = useState<any[]>([]);
   const [selectedDates, setSelectedDates] = useState<string[]>([]);
   const [orgId, setOrgId] = useState('');
   const [hostId, setHostId] = useState('');
@@ -101,16 +102,18 @@ export default function HostingAvailabilityManager() {
     (async () => {
       setLoading(true);
       try {
-        const [o, h, a, c] = await Promise.all([
+        const [o, h, a, c, hc]: any[] = await Promise.all([
           apiFetch('/organizations?page_size=500', {}, token),
           apiFetch('/host-locations?page_size=500&is_active=true', {}, token),
           apiFetch('/physical-field-areas?page_size=1000', {}, token),
           apiFetch('/field-configuration-options?page_size=2000', {}, token),
+          apiFetch('/host-location-configurations?page_size=2000', {}, token),
         ]);
         setOrgs(o.items || []);
         setHosts(h.items || []);
         setAreas(a.items || []);
         setConfigs(c.items || []);
+        setHostConfigs(hc.items || []);
         if (user?.role_name === 'community_scheduler') setOrgId(user.organization_id || '');
         else if (preselectedOrgId) setOrgId(preselectedOrgId);
         if (preselectedHostId) setHostId(preselectedHostId);
@@ -126,6 +129,7 @@ export default function HostingAvailabilityManager() {
   const hostOptions = useMemo(() => hosts.filter((h: any) => !orgId || h.organization_id === orgId), [hosts, orgId]);
   const selectedHost = useMemo(() => hostOptions.find((h: any) => h.id === hostId), [hostId, hostOptions]);
   const visibleAreas = useMemo(() => areas.filter((a: any) => a.is_active && (!hostId || a.host_location_id === hostId)), [areas, hostId]);
+  const hostConfigsForSelectedHost = useMemo(() => hostConfigs.filter((c: any) => c.is_active && c.host_location_id === hostId), [hostConfigs, hostId]);
   const configsByArea = useMemo(
     () => configs.filter((c: any) => c.is_active).reduce((m: any, c: any) => ((m[c.physical_field_area_id] = [...(m[c.physical_field_area_id] || []), c]), m), {}),
     [configs],
@@ -174,7 +178,7 @@ export default function HostingAvailabilityManager() {
     if (savedDateFilter) params.set('available_date', savedDateFilter);
     if (savedSiteTypeFilter) params.set('site_type', savedSiteTypeFilter);
     if (savedLayoutFilter) params.set('layout', savedLayoutFilter);
-    const data = await apiFetch(`/hosting-availabilities/saved?${params.toString()}`, {}, token);
+    const data: any = await apiFetch(`/hosting-availabilities/saved?${params.toString()}`, {}, token);
     const items = data.items || [];
     items.forEach((row: any, index: number) => {
       console.log('[Hosting Summary] raw saved availability row', {
@@ -189,7 +193,7 @@ export default function HostingAvailabilityManager() {
     });
     setSavedAvailability(items);
     if (hostId) {
-      const slots = await apiFetch(`/hosting-availabilities/generated-slots?${params.toString()}`, {}, token);
+      const slots: any = await apiFetch(`/hosting-availabilities/generated-slots?${params.toString()}`, {}, token);
       setGeneratedSlots(slots || []);
     } else {
       setGeneratedSlots([]);
@@ -233,14 +237,31 @@ export default function HostingAvailabilityManager() {
   };
 
   const save = async () => {
-    if (!selectedDates.length || !visibleAreas.length) {
+    if (!selectedDates.length || (!visibleAreas.length && !hostConfigsForSelectedHost.length)) {
       setType('err');
-      setMessage('Select dates and hosting site first.');
+      setMessage('Select dates, hosting site, and field configuration first.');
       return;
     }
     setSaving(true);
     try {
       const slots: any[] = [];
+      if (!visibleAreas.length && hostId) {
+        for (const d of selectedDates) {
+          const configId = getSelectedConfigId(hostId, d, hostConfigsForSelectedHost[0]?.id || '');
+          if (!configId) continue;
+          for (const range of summaryRanges(hostId, d)) {
+            slots.push({
+              organization_id: orgId,
+              host_location_id: hostId,
+              selected_configuration_id: configId,
+              available_date: d,
+              start_time: `${String(range.start).padStart(2, '0')}:00:00`,
+              end_time: `${String(range.end).padStart(2, '0')}:00:00`,
+              is_available: true,
+            });
+          }
+        }
+      }
       for (const area of visibleAreas) {
         const cfgs = configsByArea[area.id] || [];
         for (const d of selectedDates) {
@@ -260,7 +281,7 @@ export default function HostingAvailabilityManager() {
           }
         }
       }
-      const result = await apiFetch('/hosting-availabilities/bulk-upsert', { method: 'POST', body: JSON.stringify({ slots }) }, token);
+      const result: any = await apiFetch('/hosting-availabilities/bulk-upsert', { method: 'POST', body: JSON.stringify({ slots }) }, token);
       setGenerationDebug({ field_instances: result.generated_field_instances || 0, slots: result.generated_slots || 0 });
       setType('ok');
       setMessage('Availability saved successfully.');
@@ -512,8 +533,8 @@ export default function HostingAvailabilityManager() {
         <h2 className='mb-2 font-semibold'>3. Hosting Site Setup</h2>
         {!hostId ? <p className='text-slate-500'>Select a hosting site to view configured layouts.</p> : (
           <div className='space-y-3'>
-            {visibleAreas.map((area: any) => {
-              const cfgs = configsByArea[area.id] || [];
+            {(visibleAreas.length ? visibleAreas : (selectedHost ? [{ id: selectedHost.id, name: selectedHost.name, field_space_type: selectedHost.surface_type, hostLevel: true }] : [])).map((area: any) => {
+              const cfgs = area.hostLevel ? hostConfigsForSelectedHost.map((c: any) => ({ ...c, name: c.configuration_name, physical_field_area_id: area.id, thirty_yard_capacity: 0, fifty_three_yard_capacity: 0 })) : (configsByArea[area.id] || []);
               return (
                 <div key={area.id} className='rounded border bg-slate-50 p-3'>
                   <div className='font-medium'>{area.name}</div>
@@ -544,8 +565,8 @@ export default function HostingAvailabilityManager() {
         {loading || !hostId || !selectedDates.length ? <p className='text-slate-500'>Select hosting site and dates.</p> : selectedDates.map((date) => (
           <div key={date} className='mb-4'>
             <h3 className='mb-2 font-medium'>{HOSTING_DATES.find((x) => x.date === date)?.label || date}</h3>
-            {visibleAreas.map((area: any) => {
-              const cfgs = configsByArea[area.id] || [];
+            {(visibleAreas.length ? visibleAreas : (selectedHost ? [{ id: selectedHost.id, name: selectedHost.name, field_space_type: selectedHost.surface_type, hostLevel: true }] : [])).map((area: any) => {
+              const cfgs = area.hostLevel ? hostConfigsForSelectedHost.map((c: any) => ({ ...c, name: c.configuration_name, physical_field_area_id: area.id })) : (configsByArea[area.id] || []);
               const defaultCfg = cfgs[0]?.id || '';
               const selectedCfg = getSelectedConfigId(area.id, date, defaultCfg);
               const isStadium = area.field_space_type === STADIUM_TYPE;
@@ -556,7 +577,7 @@ export default function HostingAvailabilityManager() {
                       <div className='font-semibold'>{area.name}</div>
                       <div className='text-sm text-slate-600'>{isStadium ? 'Stadium Site' : 'Grass/Park Site'}</div>
                     </div>
-                    {isStadium ? (
+                    {(isStadium || area.hostLevel) ? (
                       <select className='rounded border p-2 text-sm' value={selectedCfg} onChange={(e) => setActiveConfigByAreaDate({ ...activeConfigByAreaDate, [layoutKey(area.id, date)]: e.target.value })}>
                         {cfgs.map((c: any) => <option key={c.id} value={c.id}>{layoutLabel(c.name)}</option>)}
                       </select>
@@ -589,7 +610,7 @@ export default function HostingAvailabilityManager() {
         <div className='mb-3 grid gap-2 md:grid-cols-4'>
           <input type='date' className='rounded border p-2' value={savedDateFilter} onChange={(e) => setSavedDateFilter(e.target.value)} />
           <select className='rounded border p-2' value={savedSiteTypeFilter} onChange={(e) => setSavedSiteTypeFilter(e.target.value)}><option value=''>All Site Types</option><option value='STADIUM_SITE'>Stadium Site</option><option value='GRASS_PARK_SITE'>Grass/Park Site</option></select>
-          <select className='rounded border p-2' value={savedLayoutFilter} onChange={(e) => setSavedLayoutFilter(e.target.value)}><option value=''>All Layouts</option><option value='2x53'>Two Large Fields</option><option value='1x53_plus_2x30'>One Large Field + Two Small Fields</option><option value='3x30'>Three Small Fields</option></select>
+          <select className='rounded border p-2' value={savedLayoutFilter} onChange={(e) => setSavedLayoutFilter(e.target.value)}><option value=''>All Layouts</option><option value='2x53'>Two Large Fields</option><option value='1x53_plus_2x30'>One Large Field + Two Small Fields</option><option value='3x30'>Three Small Fields</option><option value='TWO_LARGE'>Two Large</option><option value='ONE_MEDIUM_TWO_SMALL'>One Medium + Two Small</option><option value='TWO_MEDIUM'>Two Medium</option><option value='THREE_SMALL'>Three Small</option></select>
         </div>
         {!hostId ? <p className='text-slate-500'>Select a hosting site to view saved availability.</p> : !savedAvailability.length ? <p className='text-slate-500'>No saved availability has been entered for this hosting site.</p> : <div className='space-y-3'>{savedAvailability.map((entry: any, idx: number) => (
           <div key={`${entry.available_date}-${idx}`} className='rounded border bg-slate-50 p-3 text-sm'>
@@ -639,8 +660,8 @@ export default function HostingAvailabilityManager() {
         <h2 className='mb-2 font-semibold'>9. Availability Summary</h2>
         {!selectedDates.length || !selectedHost ? <p className='text-slate-500'>Select dates and hosting site to preview summary.</p> : (
           <div className='space-y-3'>
-            {selectedDates.map((date) => visibleAreas.map((area: any) => {
-              const cfgs = configsByArea[area.id] || [];
+            {selectedDates.map((date) => (visibleAreas.length ? visibleAreas : (selectedHost ? [{ id: selectedHost.id, name: selectedHost.name, hostLevel: true }] : [])).map((area: any) => {
+              const cfgs = area.hostLevel ? hostConfigsForSelectedHost.map((c: any) => ({ ...c, name: c.configuration_name })) : (configsByArea[area.id] || []);
               const selectedCfg = cfgs.find((c: any) => c.id === getSelectedConfigId(area.id, date, cfgs[0]?.id || ''));
               const ranges = summaryRanges(area.id, date);
               if (!ranges.length) return null;

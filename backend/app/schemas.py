@@ -99,11 +99,13 @@ class HostLocationCreate(BaseModel):
     organization_id: uuid.UUID
     name: str
     address: str | None = None
+    surface_type: str = 'OTHER'
     address_line1: str | None = None
     address_line2: str | None = None
     city: str | None = None
     state: str | None = None
     zip_code: str | None = None
+    notes: str | None = None
     is_active: bool = True
 
 class HostLocationRead(BaseSchema, HostLocationCreate):
@@ -111,6 +113,15 @@ class HostLocationRead(BaseSchema, HostLocationCreate):
     effective_is_active: bool = False
     status_label: str = 'Inactive/Unavailable'
     status_warning: str | None = None
+
+
+class HostLocationConfigurationCreate(BaseModel):
+    host_location_id: uuid.UUID
+    configuration_name: str
+    is_active: bool = True
+
+class HostLocationConfigurationRead(BaseSchema, HostLocationConfigurationCreate):
+    pass
 
 class PhysicalFieldAreaCreate(BaseModel):
     host_location_id: uuid.UUID
@@ -177,6 +188,9 @@ class WeekRead(BaseSchema, WeekCreate):
     pass
 
 class HostingAvailabilityCreate(BaseModel):
+    organization_id: uuid.UUID | None = None
+    host_location_id: uuid.UUID | None = None
+    selected_configuration_id: uuid.UUID | None = None
     field_id: uuid.UUID | None | None = None
     physical_field_area_id: uuid.UUID | None = None
     field_configuration_option_id: uuid.UUID | None = None
@@ -186,12 +200,16 @@ class HostingAvailabilityCreate(BaseModel):
     start_time: time
     end_time: time
     is_available: bool = True
+    notes: str | None = None
 
 class HostingAvailabilityRead(BaseSchema, HostingAvailabilityCreate):
     pass
 
 
 class HostingAvailabilityBulkSlot(BaseModel):
+    organization_id: uuid.UUID | None = None
+    host_location_id: uuid.UUID | None = None
+    selected_configuration_id: uuid.UUID | None = None
     field_id: uuid.UUID | None | None = None
     physical_field_area_id: uuid.UUID | None = None
     field_configuration_option_id: uuid.UUID | None = None
@@ -201,6 +219,7 @@ class HostingAvailabilityBulkSlot(BaseModel):
     start_time: time
     end_time: time
     is_available: bool = True
+    notes: str | None = None
 
 
 class HostingAvailabilityBulkUpsertRequest(BaseModel):
@@ -326,6 +345,8 @@ class GameCreate(BaseModel):
     home_team_id: uuid.UUID
     away_team_id: uuid.UUID
     field_id: uuid.UUID | None
+    host_location_id: uuid.UUID | None = None
+    field_instance_id: uuid.UUID | None = None
     game_status_id: uuid.UUID
     game_date: date
     kickoff_time: time
@@ -369,6 +390,7 @@ class PublicGameRead(BaseModel):
     host_location_name: str
     field_id: uuid.UUID | None
     field_name: str
+    field_type: str | None = None
     organization_id: uuid.UUID
     organization_name: str
     division_id: uuid.UUID
