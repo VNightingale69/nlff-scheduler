@@ -286,6 +286,133 @@ def _score_turf_layout_for_demand(layout_name: str, demand_counts: dict[str, int
     return (compatible_capacity * 100 + exact_field_types * 25 - unused_capacity * 20, -unused_capacity, -total_fields)
 
 
+def _available_turf_configuration_names(configs: list[HostLocationConfiguration]) -> set[str]:
+    return {
+        _normalize_configuration_name(config.configuration_name)
+        for config in configs
+        if config.is_active and _turf_configuration_metadata(config.configuration_name)
+    }
+
+
+def _hours_between(start_time, end_time, available_date: date) -> int:
+    start_dt = datetime.combine(available_date, start_time)
+    end_dt = datetime.combine(available_date, end_time)
+    return max(math.ceil((end_dt - start_dt).total_seconds() / 3600), 1)
+
+
+def _simulate_turf_layout_sequence(
+    sequence: list[str],
+    demand_counts: dict[str, int],
+    total_hours: int,
+    *,
+    mixed_layout_available: bool,
+) -> tuple[int, list[tuple[str, int]], dict[str, int]] | None:
+    normalized_sequence = [_normalize_configuration_name(layout_name) for layout_name in sequence]
+    if not normalized_sequence or total_hours <= 0:
+        return None
+    relevant_sequence = []
+    for layout_name in normalized_sequence:
+        metadata = _turf_configuration_metadata(layout_name)
+        if not metadata:
+            return None
+        counts = metadata['counts']
+        if any(counts[size] and demand_counts.get(size, 0) > 0 for size in FIELD_SIZE_ORDER):
+            relevant_sequence.append(layout_name)
+    if not relevant_sequence:
+        return None
+
+    best: tuple[int, list[tuple[str, int]], dict[str, int]] | None = None
+
+    def _score_allocation(hours_by_layout: list[int]) -> tuple[int, list[tuple[str, int]], dict[str, int]]:
+        remaining = {size: max(int(demand_counts.get(size, 0) or 0), 0) for size in FIELD_SIZE_ORDER}
+        scheduled_together = False
+        for layout_name, hours in zip(relevant_sequence, hours_by_layout):
+            counts = _turf_configuration_metadata(layout_name)['counts']
+            before_small = remaining[FIELD_SIZE_SMALL]
+            before_medium = remaining[FIELD_SIZE_MEDIUM]
+            for size in FIELD_SIZE_ORDER:
+                remaining[size] = max(remaining[size] - counts[size] * hours, 0)
+            if layout_name == 'ONE_MEDIUM_TWO_SMALL' and before_small > remaining[FIELD_SIZE_SMALL] and before_medium > remaining[FIELD_SIZE_MEDIUM]:
+                scheduled_together = True
+        unscheduled = sum(remaining.values())
+        layout_changes = max(0, len(relevant_sequence) - 1)
+        score = -10000 * unscheduled - 1000 * max(0, layout_changes - 1)
+        if mixed_layout_available and demand_counts.get(FIELD_SIZE_SMALL, 0) > 0 and demand_counts.get(FIELD_SIZE_MEDIUM, 0) > 0:
+            if 'ONE_MEDIUM_TWO_SMALL' in relevant_sequence:
+                score += 500
+                if scheduled_together:
+                    score += 300
+            has_small_only = any(_turf_configuration_metadata(layout)['counts'][FIELD_SIZE_SMALL] > 0 and _turf_configuration_metadata(layout)['counts'][FIELD_SIZE_MEDIUM] == 0 for layout in relevant_sequence)
+            has_medium_only = any(_turf_configuration_metadata(layout)['counts'][FIELD_SIZE_MEDIUM] > 0 and _turf_configuration_metadata(layout)['counts'][FIELD_SIZE_SMALL] == 0 for layout in relevant_sequence)
+            if has_small_only and has_medium_only:
+                score -= 500
+        if demand_counts.get(FIELD_SIZE_LARGE, 0) > 0 and 'TWO_LARGE' in relevant_sequence:
+            score += 300
+        if layout_changes == 1:
+            score += 250
+        if 'TWO_LARGE' in relevant_sequence:
+            large_index = relevant_sequence.index('TWO_LARGE')
+            later_layouts = relevant_sequence[large_index + 1:]
+            if any(
+                _turf_configuration_metadata(layout)['counts'][FIELD_SIZE_SMALL] > 0
+                or _turf_configuration_metadata(layout)['counts'][FIELD_SIZE_MEDIUM] > 0
+                for layout in later_layouts
+            ):
+                score -= 750
+        scheduled = {size: max(int(demand_counts.get(size, 0) or 0), 0) - remaining[size] for size in FIELD_SIZE_ORDER}
+        return score, list(zip(relevant_sequence, hours_by_layout)), scheduled
+
+    def _allocate(index: int, hours_left: int, prefix: list[int]) -> None:
+        nonlocal best
+        remaining_blocks = len(relevant_sequence) - index
+        if remaining_blocks == 1:
+            candidate = _score_allocation(prefix + [hours_left])
+            if best is None or candidate[0] > best[0]:
+                best = candidate
+            return
+        max_hours = hours_left - (remaining_blocks - 1)
+        for hours in range(1, max_hours + 1):
+            _allocate(index + 1, hours_left - hours, prefix + [hours])
+
+    if len(relevant_sequence) > total_hours:
+        return None
+    _allocate(0, total_hours, [])
+    return best
+
+
+def _plan_turf_layout_blocks(
+    demand_counts: dict[str, int],
+    total_hours: int,
+    active_configuration_names: set[str],
+) -> list[tuple[str, int]]:
+    if not any(demand_counts.get(size, 0) > 0 for size in FIELD_SIZE_ORDER):
+        return []
+    mixed_layout_available = 'ONE_MEDIUM_TWO_SMALL' in active_configuration_names
+    sequence_candidates: list[list[str]] = []
+    if demand_counts.get(FIELD_SIZE_SMALL, 0) > 0 and demand_counts.get(FIELD_SIZE_MEDIUM, 0) > 0 and mixed_layout_available:
+        if demand_counts.get(FIELD_SIZE_LARGE, 0) > 0 and 'TWO_LARGE' in active_configuration_names:
+            sequence_candidates.append(['ONE_MEDIUM_TWO_SMALL', 'TWO_LARGE'])
+        sequence_candidates.append(['ONE_MEDIUM_TWO_SMALL'])
+    if demand_counts.get(FIELD_SIZE_SMALL, 0) > 0 and demand_counts.get(FIELD_SIZE_MEDIUM, 0) > 0:
+        if all(layout in active_configuration_names for layout in ('THREE_SMALL', 'TWO_MEDIUM')):
+            pure_sequence = ['THREE_SMALL', 'TWO_MEDIUM']
+            if demand_counts.get(FIELD_SIZE_LARGE, 0) > 0 and 'TWO_LARGE' in active_configuration_names:
+                pure_sequence.append('TWO_LARGE')
+            sequence_candidates.append(pure_sequence)
+    for layout_name in ('TWO_LARGE', 'ONE_LARGE_ONE_MEDIUM', 'ONE_LARGE_ONE_SMALL', 'THREE_SMALL', 'TWO_MEDIUM', 'ONE_MEDIUM_ONE_SMALL'):
+        if layout_name in active_configuration_names:
+            sequence_candidates.append([layout_name])
+
+    best_plan = None
+    for sequence in sequence_candidates:
+        if any(layout not in active_configuration_names for layout in sequence):
+            continue
+        candidate = _simulate_turf_layout_sequence(sequence, demand_counts, total_hours, mixed_layout_available=mixed_layout_available)
+        if candidate and (best_plan is None or candidate[0] > best_plan[0]):
+            best_plan = candidate
+    return best_plan[1] if best_plan else []
+
+
 def _select_best_turf_configuration(db: Session, availability: HostingAvailability, host: HostLocation) -> HostLocationConfiguration | None:
     _ensure_approved_turf_configurations(db, host)
     db.flush()
@@ -377,13 +504,42 @@ def _regenerate_generated_slots(db: Session, availability: HostingAvailability, 
     host = availability.host_location or (field.host_location if field else None) or (availability.physical_field_area.host_location if availability.physical_field_area else None)
     surface_type = (host.surface_type if host else None) or 'GRASS_FIELD'
     templates: list[tuple[str, str]] = []
+    turf_layout_blocks: list[tuple[str, int]] = []
     if surface_type == 'TURF_STADIUM':
+        active_configs = []
+        if host:
+            _ensure_approved_turf_configurations(db, host)
+            db.flush()
+            active_configs = db.query(HostLocationConfiguration).filter(
+                HostLocationConfiguration.host_location_id == host.id,
+                HostLocationConfiguration.is_active.is_(True),
+            ).all()
+        active_configuration_names = _available_turf_configuration_names(active_configs)
         selected_configuration = _select_best_turf_configuration(db, availability, host) if host else None
+        use_dynamic_layouts = bool(
+            host
+            and availability.auto_select_turf_layout
+            and not availability.lock_selected_layout
+            and active_configuration_names
+        )
+        if use_dynamic_layouts:
+            demand_counts = _turf_demand_counts_for_date(db, host, availability.available_date)
+            total_hours = _hours_between(availability.start_time, availability.end_time, availability.available_date)
+            turf_layout_blocks = _plan_turf_layout_blocks(demand_counts, total_hours, active_configuration_names)
+        if turf_layout_blocks:
+            first_layout = turf_layout_blocks[0][0]
+            selected_configuration = next((config for config in active_configs if _normalize_configuration_name(config.configuration_name) == first_layout), selected_configuration)
         if selected_configuration and availability.selected_configuration_id != selected_configuration.id:
             availability.selected_configuration_id = selected_configuration.id
             host_configuration = selected_configuration
             logger.info('Selected turf layout %s for availability_id=%s host_location_id=%s', selected_configuration.configuration_name, availability.id, host_location_id)
-        if not host_configuration or not host_configuration.is_active:
+        if turf_layout_blocks:
+            templates = [
+                (f'{layout_name} Block {block_index} {field_name}', field_type)
+                for block_index, (layout_name, _hours) in enumerate(turf_layout_blocks, start=1)
+                for field_name, field_type in _configuration_field_templates(layout_name)
+            ]
+        elif not host_configuration or not host_configuration.is_active:
             templates = []
         else:
             configuration_name = host_configuration.configuration_name
@@ -409,21 +565,51 @@ def _regenerate_generated_slots(db: Session, availability: HostingAvailability, 
             'obsolete_unused_slots_removed': removed_slots,
         }
     instances: list[FieldInstance] = []
-    for field_name, field_type in templates:
-        instances.append(FieldInstance(host_location_id=host_location_id, hosting_availability_id=availability.id, instance_date=availability.available_date, field_name=field_name, field_type=field_type, is_active=True))
-    for instance in instances:
-        db.add(instance)
-    db.flush()
-    logger.info('Generated %s field instances for availability_id=%s host_location_id=%s', len(instances), availability.id, host_location_id)
     created_slots = 0
     start_dt = datetime.combine(availability.available_date, availability.start_time)
     end_dt = datetime.combine(availability.available_date, availability.end_time)
-    while start_dt < end_dt:
-        next_dt = min(start_dt + timedelta(hours=1), end_dt)
+    if turf_layout_blocks:
+        block_start_dt = start_dt
+        for block_index, (layout_name, block_hours) in enumerate(turf_layout_blocks, start=1):
+            block_end_dt = min(block_start_dt + timedelta(hours=block_hours), end_dt)
+            block_instances: list[FieldInstance] = []
+            for field_name, field_type in _configuration_field_templates(layout_name):
+                instance = FieldInstance(
+                    host_location_id=host_location_id,
+                    hosting_availability_id=availability.id,
+                    instance_date=availability.available_date,
+                    field_name=f'{layout_name} Block {block_index} {field_name}',
+                    field_type=field_type,
+                    is_active=True,
+                )
+                block_instances.append(instance)
+                instances.append(instance)
+                db.add(instance)
+            db.flush()
+            slot_start_dt = block_start_dt
+            while slot_start_dt < block_end_dt:
+                next_dt = min(slot_start_dt + timedelta(hours=1), block_end_dt)
+                for instance in block_instances:
+                    db.add(GameSlot(field_instance_id=instance.id, host_location_id=host_location_id, slot_date=availability.available_date, start_time=slot_start_dt.time(), end_time=next_dt.time(), field_type=instance.field_type, status='OPEN'))
+                    created_slots += 1
+                slot_start_dt = next_dt
+            block_start_dt = block_end_dt
+            if block_start_dt >= end_dt:
+                break
+    else:
+        for field_name, field_type in templates:
+            instances.append(FieldInstance(host_location_id=host_location_id, hosting_availability_id=availability.id, instance_date=availability.available_date, field_name=field_name, field_type=field_type, is_active=True))
         for instance in instances:
-            db.add(GameSlot(field_instance_id=instance.id, host_location_id=host_location_id, slot_date=availability.available_date, start_time=start_dt.time(), end_time=next_dt.time(), field_type=instance.field_type, status='OPEN'))
-            created_slots += 1
-        start_dt = next_dt
+            db.add(instance)
+        db.flush()
+        slot_start_dt = start_dt
+        while slot_start_dt < end_dt:
+            next_dt = min(slot_start_dt + timedelta(hours=1), end_dt)
+            for instance in instances:
+                db.add(GameSlot(field_instance_id=instance.id, host_location_id=host_location_id, slot_date=availability.available_date, start_time=slot_start_dt.time(), end_time=next_dt.time(), field_type=instance.field_type, status='OPEN'))
+                created_slots += 1
+            slot_start_dt = next_dt
+    logger.info('Generated %s field instances for availability_id=%s host_location_id=%s', len(instances), availability.id, host_location_id)
     logger.info('Generated %s game slots for availability_id=%s host_location_id=%s', created_slots, availability.id, host_location_id)
     return {
         'total_slots_evaluated': len(existing_slots),
