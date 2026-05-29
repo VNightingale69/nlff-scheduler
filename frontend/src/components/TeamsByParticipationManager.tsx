@@ -3,23 +3,35 @@ import { useEffect, useMemo, useState } from 'react';
 import { apiFetch } from '@/lib/api';
 import { getAuthUser, getToken } from '@/lib/auth';
 
-type FieldType = 'SMALL' | 'LARGE';
+type FieldType = 'SMALL' | 'MEDIUM' | 'LARGE';
 
 const DIVISION_SORT_ORDER = ['K/1st', '2nd/3rd', '4th/5th', '6th/7th', '8th'];
 
 const resolveDivisionLabel = (division: any) => `${division.division_group === 'COED' ? 'Coed' : 'Girls'} ${division.name}`;
 
+const FIELD_TYPE_LABELS: Record<FieldType, string> = {
+  SMALL: 'Small',
+  MEDIUM: 'Medium',
+  LARGE: 'Large',
+};
+
 const resolveFieldType = (division: any): FieldType => {
   const divisionName = String(division?.name || '').trim();
   const group = String(division?.division_group || '').toUpperCase();
   if (group === 'COED') {
-    return ['K/1st', '2nd/3rd', '4th/5th'].includes(divisionName) ? 'SMALL' : 'LARGE';
+    if (['K/1st', '2nd/3rd'].includes(divisionName)) return 'SMALL';
+    if (divisionName === '4th/5th') return 'MEDIUM';
+    return 'LARGE';
   }
   if (group === 'GIRLS') {
-    return ['K/1st', '2nd/3rd', '4th/5th'].includes(divisionName) ? 'SMALL' : 'LARGE';
+    if (['K/1st', '2nd/3rd'].includes(divisionName)) return 'SMALL';
+    if (divisionName === '4th/5th') return 'MEDIUM';
+    return 'LARGE';
   }
   return 'LARGE';
 };
+
+const calculateWeeklyDemand = (teamCount: number) => Math.ceil(teamCount / 2);
 
 const divisionSortRank = (division: any) => {
   const group = String(division?.division_group || '').toUpperCase();
@@ -78,6 +90,7 @@ export default function TeamsByParticipationManager() {
     const coedTeams = teams.filter((t: any) => divisionsById[t.division_id]?.division_group === 'COED').length;
     const girlsTeams = teams.filter((t: any) => divisionsById[t.division_id]?.division_group === 'GIRLS').length;
     const smallFieldTeams = teams.filter((t: any) => resolveFieldType(divisionsById[t.division_id]) === 'SMALL').length;
+    const mediumFieldTeams = teams.filter((t: any) => resolveFieldType(divisionsById[t.division_id]) === 'MEDIUM').length;
     const largeFieldTeams = teams.filter((t: any) => resolveFieldType(divisionsById[t.division_id]) === 'LARGE').length;
     return {
       totalOrganizations: orgs.length,
@@ -85,6 +98,7 @@ export default function TeamsByParticipationManager() {
       totalCoedTeams: coedTeams,
       totalGirlsTeams: girlsTeams,
       smallFieldTeams,
+      mediumFieldTeams,
       largeFieldTeams,
     };
   }, [divisions, teams, orgs]);
@@ -118,11 +132,30 @@ export default function TeamsByParticipationManager() {
     });
   }, [divisions, teams, orgs]);
 
-  const quickIndicators = useMemo(() => {
-    const oddRows = leagueTableRows.filter((row) => row.teamCount % 2 === 1);
-    const doubleHeaderDivisions = Array.from(new Set(oddRows.map((row) => row.divisionLabel)));
-    return { oddRows, doubleHeaderDivisions };
-  }, [leagueTableRows]);
+  const divisionDemandRows = useMemo(() => {
+    const divisionsById = Object.fromEntries(divisions.map((d: any) => [d.id, d]));
+    const rowMap = new Map<string, any>();
+    teams.forEach((team: any) => {
+      const div = divisionsById[team.division_id];
+      if (!div) return;
+      if (!rowMap.has(div.id)) {
+        rowMap.set(div.id, {
+          divisionLabel: resolveDivisionLabel(div),
+          divisionSort: divisionSortRank(div),
+          fieldType: resolveFieldType(div),
+          teamCount: 0,
+        });
+      }
+      rowMap.get(div.id).teamCount += 1;
+    });
+
+    return Array.from(rowMap.values()).sort((a, b) => a.divisionSort.localeCompare(b.divisionSort));
+  }, [divisions, teams]);
+
+  const schedulingDemand = useMemo(() => divisionDemandRows.reduce((acc, row) => {
+    acc[row.fieldType as FieldType] += calculateWeeklyDemand(row.teamCount);
+    return acc;
+  }, { SMALL: 0, MEDIUM: 0, LARGE: 0 } as Record<FieldType, number>), [divisionDemandRows]);
 
   const addTeam = async (divisionId: string, expectedCount: number, activeCount: number) => {
     if (activeCount >= expectedCount) return;
@@ -163,18 +196,43 @@ export default function TeamsByParticipationManager() {
     <select className='rounded border p-2' value={orgId} onChange={(e) => { const value = e.target.value; setOrgId(value); if (value) load(value); else loadLeagueSummary(); }}><option value=''>League-wide view</option>{orgs.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select>
 
     {!orgId && <>
-      <div className='grid grid-cols-1 gap-3 md:grid-cols-3'>
-        <div className='rounded border bg-white p-3'><div className='text-xs text-slate-500'>Total organizations</div><div className='text-xl font-semibold'>{leagueSummary.totalOrganizations}</div></div>
-        <div className='rounded border bg-white p-3'><div className='text-xs text-slate-500'>Total teams</div><div className='text-xl font-semibold'>{leagueSummary.totalTeams}</div></div>
-        <div className='rounded border bg-white p-3'><div className='text-xs text-slate-500'>Total coed teams</div><div className='text-xl font-semibold'>{leagueSummary.totalCoedTeams}</div></div>
-        <div className='rounded border bg-white p-3'><div className='text-xs text-slate-500'>Total girls teams</div><div className='text-xl font-semibold'>{leagueSummary.totalGirlsTeams}</div></div>
-        <div className='rounded border bg-white p-3'><div className='text-xs text-slate-500'>Small-field teams</div><div className='text-xl font-semibold'>{leagueSummary.smallFieldTeams}</div></div>
-        <div className='rounded border bg-white p-3'><div className='text-xs text-slate-500'>Large-field teams</div><div className='text-xl font-semibold'>{leagueSummary.largeFieldTeams}</div></div>
+      <div className='grid grid-cols-1 gap-3 md:grid-cols-3 xl:grid-cols-4'>
+        <div className='rounded border bg-white p-3'><div className='text-xs text-slate-500'>Total Organizations</div><div className='text-xl font-semibold'>{leagueSummary.totalOrganizations}</div></div>
+        <div className='rounded border bg-white p-3'><div className='text-xs text-slate-500'>Total Teams</div><div className='text-xl font-semibold'>{leagueSummary.totalTeams}</div></div>
+        <div className='rounded border bg-white p-3'><div className='text-xs text-slate-500'>Total Coed Teams</div><div className='text-xl font-semibold'>{leagueSummary.totalCoedTeams}</div></div>
+        <div className='rounded border bg-white p-3'><div className='text-xs text-slate-500'>Total Girls Teams</div><div className='text-xl font-semibold'>{leagueSummary.totalGirlsTeams}</div></div>
+        <div className='rounded border bg-white p-3'><div className='text-xs text-slate-500'>Small Field Teams</div><div className='text-xl font-semibold'>{leagueSummary.smallFieldTeams}</div></div>
+        <div className='rounded border bg-white p-3'><div className='text-xs text-slate-500'>Medium Field Teams</div><div className='text-xl font-semibold'>{leagueSummary.mediumFieldTeams}</div></div>
+        <div className='rounded border bg-white p-3'><div className='text-xs text-slate-500'>Large Field Teams</div><div className='text-xl font-semibold'>{leagueSummary.largeFieldTeams}</div></div>
       </div>
 
-      <div className='rounded border bg-amber-50 p-3 text-sm'>
-        <div><span className='font-semibold'>Odd team count warnings:</span> {quickIndicators.oddRows.length === 0 ? 'None' : `${quickIndicators.oddRows.length} organization/division group(s)`}</div>
-        <div><span className='font-semibold'>Divisions requiring weekly double headers:</span> {quickIndicators.doubleHeaderDivisions.length === 0 ? 'None' : quickIndicators.doubleHeaderDivisions.join(', ')}</div>
+      <div className='grid grid-cols-1 gap-3 md:grid-cols-3'>
+        <div className='rounded border bg-sky-50 p-3'><div className='text-xs text-slate-500'>Small Field Demand</div><div className='text-xl font-semibold'>{schedulingDemand.SMALL}</div><div className='text-xs text-slate-500'>weekly game slot(s)</div></div>
+        <div className='rounded border bg-sky-50 p-3'><div className='text-xs text-slate-500'>Medium Field Demand</div><div className='text-xl font-semibold'>{schedulingDemand.MEDIUM}</div><div className='text-xs text-slate-500'>weekly game slot(s)</div></div>
+        <div className='rounded border bg-sky-50 p-3'><div className='text-xs text-slate-500'>Large Field Demand</div><div className='text-xl font-semibold'>{schedulingDemand.LARGE}</div><div className='text-xs text-slate-500'>weekly game slot(s)</div></div>
+      </div>
+
+      <div className='overflow-x-auto rounded border bg-white'>
+        <div className='border-b bg-slate-50 p-3'>
+          <h2 className='font-semibold'>Divisions Requiring Weekly Doubleheaders</h2>
+          <p className='text-xs text-slate-600'>Odd team counts are supported by scheduling logic; they require one weekly doubleheader game within that division.</p>
+        </div>
+        <table className='w-full text-left text-sm'>
+          <thead className='bg-slate-100'>
+            <tr>
+              <th className='p-2'>Division Name</th>
+              <th className='p-2'>Team Count</th>
+              <th className='p-2'>Doubleheader Required</th>
+            </tr>
+          </thead>
+          <tbody>
+            {divisionDemandRows.length === 0 ? <tr><td className='p-2 text-slate-500' colSpan={3}>No active teams found.</td></tr> : divisionDemandRows.map((row) => <tr key={row.divisionLabel} className='border-t'>
+              <td className='p-2'>{row.divisionLabel}</td>
+              <td className='p-2'>{row.teamCount}</td>
+              <td className='p-2'>{row.teamCount % 2 === 1 ? 'Yes' : 'No'}</td>
+            </tr>)}
+          </tbody>
+        </table>
       </div>
 
       <div className='overflow-x-auto rounded border bg-white'>
@@ -192,9 +250,9 @@ export default function TeamsByParticipationManager() {
             {leagueTableRows.map((row, idx) => <tr key={`${row.divisionLabel}-${row.organizationName}-${idx}`} className='border-t'>
               <td className='p-2'>{row.divisionLabel}</td>
               <td className='p-2'>{row.organizationName}</td>
-              <td className='p-2'>{row.teamCount}{row.teamCount % 2 === 1 ? <span className='ml-2 text-amber-700'>⚠ odd</span> : null}</td>
+              <td className='p-2'>{row.teamCount}</td>
               <td className='p-2'>{row.teamNames.sort((a: string, b: string) => a.localeCompare(b)).join(', ')}</td>
-              <td className='p-2'>{row.fieldType}</td>
+              <td className='p-2'>{FIELD_TYPE_LABELS[row.fieldType as FieldType]}</td>
             </tr>)}
           </tbody>
         </table>
