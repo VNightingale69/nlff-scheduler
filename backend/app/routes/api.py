@@ -4816,17 +4816,17 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         valid_candidates = []
         for target_time in time_windows:
             all_candidates = []
-            seen_host_time_keys: set[tuple[str, object, object]] = set()
+            seen_field_time_keys: set[tuple[str, object, object]] = set()
             for slot in sorted_slots:
                 if (slot.slot_date, slot.start_time) != target_time:
                     continue
                 if not slot.host_location_id:
                     continue
-                host_time_key = (str(slot.host_location_id), slot.slot_date, slot.start_time)
-                if host_time_key in seen_host_time_keys:
+                field_time_key = (str(slot.field_instance_id), slot.slot_date, slot.start_time)
+                if field_time_key in seen_field_time_keys:
                     continue
-                seen_host_time_keys.add(host_time_key)
-                selected_field_slot = _first_compatible_open_slot_by_field_order(slot.host_location_id, slot.slot_date, slot.start_time)
+                seen_field_time_keys.add(field_time_key)
+                selected_field_slot = slot if _normalize_field_size(slot.field_type) == _normalize_field_size(required_field_type) else _first_compatible_open_slot_by_field_order(slot.host_location_id, slot.slot_date, slot.start_time)
                 if not selected_field_slot:
                     continue
                 for i in range(len(available_team_ids)):
@@ -7072,8 +7072,65 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
     divisions_with_unresolved_games: list[str] = []
     required_games_missing: list[dict[str, object]] = []
     skipped_attempts_by_reason: dict[str, int] = {}
+    skipped_attempts_summary: dict[str, int] = {
+        'Already scheduled': 0,
+        'No compatible field': 0,
+        'No available slot': 0,
+        'No host capacity': 0,
+        'Missing generated game group': 0,
+    }
     post_run_validation: list[dict[str, object]] = []
     validation_warnings: list[dict[str, object]] = []
+    weekly_diagnostics_by_week_id: dict[uuid.UUID, dict[str, object]] = {}
+    division_week_diagnostics: list[dict[str, object]] = []
+
+    def _regular_season_weeks() -> list[Week]:
+        return [week for week in weeks if int(week.week_number or 0) <= 99]
+
+    def _division_required_games(active_team_count: int) -> int:
+        return (int(active_team_count or 0) + 1) // 2
+
+    def _skip_reason_code(reason: str | None) -> str:
+        text = (reason or '').strip().lower()
+        if not text:
+            return 'unknown'
+        if 'weekly game limit reached' in text or 'already scheduled' in text or 'duplicate matchup' in text or 'that matchup is already scheduled' in text:
+            return 'filtered_out_before_placement'
+        if 'no active teams' in text or 'missing generated game group' in text:
+            return 'no_game_group_generated'
+        if 'no compatible host locations' in text or 'no compatible host location' in text:
+            return 'no_compatible_host_location'
+        if 'no compatible large field' in text or 'incompatible field' in text or 'not compatible with division layout requirements' in text:
+            return 'no_compatible_field_size'
+        if 'no compatible generated slots' in text or 'no compatible slot' in text or 'not enough open matching slots' in text:
+            return 'no_available_slot'
+        if 'unable to schedule required games' in text or 'host capacity' in text or 'capacity fallback' in text:
+            return 'no_available_host_community'
+        if 'turf' in text and 'capacity' in text:
+            return 'turf_wave_capacity_missing'
+        if 'grass' in text and 'capacity' in text:
+            return 'grass_forecast_capacity_missing'
+        if 'double' in text and 'blocked' in text:
+            return 'doubleheader_rule_blocked'
+        if 'team already scheduled' in text or 'team conflict' in text:
+            return 'team_conflict'
+        if 'field already occupied' in text or 'field conflict' in text or 'time slot already occupied' in text:
+            return 'field_conflict'
+        return 'unknown'
+
+    def _skip_summary_bucket(reason: str | None) -> str:
+        code = _skip_reason_code(reason)
+        if code in {'filtered_out_before_placement', 'team_conflict'}:
+            return 'Already scheduled'
+        if code in {'no_compatible_field_size', 'no_compatible_host_location'}:
+            return 'No compatible field'
+        if code in {'no_available_slot', 'no_generated_slot'}:
+            return 'No available slot'
+        if code in {'no_available_host_community', 'turf_wave_capacity_missing', 'grass_forecast_capacity_missing'}:
+            return 'No host capacity'
+        if code == 'no_game_group_generated':
+            return 'Missing generated game group'
+        return 'No available slot'
 
     def _normalize_skip_reason(reason: str) -> str:
         text = (reason or '').strip().lower()
@@ -7099,8 +7156,11 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
 
     def _record_skipped(skipped_rows: list[dict[str, object]] | None) -> None:
         for row in skipped_rows or []:
-            key = _normalize_skip_reason(str((row or {}).get('reason') or 'unknown'))
+            reason = str((row or {}).get('reason') or 'unknown')
+            key = _normalize_skip_reason(reason)
             skipped_attempts_by_reason[key] = skipped_attempts_by_reason.get(key, 0) + 1
+            bucket = _skip_summary_bucket(reason)
+            skipped_attempts_summary[bucket] = skipped_attempts_summary.get(bucket, 0) + 1
 
     def _actual_created_game_count_for_week(division_id: uuid.UUID, week_id: uuid.UUID) -> int:
         return db.query(Game.id).join(Game.status).join(Team, Game.home_team_id == Team.id).filter(
@@ -7122,6 +7182,42 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
         ).distinct().all()
         return len(rows)
 
+    def _scheduled_games_for_week(week_id: uuid.UUID) -> list[Game]:
+        return db.query(Game).join(Game.status).filter(
+            Game.season_id == season_id,
+            Game.week_id == week_id,
+            GameStatus.code != 'UNSCHEDULED',
+            GameStatus.is_active.is_(True),
+        ).all()
+
+    def _week_field_size_counts(week_id: uuid.UUID) -> dict[str, int]:
+        counts = {FIELD_SIZE_SMALL: 0, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_LARGE: 0}
+        rows = db.query(GameSlot.field_type, func.count(Game.id)).select_from(Game).join(Game.status).join(
+            GameSlot, GameSlot.assigned_game_id == Game.id
+        ).filter(
+            Game.season_id == season_id,
+            Game.week_id == week_id,
+            GameStatus.code != 'UNSCHEDULED',
+            GameStatus.is_active.is_(True),
+        ).group_by(GameSlot.field_type).all()
+        for field_type, count in rows:
+            size = _normalize_field_size(field_type) or str(field_type or '').upper()
+            if size in counts:
+                counts[size] = int(count or 0)
+        return counts
+
+    def _active_team_count(division_id: uuid.UUID) -> int:
+        return db.query(Team.id).filter(Team.division_id == division_id, Team.is_active.is_(True)).count()
+
+    def _expected_regular_season_week_total() -> int:
+        total = 0
+        for group, name in division_order:
+            division = divisions_by_key.get(canonical_division_id(group, name)) or divisions_by_normalized_name.get(normalize_division_name(f'{group} {name}'))
+            if not division:
+                continue
+            total += _division_required_games(_active_team_count(division.id))
+        return total
+
     for group, name in division_order:
         requested_label = f'{group} {name}'
         requested_normalized = normalize_division_name(requested_label)
@@ -7139,32 +7235,98 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
         division_created = 0
         division_unresolved = False
         for week in weeks:
-            preview = auto_fill_preview({'season_id': season_id, 'week_id': week.id, 'division_id': division.id}, db)
-            proposals = preview.get('proposals') or []
-            _record_skipped(preview.get('skipped') or [])
-            preview_validation = preview.get('final_validation') or {}
-            active_team_count = int(preview_validation.get('active_team_count') or 0)
-            required_games = int(preview_validation.get('required_game_count') or ((active_team_count + 1) // 2))
-            created_games = int(preview_validation.get('created_game_count') or 0)
-            unscheduled_teams = list(preview_validation.get('unscheduled_teams') or [])
-            unresolved_conflicts = list(preview.get('skipped') or [])
-            if not proposals:
+            proposals = []
+            preview = {}
+            preview_skipped: list[dict[str, object]] = []
+            apply_skipped: list[dict[str, object]] = []
+            generated_game_groups = 0
+            active_team_count = _active_team_count(division.id)
+            required_games = _division_required_games(active_team_count)
+            unscheduled_teams: list[str] = []
+            unresolved_conflicts: list[dict[str, object]] = []
+            host_count = 0
+            try:
+                preview = auto_fill_preview({'season_id': season_id, 'week_id': week.id, 'division_id': division.id}, db)
+                proposals = preview.get('proposals') or []
+                generated_game_groups = len(proposals)
+                preview_skipped = list(preview.get('skipped') or [])
+                _record_skipped(preview_skipped)
+                preview_validation = preview.get('final_validation') or {}
+                active_team_count = int(preview_validation.get('active_team_count') or active_team_count)
+                required_games = int(preview_validation.get('required_game_count') or required_games)
+                unscheduled_teams = list(preview_validation.get('unscheduled_teams') or [])
+                unresolved_conflicts = list(preview_skipped)
+                if not proposals:
+                    actual_created_games = _actual_created_game_count_for_week(division.id, week.id)
+                    host_count = _host_count_for_week(division.id, week.id)
+                    if required_games > actual_created_games and not preview_skipped:
+                        preview_skipped.append({'reason': 'Missing generated game group for required division/week.'})
+                        _record_skipped([preview_skipped[-1]])
+                else:
+                    try:
+                        applied = auto_fill_apply({'season_id': season_id, 'week_id': week.id, 'division_id': division.id, 'proposals': proposals}, db)
+                        created_count = int(applied.get('created_count') or 0)
+                        skipped_count = int(applied.get('skipped_count') or 0)
+                        division_created += created_count
+                        total_games_created += created_count
+                        apply_skipped = list(applied.get('skipped') or [])
+                        _record_skipped(apply_skipped)
+                        host_count = _host_count_for_week(division.id, week.id)
+                        actual_created_games = _actual_created_game_count_for_week(division.id, week.id)
+                        if skipped_count > 0:
+                            division_unresolved = True
+                        apply_validation = applied.get('final_validation') or {}
+                        if int(apply_validation.get('required_game_count') or 0) != required_games:
+                            required_games = int(apply_validation.get('required_game_count') or 0)
+                    except Exception as exc:
+                        db.rollback()
+                        division_unresolved = True
+                        actual_created_games = _actual_created_game_count_for_week(division.id, week.id)
+                        host_count = _host_count_for_week(division.id, week.id)
+                        apply_skipped = [{'reason': f'Placement failed but scheduling continued for later divisions: {exc}'}]
+                        _record_skipped(apply_skipped)
+                        warnings.append(f'{division_label} Week {week.week_number}: placement failed; continuing with later divisions.')
+                        logger.exception('auto_schedule_apply_failed_continuing season_id=%s week_id=%s division_id=%s', season_id, week.id, division.id)
+            except Exception as exc:
+                db.rollback()
+                division_unresolved = True
                 actual_created_games = _actual_created_game_count_for_week(division.id, week.id)
                 host_count = _host_count_for_week(division.id, week.id)
-            else:
-                applied = auto_fill_apply({'season_id': season_id, 'week_id': week.id, 'division_id': division.id, 'proposals': proposals}, db)
-                created_count = int(applied.get('created_count') or 0)
-                skipped_count = int(applied.get('skipped_count') or 0)
-                division_created += created_count
-                total_games_created += created_count
-                _record_skipped(applied.get('skipped') or [])
-                host_count = _host_count_for_week(division.id, week.id)
-                actual_created_games = _actual_created_game_count_for_week(division.id, week.id)
-                if skipped_count > 0:
-                    division_unresolved = True
-                apply_validation = applied.get('final_validation') or {}
-                if int(apply_validation.get('required_game_count') or 0) != required_games:
-                    required_games = int(apply_validation.get('required_game_count') or 0)
+                preview_skipped = [{'reason': f'Game group generation failed but scheduling continued for later divisions: {exc}'}]
+                _record_skipped(preview_skipped)
+                warnings.append(f'{division_label} Week {week.week_number}: game group generation failed; continuing with later divisions.')
+                logger.exception('auto_schedule_preview_failed_continuing season_id=%s week_id=%s division_id=%s', season_id, week.id, division.id)
+            generated_game_groups = max(generated_game_groups, min(required_games, actual_created_games))
+            all_skips_for_division_week = preview_skipped + apply_skipped
+            skip_reasons = sorted({_skip_reason_code(str((row or {}).get('reason') or 'unknown')) for row in all_skips_for_division_week})
+            division_week_diagnostic = {
+                'week': week.week_number,
+                'week_start_date': str(week.start_date) if week.start_date else None,
+                'division_name': division_label,
+                'required_field_size': _required_field_type_for_division(division),
+                'active_team_count': active_team_count,
+                'expected_games': required_games,
+                'generated_game_groups': generated_game_groups,
+                'scheduled_games': actual_created_games,
+                'missing_games': max(0, required_games - actual_created_games),
+                'skipped_placements': len(all_skips_for_division_week),
+                'skip_reasons': skip_reasons or ([] if actual_created_games >= required_games else ['unknown']),
+            }
+            division_week_diagnostics.append(division_week_diagnostic)
+            week_diagnostic = weekly_diagnostics_by_week_id.setdefault(week.id, {
+                'week': week.week_number,
+                'week_start_date': str(week.start_date) if week.start_date else None,
+                'expected_games_total': 0,
+                'generated_game_groups_total': 0,
+                'scheduled_games_total': 0,
+                'missing_games_total': 0,
+                'skipped_placements_total': 0,
+                'divisions': [],
+            })
+            week_diagnostic['expected_games_total'] = int(week_diagnostic['expected_games_total']) + required_games
+            week_diagnostic['generated_game_groups_total'] = int(week_diagnostic['generated_game_groups_total']) + generated_game_groups
+            week_diagnostic['skipped_placements_total'] = int(week_diagnostic['skipped_placements_total']) + len(all_skips_for_division_week)
+            week_diagnostic['divisions'].append(division_week_diagnostic)
             post_run_validation.append({
                 'division': division_label,
                 'week': week.week_number,
@@ -7261,11 +7423,121 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
         GameSlot.slot_date == date(season.start_date.year, 9, 13)
     ).count() if season.start_date else 0
 
+    expected_regular_season_games = _expected_regular_season_week_total()
+    hard_validation: list[dict[str, object]] = []
+    for week in _regular_season_weeks():
+        scheduled_games = _scheduled_games_for_week(week.id)
+        scheduled_games_total = len(scheduled_games)
+        unique_team_ids = {
+            team_id
+            for game in scheduled_games
+            for team_id in (game.home_team_id, game.away_team_id)
+            if team_id
+        }
+        unique_teams_playing = len(unique_team_ids)
+        field_size_counts = _week_field_size_counts(week.id)
+        missing_total = max(0, expected_regular_season_games - scheduled_games_total)
+        week_diagnostic = weekly_diagnostics_by_week_id.setdefault(week.id, {
+            'week': week.week_number,
+            'week_start_date': str(week.start_date) if week.start_date else None,
+            'expected_games_total': expected_regular_season_games,
+            'generated_game_groups_total': 0,
+            'scheduled_games_total': 0,
+            'missing_games_total': 0,
+            'skipped_placements_total': 0,
+            'divisions': [],
+        })
+        week_diagnostic['expected_games_total'] = expected_regular_season_games
+        week_diagnostic['scheduled_games_total'] = scheduled_games_total
+        week_diagnostic['missing_games_total'] = missing_total
+        week_diagnostic['unique_teams_playing'] = unique_teams_playing
+        week_diagnostic['field_size_counts'] = field_size_counts
+        missing_divisions = [
+            division_row
+            for division_row in week_diagnostic.get('divisions', [])
+            if int(division_row.get('missing_games') or 0) > 0
+        ]
+        validation_row = {
+            'week': week.week_number,
+            'week_start_date': str(week.start_date) if week.start_date else None,
+            'expected_games': expected_regular_season_games,
+            'scheduled_games': scheduled_games_total,
+            'unique_teams_playing': unique_teams_playing,
+            'expected_unique_teams_playing': 43,
+            'field_size_counts': field_size_counts,
+            'missing_games': missing_total,
+            'missing_divisions': missing_divisions,
+            'skipped_placement_reasons': sorted({
+                reason
+                for division_row in missing_divisions
+                for reason in (division_row.get('skip_reasons') or ['unknown'])
+            }),
+        }
+        if expected_regular_season_games != 22:
+            validation_errors.append(
+                f'Week {week.week_number}: expected regular-season game count is {expected_regular_season_games}; hard validation expects 22 based on current league setup.'
+            )
+        if scheduled_games_total != expected_regular_season_games:
+            validation_errors.append(
+                f'Week {week.week_number}: scheduled_games={scheduled_games_total}, expected_games={expected_regular_season_games}, missing_games={missing_total}.'
+            )
+        if unique_teams_playing != 43:
+            validation_errors.append(
+                f'Week {week.week_number}: unique_teams_playing={unique_teams_playing}, expected_unique_teams_playing=43.'
+            )
+        if missing_total > 0 and not any(row.get('week') == week.week_number for row in required_games_missing):
+            required_games_missing.append({
+                'division': 'WEEK_TOTAL',
+                'week': week.week_number,
+                'required_games': expected_regular_season_games,
+                'created_games': scheduled_games_total,
+                'missing_games': missing_total,
+                'missing_divisions': missing_divisions,
+                'skipped_placement_reasons': validation_row['skipped_placement_reasons'],
+            })
+        if week.start_date == date(2026, 9, 13):
+            expected_by_size = {FIELD_SIZE_SMALL: 10, FIELD_SIZE_MEDIUM: 5, FIELD_SIZE_LARGE: 7}
+            missing_by_size = {
+                size: max(0, expected_count - int(field_size_counts.get(size, 0) or 0))
+                for size, expected_count in expected_by_size.items()
+            }
+            validation_row['september_13_validation'] = {
+                'expected_small_games': expected_by_size[FIELD_SIZE_SMALL],
+                'expected_medium_games': expected_by_size[FIELD_SIZE_MEDIUM],
+                'expected_large_games': expected_by_size[FIELD_SIZE_LARGE],
+                'actual_small_games': field_size_counts[FIELD_SIZE_SMALL],
+                'actual_medium_games': field_size_counts[FIELD_SIZE_MEDIUM],
+                'actual_large_games': field_size_counts[FIELD_SIZE_LARGE],
+                'missing_small_games': missing_by_size[FIELD_SIZE_SMALL],
+                'missing_medium_games': missing_by_size[FIELD_SIZE_MEDIUM],
+                'missing_large_games': missing_by_size[FIELD_SIZE_LARGE],
+            }
+            if any(missing_by_size.values()):
+                validation_errors.append(
+                    '09/13/2026 field-size validation failed: '
+                    f"missing_small_games={missing_by_size[FIELD_SIZE_SMALL]}, "
+                    f"missing_medium_games={missing_by_size[FIELD_SIZE_MEDIUM]}, "
+                    f"missing_large_games={missing_by_size[FIELD_SIZE_LARGE]}."
+                )
+        hard_validation.append(validation_row)
+
+    schedule_complete = not validation_errors and not required_games_missing
+    skipped_attempts_message = (
+        f"{sum(skipped_attempts_by_reason.values())} placement attempts skipped:\n"
+        f"- Already scheduled: {skipped_attempts_summary.get('Already scheduled', 0)}\n"
+        f"- No compatible field: {skipped_attempts_summary.get('No compatible field', 0)}\n"
+        f"- No available slot: {skipped_attempts_summary.get('No available slot', 0)}\n"
+        f"- No host capacity: {skipped_attempts_summary.get('No host capacity', 0)}\n"
+        f"- Missing generated game group: {skipped_attempts_summary.get('Missing generated game group', 0)}"
+    )
+
     # Intentionally do not run post-schedule optimization automatically.
     # Optimization is executed manually via /manual-schedule-builder/optimize-schedule.
     db.commit()
 
     return {
+        'status': 'complete' if schedule_complete else 'incomplete',
+        'message': 'Auto-schedule completed.' if schedule_complete else 'Auto-schedule completed with missing required games; review validation_errors and diagnostics.',
         'season_date_diagnostics': {
             'target_date_checked': f"{season.start_date.year}-09-13" if season.start_date else None,
             'matching_week_numbers': [w.week_number for w in september_13_weeks],
@@ -7274,11 +7546,16 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
             'date_excluded_reason': None if len(september_13_weeks) > 0 else 'No season week starts on September 13; date is outside defined weekly schedule windows.',
         },
         'games_skipped': sum(skipped_attempts_by_reason.values()),
+        'skipped_attempts_message': skipped_attempts_message,
+        'skipped_attempts_summary': skipped_attempts_summary,
         'skipped_attempts_by_reason': skipped_attempts_by_reason,
         'required_games_still_missing': required_games_missing,
         'warnings': warnings,
         'validation_errors': validation_errors,
         'validation_warnings': validation_warnings,
+        'weekly_schedule_diagnostics': sorted(weekly_diagnostics_by_week_id.values(), key=lambda row: (int(row.get('week') or 0), str(row.get('week_start_date') or ''))),
+        'division_week_schedule_diagnostics': division_week_diagnostics,
+        'hard_validation': hard_validation,
         'post_run_validation': post_run_validation,
         'divisions_completed': divisions_completed,
         'divisions_with_unresolved_games': divisions_with_unresolved_games,
