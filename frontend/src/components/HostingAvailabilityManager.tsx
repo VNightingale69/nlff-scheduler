@@ -83,6 +83,8 @@ export default function HostingAvailabilityManager() {
   const [hostId, setHostId] = useState('');
   const [selectedSlots, setSelectedSlots] = useState<Record<string, boolean>>({});
   const [activeConfigByAreaDate, setActiveConfigByAreaDate] = useState<Record<string, string>>({});
+  const [autoSelectLayoutByAreaDate, setAutoSelectLayoutByAreaDate] = useState<Record<string, boolean>>({});
+  const [lockLayoutByAreaDate, setLockLayoutByAreaDate] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [savedAvailability, setSavedAvailability] = useState<any[]>([]);
@@ -141,6 +143,8 @@ export default function HostingAvailabilityManager() {
 
   const getSelectedConfigId = (areaId: string, date: string, defaultConfigId: string) =>
     activeConfigByAreaDate[layoutKey(areaId, date)] || defaultConfigId;
+  const getAutoSelectLayout = (areaId: string, date: string) => autoSelectLayoutByAreaDate[layoutKey(areaId, date)] ?? true;
+  const getLockLayout = (areaId: string, date: string) => lockLayoutByAreaDate[layoutKey(areaId, date)] ?? false;
 
   const toggleHour = (a: string, d: string, h: number) =>
     setSelectedSlots((p) => ({ ...p, [slotKey(a, d, h)]: !p[slotKey(a, d, h)] }));
@@ -208,6 +212,8 @@ export default function HostingAvailabilityManager() {
     setSelectedDates([entry.available_date]);
     const nextSlots: Record<string, boolean> = {};
     const nextConfigs: Record<string, string> = {};
+    const nextAutoSelect: Record<string, boolean> = {};
+    const nextLocks: Record<string, boolean> = {};
     const area = visibleAreas[0];
     if (!area) return;
     for (const range of entry.time_ranges) {
@@ -217,8 +223,12 @@ export default function HostingAvailabilityManager() {
     }
     const cfg = (configsByArea[area.id] || []).find((c: any) => c.name === entry.available_layout);
     if (cfg) nextConfigs[layoutKey(area.id, entry.available_date)] = cfg.id;
+    nextAutoSelect[layoutKey(area.id, entry.available_date)] = entry.auto_select_turf_layout ?? true;
+    nextLocks[layoutKey(area.id, entry.available_date)] = entry.lock_selected_layout ?? false;
     setSelectedSlots(nextSlots);
     setActiveConfigByAreaDate(nextConfigs);
+    setAutoSelectLayoutByAreaDate(nextAutoSelect);
+    setLockLayoutByAreaDate(nextLocks);
   };
 
   const deleteSaved = async (entry: any) => {
@@ -254,6 +264,8 @@ export default function HostingAvailabilityManager() {
               organization_id: orgId,
               host_location_id: hostId,
               selected_configuration_id: configId,
+              auto_select_turf_layout: getAutoSelectLayout(hostId, d),
+              lock_selected_layout: getLockLayout(hostId, d),
               available_date: d,
               start_time: `${String(range.start).padStart(2, '0')}:00:00`,
               end_time: `${String(range.end).padStart(2, '0')}:00:00`,
@@ -272,6 +284,8 @@ export default function HostingAvailabilityManager() {
               slots.push({
                 physical_field_area_id: area.id,
                 field_configuration_option_id: configId,
+                auto_select_turf_layout: false,
+                lock_selected_layout: true,
                 available_date: d,
                 start_time: `${String(h).padStart(2, '0')}:00:00`,
                 end_time: `${String(h + 1).padStart(2, '0')}:00:00`,
@@ -578,10 +592,20 @@ export default function HostingAvailabilityManager() {
                       <div className='text-sm text-slate-600'>{isStadium ? 'Stadium Site' : 'Grass/Park Site'}</div>
                     </div>
                     {(isStadium || area.hostLevel) ? (
-                      <select className='rounded border p-2 text-sm' value={selectedCfg} onChange={(e) => setActiveConfigByAreaDate({ ...activeConfigByAreaDate, [layoutKey(area.id, date)]: e.target.value })}>
-                        {cfgs.map((c: any) => <option key={c.id} value={c.id}>{layoutLabel(c.name)}</option>)}
-                      </select>
-                    ) : <div className='text-sm text-slate-700'>Layout uses saved site setup automatically.</div>}
+                      <div className='flex flex-col gap-2 md:items-end'>
+                        <select className='rounded border p-2 text-sm' value={selectedCfg} disabled={getAutoSelectLayout(area.id, date) && !getLockLayout(area.id, date)} onChange={(e) => setActiveConfigByAreaDate({ ...activeConfigByAreaDate, [layoutKey(area.id, date)]: e.target.value })}>
+                          {cfgs.map((c: any) => <option key={c.id} value={c.id}>{layoutLabel(c.name)}</option>)}
+                        </select>
+                        <label className='inline-flex items-center gap-2 text-xs text-slate-700'>
+                          <input type='checkbox' checked={getAutoSelectLayout(area.id, date)} onChange={(e) => setAutoSelectLayoutByAreaDate({ ...autoSelectLayoutByAreaDate, [layoutKey(area.id, date)]: e.target.checked })} />
+                          Allow scheduler to auto-select best turf layout for this date
+                        </label>
+                        <label className='inline-flex items-center gap-2 text-xs text-slate-700'>
+                          <input type='checkbox' checked={getLockLayout(area.id, date)} onChange={(e) => setLockLayoutByAreaDate({ ...lockLayoutByAreaDate, [layoutKey(area.id, date)]: e.target.checked })} />
+                          Lock selected layout
+                        </label>
+                      </div>
+                    ) : <div className='text-sm text-slate-700'>Grass fields use active configured fields automatically.</div>}
                   </div>
                   <div className='mb-2'>
                     <label className='inline-flex items-center gap-2 text-sm font-medium'>
@@ -615,7 +639,7 @@ export default function HostingAvailabilityManager() {
         {!hostId ? <p className='text-slate-500'>Select a hosting site to view saved availability.</p> : !savedAvailability.length ? <p className='text-slate-500'>No saved availability has been entered for this hosting site.</p> : <div className='space-y-3'>{savedAvailability.map((entry: any, idx: number) => (
           <div key={`${entry.available_date}-${idx}`} className='rounded border bg-slate-50 p-3 text-sm'>
             <div className='flex items-start justify-between gap-2'>
-              <div><div className='font-semibold'>{formatDateLabel(entry.available_date)}</div><div>{entry.host_location_name}</div><div>{entry.site_type === 'STADIUM_SITE' || entry.site_type === 'TURF_STADIUM' ? 'Turf Stadium' : 'Grass Field'}</div><div>Available Layout: {layoutLabel(entry.available_layout)}</div><div>Capacity: {entry.small_field_capacity} Small / {entry.medium_field_capacity || 0} Medium / {entry.large_field_capacity} Large</div></div>
+              <div><div className='font-semibold'>{formatDateLabel(entry.available_date)}</div><div>{entry.host_location_name}</div><div>{entry.site_type === 'STADIUM_SITE' || entry.site_type === 'TURF_STADIUM' ? 'Turf Stadium' : 'Grass Field'}</div><div>Available Layout: {layoutLabel(entry.available_layout)}</div><div>{entry.auto_select_turf_layout ? 'Auto-select enabled' : 'Manual layout'}{entry.lock_selected_layout ? ' • Layout locked' : ''}</div><div>Capacity: {entry.small_field_capacity} Small / {entry.medium_field_capacity || 0} Medium / {entry.large_field_capacity} Large</div></div>
               <div className='flex gap-2'><button onClick={() => editSaved(entry)} className='rounded border px-3 py-1'>Edit</button><button onClick={() => deleteSaved(entry)} className='rounded border border-red-300 px-3 py-1 text-red-700'>Delete</button></div>
             </div>
             <div className='mt-1'>Available:</div><ul className='list-disc pl-6'>{entry.time_ranges.map((range: any, rIdx: number) => <li key={rIdx}>{displayHour(Number(range.start_time.slice(0,2)))}–{displayHour(Number(range.end_time.slice(0,2)))}</li>)}</ul>
@@ -669,7 +693,7 @@ export default function HostingAvailabilityManager() {
                 <div key={`summary-${area.id}-${date}`} className='rounded border bg-slate-50 p-3 text-sm'>
                   <div className='font-medium'>{HOSTING_DATES.find((x) => x.date === date)?.label || date}</div>
                   <div>{selectedHost.name}</div>
-                  <div>{layoutLabel(selectedCfg?.name || '')}</div>
+                  <div>{getAutoSelectLayout(area.id, date) && !getLockLayout(area.id, date) ? 'Scheduler will auto-select best turf layout' : layoutLabel(selectedCfg?.name || '')}</div>
                   <div className='mt-1'>Available:</div>
                   <ul className='list-disc pl-6'>
                     {ranges.map((r, i) => <li key={i}>{displayHour(r.start)}–{displayHour(r.end)}</li>)}
