@@ -80,14 +80,26 @@ class HostLocation(Base, TimestampMixin):
     organization_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('organizations.id'), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     address: Mapped[str | None] = mapped_column(String(255))
+    surface_type: Mapped[str] = mapped_column(String(40), nullable=False, default='OTHER')
     address_line1: Mapped[str | None] = mapped_column(String(255))
     address_line2: Mapped[str | None] = mapped_column(String(255))
     city: Mapped[str | None] = mapped_column(String(120))
     state: Mapped[str | None] = mapped_column(String(80))
     zip_code: Mapped[str | None] = mapped_column(String(20))
+    notes: Mapped[str | None] = mapped_column(Text)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     organization = relationship('Organization')
     __table_args__ = (UniqueConstraint('organization_id', 'name', name='uq_host_location_org_name'),)
+
+class HostLocationConfiguration(Base, TimestampMixin):
+    __tablename__ = 'host_location_configurations'
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    host_location_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('host_locations.id'), nullable=False)
+    configuration_name: Mapped[str] = mapped_column(String(80), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    host_location = relationship('HostLocation')
+    __table_args__ = (UniqueConstraint('host_location_id', 'configuration_name', name='uq_host_location_configuration_name'),)
+
 
 class Field(Base, TimestampMixin):
     __tablename__ = 'fields'
@@ -160,6 +172,9 @@ class Week(Base, TimestampMixin):
 class HostingAvailability(Base, TimestampMixin):
     __tablename__ = 'hosting_availabilities'
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('organizations.id'))
+    host_location_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('host_locations.id'))
+    selected_configuration_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('host_location_configurations.id'))
     field_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('fields.id'))
     physical_field_area_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('physical_field_areas.id'))
     field_configuration_option_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('field_configuration_options.id'))
@@ -169,6 +184,10 @@ class HostingAvailability(Base, TimestampMixin):
     start_time: Mapped[Time] = mapped_column(Time, nullable=False)
     end_time: Mapped[Time] = mapped_column(Time, nullable=False)
     is_available: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    notes: Mapped[str | None] = mapped_column(Text)
+    organization = relationship('Organization')
+    host_location = relationship('HostLocation')
+    selected_configuration = relationship('HostLocationConfiguration')
     field = relationship('Field')
     physical_field_area = relationship('PhysicalFieldArea')
     field_configuration_option = relationship('FieldConfigurationOption')
@@ -220,12 +239,16 @@ class Game(Base, TimestampMixin):
     home_team_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('teams.id'), nullable=False)
     away_team_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('teams.id'), nullable=False)
     field_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('fields.id'), nullable=True)
+    host_location_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('host_locations.id'), nullable=True)
+    field_instance_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('field_instances.id'), nullable=True)
     game_status_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('game_statuses.id'), nullable=False)
     game_date: Mapped[Date] = mapped_column(Date, nullable=False)
     kickoff_time: Mapped[Time] = mapped_column(Time, nullable=False)
     season = relationship('Season')
     week = relationship('Week')
     field = relationship('Field')
+    host_location = relationship('HostLocation')
+    field_instance = relationship('FieldInstance')
     status = relationship('GameStatus')
     home_team = relationship('Team', foreign_keys=[home_team_id])
     away_team = relationship('Team', foreign_keys=[away_team_id])

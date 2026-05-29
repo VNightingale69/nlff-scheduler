@@ -14,11 +14,11 @@ from sqlalchemy.orm import Session, aliased
 
 from app.auth import ROLE_COMMUNITY_SCHEDULER, ROLE_LEAGUE_ADMIN, enforce_organization_scope, get_current_user, require_roles
 from app.database import get_db
-from app.models import Division, Field, FieldConfigurationOption, FieldInstance, Game, GameSlot, GameStatus, HostLocation, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Season, Team, User, Week
+from app.models import Division, Field, FieldConfigurationOption, FieldInstance, Game, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Season, Team, User, Week
 from app.schemas import (
     DivisionCreate, DivisionRead, FieldConfigurationOptionCreate, FieldConfigurationOptionRead, FieldCreate, FieldRead, GameCreate, GameRead, GameSaveResponse,
     OrganizationDivisionParticipationBulkUpsertRequest, OrganizationDivisionParticipationRead,
-    GeneratedSlotRead, HostLocationCreate, HostLocationRead, HostingAvailabilityCreate, HostingAvailabilityRead, HostingAvailabilityBulkUpsertRequest, HostingAvailabilityBulkUpsertResponse, HostingGenerationRunResult, HostingGenerationLocationResult, PhysicalFieldAreaCreate, PhysicalFieldAreaRead, SavedAvailabilityResponse,
+    GeneratedSlotRead, HostLocationCreate, HostLocationRead, HostLocationConfigurationCreate, HostLocationConfigurationRead, HostingAvailabilityCreate, HostingAvailabilityRead, HostingAvailabilityBulkUpsertRequest, HostingAvailabilityBulkUpsertResponse, HostingGenerationRunResult, HostingGenerationLocationResult, PhysicalFieldAreaCreate, PhysicalFieldAreaRead, SavedAvailabilityResponse,
     LoginRequest, OrganizationCreate, OrganizationRead, PagedResponse, PublicGameRead, RefreshRequest,
     TeamCreate, TeamRead, TeamUpdate, TokenResponse, UserCreate, UserRead,
     ScheduleReadinessDivisionRow, ScheduleReadinessResponse, ScheduleReadinessTotals
@@ -94,15 +94,42 @@ def normalize_division_name(value: str) -> str:
 def normalized_division_key(division_group: str | None, division_name: str | None) -> str:
     return normalize_division_name(f"{division_group or ''} {division_name or ''}")
 
-def _capacity_for_layout(layout_name: str | None, option: FieldConfigurationOption | None) -> tuple[int, int]:
+ALLOWED_SURFACE_TYPES = {'TURF_STADIUM', 'GRASS_FIELD', 'MULTI_FIELD_COMPLEX', 'OTHER'}
+CONFIGURATION_FIELD_TEMPLATES = {
+    'TWO_LARGE': [('Field A', 'LARGE'), ('Field B', 'LARGE')],
+    'ONE_MEDIUM_TWO_SMALL': [('Field A', 'MEDIUM'), ('Field B', 'SMALL'), ('Field C', 'SMALL')],
+    'TWO_MEDIUM': [('Field A', 'MEDIUM'), ('Field B', 'MEDIUM')],
+    'THREE_SMALL': [('Field A', 'SMALL'), ('Field B', 'SMALL'), ('Field C', 'SMALL')],
+    'CUSTOM': [],
+    # Backward-compatible layout names used by existing setup screens.
+    '2X53': [('Field A', 'LARGE'), ('Field B', 'LARGE')],
+    '1X53_PLUS_2X30': [('Field A', 'LARGE'), ('Field B', 'SMALL'), ('Field C', 'SMALL')],
+    '3X30': [('Field A', 'SMALL'), ('Field B', 'SMALL'), ('Field C', 'SMALL')],
+}
+
+
+def _normalize_configuration_name(value: str | None) -> str:
+    return str(value or '').strip().upper().replace('-', '_').replace(' ', '_')
+
+
+def _configuration_field_templates(configuration_name: str | None, option: FieldConfigurationOption | None) -> list[tuple[str, str]]:
     if option:
-        return option.thirty_yard_capacity, option.fifty_three_yard_capacity
-    if layout_name == '1x53_plus_2x30':
-        return 2, 1
-    if layout_name == '2x53':
-        return 0, 2
-    if layout_name == '3x30':
-        return 3, 0
+        fields: list[tuple[str, str]] = []
+        letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+        for i in range(int(option.fifty_three_yard_capacity or 0)):
+            fields.append((f'Field {letters[len(fields)]}', 'LARGE'))
+        for i in range(int(option.thirty_yard_capacity or 0)):
+            fields.append((f'Field {letters[len(fields)]}', 'SMALL'))
+        return fields
+    return CONFIGURATION_FIELD_TEMPLATES.get(_normalize_configuration_name(configuration_name), [])
+
+
+def _capacity_for_layout(layout_name: str | None, option: FieldConfigurationOption | None) -> tuple[int, int]:
+    templates = _configuration_field_templates(layout_name, option)
+    if templates:
+        small = sum(1 for _, field_type in templates if field_type == 'SMALL')
+        large = sum(1 for _, field_type in templates if field_type == 'LARGE')
+        return small, large
     return 0, 0
 
 
@@ -127,16 +154,25 @@ def _regenerate_generated_slots(db: Session, availability: HostingAvailability, 
             'new_slots_created': 0,
             'obsolete_unused_slots_removed': removed_slots,
         }
-    area = availability.physical_field_area
-    if not area:
-        return
     option = availability.field_configuration_option
-    small_count, large_count = _capacity_for_layout(availability.layout_type or (option.name if option else None), option)
+    host_configuration = availability.selected_configuration
+    configuration_name = (
+        host_configuration.configuration_name
+        if host_configuration
+        else availability.layout_type or (option.name if option else None)
+    )
+    templates = _configuration_field_templates(configuration_name, option)
+    if not templates:
+        return {
+            'total_slots_evaluated': len(existing_slots),
+            'slots_regenerated': removed_slots,
+            'locked_slots_skipped': len(locked_slots),
+            'new_slots_created': 0,
+            'obsolete_unused_slots_removed': removed_slots,
+        }
     instances: list[FieldInstance] = []
-    for i in range(large_count):
-        instances.append(FieldInstance(host_location_id=host_location_id, hosting_availability_id=availability.id, instance_date=availability.available_date, field_name=f'Large Field {i + 1}', field_type='LARGE', is_active=True))
-    for i in range(small_count):
-        instances.append(FieldInstance(host_location_id=host_location_id, hosting_availability_id=availability.id, instance_date=availability.available_date, field_name=f'Small Field {i + 1}', field_type='SMALL', is_active=True))
+    for field_name, field_type in templates:
+        instances.append(FieldInstance(host_location_id=host_location_id, hosting_availability_id=availability.id, instance_date=availability.available_date, field_name=field_name, field_type=field_type, is_active=True))
     for instance in instances:
         db.add(instance)
     db.flush()
@@ -145,7 +181,7 @@ def _regenerate_generated_slots(db: Session, availability: HostingAvailability, 
     start_dt = datetime.combine(availability.available_date, availability.start_time)
     end_dt = datetime.combine(availability.available_date, availability.end_time)
     while start_dt < end_dt:
-        next_dt = start_dt + timedelta(hours=1)
+        next_dt = min(start_dt + timedelta(hours=1), end_dt)
         for instance in instances:
             db.add(GameSlot(field_instance_id=instance.id, host_location_id=host_location_id, slot_date=availability.available_date, start_time=start_dt.time(), end_time=next_dt.time(), field_type=instance.field_type, status='OPEN'))
             created_slots += 1
@@ -175,7 +211,7 @@ def _regenerate_hosting_day(db: Session, availability_rows: list[HostingAvailabi
 
     for availability in availability_rows:
         try:
-            if not availability.physical_field_area:
+            if not availability.host_location_id and not availability.physical_field_area:
                 msg = 'Hosting setup missing for this location.'
                 result.errors.append(msg)
                 logger.error('Host %s (%s) availability %s error: %s', host.name, host.id, availability.id, msg)
@@ -237,12 +273,13 @@ def _host_location_dependency_summary(db: Session, host_location_id: uuid.UUID) 
     field_ids_subquery = db.query(Field.id).filter(Field.host_location_id == host_location_id).subquery()
     area_ids_subquery = db.query(PhysicalFieldArea.id).filter(PhysicalFieldArea.host_location_id == host_location_id).subquery()
     return [
-        ('Scheduled Games', db.query(Game).join(Game.field).filter(Field.host_location_id == host_location_id).count()),
+        ('Scheduled Games', db.query(Game).outerjoin(Game.field).filter(or_(Game.host_location_id == host_location_id, Field.host_location_id == host_location_id)).count()),
         ('Generated Slots Assigned to Games', db.query(GameSlot).filter(GameSlot.host_location_id == host_location_id, GameSlot.assigned_game_id.is_not(None)).count()),
         ('Generated Slots Unassigned', db.query(GameSlot).filter(GameSlot.host_location_id == host_location_id, GameSlot.assigned_game_id.is_(None)).count()),
         ('Field Instances', db.query(FieldInstance).filter(FieldInstance.host_location_id == host_location_id).count()),
-        ('Hosting Availability', db.query(HostingAvailability).filter((HostingAvailability.field_id.in_(field_ids_subquery)) | (HostingAvailability.physical_field_area_id.in_(area_ids_subquery))).count()),
+        ('Hosting Availability', db.query(HostingAvailability).filter((HostingAvailability.host_location_id == host_location_id) | (HostingAvailability.field_id.in_(field_ids_subquery)) | (HostingAvailability.physical_field_area_id.in_(area_ids_subquery))).count()),
         ('Field Configuration Options', db.query(FieldConfigurationOption).filter(FieldConfigurationOption.physical_field_area_id.in_(area_ids_subquery)).count()),
+        ('Host Location Configurations', db.query(HostLocationConfiguration).filter(HostLocationConfiguration.host_location_id == host_location_id).count()),
         ('Physical Field Areas', db.query(PhysicalFieldArea).filter(PhysicalFieldArea.host_location_id == host_location_id).count()),
     ]
 
@@ -256,8 +293,14 @@ def _host_location_effective_status(db: Session) -> dict[uuid.UUID, bool]:
         .distinct()
         .all()
     }
+    configured_host_ids = {
+        host_id for (host_id,) in db.query(HostLocationConfiguration.host_location_id)
+        .filter(HostLocationConfiguration.is_active.is_(True))
+        .distinct()
+        .all()
+    }
     host_rows = db.query(HostLocation.id, HostLocation.is_active).all()
-    return {host_id: bool(is_active and host_id in active_area_host_ids) for host_id, is_active in host_rows}
+    return {host_id: bool(is_active and (host_id in active_area_host_ids or host_id in configured_host_ids)) for host_id, is_active in host_rows}
 
 
 def _eligible_host_location_ids(db: Session) -> set[uuid.UUID]:
@@ -689,6 +732,8 @@ def upsert_organization_division_participation(
 @router.post('/host-locations', response_model=HostLocationRead, dependencies=[Depends(get_current_user)])
 def create_host_location(payload: HostLocationCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     enforce_organization_scope(payload.organization_id, current_user)
+    if payload.surface_type not in ALLOWED_SURFACE_TYPES:
+        raise HTTPException(400, f'Invalid surface type: {payload.surface_type}')
     x = HostLocation(**payload.model_dump()); db.add(x); db.commit(); db.refresh(x); return x
 
 @router.get('/host-locations', response_model=PagedResponse[HostLocationRead], dependencies=[Depends(get_current_user)])
@@ -699,7 +744,7 @@ def list_host_locations(search: str | None = None, organization_id: uuid.UUID | 
     if search: q = q.filter(func.lower(HostLocation.name).like(f"%{search.lower()}%"))
     if is_active is not None: q = q.filter(HostLocation.is_active == is_active)
     page_data = paginate(q.order_by(HostLocation.name), page, page_size)
-    active_area_host_ids = {host_id for (host_id,) in db.query(PhysicalFieldArea.host_location_id).filter(PhysicalFieldArea.is_active.is_(True)).distinct().all()}
+    active_area_host_ids = {host_id for (host_id,) in db.query(PhysicalFieldArea.host_location_id).filter(PhysicalFieldArea.is_active.is_(True)).distinct().all()} | {host_id for (host_id,) in db.query(HostLocationConfiguration.host_location_id).filter(HostLocationConfiguration.is_active.is_(True)).distinct().all()}
     for item in page_data.items:
         has_active_field_setup = item.id in active_area_host_ids
         effective_is_active = bool(item.is_active and has_active_field_setup)
@@ -714,8 +759,64 @@ def upd_host_location(item_id: uuid.UUID, payload: HostLocationCreate, current_u
     x = db.query(HostLocation).filter(HostLocation.id == item_id).first()
     if not x: raise HTTPException(404, 'Host location not found')
     enforce_organization_scope(payload.organization_id, current_user)
+    if payload.surface_type not in ALLOWED_SURFACE_TYPES:
+        raise HTTPException(400, f'Invalid surface type: {payload.surface_type}')
     for k, v in payload.model_dump().items(): setattr(x, k, v)
     db.commit(); db.refresh(x); return x
+
+
+@router.post('/host-location-configurations', response_model=HostLocationConfigurationRead, dependencies=[Depends(get_current_user)])
+def create_host_location_configuration(payload: HostLocationConfigurationCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    host = db.query(HostLocation).filter(HostLocation.id == payload.host_location_id).first()
+    if not host: raise HTTPException(400, 'Invalid host location')
+    enforce_organization_scope(host.organization_id, current_user)
+    config_name = _normalize_configuration_name(payload.configuration_name)
+    if config_name not in CONFIGURATION_FIELD_TEMPLATES:
+        raise HTTPException(400, f'Invalid configuration_name: {payload.configuration_name}')
+    x = HostLocationConfiguration(host_location_id=payload.host_location_id, configuration_name=config_name, is_active=payload.is_active)
+    db.add(x); db.commit(); db.refresh(x); return x
+
+
+@router.get('/host-location-configurations', response_model=PagedResponse[HostLocationConfigurationRead], dependencies=[Depends(get_current_user)])
+def list_host_location_configurations(host_location_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, page: int = 1, page_size: int = 100, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    q = db.query(HostLocationConfiguration).join(HostLocationConfiguration.host_location)
+    if current_user.role.name == ROLE_COMMUNITY_SCHEDULER:
+        q = q.filter(HostLocation.organization_id == current_user.organization_id)
+    elif organization_id:
+        q = q.filter(HostLocation.organization_id == organization_id)
+    if host_location_id:
+        q = q.filter(HostLocationConfiguration.host_location_id == host_location_id)
+    return paginate(q.order_by(HostLocation.name, HostLocationConfiguration.configuration_name), page, page_size)
+
+
+@router.put('/host-location-configurations/{item_id}', response_model=HostLocationConfigurationRead, dependencies=[Depends(get_current_user)])
+def upd_host_location_configuration(item_id: uuid.UUID, payload: HostLocationConfigurationCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    x = db.query(HostLocationConfiguration).filter(HostLocationConfiguration.id == item_id).first()
+    if not x: raise HTTPException(404, 'Host location configuration not found')
+    host = db.query(HostLocation).filter(HostLocation.id == payload.host_location_id).first()
+    if not host: raise HTTPException(400, 'Invalid host location')
+    enforce_organization_scope(host.organization_id, current_user)
+    config_name = _normalize_configuration_name(payload.configuration_name)
+    if config_name not in CONFIGURATION_FIELD_TEMPLATES:
+        raise HTTPException(400, f'Invalid configuration_name: {payload.configuration_name}')
+    x.host_location_id = payload.host_location_id
+    x.configuration_name = config_name
+    x.is_active = payload.is_active
+    db.commit(); db.refresh(x); return x
+
+
+@router.delete('/host-location-configurations/{item_id}', dependencies=[Depends(get_current_user)])
+def del_host_location_configuration(item_id: uuid.UUID, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    x = db.query(HostLocationConfiguration).join(HostLocationConfiguration.host_location).filter(HostLocationConfiguration.id == item_id).first()
+    if not x: raise HTTPException(404, 'Host location configuration not found')
+    enforce_organization_scope(x.host_location.organization_id, current_user)
+    in_use = db.query(HostingAvailability).filter(HostingAvailability.selected_configuration_id == item_id).count()
+    if in_use:
+        x.is_active = False
+    else:
+        db.delete(x)
+    db.commit(); return {'ok': True}
+
 
 @router.get('/host-locations/{item_id}/delete-check', dependencies=[Depends(get_current_user)])
 def get_host_location_delete_check(item_id: uuid.UUID, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -761,8 +862,9 @@ def del_host_location(item_id: uuid.UUID, force: bool = Query(False), current_us
     area_ids = [area_id for (area_id,) in db.query(PhysicalFieldArea.id).filter(PhysicalFieldArea.host_location_id == item_id).all()]
     field_ids = [field_id for (field_id,) in db.query(Field.id).filter(Field.host_location_id == item_id).all()]
     deleted_hosting_availabilities = db.query(HostingAvailability).filter(
-        (HostingAvailability.field_id.in_(field_ids)) | (HostingAvailability.physical_field_area_id.in_(area_ids))
+        (HostingAvailability.host_location_id == item_id) | (HostingAvailability.field_id.in_(field_ids)) | (HostingAvailability.physical_field_area_id.in_(area_ids))
     ).delete(synchronize_session=False)
+    deleted_host_location_configurations = db.query(HostLocationConfiguration).filter(HostLocationConfiguration.host_location_id == item_id).delete(synchronize_session=False)
     deleted_field_configuration_options = db.query(FieldConfigurationOption).filter(FieldConfigurationOption.physical_field_area_id.in_(area_ids)).delete(synchronize_session=False) if area_ids else 0
     deleted_physical_field_areas = db.query(PhysicalFieldArea).filter(PhysicalFieldArea.id.in_(area_ids)).delete(synchronize_session=False) if area_ids else 0
     deleted_fields = db.query(Field).filter(Field.id.in_(field_ids)).delete(synchronize_session=False) if field_ids else 0
@@ -779,6 +881,7 @@ def del_host_location(item_id: uuid.UUID, force: bool = Query(False), current_us
             'hosting_availabilities': deleted_hosting_availabilities,
             'physical_field_areas': deleted_physical_field_areas,
             'field_configuration_options': deleted_field_configuration_options,
+            'host_location_configurations': deleted_host_location_configurations,
             'fields': deleted_fields,
         }
     }
@@ -881,32 +984,61 @@ def del_field(item_id: uuid.UUID, current_user: User = Depends(get_current_user)
     enforce_organization_scope(x.host_location.organization_id, current_user)
     db.delete(x); db.commit(); return {'ok': True}
 
-@router.post('/hosting-availabilities', response_model=HostingAvailabilityRead, dependencies=[Depends(get_current_user)])
-def create_hosting_availability(payload: HostingAvailabilityCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def _resolve_availability_host_and_validate(payload, current_user: User, db: Session) -> tuple[HostLocation, Field | None, PhysicalFieldArea | None, HostLocationConfiguration | None]:
     field = None
     area = None
-    if payload.field_id:
+    config = None
+    host = None
+    if payload.host_location_id:
+        host = db.query(HostLocation).filter(HostLocation.id == payload.host_location_id).first()
+        if not host: raise HTTPException(400, 'Invalid host location')
+        enforce_organization_scope(host.organization_id, current_user)
+        if payload.organization_id and payload.organization_id != host.organization_id:
+            raise HTTPException(400, 'Host location does not belong to selected organization')
+        if not payload.selected_configuration_id:
+            raise HTTPException(400, 'selected_configuration_id is required when host_location_id is provided')
+        config = db.query(HostLocationConfiguration).filter(
+            HostLocationConfiguration.id == payload.selected_configuration_id,
+            HostLocationConfiguration.host_location_id == host.id,
+            HostLocationConfiguration.is_active.is_(True),
+        ).first()
+        if not config: raise HTTPException(400, 'Invalid host location configuration')
+    elif payload.field_id:
         field = db.query(Field).join(Field.host_location).filter(Field.id == payload.field_id).first()
         if not field: raise HTTPException(400, 'Invalid field')
-        enforce_organization_scope(field.host_location.organization_id, current_user)
+        host = field.host_location
+        enforce_organization_scope(host.organization_id, current_user)
     elif payload.physical_field_area_id:
         area = db.query(PhysicalFieldArea).join(PhysicalFieldArea.host_location).filter(PhysicalFieldArea.id == payload.physical_field_area_id).first()
         if not area: raise HTTPException(400, 'Invalid physical field area')
-        enforce_organization_scope(area.host_location.organization_id, current_user)
+        host = area.host_location
+        enforce_organization_scope(host.organization_id, current_user)
+        if not payload.field_configuration_option_id:
+            raise HTTPException(400, 'field_configuration_option_id is required for physical field area slots')
+        option = db.query(FieldConfigurationOption).filter(FieldConfigurationOption.id == payload.field_configuration_option_id, FieldConfigurationOption.physical_field_area_id == payload.physical_field_area_id).first()
+        if not option: raise HTTPException(400, f'Invalid field configuration option: {payload.field_configuration_option_id}')
     else:
-        raise HTTPException(400, 'field_id or physical_field_area_id is required')
-    validate_hour_block(payload.start_time, payload.end_time)
-    x = HostingAvailability(**payload.model_dump()); db.add(x); db.flush()
-    resolved_host_id = area.host_location_id if area else field.host_location_id
-    _regenerate_generated_slots(db, x, resolved_host_id)
+        raise HTTPException(400, 'host_location_id, field_id, or physical_field_area_id is required')
+    return host, field, area, config
+
+
+@router.post('/hosting-availabilities', response_model=HostingAvailabilityRead, dependencies=[Depends(get_current_user)])
+def create_hosting_availability(payload: HostingAvailabilityCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    host, field, area, config = _resolve_availability_host_and_validate(payload, current_user, db)
+    x = HostingAvailability(**payload.model_dump())
+    if payload.host_location_id:
+        x.organization_id = host.organization_id
+        x.host_location_id = host.id
+    db.add(x); db.flush()
+    _regenerate_generated_slots(db, x, host.id)
     db.commit(); db.refresh(x); return x
 
 @router.get('/hosting-availabilities', response_model=PagedResponse[HostingAvailabilityRead], dependencies=[Depends(get_current_user)])
 def list_hosting_availabilities(field_id: uuid.UUID | None = None, field_ids: str | None = None, host_location_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, available_date: str | None = None, available_dates: str | None = None, page: int = 1, page_size: int = 20, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    q = db.query(HostingAvailability).join(HostingAvailability.field).join(Field.host_location)
-    if current_user.role.name == ROLE_COMMUNITY_SCHEDULER: q = q.filter(HostLocation.organization_id == current_user.organization_id)
-    elif organization_id: q = q.filter(HostLocation.organization_id == organization_id)
-    if host_location_id: q = q.filter(Field.host_location_id == host_location_id)
+    q = db.query(HostingAvailability).outerjoin(HostingAvailability.host_location).outerjoin(HostingAvailability.field)
+    if current_user.role.name == ROLE_COMMUNITY_SCHEDULER: q = q.filter(or_(HostLocation.organization_id == current_user.organization_id, HostingAvailability.organization_id == current_user.organization_id, HostingAvailability.field_id.in_(db.query(Field.id).join(Field.host_location).filter(HostLocation.organization_id == current_user.organization_id))))
+    elif organization_id: q = q.filter(or_(HostLocation.organization_id == organization_id, HostingAvailability.organization_id == organization_id, HostingAvailability.field_id.in_(db.query(Field.id).join(Field.host_location).filter(HostLocation.organization_id == organization_id))))
+    if host_location_id: q = q.filter(or_(HostingAvailability.host_location_id == host_location_id, Field.host_location_id == host_location_id))
     if field_id: q = q.filter(HostingAvailability.field_id == field_id)
     if field_ids:
         parsed = [uuid.UUID(x.strip()) for x in field_ids.split(',') if x.strip()]
@@ -920,29 +1052,23 @@ def list_hosting_availabilities(field_id: uuid.UUID | None = None, field_ids: st
 def upd_hosting_availability(item_id: uuid.UUID, payload: HostingAvailabilityCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     x = db.query(HostingAvailability).filter(HostingAvailability.id == item_id).first()
     if not x: raise HTTPException(404, 'Hosting availability not found')
-    field = None
-    area = None
-    if payload.field_id:
-        field = db.query(Field).join(Field.host_location).filter(Field.id == payload.field_id).first()
-        if not field: raise HTTPException(400, 'Invalid field')
-        enforce_organization_scope(field.host_location.organization_id, current_user)
-    elif payload.physical_field_area_id:
-        area = db.query(PhysicalFieldArea).join(PhysicalFieldArea.host_location).filter(PhysicalFieldArea.id == payload.physical_field_area_id).first()
-        if not area: raise HTTPException(400, 'Invalid physical field area')
-        enforce_organization_scope(area.host_location.organization_id, current_user)
-    validate_hour_block(payload.start_time, payload.end_time)
+    host, field, area, config = _resolve_availability_host_and_validate(payload, current_user, db)
     for k, v in payload.model_dump().items(): setattr(x, k, v)
+    if payload.host_location_id:
+        x.organization_id = host.organization_id
+        x.host_location_id = host.id
     db.flush()
-    resolved_host_id = area.host_location_id if area else field.host_location_id
-    _regenerate_generated_slots(db, x, resolved_host_id)
+    _regenerate_generated_slots(db, x, host.id)
     db.commit(); db.refresh(x); return x
 
 @router.delete('/hosting-availabilities/{item_id}', dependencies=[Depends(get_current_user)])
 def del_hosting_availability(item_id: uuid.UUID, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     x = db.query(HostingAvailability).filter(HostingAvailability.id == item_id).first()
     if not x: raise HTTPException(404, 'Hosting availability not found')
-    enforce_organization_scope(x.field.host_location.organization_id, current_user)
-    host_location_id = x.physical_field_area.host_location_id if x.physical_field_area_id else x.field.host_location_id
+    host = x.host_location or (x.physical_field_area.host_location if x.physical_field_area else None) or (x.field.host_location if x.field else None)
+    if not host: raise HTTPException(400, 'Hosting availability is missing host location data')
+    enforce_organization_scope(host.organization_id, current_user)
+    host_location_id = host.id
     _delete_availability_with_generated_slots_guard(db, [x.id], host_location_id, x.available_date)
     db.delete(x); db.commit(); return {'ok': True}
 
@@ -953,22 +1079,10 @@ def bulk_upsert_hosting_availabilities(payload: HostingAvailabilityBulkUpsertReq
     created = 0
     updated = 0
     for slot in payload.slots:
-        if slot.field_id:
-            field = db.query(Field).join(Field.host_location).filter(Field.id == slot.field_id).first()
-            if not field: raise HTTPException(400, f'Invalid field: {slot.field_id}')
-            enforce_organization_scope(field.host_location.organization_id, current_user)
-        elif slot.physical_field_area_id:
-            area = db.query(PhysicalFieldArea).join(PhysicalFieldArea.host_location).filter(PhysicalFieldArea.id == slot.physical_field_area_id).first()
-            if not area: raise HTTPException(400, f'Invalid physical field area: {slot.physical_field_area_id}')
-            enforce_organization_scope(area.host_location.organization_id, current_user)
-            if not slot.field_configuration_option_id:
-                raise HTTPException(400, 'field_configuration_option_id is required for physical field area slots')
-            option = db.query(FieldConfigurationOption).filter(FieldConfigurationOption.id == slot.field_configuration_option_id, FieldConfigurationOption.physical_field_area_id == slot.physical_field_area_id).first()
-            if not option: raise HTTPException(400, f'Invalid field configuration option: {slot.field_configuration_option_id}')
-        else:
-            raise HTTPException(400, 'Each slot must include field_id or physical_field_area_id')
-        validate_hour_block(slot.start_time, slot.end_time)
+        host, field, area, config = _resolve_availability_host_and_validate(slot, current_user, db)
         existing = db.query(HostingAvailability).filter(
+            HostingAvailability.host_location_id == slot.host_location_id,
+            HostingAvailability.selected_configuration_id == slot.selected_configuration_id,
             HostingAvailability.field_id == slot.field_id,
             HostingAvailability.physical_field_area_id == slot.physical_field_area_id,
             HostingAvailability.available_date == slot.available_date,
@@ -979,16 +1093,20 @@ def bulk_upsert_hosting_availabilities(payload: HostingAvailabilityBulkUpsertReq
         ).first()
         if existing:
             existing.is_available = slot.is_available
+            existing.notes = slot.notes
             updated += 1
-            _regenerate_generated_slots(db, existing, area.host_location_id if slot.physical_field_area_id else field.host_location_id)
+            _regenerate_generated_slots(db, existing, host.id)
         else:
             availability = HostingAvailability(**slot.model_dump())
+            if slot.host_location_id:
+                availability.organization_id = host.organization_id
+                availability.host_location_id = host.id
             db.add(availability)
             db.flush()
-            _regenerate_generated_slots(db, availability, area.host_location_id if slot.physical_field_area_id else field.host_location_id)
+            _regenerate_generated_slots(db, availability, host.id)
             created += 1
     db.commit()
-    generated_field_instances = db.query(FieldInstance).join(FieldInstance.hosting_availability).join(HostingAvailability.physical_field_area).join(PhysicalFieldArea.host_location)
+    generated_field_instances = db.query(FieldInstance).join(FieldInstance.host_location)
     generated_slots = db.query(GameSlot).join(GameSlot.host_location)
     if current_user.role.name == ROLE_COMMUNITY_SCHEDULER:
         generated_field_instances = generated_field_instances.filter(HostLocation.organization_id == current_user.organization_id)
@@ -1101,6 +1219,62 @@ def list_saved_hosting_availability(organization_id: uuid.UUID | None = None, ho
             }
         grouped[key]['hours'].append(row.start_time.hour)
 
+
+    direct_q = db.query(HostingAvailability).join(HostingAvailability.host_location).join(HostingAvailability.selected_configuration).filter(
+        HostingAvailability.is_available.is_(True),
+        HostingAvailability.host_location_id.is_not(None),
+        HostingAvailability.selected_configuration_id.is_not(None),
+    )
+    if current_user.role.name == ROLE_COMMUNITY_SCHEDULER:
+        direct_q = direct_q.filter(HostLocation.organization_id == current_user.organization_id)
+    elif organization_id:
+        direct_q = direct_q.filter(HostLocation.organization_id == organization_id)
+    if host_location_id:
+        direct_q = direct_q.filter(HostLocation.id == host_location_id)
+    if site_type:
+        direct_q = direct_q.filter(HostLocation.surface_type == site_type)
+    if layout:
+        direct_q = direct_q.filter(HostLocationConfiguration.configuration_name == _normalize_configuration_name(layout))
+    if available_date:
+        direct_q = direct_q.filter(func.cast(HostingAvailability.available_date, str) == available_date)
+    for row in direct_q.order_by(HostingAvailability.available_date, HostLocation.name, HostingAvailability.start_time).all():
+        host = row.host_location
+        config = row.selected_configuration
+        layout_name = config.configuration_name if config else 'CUSTOM'
+        templates = _configuration_field_templates(layout_name, None)
+        small = sum(1 for _, field_type in templates if field_type == 'SMALL')
+        large = sum(1 for _, field_type in templates if field_type == 'LARGE')
+        key = (str(row.available_date), str(host.id), layout_name)
+        if key not in grouped:
+            grouped[key] = {
+                'id': row.id,
+                'available_date': row.available_date,
+                'organization_id': host.organization_id,
+                'organization_name': host.organization.name if host.organization else None,
+                'host_location_id': host.id,
+                'host_location_name': host.name,
+                'site_type': host.surface_type,
+                'available_layout': layout_name,
+                'small_field_capacity': small,
+                'large_field_capacity': large,
+                'total_fields_found': len(templates),
+                'inactive_field_count': 0,
+                'unmatched_field_records': 0,
+                'has_field_inventory_mismatch': len(templates) == 0,
+                'fields': [
+                    {
+                        'configuration_option_id': str(config.id) if config else None,
+                        'configuration_option_name': layout_name,
+                        'raw_field_type_value': layout_name,
+                        'small_field_count': small,
+                        'large_field_count': large,
+                        'is_active': bool(config.is_active) if config else False,
+                    }
+                ],
+                'hours': [],
+            }
+        grouped[key]['hours'].extend(range(row.start_time.hour, row.end_time.hour))
+
     items = []
     for data in grouped.values():
         hours = sorted(set(data['hours']))
@@ -1147,23 +1321,36 @@ def delete_saved_hosting_availability(item_id: str, current_user: User = Depends
     except ValueError as exc:
         raise HTTPException(400, 'Invalid availability id.') from exc
 
-    sample = db.query(HostingAvailability).join(HostingAvailability.physical_field_area).join(PhysicalFieldArea.host_location).filter(HostingAvailability.id == availability_id).first()
+    sample = db.query(HostingAvailability).filter(HostingAvailability.id == availability_id).first()
     if not sample:
         raise HTTPException(404, 'Saved availability not found')
-    if not sample.physical_field_area or not sample.physical_field_area.host_location:
+    host = sample.host_location or (sample.physical_field_area.host_location if sample.physical_field_area else None)
+    if not host:
         raise HTTPException(400, 'Saved availability is missing host location data')
 
-    host_location_id = sample.physical_field_area.host_location.id
+    host_location_id = host.id
     date_value = sample.available_date
-    enforce_organization_scope(sample.physical_field_area.host_location.organization_id, current_user)
-    availability_ids = [
-        row.id
-        for row in db.query(HostingAvailability.id)
-        .join(HostingAvailability.physical_field_area)
-        .join(PhysicalFieldArea.host_location)
-        .filter(HostLocation.id == host_location_id, HostingAvailability.available_date == date_value)
-        .all()
-    ]
+    enforce_organization_scope(host.organization_id, current_user)
+    if sample.host_location_id:
+        availability_ids = [
+            row.id
+            for row in db.query(HostingAvailability.id)
+            .filter(
+                HostingAvailability.host_location_id == host_location_id,
+                HostingAvailability.available_date == date_value,
+                HostingAvailability.selected_configuration_id == sample.selected_configuration_id,
+            )
+            .all()
+        ]
+    else:
+        availability_ids = [
+            row.id
+            for row in db.query(HostingAvailability.id)
+            .join(HostingAvailability.physical_field_area)
+            .join(PhysicalFieldArea.host_location)
+            .filter(HostLocation.id == host_location_id, HostingAvailability.available_date == date_value)
+            .all()
+        ]
 
     try:
         _delete_availability_with_generated_slots_guard(db, availability_ids, host_location_id, date_value)
@@ -1664,8 +1851,8 @@ def _to_game_read(
         home_team_name=home_team_name,
         away_team_name=away_team_name,
         generated_slot_id=(generated_slot.id if generated_slot else None),
-        field_instance_id=(generated_slot.field_instance_id if generated_slot else None),
-        host_location_id=(generated_slot.host_location_id if generated_slot else None),
+        field_instance_id=(generated_slot.field_instance_id if generated_slot else g.field_instance_id),
+        host_location_id=(generated_slot.host_location_id if generated_slot else g.host_location_id),
         field_instance_name=field_instance_name,
         host_location_name=host_location_name,
     )
@@ -1978,6 +2165,8 @@ def assign_generated_slot(payload: dict, db: Session = Depends(get_db)):
         home_team_id=home_team.id,
         away_team_id=away_team.id,
         field_id=None,
+        host_location_id=slot.host_location_id,
+        field_instance_id=slot.field_instance_id,
         game_status_id=status.id,
         game_date=slot.slot_date,
         kickoff_time=slot.start_time,
@@ -4207,6 +4396,8 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
             home_team_id=home_team_id,
             away_team_id=away_team_id,
             field_id=None,
+            host_location_id=slot.host_location_id,
+            field_instance_id=slot.field_instance_id,
             game_status_id=status.id,
             game_date=slot.slot_date,
             kickoff_time=slot.start_time,
@@ -4457,7 +4648,7 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
                             recovery_overflow_used = True
                             two_location_rule_relaxed = True
                             overflow_host_ids.add(str(slot.host_location_id))
-                        game = Game(season_id=season_id, week_id=week_id, home_team_id=home_tid, away_team_id=away_tid, field_id=None, game_status_id=status.id, game_date=slot.slot_date, kickoff_time=slot.start_time)
+                        game = Game(season_id=season_id, week_id=week_id, home_team_id=home_tid, away_team_id=away_tid, field_id=None, host_location_id=slot.host_location_id, field_instance_id=slot.field_instance_id, game_status_id=status.id, game_date=slot.slot_date, kickoff_time=slot.start_time)
                         db.add(game); db.flush()
                         slot.status = 'ASSIGNED'; slot.assigned_game_id = game.id
                         team_time_occupied.add((home_tid, slot.slot_date, slot.start_time)); team_time_occupied.add((away_tid, slot.slot_date, slot.start_time))
@@ -5850,6 +6041,7 @@ def _public_game_read_from_schedule_row(row) -> PublicGameRead:
         host_location_name=host.name if host else '',
         field_id=fi.id if fi else None,
         field_name=fi.field_name if fi else '',
+        field_type=slot.field_type if slot else None,
         organization_id=org.id,
         organization_name=org.name,
         division_id=div.id,
@@ -6133,6 +6325,8 @@ def move_game_schedule(game_id: uuid.UUID, payload: dict, db: Session = Depends(
     old_slot = db.query(GameSlot).filter(GameSlot.assigned_game_id == game.id).first()
     if old_slot: old_slot.status = 'OPEN'; old_slot.assigned_game_id = None
     new_slot.status = 'ASSIGNED'; new_slot.assigned_game_id = game.id
+    game.host_location_id = new_slot.host_location_id
+    game.field_instance_id = new_slot.field_instance_id
     game.game_date = new_slot.slot_date; game.kickoff_time = new_slot.start_time
     db.commit()
     return {'ok': True}
