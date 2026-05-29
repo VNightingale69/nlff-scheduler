@@ -4901,6 +4901,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'divisions_scheduled': sorted(existing_week_host_divisions.get(host_id, set()) | {division.name}),
         })
     selected_host_ids = extract_selected_host_ids(plans)
+    selected_host_id_set: set[uuid.UUID] = {uuid.UUID(str(host_id)) for host_id in (selected_host_ids or []) if host_id}
     host_sites_used_per_date: dict[str, list[str]] = {}
     for plan in plans:
         plan_date = str(plan.get('proposed_date') or '')
@@ -5131,15 +5132,15 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                             'host_location': host_name_by_id.get(host_id, str(host_id)),
                             'capacity': len(slots_by_host.get(host_id, [])),
                         }
-                        for host_id in sorted(_hosts_for_rotation_community(org_id) & selected_host_ids, key=lambda hid: host_name_by_id.get(hid, ''))
+                        for host_id in sorted(_hosts_for_rotation_community(org_id) & selected_host_id_set, key=lambda hid: host_name_by_id.get(hid, ''))
                     ],
-                    'combined_capacity': _selected_capacity(_hosts_for_rotation_community(org_id) & selected_host_ids),
-                    'combined_capacity_by_size': _selected_capacity_by_size(_hosts_for_rotation_community(org_id) & selected_host_ids),
+                    'combined_capacity': _selected_capacity(_hosts_for_rotation_community(org_id) & selected_host_id_set),
+                    'combined_capacity_by_size': _selected_capacity_by_size(_hosts_for_rotation_community(org_id) & selected_host_id_set),
                 }
                 for org_id in selected_rotation_orgs
             ],
-            'combined_selected_community_capacity': _selected_capacity(selected_host_ids),
-            'combined_selected_community_capacity_by_size': _selected_capacity_by_size(selected_host_ids),
+            'combined_selected_community_capacity': _selected_capacity(selected_host_id_set),
+            'combined_selected_community_capacity_by_size': _selected_capacity_by_size(selected_host_id_set),
             'primary_community_can_host_all_games': primary_community_can_host_all_games,
             'additional_communities_needed': len(selected_rotation_orgs) > 1,
             'single_site_game_limit': single_site_game_limit,
