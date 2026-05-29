@@ -1133,6 +1133,7 @@ def _build_hosting_rotation_readiness(db: Session) -> list[dict[str, object]]:
             org_names[org_id] = org_name or 'Unknown community'
     selected_by_date: dict[date, set[uuid.UUID]] = {}
     games_by_date_org: dict[tuple[date, uuid.UUID], int] = {}
+    generated_host_locations_by_date_org: dict[tuple[date, uuid.UUID], dict[uuid.UUID, str]] = {}
     scheduled_rows = db.query(GameSlot.slot_date, HostLocation.organization_id, func.count(Game.id)).select_from(Game).join(
         GameSlot, GameSlot.assigned_game_id == Game.id
     ).join(HostLocation, HostLocation.id == GameSlot.host_location_id).join(Game.status).filter(
@@ -1144,6 +1145,16 @@ def _build_hosting_rotation_readiness(db: Session) -> list[dict[str, object]]:
     for slot_date, org_id, count in scheduled_rows:
         selected_by_date.setdefault(slot_date, set()).add(org_id)
         games_by_date_org[(slot_date, org_id)] = int(count or 0)
+    generated_slot_hosts = db.query(GameSlot.slot_date, HostLocation.organization_id, HostLocation.id, HostLocation.name).join(
+        HostLocation, HostLocation.id == GameSlot.host_location_id
+    ).filter(
+        GameSlot.slot_date.in_(list(available_orgs_by_date.keys())),
+        HostLocation.organization_id.in_(list(org_names.keys())),
+    ).distinct().all()
+    for slot_date, org_id, host_id, host_name in generated_slot_hosts:
+        if slot_date and org_id and host_id:
+            generated_host_locations_by_date_org.setdefault((slot_date, org_id), {})[host_id] = host_name or str(host_id)
+
     rows: list[dict[str, object]] = []
     cumulative_games = {org_id: 0 for org_id in org_names}
     cumulative_host_weeks: dict[uuid.UUID, set[date]] = {org_id: set() for org_id in org_names}
@@ -1211,10 +1222,35 @@ def _build_hosting_rotation_readiness(db: Session) -> list[dict[str, object]]:
                     reason = 'skipped: capacity or scheduling rules assigned games elsewhere; review auto-scheduler diagnostics'
                 reason_skipped.append(f"#{index} {item['community']}: {reason}")
                 skipped_communities.append({'community': item['community'], 'reason': reason})
+        selected_ordered_by_rotation = [uuid.UUID(item['community_id']) for item in ranking if item['community_id'] in selected_set]
+        total_games_on_date = sum(games_by_date_org.get((host_date, org_id), 0) for org_id in selected)
+        first_selected_org = selected_ordered_by_rotation[0] if selected_ordered_by_rotation else None
+        first_selected_capacity = capacity_by_org.get(first_selected_org, 0) if first_selected_org else 0
+        selected_host_locations_by_community = []
+        for org_id in selected_ordered_by_rotation:
+            host_locations = [
+                {'host_location_id': str(host_id), 'host_location': host_name}
+                for host_id, host_name in sorted(
+                    generated_host_locations_by_date_org.get((host_date, org_id), {}).items(),
+                    key=lambda item: item[1],
+                )
+            ]
+            selected_host_locations_by_community.append({
+                'community_id': str(org_id),
+                'community': org_names.get(org_id, 'Unknown community'),
+                'host_locations': host_locations,
+                'capacity': capacity_by_org.get(org_id, 0),
+                'capacity_by_size': capacity_by_size_by_org.get(org_id, {}),
+                'games_assigned': games_by_date_org.get((host_date, org_id), 0),
+            })
         rows.append({
             'week': f"Week {weeks_by_date.get(host_date)}" if weeks_by_date.get(host_date) is not None else str(host_date),
             'available_communities': available_names,
             'selected_host_communities': selected_names,
+            'selected_host_locations_by_community': selected_host_locations_by_community,
+            'combined_community_capacity': sum(capacity_by_org.get(org_id, 0) for org_id in selected),
+            'selected_community_could_host_all_games': bool(first_selected_org and first_selected_capacity >= total_games_on_date),
+            'additional_communities_needed': len(selected_ordered_by_rotation) > 1,
             'skipped_communities': skipped_communities,
             'rotation_ranking': ranking,
             'reason_selected': reason_selected,
@@ -3905,8 +3941,16 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         if host_row and host_row.organization_id:
             host_org_by_id[host_row.id] = host_row.organization_id
             host_name_by_id[host_row.id] = host_row.name or ''
-            if host_row.organization_id not in primary_host_by_org:
-                primary_host_by_org[host_row.organization_id] = host_row.id
+    for org_id, community_host_ids in host_ids_by_org.items():
+        ordered_community_hosts = sorted(
+            community_host_ids,
+            key=lambda host_id: (
+                -host_capacity_by_id.get(host_id, 0),
+                host_name_by_id.get(host_id, ''),
+            ),
+        )
+        if ordered_community_hosts:
+            primary_host_by_org[org_id] = ordered_community_hosts[0]
     available_host_community_ids = set(host_ids_by_org.keys())
     org_names_by_id = {
         org.id: org.name or str(org.id)
@@ -3952,23 +3996,25 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         ),
         reverse=True,
     )
-    def _best_host_for_rotation_community(org_id: uuid.UUID) -> uuid.UUID | None:
-        community_hosts = [host for host in host_capacity if host_org_by_id.get(host['host_id']) == org_id]
-        if not community_hosts:
-            return None
-        community_hosts.sort(key=lambda host: (
-            -(int(host['slot_count']) >= games_required),
-            -int(host['slot_count']),
-            -int(host['field_count']),
-            host_name_by_id.get(host['host_id'], ''),
-        ))
-        return community_hosts[0]['host_id']
+    def _hosts_for_rotation_community(org_id: uuid.UUID | None) -> set[uuid.UUID]:
+        if not org_id:
+            return set()
+        return set(host_ids_by_org.get(org_id, set()))
 
     def _selected_capacity(host_ids: set[uuid.UUID]) -> int:
         return sum(len(slots_by_host.get(host_id, [])) for host_id in host_ids)
 
+    def _selected_capacity_by_size(host_ids: set[uuid.UUID]) -> dict[str, int]:
+        return {
+            size: sum(1 for host_id in host_ids for slot in slots_by_host.get(host_id, []) if slot.field_type == size)
+            for size in ('SMALL', 'MEDIUM', 'LARGE')
+        }
+
     primary_rotation_org_id: uuid.UUID | None = community_rotation_ranking[0] if community_rotation_ranking else None
-    primary_host_id: uuid.UUID | None = _best_host_for_rotation_community(primary_rotation_org_id) if primary_rotation_org_id else None
+    primary_host_id: uuid.UUID | None = primary_host_by_org.get(primary_rotation_org_id) if primary_rotation_org_id else None
+    primary_community_host_ids = _hosts_for_rotation_community(primary_rotation_org_id)
+    primary_community_capacity = _selected_capacity(primary_community_host_ids)
+    primary_community_can_host_all_games = bool(primary_rotation_org_id and primary_community_capacity >= games_required)
     single_site_possible = bool(primary_host_id and len(slots_by_host.get(primary_host_id, [])) >= games_required)
     prefer_two_sites = games_required > single_site_game_limit and len(host_capacity) >= 2
     selected_host_ids: set[uuid.UUID] = set()
@@ -3979,41 +4025,43 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     host_lock_reason = 'No compatible host locations found.'
     if host_capacity and community_rotation_ranking:
         for org_id in community_rotation_ranking:
-            host_id = _best_host_for_rotation_community(org_id)
-            if not host_id:
+            community_host_ids = _hosts_for_rotation_community(org_id)
+            if not community_host_ids:
                 skipped_rotation_orgs.append({
                     'community_id': str(org_id),
+                    'community': org_names_by_id.get(org_id, str(org_id)),
                     'reason': 'skipped: no compatible generated slots for required field size',
                 })
                 continue
-            if not selected_host_ids:
-                selected_host_ids.add(host_id)
-                selected_rotation_orgs.append(org_id)
-                if _selected_capacity(selected_host_ids) >= games_required:
-                    break
-                continue
-            if _selected_capacity(selected_host_ids) < games_required:
-                selected_host_ids.add(host_id)
-                selected_rotation_orgs.append(org_id)
-                if _selected_capacity(selected_host_ids) >= games_required:
-                    break
-            else:
+            selected_host_ids.update(community_host_ids)
+            selected_rotation_orgs.append(org_id)
+            if _selected_capacity(selected_host_ids) >= games_required:
+                break
+        for org_id in community_rotation_ranking:
+            if org_id not in selected_rotation_orgs and all(row.get('community_id') != str(org_id) for row in skipped_rotation_orgs):
                 skipped_rotation_orgs.append({
                     'community_id': str(org_id),
-                    'reason': 'skipped: higher-ranked rotation hosts already provide enough valid slots',
+                    'community': org_names_by_id.get(org_id, str(org_id)),
+                    'reason': 'skipped: selected rotation community capacity was sufficient for this division/week',
                 })
         if selected_host_ids:
-            locked_host_mode = 'rotation_primary' if len(selected_host_ids) == 1 else 'rotation_capacity_extension'
+            locked_host_mode = 'rotation_primary' if len(selected_rotation_orgs) == 1 else 'rotation_capacity_extension'
             selected_capacity = _selected_capacity(selected_host_ids)
             primary_name = org_names_by_id.get(primary_rotation_org_id, str(primary_rotation_org_id)) if primary_rotation_org_id else 'unknown community'
             if selected_capacity >= games_required:
-                host_lock_reason = (
-                    f'rotation-first host selection: primary community {primary_name} selected before capacity optimization; '
-                    f'additional ranked communities added only as needed for {games_required} required game(s)'
-                )
+                if primary_community_can_host_all_games:
+                    host_lock_reason = (
+                        f'community rotation selected {primary_name}; all available host locations in that community were aggregated '
+                        f'and can host all {games_required} required game(s) without adding another community'
+                    )
+                else:
+                    host_lock_reason = (
+                        f'community rotation selected {primary_name} first; that community provided {primary_community_capacity} valid slot(s), '
+                        f'so additional communities were added in rotation order until {games_required} required game(s) could be hosted'
+                    )
             else:
                 host_lock_reason = (
-                    f'rotation-first host selection could provide only {selected_capacity} valid slot(s) for '
+                    f'community rotation capacity could provide only {selected_capacity} valid slot(s) for '
                     f'{games_required} required game(s); capacity fallback may be needed'
                 )
         if selected_host_ids and _selected_capacity(selected_host_ids) < games_required:
@@ -4025,7 +4073,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                 overflow_host_ids.add(host_id)
                 if _selected_capacity(selected_host_ids) >= games_required:
                     locked_host_mode = 'rotation_capacity_fallback'
-                    host_lock_reason = 'rotation hosts kept; extra capacity host locations added to avoid unscheduled games'
+                    host_lock_reason = 'rotation communities kept; extra capacity host locations added to avoid unscheduled games'
                     break
     two_location_rule_relaxed = False
     if not selected_host_ids and games_required > 0:
@@ -5066,6 +5114,34 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'locked_host_locations': [str(hid) for hid in selected_host_ids],
             'locked_host_mode': locked_host_mode,
             'host_selection_reason': host_lock_reason,
+            'community_rotation_order': [
+                {
+                    'community_id': str(org_id),
+                    'community': org_names_by_id.get(org_id, str(org_id)),
+                }
+                for org_id in community_rotation_ranking
+            ],
+            'selected_host_locations_by_community': [
+                {
+                    'community_id': str(org_id),
+                    'community': org_names_by_id.get(org_id, str(org_id)),
+                    'host_locations': [
+                        {
+                            'host_location_id': str(host_id),
+                            'host_location': host_name_by_id.get(host_id, str(host_id)),
+                            'capacity': len(slots_by_host.get(host_id, [])),
+                        }
+                        for host_id in sorted(_hosts_for_rotation_community(org_id) & selected_host_ids, key=lambda hid: host_name_by_id.get(hid, ''))
+                    ],
+                    'combined_capacity': _selected_capacity(_hosts_for_rotation_community(org_id) & selected_host_ids),
+                    'combined_capacity_by_size': _selected_capacity_by_size(_hosts_for_rotation_community(org_id) & selected_host_ids),
+                }
+                for org_id in selected_rotation_orgs
+            ],
+            'combined_selected_community_capacity': _selected_capacity(selected_host_ids),
+            'combined_selected_community_capacity_by_size': _selected_capacity_by_size(selected_host_ids),
+            'primary_community_can_host_all_games': primary_community_can_host_all_games,
+            'additional_communities_needed': len(selected_rotation_orgs) > 1,
             'single_site_game_limit': single_site_game_limit,
             'admin_override_third_host_locations': admin_override_third_host,
             'split_host_week': split_host_week,
@@ -5142,10 +5218,10 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                 if len(occurrences) > regular_season_host_limit
             ],
             'balanced_hosting_achieved': (
-                not regular_season_host_occurrences_by_location
+                not regular_season_host_occurrences_by_community
                 or (
-                    max(len(v) for v in regular_season_host_occurrences_by_location.values())
-                    - min(len(v) for v in regular_season_host_occurrences_by_location.values())
+                    max(len(v) for v in regular_season_host_occurrences_by_community.values())
+                    - min(len(v) for v in regular_season_host_occurrences_by_community.values())
                 ) <= 1
             ),
         'field_balancing': {

@@ -690,6 +690,60 @@ class AutoFillPreviewTest(unittest.TestCase):
         self.assertEqual(len(starts), 2)
         self.assertEqual(abs((starts[1].hour * 60 + starts[1].minute) - (starts[0].hour * 60 + starts[0].minute)), 60)
 
+
+    def test_rotation_selects_community_and_aggregates_all_its_locations_before_higher_capacity_hosts(self):
+        # Give Antioch prior hosting usage so Westosha is next in the community rotation even though
+        # Antioch has more total compatible slot capacity this week.
+        antioch_prior_host = HostLocation(id=uuid.uuid4(), organization_id=self.org_a.id, name='Antioch Prior Host', is_active=True)
+        antioch_prior_fi = FieldInstance(id=uuid.uuid4(), host_location_id=antioch_prior_host.id, hosting_availability_id=uuid.uuid4(), instance_date=self.week1.start_date, field_name='Prior Small', field_type='SMALL', is_active=True)
+        antioch_prior_slot = GameSlot(id=uuid.uuid4(), field_instance_id=antioch_prior_fi.id, host_location_id=antioch_prior_host.id, slot_date=self.week1.start_date, start_time=time(10, 0), end_time=time(11, 0), field_type='SMALL', status='ASSIGNED')
+        prior_game = self.db.query(Game).filter(Game.week_id == self.week1.id).first()
+        antioch_prior_slot.assigned_game_id = prior_game.id
+
+        westosha_grass = HostLocation(id=uuid.uuid4(), organization_id=self.org_w.id, name='Westosha Grass Fields', is_active=True)
+        extra_rows = [antioch_prior_host, antioch_prior_fi, antioch_prior_slot, westosha_grass]
+        # Existing Westosha Park already has one slot; add one more there and two at the second Westosha site.
+        for hour in (10,):
+            fi = FieldInstance(id=uuid.uuid4(), host_location_id=self.host.id, hosting_availability_id=uuid.uuid4(), instance_date=self.week2.start_date, field_name=f'Westosha Park Small {hour}', field_type='SMALL', is_active=True)
+            slot = GameSlot(id=uuid.uuid4(), field_instance_id=fi.id, host_location_id=self.host.id, slot_date=self.week2.start_date, start_time=time(hour, 0), end_time=time(hour + 1, 0), field_type='SMALL', status='OPEN')
+            extra_rows.extend([fi, slot])
+        for hour in (9, 10):
+            fi = FieldInstance(id=uuid.uuid4(), host_location_id=westosha_grass.id, hosting_availability_id=uuid.uuid4(), instance_date=self.week2.start_date, field_name=f'Westosha Grass Small {hour}', field_type='SMALL', is_active=True)
+            slot = GameSlot(id=uuid.uuid4(), field_instance_id=fi.id, host_location_id=westosha_grass.id, slot_date=self.week2.start_date, start_time=time(hour, 0), end_time=time(hour + 1, 0), field_type='SMALL', status='OPEN')
+            extra_rows.extend([fi, slot])
+
+        antioch_big = HostLocation(id=uuid.uuid4(), organization_id=self.org_a.id, name='Antioch Bigger Capacity', is_active=True)
+        extra_rows.append(antioch_big)
+        for hour in (9, 10, 11, 12, 13):
+            fi = FieldInstance(id=uuid.uuid4(), host_location_id=antioch_big.id, hosting_availability_id=uuid.uuid4(), instance_date=self.week2.start_date, field_name=f'Antioch Small {hour}', field_type='SMALL', is_active=True)
+            slot = GameSlot(id=uuid.uuid4(), field_instance_id=fi.id, host_location_id=antioch_big.id, slot_date=self.week2.start_date, start_time=time(hour, 0), end_time=time(hour + 1, 0), field_type='SMALL', status='OPEN')
+            extra_rows.extend([fi, slot])
+
+        extra_teams = [
+            Team(id=uuid.uuid4(), organization_id=self.org_w.id, division_id=self.division.id, name='Westosha White', is_active=True),
+            Team(id=uuid.uuid4(), organization_id=self.org_w.id, division_id=self.division.id, name='Westosha Black', is_active=True),
+            Team(id=uuid.uuid4(), organization_id=self.org_a.id, division_id=self.division.id, name='Antioch Red', is_active=True),
+            Team(id=uuid.uuid4(), organization_id=self.org_a.id, division_id=self.division.id, name='Antioch Blue', is_active=True),
+        ]
+        self.db.add_all(extra_rows + extra_teams)
+        self.db.commit()
+
+        preview = auto_fill_preview({'season_id': self.season.id, 'week_id': self.week2.id, 'division_id': self.division.id}, db=self.db)
+
+        self.assertEqual(preview['proposed_game_count'], 4)
+        selected_communities = preview['audit']['selected_host_communities']
+        self.assertEqual([row['community'] for row in selected_communities], ['Westosha'])
+        selected_locations = {row['host_location'] for row in preview['proposals']}
+        self.assertEqual(selected_locations, {'Westosha Park', 'Westosha Grass Fields'})
+        locked_locations = set(preview['audit']['locked_host_locations'])
+        self.assertEqual(locked_locations, {str(self.host.id), str(westosha_grass.id)})
+        self.assertTrue(preview['audit']['primary_community_can_host_all_games'])
+        self.assertFalse(preview['audit']['additional_communities_needed'])
+        capacity_row = preview['audit']['selected_host_locations_by_community'][0]
+        self.assertEqual(capacity_row['community'], 'Westosha')
+        self.assertEqual(capacity_row['combined_capacity'], 4)
+        self.assertEqual(capacity_row['combined_capacity_by_size']['SMALL'], 4)
+
     def test_host_rotation_audit_tracks_occurrences(self):
         preview = auto_fill_preview({'season_id': self.season.id, 'week_id': self.week2.id, 'division_id': self.division.id}, db=self.db)
         self.assertIn('total_host_occurrences_by_community', preview['audit'])
