@@ -21,7 +21,7 @@ from app.schemas import (
     GeneratedSlotRead, HostLocationCreate, HostLocationRead, HostLocationConfigurationCreate, HostLocationConfigurationRead, HostingAvailabilityCreate, HostingAvailabilityRead, HostingAvailabilityBulkUpsertRequest, HostingAvailabilityBulkUpsertResponse, HostingGenerationRunResult, HostingGenerationLocationResult, PhysicalFieldAreaCreate, PhysicalFieldAreaRead, SavedAvailabilityResponse,
     LoginRequest, OrganizationCreate, OrganizationRead, PagedResponse, PublicGameRead, RefreshRequest,
     TeamCreate, TeamRead, TeamUpdate, TokenResponse, UserCreate, UserRead,
-    ScheduleReadinessDivisionRow, ScheduleReadinessResponse, ScheduleReadinessTotals
+    ScheduleReadinessDivisionRow, ScheduleReadinessHostDateRow, ScheduleReadinessHostSiteRow, ScheduleReadinessResponse, ScheduleReadinessTotals
 )
 from app.security import create_access_token, create_refresh_token, hash_password, validate_password_strength, verify_password, decode_token
 from app.services.game_statuses import REQUIRED_GAME_STATUSES, ensure_required_game_statuses
@@ -202,6 +202,71 @@ def _capacity_for_layout(layout_name: str | None, option: FieldConfigurationOpti
 
 
 
+def _turf_demand_counts_for_date(db: Session, host: HostLocation, available_date: date) -> dict[str, int]:
+    counts = {FIELD_SIZE_SMALL: 0, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_LARGE: 0}
+    game_rows = (
+        db.query(Game, Division)
+        .join(Team, Game.home_team_id == Team.id)
+        .join(Division, Team.division_id == Division.id)
+        .filter(Game.game_date == available_date)
+        .all()
+    )
+    for _game, division in game_rows:
+        required = _required_field_type_for_division(division)
+        if required in counts:
+            counts[required] += 1
+    if any(counts.values()):
+        return counts
+
+    # Before games exist, approximate demand from active teams in divisions the host community participates in.
+    participation_rows = (
+        db.query(Division, OrganizationDivisionParticipation.team_count)
+        .join(OrganizationDivisionParticipation, OrganizationDivisionParticipation.division_id == Division.id)
+        .filter(
+            OrganizationDivisionParticipation.organization_id == host.organization_id,
+            OrganizationDivisionParticipation.is_active.is_(True),
+            OrganizationDivisionParticipation.is_participating.is_(True),
+        )
+        .all()
+    )
+    for division, team_count in participation_rows:
+        required = _required_field_type_for_division(division)
+        if required in counts:
+            counts[required] += max(int(team_count or 0), 0)
+    return counts
+
+
+def _score_turf_layout_for_demand(layout_name: str, demand_counts: dict[str, int], slot_count_per_field: int) -> tuple[int, int, int]:
+    metadata = _turf_configuration_metadata(layout_name)
+    layout_counts = metadata['counts'] if metadata else {size: 0 for size in FIELD_SIZE_ORDER}
+    compatible_capacity = sum(min(layout_counts[size] * max(slot_count_per_field, 1), demand_counts.get(size, 0)) for size in FIELD_SIZE_ORDER)
+    exact_field_types = sum(1 for size in FIELD_SIZE_ORDER if layout_counts[size] and demand_counts.get(size, 0))
+    unused_capacity = sum(max((layout_counts[size] * max(slot_count_per_field, 1)) - demand_counts.get(size, 0), 0) for size in FIELD_SIZE_ORDER)
+    total_fields = sum(layout_counts.values())
+    # Scheduled games and exact matches dominate; unused capacity and extra fields break ties.
+    return (compatible_capacity * 100 + exact_field_types * 25 - unused_capacity * 20, -unused_capacity, -total_fields)
+
+
+def _select_best_turf_configuration(db: Session, availability: HostingAvailability, host: HostLocation) -> HostLocationConfiguration | None:
+    active_configs = db.query(HostLocationConfiguration).filter(
+        HostLocationConfiguration.host_location_id == host.id,
+        HostLocationConfiguration.is_active.is_(True),
+    ).all()
+    active_configs = [config for config in active_configs if _turf_configuration_metadata(config.configuration_name)]
+    if not active_configs:
+        return None
+    if availability.lock_selected_layout and availability.selected_configuration_id:
+        return next((config for config in active_configs if config.id == availability.selected_configuration_id), None)
+    if availability.selected_configuration_id and not availability.auto_select_turf_layout:
+        return next((config for config in active_configs if config.id == availability.selected_configuration_id), None)
+
+    start_dt = datetime.combine(availability.available_date, availability.start_time)
+    end_dt = datetime.combine(availability.available_date, availability.end_time)
+    slot_count_per_field = max(math.ceil((end_dt - start_dt).total_seconds() / 3600), 1)
+    demand_counts = _turf_demand_counts_for_date(db, host, availability.available_date)
+    return max(active_configs, key=lambda config: _score_turf_layout_for_demand(config.configuration_name, demand_counts, slot_count_per_field))
+
+
 def _apply_turf_configuration_metadata(obj, configuration_name: str) -> None:
     metadata = _turf_configuration_metadata(configuration_name)
     if not metadata:
@@ -248,6 +313,11 @@ def _regenerate_generated_slots(db: Session, availability: HostingAvailability, 
     surface_type = (host.surface_type if host else None) or 'GRASS_FIELD'
     templates: list[tuple[str, str]] = []
     if surface_type == 'TURF_STADIUM':
+        selected_configuration = _select_best_turf_configuration(db, availability, host) if host else None
+        if selected_configuration and availability.selected_configuration_id != selected_configuration.id:
+            availability.selected_configuration_id = selected_configuration.id
+            host_configuration = selected_configuration
+            logger.info('Selected turf layout %s for availability_id=%s host_location_id=%s', selected_configuration.configuration_name, availability.id, host_location_id)
         if not host_configuration or not host_configuration.is_active:
             templates = []
         else:
@@ -676,6 +746,125 @@ def ensure_league_defined_divisions(db: Session) -> None:
 
 
 
+
+
+def _build_host_date_readiness(db: Session) -> list[ScheduleReadinessHostDateRow]:
+    slot_rows = (
+        db.query(GameSlot, FieldInstance, HostLocation, HostingAvailability)
+        .join(GameSlot.field_instance)
+        .join(GameSlot.host_location)
+        .outerjoin(HostingAvailability, FieldInstance.hosting_availability_id == HostingAvailability.id)
+        .order_by(GameSlot.slot_date, HostLocation.name, GameSlot.start_time)
+        .all()
+    )
+    games_by_slot_id = {slot_id: count for slot_id, count in db.query(GameSlot.id, func.count(Game.id)).outerjoin(Game, GameSlot.assigned_game_id == Game.id).group_by(GameSlot.id).all()}
+    divisions_by_site_date: dict[tuple[date, uuid.UUID], set[str]] = {}
+    incompatible_by_site_date: dict[tuple[date, uuid.UUID], int] = {}
+    assigned_games = (
+        db.query(Game, GameSlot, HostLocation, Division)
+        .join(GameSlot, GameSlot.assigned_game_id == Game.id)
+        .join(HostLocation, GameSlot.host_location_id == HostLocation.id)
+        .join(Team, Game.home_team_id == Team.id)
+        .join(Division, Team.division_id == Division.id)
+        .all()
+    )
+    for game, slot, host, division in assigned_games:
+        key = (game.game_date, host.id)
+        divisions_by_site_date.setdefault(key, set()).add(f'{division.division_group.title()} {division.name}' if division.division_group else division.name)
+        if slot.field_type != _required_field_type_for_division(division):
+            incompatible_by_site_date[key] = incompatible_by_site_date.get(key, 0) + 1
+
+    unscheduled_games_by_date: dict[date, int] = {}
+    for game_date, count in db.query(Game.game_date, func.count(Game.id)).outerjoin(GameSlot, GameSlot.assigned_game_id == Game.id).filter(GameSlot.id.is_(None), Game.game_date.is_not(None)).group_by(Game.game_date).all():
+        unscheduled_games_by_date[game_date] = int(count or 0)
+
+    site_data: dict[tuple[date, uuid.UUID], dict] = {}
+    date_data: dict[date, dict] = {}
+    for slot, field_instance, host, availability in slot_rows:
+        date_key = slot.slot_date
+        site_key = (date_key, host.id)
+        site = site_data.setdefault(site_key, {
+            'host': host,
+            'availability': availability,
+            'field_names': set(),
+            'field_counts': {FIELD_SIZE_SMALL: 0, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_LARGE: 0},
+            'slot_counts': {FIELD_SIZE_SMALL: 0, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_LARGE: 0},
+            'generated_slots': 0,
+            'games_assigned': 0,
+            'layouts': set(),
+        })
+        site['field_names'].add(field_instance.field_name)
+        if slot.field_type in site['slot_counts']:
+            site['slot_counts'][slot.field_type] += 1
+        site['generated_slots'] += 1
+        site['games_assigned'] += int(games_by_slot_id.get(slot.id, 0) or 0)
+        if field_instance.field_type in site['field_counts'] and field_instance.field_name not in site.get('counted_fields', set()):
+            site.setdefault('counted_fields', set()).add(field_instance.field_name)
+            site['field_counts'][field_instance.field_type] += 1
+        if availability and availability.selected_configuration:
+            site['layouts'].add(availability.selected_configuration.configuration_name)
+        date_row = date_data.setdefault(date_key, {'generated_slots': 0, 'games_assigned': 0, 'field_counts': {FIELD_SIZE_SMALL: 0, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_LARGE: 0}, 'site_ids': set()})
+        date_row['generated_slots'] += 1
+        date_row['games_assigned'] += int(games_by_slot_id.get(slot.id, 0) or 0)
+        date_row['site_ids'].add(host.id)
+
+    division_sites: dict[tuple[date, str], set[uuid.UUID]] = {}
+    for (date_key, host_id), divisions in divisions_by_site_date.items():
+        for division_label in divisions:
+            division_sites.setdefault((date_key, division_label), set()).add(host_id)
+
+    result: list[ScheduleReadinessHostDateRow] = []
+    for host_date in sorted(date_data.keys()):
+        day = date_data[host_date]
+        host_sites: list[ScheduleReadinessHostSiteRow] = []
+        day_warnings: list[str] = []
+        for host_id in sorted(day['site_ids'], key=lambda value: str(value)):
+            site = site_data[(host_date, host_id)]
+            host = site['host']
+            availability = site['availability']
+            warnings: list[str] = []
+            open_slots = site['generated_slots'] - site['games_assigned']
+            if open_slots > 0:
+                warnings.append(f'{open_slots} unused generated slot(s).')
+            if len(site['layouts']) > 1:
+                warnings.append('Multiple turf layouts appear on this host date; avoid mid-day layout changes unless admin override is enabled.')
+            if incompatible_by_site_date.get((host_date, host_id), 0):
+                warnings.append(f"{incompatible_by_site_date[(host_date, host_id)]} incompatible field-size assignment(s).")
+            if availability and availability.lock_selected_layout and unscheduled_games_by_date.get(host_date, 0):
+                warnings.append('Locked turf layout may be preventing additional games from being assigned.')
+            divisions_supported = sorted(divisions_by_site_date.get((host_date, host_id), set()))
+            split_divisions = [label for label in divisions_supported if len(division_sites.get((host_date, label), set())) > 1]
+            if split_divisions:
+                warnings.append(f"Split division(s) across host sites: {', '.join(split_divisions)}.")
+            selected_layout = ', '.join(sorted(site['layouts'])) if site['layouts'] else None
+            host_sites.append(ScheduleReadinessHostSiteRow(
+                host_location_id=host.id,
+                host_location_name=host.name,
+                surface_type=host.surface_type or 'GRASS_FIELD',
+                selected_turf_layout=selected_layout if (host.surface_type or 'GRASS_FIELD') == 'TURF_STADIUM' else None,
+                active_fields=sorted(site['field_names']) if (host.surface_type or 'GRASS_FIELD') != 'TURF_STADIUM' else [],
+                field_counts_by_size=site['field_counts'],
+                generated_slots=site['generated_slots'],
+                games_assigned=site['games_assigned'],
+                games_unscheduled=unscheduled_games_by_date.get(host_date, 0),
+                divisions_supported=divisions_supported,
+                warnings=warnings,
+                auto_select_turf_layout=bool(getattr(availability, 'auto_select_turf_layout', True)) if availability else True,
+                lock_selected_layout=bool(getattr(availability, 'lock_selected_layout', False)) if availability else False,
+            ))
+            day_warnings.extend(warnings)
+        result.append(ScheduleReadinessHostDateRow(
+            host_date=host_date,
+            host_sites_available=len(day['site_ids']),
+            generated_slots=day['generated_slots'],
+            games_assigned=day['games_assigned'],
+            games_unscheduled=unscheduled_games_by_date.get(host_date, 0),
+            field_counts_by_size={size: sum(site_data[(host_date, hid)]['field_counts'][size] for hid in day['site_ids']) for size in FIELD_SIZE_ORDER},
+            host_sites=host_sites,
+            warnings=sorted(set(day_warnings)),
+        ))
+    return result
+
 @router.get('/schedule-readiness', response_model=ScheduleReadinessResponse, dependencies=[Depends(get_current_user)])
 def get_schedule_readiness(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     ensure_league_defined_divisions(db)
@@ -792,6 +981,7 @@ def get_schedule_readiness(current_user: User = Depends(get_current_user), db: S
             total_open_slots=small_slots + medium_slots + large_slots,
         ),
         warnings=warnings,
+        host_dates=_build_host_date_readiness(db),
     )
 @router.post('/divisions', response_model=DivisionRead, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def create_division(payload: DivisionCreate, db: Session = Depends(get_db)):
@@ -1185,16 +1375,19 @@ def _resolve_availability_host_and_validate(payload, current_user: User, db: Ses
             raise HTTPException(400, 'Host location does not belong to selected organization')
         surface_type = host.surface_type or 'GRASS_FIELD'
         if surface_type == 'TURF_STADIUM':
-            if not payload.selected_configuration_id:
-                raise HTTPException(400, 'selected_configuration_id is required for turf stadium availability')
-            config = db.query(HostLocationConfiguration).filter(
-                HostLocationConfiguration.id == payload.selected_configuration_id,
-                HostLocationConfiguration.host_location_id == host.id,
-                HostLocationConfiguration.is_active.is_(True),
-            ).first()
-            if not config: raise HTTPException(400, 'Invalid host location configuration')
-            if not _turf_configuration_metadata(config.configuration_name):
-                raise HTTPException(400, 'Unsupported turf stadium configuration')
+            if payload.lock_selected_layout and not payload.selected_configuration_id:
+                raise HTTPException(400, 'selected_configuration_id is required when a turf layout is locked')
+            if payload.selected_configuration_id:
+                config = db.query(HostLocationConfiguration).filter(
+                    HostLocationConfiguration.id == payload.selected_configuration_id,
+                    HostLocationConfiguration.host_location_id == host.id,
+                    HostLocationConfiguration.is_active.is_(True),
+                ).first()
+                if not config: raise HTTPException(400, 'Invalid host location configuration')
+                if not _turf_configuration_metadata(config.configuration_name):
+                    raise HTTPException(400, 'Unsupported turf stadium configuration')
+            elif not payload.auto_select_turf_layout:
+                raise HTTPException(400, 'selected_configuration_id is required when auto-select turf layout is disabled')
         else:
             raise HTTPException(400, 'Grass field availability must select an active configured grass field')
     elif payload.field_id:
@@ -1294,6 +1487,10 @@ def bulk_upsert_hosting_availabilities(payload: HostingAvailabilityBulkUpsertReq
         if existing:
             existing.is_available = slot.is_available
             existing.notes = slot.notes
+            existing.auto_select_turf_layout = slot.auto_select_turf_layout
+            existing.lock_selected_layout = slot.lock_selected_layout
+            existing.allow_turf_layout_changes = slot.allow_turf_layout_changes
+            existing.admin_override_incompatible_field_size = slot.admin_override_incompatible_field_size
             updated += 1
             _regenerate_generated_slots(db, existing, host.id)
         else:
@@ -1418,6 +1615,8 @@ def list_saved_hosting_availability(organization_id: uuid.UUID | None = None, ho
                         'is_active': bool(option.is_active) if option else False,
                     }
                 ],
+                'auto_select_turf_layout': bool(getattr(row, 'auto_select_turf_layout', True)),
+                'lock_selected_layout': bool(getattr(row, 'lock_selected_layout', False)),
                 'hours': []
             }
         grouped[key]['hours'].append(row.start_time.hour)
@@ -1477,6 +1676,8 @@ def list_saved_hosting_availability(organization_id: uuid.UUID | None = None, ho
                         'is_active': bool(config.is_active) if config else False,
                     }
                 ],
+                'auto_select_turf_layout': bool(getattr(row, 'auto_select_turf_layout', True)),
+                'lock_selected_layout': bool(getattr(row, 'lock_selected_layout', False)),
                 'hours': [],
             }
         grouped[key]['hours'].extend(range(row.start_time.hour, row.end_time.hour))
@@ -1523,6 +1724,8 @@ def list_saved_hosting_availability(organization_id: uuid.UUID | None = None, ho
                 'unmatched_field_records': 0,
                 'has_field_inventory_mismatch': not row.field.is_active,
                 'fields': [{'configuration_option_id': str(row.field.id), 'configuration_option_name': layout_name, 'raw_field_type_value': row.field.layout_type, 'small_field_count': small, 'medium_field_count': medium, 'large_field_count': large, 'is_active': bool(row.field.is_active)}],
+                'auto_select_turf_layout': bool(getattr(row, 'auto_select_turf_layout', True)),
+                'lock_selected_layout': bool(getattr(row, 'lock_selected_layout', False)),
                 'hours': [],
             }
         grouped[key]['hours'].extend(range(row.start_time.hour, row.end_time.hour))
@@ -1563,6 +1766,8 @@ def list_saved_hosting_availability(organization_id: uuid.UUID | None = None, ho
             'mediumFieldCount': data.get('medium_field_capacity', 0),
             'largeFieldCount': data['large_field_capacity'],
             'fields': data['fields'],
+            'auto_select_turf_layout': data.get('auto_select_turf_layout', True),
+            'lock_selected_layout': data.get('lock_selected_layout', False),
         })
     items.sort(key=lambda x: (x['available_date'], x['host_location_name']))
     return {'items': items}

@@ -15,6 +15,31 @@ type ReadinessRow = {
   status: 'READY' | 'SHORT' | 'NO TEAMS';
 };
 
+type HostDateReadiness = {
+  host_date: string;
+  host_sites_available: number;
+  generated_slots: number;
+  games_assigned: number;
+  games_unscheduled: number;
+  field_counts_by_size: Record<string, number>;
+  warnings: string[];
+  host_sites: Array<{
+    host_location_id: string;
+    host_location_name: string;
+    surface_type: string;
+    selected_turf_layout: string | null;
+    active_fields: string[];
+    field_counts_by_size: Record<string, number>;
+    generated_slots: number;
+    games_assigned: number;
+    games_unscheduled: number;
+    divisions_supported: string[];
+    warnings: string[];
+    auto_select_turf_layout: boolean;
+    lock_selected_layout: boolean;
+  }>;
+};
+
 type ReadinessTotals = {
   total_teams: number;
   total_minimum_unique_matchups: number;
@@ -34,6 +59,7 @@ export default function ScheduleReadinessPage() {
   const [totals, setTotals] = useState<ReadinessTotals | null>(null);
   const [error, setError] = useState('');
   const [warnings, setWarnings] = useState<string[]>([]);
+  const [hostDates, setHostDates] = useState<HostDateReadiness[]>([]);
 
   useEffect(() => {
     (async () => {
@@ -42,6 +68,7 @@ export default function ScheduleReadinessPage() {
         setRows(data?.rows || []);
         setTotals(data?.totals || null);
         setWarnings(data?.warnings || []);
+        setHostDates(data?.host_dates || []);
       } catch (e: any) {
         setError(e?.message || 'Failed to load schedule readiness report');
       }
@@ -71,6 +98,39 @@ export default function ScheduleReadinessPage() {
           <div><div className='text-slate-500'>Total Open Slots</div><div className='font-semibold'>{totals.total_open_slots}</div></div>
         </div>
       ) : null}
+
+      <section className='rounded border bg-white p-3'>
+        <h2 className='mb-2 font-semibold'>Host Date / Host Site Readiness</h2>
+        {!hostDates.length ? <p className='text-sm text-slate-500'>No generated host-date slots found yet.</p> : (
+          <div className='space-y-3'>
+            {hostDates.map((day) => (
+              <div key={day.host_date} className='rounded border bg-slate-50 p-3 text-sm'>
+                <div className='flex flex-wrap items-center justify-between gap-2'>
+                  <div className='font-semibold'>{day.host_date}</div>
+                  <div>{day.host_sites_available} host site(s) • {day.generated_slots} generated slots • {day.games_assigned} assigned • {day.games_unscheduled} unscheduled</div>
+                </div>
+                {day.warnings.length ? <ul className='mt-2 list-disc pl-5 text-amber-800'>{day.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul> : null}
+                <div className='mt-3 grid gap-2 lg:grid-cols-2'>
+                  {day.host_sites.map((site) => (
+                    <div key={site.host_location_id} className='rounded border bg-white p-3'>
+                      <div className='font-medium'>{site.host_location_name}</div>
+                      <div className='text-slate-600'>{site.surface_type}</div>
+                      <div>Layout: {site.selected_turf_layout || 'Configured grass fields'}</div>
+                      <div>Fields: {site.field_counts_by_size.SMALL || 0} Small / {site.field_counts_by_size.MEDIUM || 0} Medium / {site.field_counts_by_size.LARGE || 0} Large</div>
+                      <div>Slots: {site.generated_slots} • Assigned: {site.games_assigned} • Unscheduled: {site.games_unscheduled}</div>
+                      <div>Divisions: {site.divisions_supported.length ? site.divisions_supported.join(', ') : '—'}</div>
+                      <div>{site.auto_select_turf_layout ? 'Auto-select layout enabled' : 'Manual layout'}{site.lock_selected_layout ? ' • Layout locked' : ''}</div>
+                      {site.active_fields.length ? <div>Active fields: {site.active_fields.join(', ')}</div> : null}
+                      {site.warnings.length ? <ul className='mt-2 list-disc pl-5 text-amber-800'>{site.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul> : null}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
       <div className='overflow-auto rounded border bg-white'>
         <table className='min-w-full text-sm'>
           <thead>

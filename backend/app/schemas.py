@@ -204,6 +204,10 @@ class HostingAvailabilityCreate(BaseModel):
     organization_id: uuid.UUID | None = None
     host_location_id: uuid.UUID | None = None
     selected_configuration_id: uuid.UUID | None = None
+    auto_select_turf_layout: bool = True
+    lock_selected_layout: bool = False
+    allow_turf_layout_changes: bool = False
+    admin_override_incompatible_field_size: bool = False
     field_id: uuid.UUID | None | None = None
     physical_field_area_id: uuid.UUID | None = None
     field_configuration_option_id: uuid.UUID | None = None
@@ -223,6 +227,10 @@ class HostingAvailabilityBulkSlot(BaseModel):
     organization_id: uuid.UUID | None = None
     host_location_id: uuid.UUID | None = None
     selected_configuration_id: uuid.UUID | None = None
+    auto_select_turf_layout: bool = True
+    lock_selected_layout: bool = False
+    allow_turf_layout_changes: bool = False
+    admin_override_incompatible_field_size: bool = False
     field_id: uuid.UUID | None | None = None
     physical_field_area_id: uuid.UUID | None = None
     field_configuration_option_id: uuid.UUID | None = None
@@ -308,10 +316,39 @@ class ScheduleReadinessTotals(BaseModel):
     total_open_slots: int
 
 
+
+class ScheduleReadinessHostSiteRow(BaseModel):
+    host_location_id: uuid.UUID
+    host_location_name: str
+    surface_type: str
+    selected_turf_layout: str | None = None
+    active_fields: list[str] = []
+    field_counts_by_size: dict[str, int]
+    generated_slots: int
+    games_assigned: int
+    games_unscheduled: int
+    divisions_supported: list[str] = []
+    warnings: list[str] = []
+    auto_select_turf_layout: bool = True
+    lock_selected_layout: bool = False
+
+
+class ScheduleReadinessHostDateRow(BaseModel):
+    host_date: date
+    host_sites_available: int
+    generated_slots: int
+    games_assigned: int
+    games_unscheduled: int
+    field_counts_by_size: dict[str, int]
+    host_sites: list[ScheduleReadinessHostSiteRow]
+    warnings: list[str] = []
+
+
 class ScheduleReadinessResponse(BaseModel):
     rows: list[ScheduleReadinessDivisionRow]
     totals: ScheduleReadinessTotals
     warnings: list[str] = []
+    host_dates: list[ScheduleReadinessHostDateRow] = []
 
 
 class HostingGenerationLocationResult(BaseModel):
