@@ -212,6 +212,7 @@ class HostingAvailabilityCreate(BaseModel):
     selected_configuration_id: uuid.UUID | None = None
     auto_select_turf_layout: bool = True
     lock_selected_layout: bool = False
+    turf_wave_plan: list[ScheduleReadinessTurfWaveRow] = []
     allow_turf_layout_changes: bool = False
     admin_override_incompatible_field_size: bool = False
     field_id: uuid.UUID | None | None = None
@@ -239,6 +240,7 @@ class HostingAvailabilityBulkSlot(BaseModel):
     selected_configuration_id: uuid.UUID | None = None
     auto_select_turf_layout: bool = True
     lock_selected_layout: bool = False
+    turf_wave_plan: list[ScheduleReadinessTurfWaveRow] = []
     allow_turf_layout_changes: bool = False
     admin_override_incompatible_field_size: bool = False
     field_id: uuid.UUID | None | None = None
@@ -335,6 +337,36 @@ class ScheduleReadinessTotals(BaseModel):
 
 
 
+class ScheduleReadinessTurfWaveSlotRow(BaseModel):
+    start_time: time
+    end_time: time
+    slot_level_configuration: str | None = None
+    field_instances_generated: list[str] = []
+    games_assigned_by_field_size: dict[str, int] = {}
+    unused_compatible_capacity: dict[str, int] = {}
+    inserted_through_slot_level_optimization: list[str] = []
+    rejected_assignments: list[str] = []
+    warnings: list[str] = []
+
+
+class ScheduleReadinessTurfWaveRow(BaseModel):
+    host_location_id: uuid.UUID
+    host_location_name: str
+    host_date: date
+    sequence_number: int
+    wave_intent: str
+    preferred_layout_code: str
+    start_time: time
+    end_time: time
+    transition_before_minutes: int = 0
+    transition_after_minutes: int = 0
+    generated_field_instances: list[str] = []
+    assigned_games: int = 0
+    notes: str | None = None
+    slot_level_configurations: list[ScheduleReadinessTurfWaveSlotRow] = []
+    warnings: list[str] = []
+
+
 class ScheduleReadinessHostSiteRow(BaseModel):
     host_location_id: uuid.UUID
     host_location_name: str
@@ -354,6 +386,7 @@ class ScheduleReadinessHostSiteRow(BaseModel):
     warnings: list[str] = []
     auto_select_turf_layout: bool = True
     lock_selected_layout: bool = False
+    turf_wave_plan: list[ScheduleReadinessTurfWaveRow] = []
 
 
 class ScheduleReadinessHostDateRow(BaseModel):

@@ -45,6 +45,33 @@ type HostDateReadiness = {
     warnings: string[];
     auto_select_turf_layout: boolean;
     lock_selected_layout: boolean;
+    turf_wave_plan?: Array<{
+      host_location_id: string;
+      host_location_name: string;
+      host_date: string;
+      sequence_number: number;
+      wave_intent: string;
+      preferred_layout_code: string;
+      start_time: string;
+      end_time: string;
+      transition_before_minutes: number;
+      transition_after_minutes: number;
+      generated_field_instances: string[];
+      assigned_games: number;
+      notes: string | null;
+      slot_level_configurations: Array<{
+        start_time: string;
+        end_time: string;
+        slot_level_configuration: string | null;
+        field_instances_generated: string[];
+        games_assigned_by_field_size: Record<string, number>;
+        unused_compatible_capacity: Record<string, number>;
+        inserted_through_slot_level_optimization: string[];
+        rejected_assignments: string[];
+        warnings: string[];
+      }>;
+      warnings: string[];
+    }>;
   }>;
 };
 
@@ -199,6 +226,39 @@ export default function ScheduleReadinessPage() {
                       <div>Divisions: {site.divisions_supported.length ? site.divisions_supported.join(', ') : '—'}</div>
                       <div>{site.auto_select_turf_layout ? 'Auto-select layout enabled' : 'Manual layout'}{site.lock_selected_layout ? ' • Layout locked' : ''}</div>
                       {site.active_fields.length ? <div>Active fields: {site.active_fields.join(', ')}</div> : null}
+                      {site.turf_wave_plan?.length ? (
+                        <div className='mt-3 rounded border border-blue-100 bg-blue-50 p-2'>
+                          <div className='font-semibold text-blue-900'>Turf Wave Plan</div>
+                          <div className='space-y-2'>
+                            {site.turf_wave_plan.map((wave) => (
+                              <div key={`${wave.host_location_id}-${wave.host_date}-${wave.sequence_number}`} className='rounded bg-white p-2'>
+                                <div className='font-medium'>Wave {wave.sequence_number}: {wave.wave_intent} • {wave.preferred_layout_code}</div>
+                                <div className='text-slate-600'>{wave.start_time}–{wave.end_time} • transition {wave.transition_before_minutes}/{wave.transition_after_minutes} min • assigned {wave.assigned_games}</div>
+                                <div className='text-slate-600'>Generated fields: {wave.generated_field_instances.length ? wave.generated_field_instances.join(', ') : '—'}</div>
+                                {wave.slot_level_configurations.length ? (
+                                  <div className='mt-2 overflow-auto'>
+                                    <table className='min-w-full text-xs'>
+                                      <thead><tr className='border-b text-left'><th className='p-1'>Slot</th><th className='p-1'>Config</th><th className='p-1'>Fields</th><th className='p-1'>Assigned</th><th className='p-1'>Unused compatible</th><th className='p-1'>Optimized inserts</th><th className='p-1'>Rejected / warnings</th></tr></thead>
+                                      <tbody>{wave.slot_level_configurations.map((slot) => (
+                                        <tr key={`${wave.sequence_number}-${slot.start_time}`} className='border-b align-top'>
+                                          <td className='p-1'>{slot.start_time}–{slot.end_time}</td>
+                                          <td className='p-1'>{slot.slot_level_configuration || 'Unsupported'}</td>
+                                          <td className='p-1'>{slot.field_instances_generated.join(', ') || '—'}</td>
+                                          <td className='p-1'>{slot.games_assigned_by_field_size.SMALL || 0} S / {slot.games_assigned_by_field_size.MEDIUM || 0} M / {slot.games_assigned_by_field_size.LARGE || 0} L</td>
+                                          <td className='p-1'>{slot.unused_compatible_capacity.SMALL || 0} S / {slot.unused_compatible_capacity.MEDIUM || 0} M / {slot.unused_compatible_capacity.LARGE || 0} L</td>
+                                          <td className='p-1'>{slot.inserted_through_slot_level_optimization.length ? slot.inserted_through_slot_level_optimization.join('; ') : '—'}</td>
+                                          <td className='p-1'>{[...(slot.rejected_assignments || []), ...(slot.warnings || [])].length ? [...(slot.rejected_assignments || []), ...(slot.warnings || [])].join('; ') : '—'}</td>
+                                        </tr>
+                                      ))}</tbody>
+                                    </table>
+                                  </div>
+                                ) : null}
+                                {wave.warnings.length ? <ul className='mt-2 list-disc pl-5 text-amber-800'>{wave.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul> : null}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      ) : null}
                       {site.warnings.length ? <ul className='mt-2 list-disc pl-5 text-amber-800'>{site.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul> : null}
                     </div>
                   ))}

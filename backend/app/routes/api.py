@@ -14,14 +14,14 @@ from sqlalchemy.orm import Session, aliased
 
 from app.auth import ROLE_COMMUNITY_SCHEDULER, ROLE_LEAGUE_ADMIN, enforce_organization_scope, get_current_user, require_roles
 from app.database import get_db
-from app.models import Division, Field, FieldConfigurationOption, FieldInstance, Game, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Season, Team, User, Week
+from app.models import Division, Field, FieldConfigurationOption, FieldInstance, Game, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Season, Team, TurfWave, User, Week
 from app.schemas import (
     DivisionCreate, DivisionRead, FieldConfigurationOptionCreate, FieldConfigurationOptionRead, FieldCreate, FieldRead, GameCreate, GameRead, GameSaveResponse,
     OrganizationDivisionParticipationBulkUpsertRequest, OrganizationDivisionParticipationRead,
     GeneratedSlotRead, HostLocationCreate, HostLocationRead, HostLocationConfigurationCreate, HostLocationConfigurationRead, HostingAvailabilityCreate, HostingAvailabilityRead, HostingAvailabilityBulkUpsertRequest, HostingAvailabilityBulkUpsertResponse, HostingGenerationRunResult, HostingGenerationLocationResult, PhysicalFieldAreaCreate, PhysicalFieldAreaRead, SavedAvailabilityResponse,
     LoginRequest, OrganizationCreate, OrganizationRead, PagedResponse, PublicGameRead, RefreshRequest,
     TeamCreate, TeamRead, TeamUpdate, TokenResponse, UserCreate, UserRead,
-    ScheduleReadinessDivisionRow, ScheduleReadinessHostDateRow, ScheduleReadinessHostSiteRow, ScheduleReadinessResponse, ScheduleReadinessTotals
+    ScheduleReadinessDivisionRow, ScheduleReadinessHostDateRow, ScheduleReadinessHostSiteRow, ScheduleReadinessResponse, ScheduleReadinessTotals, ScheduleReadinessTurfWaveRow, ScheduleReadinessTurfWaveSlotRow
 )
 from app.security import create_access_token, create_refresh_token, hash_password, validate_password_strength, verify_password, decode_token
 from app.services.game_statuses import REQUIRED_GAME_STATUSES, ensure_required_game_statuses
@@ -151,6 +151,58 @@ CONFIGURATION_FIELD_TEMPLATES = {
     key: [(f'{field_type.title()} Field {index}', field_type) for field_type in FIELD_SIZE_ORDER for index in range(1, config['counts'][field_type] + 1)]
     for key, config in TURF_STADIUM_CONFIGURATIONS.items()
 }
+
+TURF_FOOTPRINT_YARDS = 120
+TURF_WAVE_INTENT_SMALL_MEDIUM = 'SMALL_MEDIUM'
+TURF_WAVE_INTENT_LARGE = 'LARGE'
+TURF_WAVE_INTENT_MIXED = 'MIXED'
+TURF_WAVE_INTENT_CUSTOM = 'CUSTOM'
+TURF_APPROVED_LAYOUT_CODES = set(TURF_STADIUM_CONFIGURATIONS.keys())
+TURF_LAYOUT_CODE_BY_COUNTS = {
+    tuple(config['counts'][size] for size in FIELD_SIZE_ORDER): code
+    for code, config in TURF_STADIUM_CONFIGURATIONS.items()
+}
+
+
+def _turf_layout_code_for_counts(counts: dict[str, int]) -> str | None:
+    return TURF_LAYOUT_CODE_BY_COUNTS.get(tuple(int(counts.get(size, 0) or 0) for size in FIELD_SIZE_ORDER))
+
+
+def _is_approved_turf_slot_counts(counts: dict[str, int]) -> bool:
+    code = _turf_layout_code_for_counts(counts)
+    if not code:
+        return False
+    metadata = TURF_STADIUM_CONFIGURATIONS[code]
+    return int(metadata.get('space_used_yards') or 0) <= TURF_FOOTPRINT_YARDS
+
+
+def _turf_wave_intent_for_layout(layout_code: str) -> str:
+    normalized = _normalize_configuration_name(layout_code)
+    if normalized == 'ONE_MEDIUM_TWO_SMALL' or normalized == 'ONE_MEDIUM_ONE_SMALL':
+        return TURF_WAVE_INTENT_SMALL_MEDIUM
+    if normalized == 'TWO_LARGE':
+        return TURF_WAVE_INTENT_LARGE
+    if normalized in {'ONE_LARGE_ONE_MEDIUM', 'ONE_LARGE_ONE_SMALL'}:
+        return TURF_WAVE_INTENT_MIXED
+    return TURF_WAVE_INTENT_CUSTOM
+
+
+def _turf_slot_counts_from_slots(slots: list[GameSlot], *, assigned_only: bool = False) -> dict[str, int]:
+    counts = {FIELD_SIZE_SMALL: 0, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_LARGE: 0}
+    for slot in slots:
+        if assigned_only and not slot.assigned_game_id:
+            continue
+        size = _normalize_field_size(slot.field_type)
+        if size in counts:
+            counts[size] += 1
+    return counts
+
+
+def _turf_unused_compatible_capacity(slot_counts: dict[str, int], assigned_counts: dict[str, int]) -> dict[str, int]:
+    return {
+        size: max(int(slot_counts.get(size, 0) or 0) - int(assigned_counts.get(size, 0) or 0), 0)
+        for size in FIELD_SIZE_ORDER
+    }
 
 
 def _normalize_configuration_name(value: str | None) -> str:
@@ -489,6 +541,12 @@ def _regenerate_generated_slots(db: Session, availability: HostingAvailability, 
     if unlocked_field_instance_ids:
         removed_slots = db.query(GameSlot).filter(GameSlot.field_instance_id.in_(unlocked_field_instance_ids)).delete(synchronize_session=False)
         db.query(FieldInstance).filter(FieldInstance.id.in_(unlocked_field_instance_ids)).delete(synchronize_session=False)
+    stale_wave_ids = [wave_id for (wave_id,) in db.query(TurfWave.id).filter(TurfWave.hosting_availability_id == availability.id).all()]
+    if stale_wave_ids:
+        referenced_wave_ids = {wave_id for (wave_id,) in db.query(GameSlot.turf_wave_id).filter(GameSlot.turf_wave_id.in_(stale_wave_ids)).distinct().all() if wave_id}
+        removable_wave_ids = [wave_id for wave_id in stale_wave_ids if wave_id not in referenced_wave_ids]
+        if removable_wave_ids:
+            db.query(TurfWave).filter(TurfWave.id.in_(removable_wave_ids)).delete(synchronize_session=False)
 
     if not availability.is_available:
         return {
@@ -571,14 +629,35 @@ def _regenerate_generated_slots(db: Session, availability: HostingAvailability, 
     if turf_layout_blocks:
         block_start_dt = start_dt
         for block_index, (layout_name, block_hours) in enumerate(turf_layout_blocks, start=1):
+            normalized_layout = _normalize_configuration_name(layout_name)
+            metadata = _turf_configuration_metadata(normalized_layout)
+            if not metadata or normalized_layout not in TURF_APPROVED_LAYOUT_CODES or int(metadata.get('space_used_yards') or 0) > TURF_FOOTPRINT_YARDS:
+                logger.warning('Skipping unsupported turf wave layout %s for availability_id=%s', layout_name, availability.id)
+                continue
             block_end_dt = min(block_start_dt + timedelta(hours=block_hours), end_dt)
+            wave = TurfWave(
+                host_location_id=host_location_id,
+                hosting_availability_id=availability.id,
+                week_id=availability.week_id,
+                host_date=availability.available_date,
+                sequence_number=block_index,
+                wave_intent=_turf_wave_intent_for_layout(normalized_layout),
+                preferred_layout_code=normalized_layout,
+                start_time=block_start_dt.time(),
+                end_time=block_end_dt.time(),
+                transition_before_minutes=0,
+                transition_after_minutes=0,
+                notes='Generated from turf demand and approved slot-level layout rules.',
+            )
+            db.add(wave)
+            db.flush()
             block_instances: list[FieldInstance] = []
-            for field_name, field_type in _configuration_field_templates(layout_name):
+            for field_name, field_type in _configuration_field_templates(normalized_layout):
                 instance = FieldInstance(
                     host_location_id=host_location_id,
                     hosting_availability_id=availability.id,
                     instance_date=availability.available_date,
-                    field_name=f'{layout_name} Block {block_index} {field_name}',
+                    field_name=f'Wave {block_index} {normalized_layout} {field_name}',
                     field_type=field_type,
                     is_active=True,
                 )
@@ -589,8 +668,13 @@ def _regenerate_generated_slots(db: Session, availability: HostingAvailability, 
             slot_start_dt = block_start_dt
             while slot_start_dt < block_end_dt:
                 next_dt = min(slot_start_dt + timedelta(hours=1), block_end_dt)
+                slot_counts = {size: sum(1 for instance in block_instances if _normalize_field_size(instance.field_type) == size) for size in FIELD_SIZE_ORDER}
+                if not _is_approved_turf_slot_counts(slot_counts):
+                    logger.warning('Skipping unsupported turf slot-level configuration %s for wave_id=%s', slot_counts, wave.id)
+                    slot_start_dt = next_dt
+                    continue
                 for instance in block_instances:
-                    db.add(GameSlot(field_instance_id=instance.id, host_location_id=host_location_id, slot_date=availability.available_date, start_time=slot_start_dt.time(), end_time=next_dt.time(), field_type=instance.field_type, status='OPEN'))
+                    db.add(GameSlot(field_instance_id=instance.id, host_location_id=host_location_id, slot_date=availability.available_date, start_time=slot_start_dt.time(), end_time=next_dt.time(), field_type=instance.field_type, status='OPEN', turf_wave_id=wave.id))
                     created_slots += 1
                 slot_start_dt = next_dt
             block_start_dt = block_end_dt
@@ -1110,6 +1194,106 @@ def _field_size_blocks_from_slots(slots: list[GameSlot]) -> list[str]:
     return blocks
 
 
+def _build_turf_wave_plan_for_site(db: Session, host: HostLocation, host_date: date) -> list[ScheduleReadinessTurfWaveRow]:
+    waves = db.query(TurfWave).filter(
+        TurfWave.host_location_id == host.id,
+        TurfWave.host_date == host_date,
+    ).order_by(TurfWave.sequence_number, TurfWave.start_time).all()
+    if not waves:
+        return []
+
+    unscheduled_demand = {FIELD_SIZE_SMALL: 0, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_LARGE: 0}
+    unscheduled_rows = db.query(Game, Division).join(Team, Game.home_team_id == Team.id).join(Division, Team.division_id == Division.id).outerjoin(
+        GameSlot, GameSlot.assigned_game_id == Game.id
+    ).filter(
+        Game.game_date == host_date,
+        GameSlot.id.is_(None),
+    ).all()
+    for _game, division in unscheduled_rows:
+        required = _required_field_type_for_division(division)
+        if required in unscheduled_demand:
+            unscheduled_demand[required] += 1
+
+    result: list[ScheduleReadinessTurfWaveRow] = []
+    saw_large_wave = False
+    for wave in waves:
+        wave_slots = db.query(GameSlot).join(GameSlot.field_instance).filter(
+            GameSlot.turf_wave_id == wave.id,
+        ).order_by(GameSlot.start_time, FieldInstance.field_name).all()
+        slots_by_time: dict[tuple[object, object], list[GameSlot]] = {}
+        for slot in wave_slots:
+            slots_by_time.setdefault((slot.start_time, slot.end_time), []).append(slot)
+        slot_rows: list[ScheduleReadinessTurfWaveSlotRow] = []
+        wave_warnings: list[str] = []
+        assigned_count = 0
+        for (slot_start, slot_end), slots in sorted(slots_by_time.items(), key=lambda item: item[0]):
+            slot_counts = _turf_slot_counts_from_slots(slots)
+            assigned_counts = _turf_slot_counts_from_slots(slots, assigned_only=True)
+            assigned_count += sum(assigned_counts.values())
+            config_code = _turf_layout_code_for_counts(slot_counts)
+            unused_capacity = _turf_unused_compatible_capacity(slot_counts, assigned_counts)
+            slot_warnings: list[str] = []
+            rejected: list[str] = []
+            if not config_code:
+                slot_warnings.append('unsupported slot-level configuration')
+                rejected.append('Generated field combination is not an approved turf configuration.')
+            else:
+                metadata = _turf_configuration_metadata(config_code)
+                if metadata and int(metadata.get('space_used_yards') or 0) > TURF_FOOTPRINT_YARDS:
+                    slot_warnings.append('physical turf footprint violation')
+                    rejected.append('Generated field combination exceeds the 120-yard turf footprint.')
+            for size in FIELD_SIZE_ORDER:
+                if unused_capacity.get(size, 0) > 0 and unscheduled_demand.get(size, 0) > 0:
+                    slot_warnings.append(f'compatible {size.lower()} capacity left unused while unscheduled games remain')
+            if slot_warnings:
+                wave_warnings.extend(slot_warnings)
+            assigned_games = []
+            for slot in slots:
+                if slot.assigned_game:
+                    assigned_games.append(f'{slot.field_type}: {slot.assigned_game.id}')
+            inserted = []
+            preferred = _turf_configuration_metadata(wave.preferred_layout_code)
+            if preferred and config_code and config_code != wave.preferred_layout_code and any(assigned_counts.values()):
+                inserted.append(f'Slot optimized to {config_code} within {wave.preferred_layout_code} wave intent.')
+            slot_rows.append(ScheduleReadinessTurfWaveSlotRow(
+                start_time=slot_start,
+                end_time=slot_end,
+                slot_level_configuration=config_code,
+                field_instances_generated=[slot.field_instance.field_name for slot in slots if slot.field_instance],
+                games_assigned_by_field_size=assigned_counts,
+                unused_compatible_capacity=unused_capacity,
+                inserted_through_slot_level_optimization=inserted,
+                rejected_assignments=rejected,
+                warnings=sorted(set(slot_warnings)),
+            ))
+        if wave.wave_intent == TURF_WAVE_INTENT_LARGE:
+            saw_large_wave = True
+        elif saw_large_wave and wave.wave_intent == TURF_WAVE_INTENT_SMALL_MEDIUM:
+            wave_warnings.append('Small/Medium wave starts after Large wave; avoid switching back after Large games begin.')
+        if len(waves) > 2:
+            wave_warnings.append('excessive turf waves')
+        if wave.wave_intent == TURF_WAVE_INTENT_CUSTOM and wave.preferred_layout_code in {'THREE_SMALL', 'TWO_MEDIUM'}:
+            wave_warnings.append('Small/Medium games separated when mixed layout would work')
+        result.append(ScheduleReadinessTurfWaveRow(
+            host_location_id=host.id,
+            host_location_name=host.name,
+            host_date=host_date,
+            sequence_number=wave.sequence_number,
+            wave_intent=wave.wave_intent,
+            preferred_layout_code=wave.preferred_layout_code,
+            start_time=wave.start_time,
+            end_time=wave.end_time,
+            transition_before_minutes=wave.transition_before_minutes,
+            transition_after_minutes=wave.transition_after_minutes,
+            generated_field_instances=sorted({slot.field_instance.field_name for slot in wave_slots if slot.field_instance}),
+            assigned_games=assigned_count,
+            notes=wave.notes,
+            slot_level_configurations=slot_rows,
+            warnings=sorted(set(wave_warnings)),
+        ))
+    return result
+
+
 def _build_host_date_readiness(db: Session) -> list[ScheduleReadinessHostDateRow]:
     slot_rows = (
         db.query(GameSlot, FieldInstance, HostLocation, HostingAvailability)
@@ -1200,6 +1384,9 @@ def _build_host_date_readiness(db: Session) -> list[ScheduleReadinessHostDateRow
                 warnings.append(f"Split division(s) across host sites: {', '.join(split_divisions)}.")
             selected_layout = ', '.join(sorted(site['layouts'])) if site['layouts'] else None
             is_grass_site = (host.surface_type or 'GRASS_FIELD') != 'TURF_STADIUM'
+            turf_wave_plan = [] if is_grass_site else _build_turf_wave_plan_for_site(db, host, host_date)
+            for wave in turf_wave_plan:
+                warnings.extend(wave.warnings)
             host_sites.append(ScheduleReadinessHostSiteRow(
                 host_location_id=host.id,
                 host_location_name=host.name,
@@ -1219,6 +1406,7 @@ def _build_host_date_readiness(db: Session) -> list[ScheduleReadinessHostDateRow
                 warnings=warnings,
                 auto_select_turf_layout=bool(getattr(availability, 'auto_select_turf_layout', True)) if availability else True,
                 lock_selected_layout=bool(getattr(availability, 'lock_selected_layout', False)) if availability else False,
+                turf_wave_plan=turf_wave_plan,
             ))
             day_warnings.extend(warnings)
         communities = sorted({site_data[(host_date, hid)]['host'].organization.name for hid in day['site_ids'] if site_data[(host_date, hid)]['host'].organization})
@@ -4569,6 +4757,21 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                             warning_bits.append('incompatible field-size assignment (-1000)')
                             if not bool(payload.get('admin_override_incompatible_field_size', False)):
                                 continue
+                        if selected_field_slot.turf_wave_id:
+                            turf_time_slots = db.query(GameSlot).filter(
+                                GameSlot.host_location_id == selected_field_slot.host_location_id,
+                                GameSlot.slot_date == selected_field_slot.slot_date,
+                                GameSlot.start_time == selected_field_slot.start_time,
+                            ).all()
+                            turf_counts = _turf_slot_counts_from_slots(turf_time_slots)
+                            if _is_approved_turf_slot_counts(turf_counts):
+                                score += 200
+                                reason_bits.append('approved turf slot-level configuration (+200)')
+                            assigned_turf_counts = _turf_slot_counts_from_slots(turf_time_slots, assigned_only=True)
+                            unused_turf_capacity = _turf_unused_compatible_capacity(turf_counts, assigned_turf_counts)
+                            if unused_turf_capacity.get(required_field_type, 0) > 0:
+                                score += 500
+                                reason_bits.append('fills compatible unused turf wave capacity (+500)')
                         if is_odd_division and no_byes and selected_double_header_team_id and selected_double_header_team_id in {a, b}:
                             prior_double_header_slots = [
                                 p for p in plans
