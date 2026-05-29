@@ -216,7 +216,6 @@ class HostingAvailabilityCreate(BaseModel):
     selected_configuration_id: uuid.UUID | None = None
     auto_select_turf_layout: bool = True
     lock_selected_layout: bool = False
-    turf_wave_plan: list[ScheduleReadinessTurfWaveRow] = []
     allow_turf_layout_changes: bool = False
     admin_override_incompatible_field_size: bool = False
     field_id: uuid.UUID | None | None = None
@@ -244,7 +243,6 @@ class HostingAvailabilityBulkSlot(BaseModel):
     selected_configuration_id: uuid.UUID | None = None
     auto_select_turf_layout: bool = True
     lock_selected_layout: bool = False
-    turf_wave_plan: list[ScheduleReadinessTurfWaveRow] = []
     allow_turf_layout_changes: bool = False
     admin_override_incompatible_field_size: bool = False
     field_id: uuid.UUID | None | None = None
