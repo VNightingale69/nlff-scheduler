@@ -34,15 +34,15 @@ const STADIUM_TYPE = 'STADIUM_SITE';
 const SURFACE_TYPES = [
   { value: 'TURF_STADIUM', label: 'Turf Stadium' },
   { value: 'GRASS_FIELD', label: 'Grass Field' },
-  { value: 'MULTI_FIELD_COMPLEX', label: 'Multi-Field Complex' },
-  { value: 'OTHER', label: 'Other' },
 ];
 const HOST_CONFIG_OPTIONS = [
-  { value: 'TWO_LARGE', label: 'Two Large' },
-  { value: 'ONE_MEDIUM_TWO_SMALL', label: 'One Medium + Two Small' },
-  { value: 'TWO_MEDIUM', label: 'Two Medium' },
-  { value: 'THREE_SMALL', label: 'Three Small' },
-  { value: 'CUSTOM', label: 'Custom' },
+  { value: 'TWO_LARGE', label: '2 Large', used: 120, remaining: 0 },
+  { value: 'ONE_MEDIUM_TWO_SMALL', label: '1 Medium + 2 Small', used: 120, remaining: 0 },
+  { value: 'ONE_LARGE_ONE_MEDIUM', label: '1 Large + 1 Medium', used: 115, remaining: 5 },
+  { value: 'TWO_MEDIUM', label: '2 Medium', used: 110, remaining: 10 },
+  { value: 'THREE_SMALL', label: '3 Small', used: 100, remaining: 20 },
+  { value: 'ONE_LARGE_ONE_SMALL', label: '1 Large + 1 Small', used: 90, remaining: 30 },
+  { value: 'ONE_MEDIUM_ONE_SMALL', label: '1 Medium + 1 Small', used: 85, remaining: 35 },
 ];
 const configLabel = (value: string) => HOST_CONFIG_OPTIONS.find((option) => option.value === value)?.label || value;
 
@@ -197,7 +197,7 @@ export default function HostLocationsAdminPage() {
         city: form.city?.trim(),
         state: form.state?.trim(),
         zip_code: form.zip_code?.trim(),
-        surface_type: form.surface_type || 'OTHER',
+        surface_type: form.surface_type || 'GRASS_FIELD',
         notes: form.notes?.trim() || null,
         ...(form.is_active !== undefined ? { is_active: Boolean(form.is_active) } : {}),
       };
@@ -210,7 +210,7 @@ export default function HostLocationsAdminPage() {
 
       setMessage(editingId ? 'Updated successfully' : 'Created successfully');
       setType('ok');
-      setForm({ is_active: true, state: 'WI', surface_type: 'OTHER' });
+      setForm({ is_active: true, state: 'WI', surface_type: 'GRASS_FIELD' });
       setEditingId(null);
       setZipCodeError('');
       load();
@@ -223,7 +223,7 @@ export default function HostLocationsAdminPage() {
   };
 
   const edit = (item: HostLocation) => {
-    setForm({ ...item, address_line1: item.address_line1 || item.address || '', state: item.state || 'WI', surface_type: item.surface_type || 'OTHER' });
+    setForm({ ...item, address_line1: item.address_line1 || item.address || '', state: item.state || 'WI', surface_type: item.surface_type || 'GRASS_FIELD' });
     setEditingId(item.id);
     setZipCodeError('');
   };
@@ -320,7 +320,7 @@ export default function HostLocationsAdminPage() {
         <FormField label='Address Line 2 (Optional)' type='text' value={form.address_line2 ?? ''} onChange={(value) => setForm({ ...form, address_line2: String(value) })} />
         <FormField label='City' type='text' value={form.city ?? ''} onChange={(value) => setForm({ ...form, city: String(value) })} />
         <FormField label='State' type='text' value={form.state ?? 'WI'} onChange={(value) => setForm({ ...form, state: String(value) })} />
-        <FormField label='Surface Type' type='select' value={form.surface_type ?? 'OTHER'} options={SURFACE_TYPES} onChange={(value) => setForm({ ...form, surface_type: String(value) })} />
+        <FormField label='Surface Type' type='select' value={form.surface_type ?? 'GRASS_FIELD'} options={SURFACE_TYPES} onChange={(value) => setForm({ ...form, surface_type: String(value) })} />
         <FormField label='Notes' type='textarea' value={form.notes ?? ''} onChange={(value) => setForm({ ...form, notes: String(value) })} />
         <div className='flex flex-col gap-1'>
           <FormField
@@ -341,7 +341,7 @@ export default function HostLocationsAdminPage() {
             {saving ? 'Saving…' : editingId ? 'Update' : 'Create'}
           </button>
           {editingId && (
-            <button className='rounded border px-4 py-2 disabled:cursor-not-allowed disabled:opacity-50' onClick={() => { setForm({ is_active: true, state: 'WI', surface_type: 'OTHER' }); setEditingId(null); setZipCodeError(''); }} disabled={saving}>
+            <button className='rounded border px-4 py-2 disabled:cursor-not-allowed disabled:opacity-50' onClick={() => { setForm({ is_active: true, state: 'WI', surface_type: 'GRASS_FIELD' }); setEditingId(null); setZipCodeError(''); }} disabled={saving}>
               Cancel
             </button>
           )}
@@ -374,7 +374,7 @@ export default function HostLocationsAdminPage() {
                   <td className='px-3 py-2'>{(item as any).location}</td>
                   <td className='px-3 py-2'>{item.zip_code || '-'}</td>
                   <td className='px-3 py-2'>{SURFACE_TYPES.find((surface) => surface.value === item.surface_type)?.label || item.surface_type || 'Other'}</td>
-                  <td className='px-3 py-2'><div className='flex flex-col gap-1'>{(configsByHostId[item.id] || []).length ? (configsByHostId[item.id] || []).map((config: any) => <span key={config.id}>{configLabel(config.configuration_name)}{config.is_active ? '' : ' (Inactive)'}</span>) : <span className='text-slate-500'>No configurations</span>}<div className='mt-1 flex flex-wrap gap-1'>{HOST_CONFIG_OPTIONS.filter((option) => !(configsByHostId[item.id] || []).some((config: any) => config.configuration_name === option.value)).map((option) => <button key={option.value} type='button' className='rounded border px-2 py-0.5 text-xs text-emerald-700' onClick={async () => { await apiFetch('/host-location-configurations', { method: 'POST', body: JSON.stringify({ host_location_id: item.id, configuration_name: option.value, is_active: true }) }, getToken()); load(); }}>+ {option.label}</button>)}</div></div></td>
+                  <td className='px-3 py-2'><div className='flex flex-col gap-1'>{item.surface_type === 'TURF_STADIUM' ? <>{(configsByHostId[item.id] || []).length ? (configsByHostId[item.id] || []).map((config: any) => <span key={config.id}>{configLabel(config.configuration_name)} — {config.space_used_yards ?? 0} used / {config.remaining_yards ?? 0} remaining ({(config.field_instances || []).join(', ')}){config.is_active ? '' : ' (Inactive)'}</span>) : <span className='text-slate-500'>No turf configuration selected</span>}<div className='mt-1 flex flex-wrap gap-1'>{HOST_CONFIG_OPTIONS.filter((option) => !(configsByHostId[item.id] || []).some((config: any) => config.configuration_name === option.value)).map((option) => <button key={option.value} type='button' className='rounded border px-2 py-0.5 text-xs text-emerald-700' title={`${option.used} yards used, ${option.remaining} yards remaining`} onClick={async () => { await apiFetch('/host-location-configurations', { method: 'POST', body: JSON.stringify({ host_location_id: item.id, configuration_name: option.value, is_active: true }) }, getToken()); load(); }}>+ {option.label}</button>)}</div></> : <span className='text-slate-600'>Manual grass fields: Small / Medium / Large</span>}</div></td>
                   <td className='px-3 py-2'><div className='flex flex-col gap-1'><span>{item.status_label || ((item.effective_is_active ?? item.is_active) ? 'Active' : 'Inactive/Unavailable')}</span>{item.status_warning ? <span className='inline-flex w-fit rounded bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800'>{item.status_warning}</span> : null}</div></td>
                   <td className='space-x-2 px-3 py-2'>
                     <button className='text-blue-700' onClick={() => edit(item)}>Edit</button>

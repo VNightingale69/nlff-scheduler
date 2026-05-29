@@ -12,6 +12,40 @@ from app.schemas import GameCreate, GameValidationResponse, ValidationMessage
 GAME_DURATION_MINUTES = 60
 
 
+def _normalize_field_size(value: str | None) -> str | None:
+    normalized = str(value or '').strip().upper().replace('-', '_').replace(' ', '_')
+    if not normalized:
+        return None
+    if normalized in {'SMALL', 'THIRTY_YARD_WIDTH', '30', '30_YARD', '30_YARDS'} or 'THIRTY' in normalized:
+        return 'SMALL'
+    if normalized in {'MEDIUM', 'FORTY_YARD_WIDTH', '40', '40_YARD', '40_YARDS'} or 'MEDIUM' in normalized or '40' in normalized:
+        return 'MEDIUM'
+    if normalized in {'LARGE', 'FIFTY_THREE_YARD_WIDTH', '53', '53_YARD', '53_YARDS', 'FULL'} or 'FIFTY_THREE' in normalized or '53' in normalized or 'LARGE' in normalized:
+        return 'LARGE'
+    return normalized if normalized in {'SMALL', 'MEDIUM', 'LARGE'} else None
+
+
+def _normalized_division_key(division: Division | None) -> str:
+    if not division:
+        return ''
+    label = f"{division.division_group or ''} {division.name or ''}"
+    compact = ''.join(ch.lower() if ch.isalnum() else '_' for ch in label.strip())
+    while '__' in compact:
+        compact = compact.replace('__', '_')
+    return compact.strip('_')
+
+
+def _required_field_type_for_division(division: Division | None) -> str:
+    key = _normalized_division_key(division)
+    if key in {'coed_k_1st', 'girls_k_1st', 'coed_k1st', 'girls_k1st', 'coed_2nd_3rd', 'girls_2nd_3rd'}:
+        return 'SMALL'
+    if key in {'coed_4th_5th', 'girls_4th_5th'}:
+        return 'MEDIUM'
+    if key in {'coed_6th_7th', 'girls_6th_7th', 'girls_6th_7th_8th', 'coed_8th', 'girls_8th'}:
+        return 'LARGE'
+    return _normalize_field_size(division.required_field_layout_type if division else None) or 'SMALL'
+
+
 def _game_window(payload: GameCreate) -> tuple[datetime, datetime]:
     start = datetime.combine(payload.game_date, payload.kickoff_time)
     return start, start + timedelta(minutes=GAME_DURATION_MINUTES)
@@ -67,11 +101,11 @@ def validate_game(db: Session, payload: GameCreate, game_id: uuid.UUID | None = 
         if not field.is_active:
             hard_conflicts.append(ValidationMessage(code='field_inactive', message='Field must be active.'))
         division = db.query(Division).filter(Division.id == home_team.division_id).first() if home_team else None
-        if division and division.required_field_layout_type != field.layout_type:
+        if division and _required_field_type_for_division(division) != _normalize_field_size(field.layout_type):
             hard_conflicts.append(
                 ValidationMessage(
                     code='layout_mismatch',
-                    message='Division required field layout must match selected field layout capability.',
+                    message='Division required field size must match selected field capability.',
                 )
             )
 
@@ -82,6 +116,11 @@ def validate_game(db: Session, payload: GameCreate, game_id: uuid.UUID | None = 
             hard_conflicts.append(ValidationMessage(code='host_inactive', message='Host location must be active.'))
 
     if field_instance and host:
+        if not field_instance.is_active:
+            hard_conflicts.append(ValidationMessage(code='field_inactive', message='Generated field instance must be active.'))
+        division = db.query(Division).filter(Division.id == home_team.division_id).first() if home_team else None
+        if division and _required_field_type_for_division(division) != _normalize_field_size(field_instance.field_type):
+            hard_conflicts.append(ValidationMessage(code='layout_mismatch', message='Division required field size must match generated slot field type.'))
         availability = (
             db.query(GameSlot)
             .filter(

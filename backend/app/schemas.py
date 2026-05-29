@@ -99,7 +99,7 @@ class HostLocationCreate(BaseModel):
     organization_id: uuid.UUID
     name: str
     address: str | None = None
-    surface_type: str = 'OTHER'
+    surface_type: str = 'GRASS_FIELD'
     address_line1: str | None = None
     address_line2: str | None = None
     city: str | None = None
@@ -121,7 +121,13 @@ class HostLocationConfigurationCreate(BaseModel):
     is_active: bool = True
 
 class HostLocationConfigurationRead(BaseSchema, HostLocationConfigurationCreate):
-    pass
+    surface_type: str = 'TURF_STADIUM'
+    space_used_yards: int = 0
+    remaining_yards: int = 0
+    large_field_count: int = 0
+    medium_field_count: int = 0
+    small_field_count: int = 0
+    field_instances: list[str] = []
 
 class PhysicalFieldAreaCreate(BaseModel):
     host_location_id: uuid.UUID
@@ -137,8 +143,15 @@ class PhysicalFieldAreaRead(BaseSchema, PhysicalFieldAreaCreate):
 class FieldConfigurationOptionCreate(BaseModel):
     physical_field_area_id: uuid.UUID
     name: str
-    thirty_yard_capacity: int
-    fifty_three_yard_capacity: int
+    thirty_yard_capacity: int = 0
+    fifty_three_yard_capacity: int = 0
+    configuration_name: str | None = None
+    surface_type: str = 'GRASS_FIELD'
+    space_used_yards: int = 0
+    remaining_yards: int = 0
+    large_field_count: int = 0
+    medium_field_count: int = 0
+    small_field_count: int = 0
     is_active: bool = True
 
 class FieldConfigurationOptionRead(BaseSchema, FieldConfigurationOptionCreate):
@@ -250,6 +263,7 @@ class SavedAvailabilityEntry(BaseModel):
     site_type: str
     available_layout: str
     small_field_capacity: int
+    medium_field_capacity: int = 0
     large_field_capacity: int
     total_fields_found: int = 0
     inactive_field_count: int = 0
@@ -289,6 +303,7 @@ class ScheduleReadinessTotals(BaseModel):
     total_minimum_unique_matchups: int
     total_target_scheduled_games: int | None = None
     total_small_field_slots: int
+    total_medium_field_slots: int = 0
     total_large_field_slots: int
     total_open_slots: int
 

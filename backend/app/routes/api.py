@@ -94,44 +94,132 @@ def normalize_division_name(value: str) -> str:
 def normalized_division_key(division_group: str | None, division_name: str | None) -> str:
     return normalize_division_name(f"{division_group or ''} {division_name or ''}")
 
-ALLOWED_SURFACE_TYPES = {'TURF_STADIUM', 'GRASS_FIELD', 'MULTI_FIELD_COMPLEX', 'OTHER'}
+ALLOWED_SURFACE_TYPES = {'TURF_STADIUM', 'GRASS_FIELD'}
+FIELD_SIZE_SMALL = 'SMALL'
+FIELD_SIZE_MEDIUM = 'MEDIUM'
+FIELD_SIZE_LARGE = 'LARGE'
+FIELD_SIZE_ORDER = (FIELD_SIZE_LARGE, FIELD_SIZE_MEDIUM, FIELD_SIZE_SMALL)
+TURF_STADIUM_CONFIGURATIONS = {
+    'TWO_LARGE': {
+        'configuration_name': '2 Large',
+        'space_used_yards': 120,
+        'remaining_yards': 0,
+        'counts': {FIELD_SIZE_LARGE: 2, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_SMALL: 0},
+    },
+    'ONE_MEDIUM_TWO_SMALL': {
+        'configuration_name': '1 Medium + 2 Small',
+        'space_used_yards': 120,
+        'remaining_yards': 0,
+        'counts': {FIELD_SIZE_LARGE: 0, FIELD_SIZE_MEDIUM: 1, FIELD_SIZE_SMALL: 2},
+    },
+    'ONE_LARGE_ONE_MEDIUM': {
+        'configuration_name': '1 Large + 1 Medium',
+        'space_used_yards': 115,
+        'remaining_yards': 5,
+        'counts': {FIELD_SIZE_LARGE: 1, FIELD_SIZE_MEDIUM: 1, FIELD_SIZE_SMALL: 0},
+    },
+    'TWO_MEDIUM': {
+        'configuration_name': '2 Medium',
+        'space_used_yards': 110,
+        'remaining_yards': 10,
+        'counts': {FIELD_SIZE_LARGE: 0, FIELD_SIZE_MEDIUM: 2, FIELD_SIZE_SMALL: 0},
+    },
+    'THREE_SMALL': {
+        'configuration_name': '3 Small',
+        'space_used_yards': 100,
+        'remaining_yards': 20,
+        'counts': {FIELD_SIZE_LARGE: 0, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_SMALL: 3},
+    },
+    'ONE_LARGE_ONE_SMALL': {
+        'configuration_name': '1 Large + 1 Small',
+        'space_used_yards': 90,
+        'remaining_yards': 30,
+        'counts': {FIELD_SIZE_LARGE: 1, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_SMALL: 1},
+    },
+    'ONE_MEDIUM_ONE_SMALL': {
+        'configuration_name': '1 Medium + 1 Small',
+        'space_used_yards': 85,
+        'remaining_yards': 35,
+        'counts': {FIELD_SIZE_LARGE: 0, FIELD_SIZE_MEDIUM: 1, FIELD_SIZE_SMALL: 1},
+    },
+}
+BACKWARD_COMPATIBLE_TURF_CONFIGURATION_ALIASES = {
+    '2X53': 'TWO_LARGE',
+    '1X53_PLUS_2X30': 'ONE_MEDIUM_TWO_SMALL',
+    '3X30': 'THREE_SMALL',
+}
 CONFIGURATION_FIELD_TEMPLATES = {
-    'TWO_LARGE': [('Field A', 'LARGE'), ('Field B', 'LARGE')],
-    'ONE_MEDIUM_TWO_SMALL': [('Field A', 'MEDIUM'), ('Field B', 'SMALL'), ('Field C', 'SMALL')],
-    'TWO_MEDIUM': [('Field A', 'MEDIUM'), ('Field B', 'MEDIUM')],
-    'THREE_SMALL': [('Field A', 'SMALL'), ('Field B', 'SMALL'), ('Field C', 'SMALL')],
-    'CUSTOM': [],
-    # Backward-compatible layout names used by existing setup screens.
-    '2X53': [('Field A', 'LARGE'), ('Field B', 'LARGE')],
-    '1X53_PLUS_2X30': [('Field A', 'LARGE'), ('Field B', 'SMALL'), ('Field C', 'SMALL')],
-    '3X30': [('Field A', 'SMALL'), ('Field B', 'SMALL'), ('Field C', 'SMALL')],
+    key: [(f'{field_type.title()} Field {index}', field_type) for field_type in FIELD_SIZE_ORDER for index in range(1, config['counts'][field_type] + 1)]
+    for key, config in TURF_STADIUM_CONFIGURATIONS.items()
 }
 
 
 def _normalize_configuration_name(value: str | None) -> str:
-    return str(value or '').strip().upper().replace('-', '_').replace(' ', '_')
+    normalized = str(value or '').strip().upper().replace('-', '_').replace(' ', '_')
+    return BACKWARD_COMPATIBLE_TURF_CONFIGURATION_ALIASES.get(normalized, normalized)
 
 
-def _configuration_field_templates(configuration_name: str | None, option: FieldConfigurationOption | None) -> list[tuple[str, str]]:
+def _normalize_field_size(value: str | None) -> str | None:
+    normalized = str(value or '').strip().upper().replace('-', '_').replace(' ', '_')
+    if not normalized:
+        return None
+    if normalized in {FIELD_SIZE_SMALL, 'THIRTY_YARD_WIDTH', '30', '30_YARD', '30_YARDS'} or 'THIRTY' in normalized:
+        return FIELD_SIZE_SMALL
+    if normalized in {FIELD_SIZE_MEDIUM, 'FORTY_YARD_WIDTH', '40', '40_YARD', '40_YARDS'} or 'MEDIUM' in normalized or '40' in normalized:
+        return FIELD_SIZE_MEDIUM
+    if normalized in {FIELD_SIZE_LARGE, 'FIFTY_THREE_YARD_WIDTH', '53', '53_YARD', '53_YARDS', 'FULL'} or 'FIFTY_THREE' in normalized or '53' in normalized or 'LARGE' in normalized:
+        return FIELD_SIZE_LARGE
+    return normalized if normalized in FIELD_SIZE_ORDER else None
+
+
+def _turf_configuration_metadata(configuration_name: str | None) -> dict | None:
+    return TURF_STADIUM_CONFIGURATIONS.get(_normalize_configuration_name(configuration_name))
+
+
+def _configuration_field_templates(configuration_name: str | None, option: FieldConfigurationOption | None = None) -> list[tuple[str, str]]:
     if option:
         fields: list[tuple[str, str]] = []
-        letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
-        for i in range(int(option.fifty_three_yard_capacity or 0)):
-            fields.append((f'Field {letters[len(fields)]}', 'LARGE'))
-        for i in range(int(option.thirty_yard_capacity or 0)):
-            fields.append((f'Field {letters[len(fields)]}', 'SMALL'))
+        counts = {
+            FIELD_SIZE_LARGE: int(getattr(option, 'large_field_count', None) or getattr(option, 'fifty_three_yard_capacity', 0) or 0),
+            FIELD_SIZE_MEDIUM: int(getattr(option, 'medium_field_count', 0) or 0),
+            FIELD_SIZE_SMALL: int(getattr(option, 'small_field_count', None) or getattr(option, 'thirty_yard_capacity', 0) or 0),
+        }
+        for field_type in FIELD_SIZE_ORDER:
+            for index in range(1, counts[field_type] + 1):
+                fields.append((f'{field_type.title()} Field {index}', field_type))
         return fields
     return CONFIGURATION_FIELD_TEMPLATES.get(_normalize_configuration_name(configuration_name), [])
 
 
-def _capacity_for_layout(layout_name: str | None, option: FieldConfigurationOption | None) -> tuple[int, int]:
+def _capacity_for_layout(layout_name: str | None, option: FieldConfigurationOption | None) -> tuple[int, int, int]:
     templates = _configuration_field_templates(layout_name, option)
     if templates:
-        small = sum(1 for _, field_type in templates if field_type == 'SMALL')
-        large = sum(1 for _, field_type in templates if field_type == 'LARGE')
-        return small, large
-    return 0, 0
+        small = sum(1 for _, field_type in templates if field_type == FIELD_SIZE_SMALL)
+        medium = sum(1 for _, field_type in templates if field_type == FIELD_SIZE_MEDIUM)
+        large = sum(1 for _, field_type in templates if field_type == FIELD_SIZE_LARGE)
+        return small, medium, large
+    return 0, 0, 0
 
+
+
+
+def _apply_turf_configuration_metadata(obj, configuration_name: str) -> None:
+    metadata = _turf_configuration_metadata(configuration_name)
+    if not metadata:
+        raise HTTPException(400, f'Invalid turf stadium configuration_name: {configuration_name}')
+    counts = metadata['counts']
+    obj.configuration_name = _normalize_configuration_name(configuration_name)
+    obj.surface_type = 'TURF_STADIUM'
+    obj.space_used_yards = metadata['space_used_yards']
+    obj.remaining_yards = metadata['remaining_yards']
+    obj.large_field_count = counts[FIELD_SIZE_LARGE]
+    obj.medium_field_count = counts[FIELD_SIZE_MEDIUM]
+    obj.small_field_count = counts[FIELD_SIZE_SMALL]
+
+
+def _attach_configuration_instances(config: HostLocationConfiguration) -> HostLocationConfiguration:
+    config.field_instances = [field_name for field_name, _field_type in _configuration_field_templates(config.configuration_name)]
+    return config
 
 def _regenerate_generated_slots(db: Session, availability: HostingAvailability, host_location_id: uuid.UUID) -> dict[str, int]:
     existing_slots = db.query(GameSlot).join(GameSlot.field_instance).filter(
@@ -156,12 +244,26 @@ def _regenerate_generated_slots(db: Session, availability: HostingAvailability, 
         }
     option = availability.field_configuration_option
     host_configuration = availability.selected_configuration
-    configuration_name = (
-        host_configuration.configuration_name
-        if host_configuration
-        else availability.layout_type or (option.name if option else None)
-    )
-    templates = _configuration_field_templates(configuration_name, option)
+    field = availability.field
+    host = availability.host_location or (field.host_location if field else None) or (availability.physical_field_area.host_location if availability.physical_field_area else None)
+    surface_type = (host.surface_type if host else None) or 'GRASS_FIELD'
+    templates: list[tuple[str, str]] = []
+    if surface_type == 'TURF_STADIUM':
+        if not host_configuration or not host_configuration.is_active:
+            templates = []
+        else:
+            configuration_name = host_configuration.configuration_name
+            templates = _configuration_field_templates(configuration_name)
+    elif field:
+        field_size = _normalize_field_size(field.layout_type)
+        if field.is_active and field_size:
+            templates = [(field.name, field_size)]
+    else:
+        configuration_name = availability.layout_type or (option.name if option else None)
+        if option and not option.is_active:
+            templates = []
+        else:
+            templates = _configuration_field_templates(configuration_name, option)
     if not templates:
         return {
             'total_slots_evaluated': len(existing_slots),
@@ -293,14 +395,28 @@ def _host_location_effective_status(db: Session) -> dict[uuid.UUID, bool]:
         .distinct()
         .all()
     }
+    active_field_host_ids = {
+        host_id for (host_id,) in db.query(Field.host_location_id)
+        .filter(Field.is_active.is_(True))
+        .distinct()
+        .all()
+    }
     configured_host_ids = {
         host_id for (host_id,) in db.query(HostLocationConfiguration.host_location_id)
         .filter(HostLocationConfiguration.is_active.is_(True))
         .distinct()
         .all()
     }
-    host_rows = db.query(HostLocation.id, HostLocation.is_active).all()
-    return {host_id: bool(is_active and (host_id in active_area_host_ids or host_id in configured_host_ids)) for host_id, is_active in host_rows}
+    host_rows = db.query(HostLocation.id, HostLocation.is_active, HostLocation.surface_type).all()
+    status: dict[uuid.UUID, bool] = {}
+    for host_id, is_active, surface_type in host_rows:
+        effective_surface = surface_type or 'GRASS_FIELD'
+        if effective_surface == 'TURF_STADIUM':
+            has_setup = host_id in configured_host_ids
+        else:
+            has_setup = host_id in active_field_host_ids or host_id in active_area_host_ids
+        status[host_id] = bool(is_active and has_setup)
+    return status
 
 
 def _eligible_host_location_ids(db: Session) -> set[uuid.UUID]:
@@ -526,12 +642,12 @@ def debug_organization_dependencies(org_id: uuid.UUID, db: Session = Depends(get
 LEAGUE_DIVISION_SEED = [
     {'name': 'K/1st', 'division_group': 'COED', 'sort_order': 1, 'required_field_layout_type': 'THIRTY_YARD_WIDTH', 'is_active': True},
     {'name': '2nd/3rd', 'division_group': 'COED', 'sort_order': 2, 'required_field_layout_type': 'THIRTY_YARD_WIDTH', 'is_active': True},
-    {'name': '4th/5th', 'division_group': 'COED', 'sort_order': 3, 'required_field_layout_type': 'THIRTY_YARD_WIDTH', 'is_active': True},
+    {'name': '4th/5th', 'division_group': 'COED', 'sort_order': 3, 'required_field_layout_type': 'MEDIUM', 'is_active': True},
     {'name': '6th/7th', 'division_group': 'COED', 'sort_order': 4, 'required_field_layout_type': 'FIFTY_THREE_YARD_WIDTH', 'is_active': True},
     {'name': '8th', 'division_group': 'COED', 'sort_order': 5, 'required_field_layout_type': 'FIFTY_THREE_YARD_WIDTH', 'is_active': True},
     {'name': 'K/1st', 'division_group': 'GIRLS', 'sort_order': 1, 'required_field_layout_type': 'THIRTY_YARD_WIDTH', 'is_active': True},
     {'name': '2nd/3rd', 'division_group': 'GIRLS', 'sort_order': 2, 'required_field_layout_type': 'THIRTY_YARD_WIDTH', 'is_active': True},
-    {'name': '4th/5th', 'division_group': 'GIRLS', 'sort_order': 3, 'required_field_layout_type': 'THIRTY_YARD_WIDTH', 'is_active': True},
+    {'name': '4th/5th', 'division_group': 'GIRLS', 'sort_order': 3, 'required_field_layout_type': 'MEDIUM', 'is_active': True},
     {'name': '6th/7th/8th', 'division_group': 'GIRLS', 'sort_order': 4, 'required_field_layout_type': 'FIFTY_THREE_YARD_WIDTH', 'is_active': True},
 ]
 
@@ -594,6 +710,7 @@ def get_schedule_readiness(current_user: User = Depends(get_current_user), db: S
     )
 
     small_slots = int(open_slot_counts.get('SMALL', 0) or 0)
+    medium_slots = int(open_slot_counts.get('MEDIUM', 0) or 0)
     large_slots = int(open_slot_counts.get('LARGE', 0) or 0)
 
     scheduled_game_counts = dict(
@@ -613,8 +730,12 @@ def get_schedule_readiness(current_user: User = Depends(get_current_user), db: S
         teams = int(row.team_count or 0)
         minimum_unique_matchups = (teams * (teams - 1)) // 2
         target_scheduled_games = int(scheduled_game_counts.get(row.division_id, 0) or 0)
-        required_field_type = 'SMALL' if row.required_field_layout_type == 'THIRTY_YARD_WIDTH' else 'LARGE'
-        available_matching_slots = small_slots if required_field_type == 'SMALL' else large_slots
+        required_field_type = _required_field_type_for_division(row)
+        available_matching_slots = {
+            FIELD_SIZE_SMALL: small_slots,
+            FIELD_SIZE_MEDIUM: medium_slots,
+            FIELD_SIZE_LARGE: large_slots,
+        }.get(required_field_type, 0)
 
         if teams == 0:
             status = 'NO TEAMS'
@@ -638,11 +759,27 @@ def get_schedule_readiness(current_user: User = Depends(get_current_user), db: S
         total_target_scheduled_games += target_scheduled_games
 
     active_host_ids = {host_id for (host_id,) in db.query(HostLocation.id).filter(HostLocation.is_active.is_(True)).all()}
-    active_setup_host_ids = {host_id for (host_id,) in db.query(PhysicalFieldArea.host_location_id).filter(PhysicalFieldArea.is_active.is_(True)).distinct().all()}
+    active_setup_host_ids = {host_id for host_id, is_ready in _host_location_effective_status(db).items() if is_ready}
     hosts_missing_setup = active_host_ids - active_setup_host_ids
     warnings = []
     if hosts_missing_setup:
-        warnings.append(f"{len(hosts_missing_setup)} active host location(s) have no active field setup and are unavailable for scheduling.")
+        warnings.append(f"{len(hosts_missing_setup)} active host location(s) have no active compatible field setup and are unavailable for scheduling.")
+    missing_surface_count = db.query(HostLocation).filter(or_(HostLocation.surface_type.is_(None), HostLocation.surface_type == '')).count()
+    if missing_surface_count:
+        warnings.append(f"{missing_surface_count} host location(s) are missing surface_type; Grass Field is used for backward compatibility.")
+    unsupported_turf_configs = db.query(HostLocationConfiguration).join(HostLocationConfiguration.host_location).filter(
+        HostLocation.surface_type == 'TURF_STADIUM',
+        ~HostLocationConfiguration.configuration_name.in_(tuple(TURF_STADIUM_CONFIGURATIONS.keys())),
+        HostLocationConfiguration.is_active.is_(True),
+    ).count()
+    if unsupported_turf_configs:
+        warnings.append(f"{unsupported_turf_configs} active turf stadium configuration(s) are not approved.")
+    missing_slot_type_count = db.query(GameSlot).filter(or_(GameSlot.field_type.is_(None), GameSlot.field_type == '')).count()
+    if missing_slot_type_count:
+        warnings.append(f"{missing_slot_type_count} generated slot(s) are missing field type.")
+    inactive_field_used_count = db.query(Game).join(Game.field_instance).filter(FieldInstance.is_active.is_(False)).count()
+    if inactive_field_used_count:
+        warnings.append(f"{inactive_field_used_count} scheduled game(s) use inactive generated fields.")
 
     return ScheduleReadinessResponse(
         rows=rows,
@@ -651,8 +788,9 @@ def get_schedule_readiness(current_user: User = Depends(get_current_user), db: S
             total_minimum_unique_matchups=total_minimum_unique_matchups,
             total_target_scheduled_games=total_target_scheduled_games,
             total_small_field_slots=small_slots,
+            total_medium_field_slots=medium_slots,
             total_large_field_slots=large_slots,
-            total_open_slots=small_slots + large_slots,
+            total_open_slots=small_slots + medium_slots + large_slots,
         ),
         warnings=warnings,
     )
@@ -732,9 +870,10 @@ def upsert_organization_division_participation(
 @router.post('/host-locations', response_model=HostLocationRead, dependencies=[Depends(get_current_user)])
 def create_host_location(payload: HostLocationCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     enforce_organization_scope(payload.organization_id, current_user)
-    if payload.surface_type not in ALLOWED_SURFACE_TYPES:
-        raise HTTPException(400, f'Invalid surface type: {payload.surface_type}')
-    x = HostLocation(**payload.model_dump()); db.add(x); db.commit(); db.refresh(x); return x
+    surface_type = payload.surface_type or 'GRASS_FIELD'
+    if surface_type not in ALLOWED_SURFACE_TYPES:
+        raise HTTPException(400, f'Invalid surface type: {surface_type}')
+    x = HostLocation(**{**payload.model_dump(), 'surface_type': surface_type}); db.add(x); db.commit(); db.refresh(x); return x
 
 @router.get('/host-locations', response_model=PagedResponse[HostLocationRead], dependencies=[Depends(get_current_user)])
 def list_host_locations(search: str | None = None, organization_id: uuid.UUID | None = None, is_active: bool | None = None, page: int = 1, page_size: int = 20, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -744,14 +883,23 @@ def list_host_locations(search: str | None = None, organization_id: uuid.UUID | 
     if search: q = q.filter(func.lower(HostLocation.name).like(f"%{search.lower()}%"))
     if is_active is not None: q = q.filter(HostLocation.is_active == is_active)
     page_data = paginate(q.order_by(HostLocation.name), page, page_size)
-    active_area_host_ids = {host_id for (host_id,) in db.query(PhysicalFieldArea.host_location_id).filter(PhysicalFieldArea.is_active.is_(True)).distinct().all()} | {host_id for (host_id,) in db.query(HostLocationConfiguration.host_location_id).filter(HostLocationConfiguration.is_active.is_(True)).distinct().all()}
+    active_area_host_ids = {host_id for (host_id,) in db.query(PhysicalFieldArea.host_location_id).filter(PhysicalFieldArea.is_active.is_(True)).distinct().all()}
+    active_field_host_ids = {host_id for (host_id,) in db.query(Field.host_location_id).filter(Field.is_active.is_(True)).distinct().all()}
+    active_config_host_ids = {host_id for (host_id,) in db.query(HostLocationConfiguration.host_location_id).filter(HostLocationConfiguration.is_active.is_(True)).distinct().all()}
     for item in page_data.items:
-        has_active_field_setup = item.id in active_area_host_ids
+        effective_surface = item.surface_type or 'GRASS_FIELD'
+        has_active_field_setup = item.id in active_config_host_ids if effective_surface == 'TURF_STADIUM' else item.id in active_area_host_ids or item.id in active_field_host_ids
         effective_is_active = bool(item.is_active and has_active_field_setup)
         item.has_active_field_setup = has_active_field_setup
         item.effective_is_active = effective_is_active
         item.status_label = 'Active' if effective_is_active else 'Inactive/Unavailable'
-        item.status_warning = 'No active field setup' if item.is_active and not has_active_field_setup else None
+        warnings = []
+        if item.is_active and not has_active_field_setup:
+            warnings.append('No active field setup')
+        if not item.surface_type:
+            warnings.append('Surface type missing; defaulting to Grass Field')
+            item.surface_type = 'GRASS_FIELD'
+        item.status_warning = '; '.join(warnings) if warnings else None
     return page_data
 
 @router.put('/host-locations/{item_id}', response_model=HostLocationRead, dependencies=[Depends(get_current_user)])
@@ -759,9 +907,10 @@ def upd_host_location(item_id: uuid.UUID, payload: HostLocationCreate, current_u
     x = db.query(HostLocation).filter(HostLocation.id == item_id).first()
     if not x: raise HTTPException(404, 'Host location not found')
     enforce_organization_scope(payload.organization_id, current_user)
-    if payload.surface_type not in ALLOWED_SURFACE_TYPES:
-        raise HTTPException(400, f'Invalid surface type: {payload.surface_type}')
-    for k, v in payload.model_dump().items(): setattr(x, k, v)
+    surface_type = payload.surface_type or 'GRASS_FIELD'
+    if surface_type not in ALLOWED_SURFACE_TYPES:
+        raise HTTPException(400, f'Invalid surface type: {surface_type}')
+    for k, v in {**payload.model_dump(), 'surface_type': surface_type}.items(): setattr(x, k, v)
     db.commit(); db.refresh(x); return x
 
 
@@ -770,11 +919,12 @@ def create_host_location_configuration(payload: HostLocationConfigurationCreate,
     host = db.query(HostLocation).filter(HostLocation.id == payload.host_location_id).first()
     if not host: raise HTTPException(400, 'Invalid host location')
     enforce_organization_scope(host.organization_id, current_user)
+    if (host.surface_type or 'GRASS_FIELD') != 'TURF_STADIUM':
+        raise HTTPException(400, 'Host location configurations are only available for turf stadium locations')
     config_name = _normalize_configuration_name(payload.configuration_name)
-    if config_name not in CONFIGURATION_FIELD_TEMPLATES:
-        raise HTTPException(400, f'Invalid configuration_name: {payload.configuration_name}')
     x = HostLocationConfiguration(host_location_id=payload.host_location_id, configuration_name=config_name, is_active=payload.is_active)
-    db.add(x); db.commit(); db.refresh(x); return x
+    _apply_turf_configuration_metadata(x, config_name)
+    db.add(x); db.commit(); db.refresh(x); return _attach_configuration_instances(x)
 
 
 @router.get('/host-location-configurations', response_model=PagedResponse[HostLocationConfigurationRead], dependencies=[Depends(get_current_user)])
@@ -786,7 +936,10 @@ def list_host_location_configurations(host_location_id: uuid.UUID | None = None,
         q = q.filter(HostLocation.organization_id == organization_id)
     if host_location_id:
         q = q.filter(HostLocationConfiguration.host_location_id == host_location_id)
-    return paginate(q.order_by(HostLocation.name, HostLocationConfiguration.configuration_name), page, page_size)
+    page_data = paginate(q.order_by(HostLocation.name, HostLocationConfiguration.configuration_name), page, page_size)
+    for config in page_data.items:
+        _attach_configuration_instances(config)
+    return page_data
 
 
 @router.put('/host-location-configurations/{item_id}', response_model=HostLocationConfigurationRead, dependencies=[Depends(get_current_user)])
@@ -796,13 +949,13 @@ def upd_host_location_configuration(item_id: uuid.UUID, payload: HostLocationCon
     host = db.query(HostLocation).filter(HostLocation.id == payload.host_location_id).first()
     if not host: raise HTTPException(400, 'Invalid host location')
     enforce_organization_scope(host.organization_id, current_user)
+    if (host.surface_type or 'GRASS_FIELD') != 'TURF_STADIUM':
+        raise HTTPException(400, 'Host location configurations are only available for turf stadium locations')
     config_name = _normalize_configuration_name(payload.configuration_name)
-    if config_name not in CONFIGURATION_FIELD_TEMPLATES:
-        raise HTTPException(400, f'Invalid configuration_name: {payload.configuration_name}')
     x.host_location_id = payload.host_location_id
-    x.configuration_name = config_name
+    _apply_turf_configuration_metadata(x, config_name)
     x.is_active = payload.is_active
-    db.commit(); db.refresh(x); return x
+    db.commit(); db.refresh(x); return _attach_configuration_instances(x)
 
 
 @router.delete('/host-location-configurations/{item_id}', dependencies=[Depends(get_current_user)])
@@ -891,6 +1044,8 @@ def create_physical_field_area(payload: PhysicalFieldAreaCreate, current_user: U
     host_location = db.query(HostLocation).filter(HostLocation.id == payload.host_location_id).first()
     if not host_location: raise HTTPException(400, 'Invalid host location')
     enforce_organization_scope(host_location.organization_id, current_user)
+    if (host_location.surface_type or 'GRASS_FIELD') != 'GRASS_FIELD':
+        raise HTTPException(400, 'Physical field areas are only allowed for grass field locations')
     if payload.field_space_type not in ALLOWED_FIELD_SPACE_TYPES:
         raise HTTPException(400, f"Invalid field space type: {payload.field_space_type}")
     x = PhysicalFieldArea(**payload.model_dump()); db.add(x); db.commit(); db.refresh(x); return x
@@ -909,6 +1064,8 @@ def upd_physical_field_area(item_id: uuid.UUID, payload: PhysicalFieldAreaCreate
     host_location = db.query(HostLocation).filter(HostLocation.id == payload.host_location_id).first()
     if not host_location: raise HTTPException(400, 'Invalid host location')
     enforce_organization_scope(host_location.organization_id, current_user)
+    if (host_location.surface_type or 'GRASS_FIELD') != 'GRASS_FIELD':
+        raise HTTPException(400, 'Physical field areas are only allowed for grass field locations')
     if payload.field_space_type not in ALLOWED_FIELD_SPACE_TYPES:
         raise HTTPException(400, f"Invalid field space type: {payload.field_space_type}")
     for k, v in payload.model_dump().items(): setattr(x, k, v)
@@ -919,9 +1076,21 @@ def create_field_configuration_option(payload: FieldConfigurationOptionCreate, c
     area = db.query(PhysicalFieldArea).join(PhysicalFieldArea.host_location).filter(PhysicalFieldArea.id == payload.physical_field_area_id).first()
     if not area: raise HTTPException(400, 'Invalid physical field area')
     enforce_organization_scope(area.host_location.organization_id, current_user)
-    if payload.thirty_yard_capacity < 0 or payload.fifty_three_yard_capacity < 0:
+    counts = [payload.small_field_count, payload.medium_field_count, payload.large_field_count, payload.thirty_yard_capacity, payload.fifty_three_yard_capacity]
+    if any(count < 0 for count in counts):
         raise HTTPException(400, 'Capacities must be non-negative')
-    x = FieldConfigurationOption(**payload.model_dump()); db.add(x); db.commit(); db.refresh(x); return x
+    data = payload.model_dump()
+    if data['surface_type'] not in ALLOWED_SURFACE_TYPES:
+        raise HTTPException(400, f"Invalid surface type: {data['surface_type']}")
+    if data['surface_type'] == 'TURF_STADIUM':
+        raise HTTPException(400, 'Custom turf configurations are not supported')
+    if data['small_field_count'] == 0 and data['thirty_yard_capacity']:
+        data['small_field_count'] = data['thirty_yard_capacity']
+    if data['large_field_count'] == 0 and data['fifty_three_yard_capacity']:
+        data['large_field_count'] = data['fifty_three_yard_capacity']
+    if not data['configuration_name']:
+        data['configuration_name'] = data['name']
+    x = FieldConfigurationOption(**data); db.add(x); db.commit(); db.refresh(x); return x
 
 @router.get('/field-configuration-options', response_model=PagedResponse[FieldConfigurationOptionRead], dependencies=[Depends(get_current_user)])
 def list_field_configuration_options(physical_field_area_id: uuid.UUID | None = None, page: int = 1, page_size: int = 50, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -937,9 +1106,21 @@ def upd_field_configuration_option(item_id: uuid.UUID, payload: FieldConfigurati
     area = db.query(PhysicalFieldArea).join(PhysicalFieldArea.host_location).filter(PhysicalFieldArea.id == payload.physical_field_area_id).first()
     if not area: raise HTTPException(400, 'Invalid physical field area')
     enforce_organization_scope(area.host_location.organization_id, current_user)
-    if payload.thirty_yard_capacity < 0 or payload.fifty_three_yard_capacity < 0:
+    counts = [payload.small_field_count, payload.medium_field_count, payload.large_field_count, payload.thirty_yard_capacity, payload.fifty_three_yard_capacity]
+    if any(count < 0 for count in counts):
         raise HTTPException(400, 'Capacities must be non-negative')
-    for k, v in payload.model_dump().items(): setattr(x, k, v)
+    data = payload.model_dump()
+    if data['surface_type'] not in ALLOWED_SURFACE_TYPES:
+        raise HTTPException(400, f"Invalid surface type: {data['surface_type']}")
+    if data['surface_type'] == 'TURF_STADIUM':
+        raise HTTPException(400, 'Custom turf configurations are not supported')
+    if data['small_field_count'] == 0 and data['thirty_yard_capacity']:
+        data['small_field_count'] = data['thirty_yard_capacity']
+    if data['large_field_count'] == 0 and data['fifty_three_yard_capacity']:
+        data['large_field_count'] = data['fifty_three_yard_capacity']
+    if not data['configuration_name']:
+        data['configuration_name'] = data['name']
+    for k, v in data.items(): setattr(x, k, v)
     db.commit(); db.refresh(x); return x
 
 @router.delete('/field-configuration-options/{item_id}', dependencies=[Depends(get_current_user)])
@@ -954,10 +1135,14 @@ def create_field(payload: FieldCreate, current_user: User = Depends(get_current_
     host_location = db.query(HostLocation).filter(HostLocation.id == payload.host_location_id).first()
     if not host_location: raise HTTPException(400, 'Invalid host location')
     enforce_organization_scope(host_location.organization_id, current_user)
+    if (host_location.surface_type or 'GRASS_FIELD') != 'GRASS_FIELD':
+        raise HTTPException(400, 'Manual fields are only allowed for grass field locations')
+    if not _normalize_field_size(payload.layout_type):
+        raise HTTPException(400, 'Field type must be Small, Medium, or Large')
     if payload.physical_field_area_id:
         area = db.query(PhysicalFieldArea).filter(PhysicalFieldArea.id == payload.physical_field_area_id, PhysicalFieldArea.host_location_id == payload.host_location_id).first()
         if not area: raise HTTPException(400, 'Invalid physical field area for host location')
-    x = Field(**payload.model_dump()); db.add(x); db.commit(); db.refresh(x); return x
+    x = Field(**{**payload.model_dump(), 'layout_type': _normalize_field_size(payload.layout_type)}); db.add(x); db.commit(); db.refresh(x); return x
 
 @router.get('/fields', response_model=PagedResponse[FieldRead], dependencies=[Depends(get_current_user)])
 def list_fields(search: str | None = None, host_location_id: uuid.UUID | None = None, page: int = 1, page_size: int = 20, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -974,7 +1159,11 @@ def upd_field(item_id: uuid.UUID, payload: FieldCreate, current_user: User = Dep
     host_location = db.query(HostLocation).filter(HostLocation.id == payload.host_location_id).first()
     if not host_location: raise HTTPException(400, 'Invalid host location')
     enforce_organization_scope(host_location.organization_id, current_user)
-    for k, v in payload.model_dump().items(): setattr(x, k, v)
+    if (host_location.surface_type or 'GRASS_FIELD') != 'GRASS_FIELD':
+        raise HTTPException(400, 'Manual fields are only allowed for grass field locations')
+    if not _normalize_field_size(payload.layout_type):
+        raise HTTPException(400, 'Field type must be Small, Medium, or Large')
+    for k, v in {**payload.model_dump(), 'layout_type': _normalize_field_size(payload.layout_type)}.items(): setattr(x, k, v)
     db.commit(); db.refresh(x); return x
 
 @router.delete('/fields/{item_id}', dependencies=[Depends(get_current_user)])
@@ -995,19 +1184,31 @@ def _resolve_availability_host_and_validate(payload, current_user: User, db: Ses
         enforce_organization_scope(host.organization_id, current_user)
         if payload.organization_id and payload.organization_id != host.organization_id:
             raise HTTPException(400, 'Host location does not belong to selected organization')
-        if not payload.selected_configuration_id:
-            raise HTTPException(400, 'selected_configuration_id is required when host_location_id is provided')
-        config = db.query(HostLocationConfiguration).filter(
-            HostLocationConfiguration.id == payload.selected_configuration_id,
-            HostLocationConfiguration.host_location_id == host.id,
-            HostLocationConfiguration.is_active.is_(True),
-        ).first()
-        if not config: raise HTTPException(400, 'Invalid host location configuration')
+        surface_type = host.surface_type or 'GRASS_FIELD'
+        if surface_type == 'TURF_STADIUM':
+            if not payload.selected_configuration_id:
+                raise HTTPException(400, 'selected_configuration_id is required for turf stadium availability')
+            config = db.query(HostLocationConfiguration).filter(
+                HostLocationConfiguration.id == payload.selected_configuration_id,
+                HostLocationConfiguration.host_location_id == host.id,
+                HostLocationConfiguration.is_active.is_(True),
+            ).first()
+            if not config: raise HTTPException(400, 'Invalid host location configuration')
+            if not _turf_configuration_metadata(config.configuration_name):
+                raise HTTPException(400, 'Unsupported turf stadium configuration')
+        else:
+            raise HTTPException(400, 'Grass field availability must select an active configured grass field')
     elif payload.field_id:
         field = db.query(Field).join(Field.host_location).filter(Field.id == payload.field_id).first()
         if not field: raise HTTPException(400, 'Invalid field')
         host = field.host_location
         enforce_organization_scope(host.organization_id, current_user)
+        if (host.surface_type or 'GRASS_FIELD') != 'GRASS_FIELD':
+            raise HTTPException(400, 'Manual field availability is only available for grass field locations')
+        if not field.is_active:
+            raise HTTPException(400, 'Inactive fields cannot be used for availability')
+        if not _normalize_field_size(field.layout_type):
+            raise HTTPException(400, 'Configured grass field is missing a valid field type')
     elif payload.physical_field_area_id:
         area = db.query(PhysicalFieldArea).join(PhysicalFieldArea.host_location).filter(PhysicalFieldArea.id == payload.physical_field_area_id).first()
         if not area: raise HTTPException(400, 'Invalid physical field area')
@@ -1015,8 +1216,10 @@ def _resolve_availability_host_and_validate(payload, current_user: User, db: Ses
         enforce_organization_scope(host.organization_id, current_user)
         if not payload.field_configuration_option_id:
             raise HTTPException(400, 'field_configuration_option_id is required for physical field area slots')
-        option = db.query(FieldConfigurationOption).filter(FieldConfigurationOption.id == payload.field_configuration_option_id, FieldConfigurationOption.physical_field_area_id == payload.physical_field_area_id).first()
+        option = db.query(FieldConfigurationOption).filter(FieldConfigurationOption.id == payload.field_configuration_option_id, FieldConfigurationOption.physical_field_area_id == payload.physical_field_area_id, FieldConfigurationOption.is_active.is_(True)).first()
         if not option: raise HTTPException(400, f'Invalid field configuration option: {payload.field_configuration_option_id}')
+        if (host.surface_type or 'GRASS_FIELD') != 'GRASS_FIELD':
+            raise HTTPException(400, 'Physical field area availability is only available for grass field locations')
     else:
         raise HTTPException(400, 'host_location_id, field_id, or physical_field_area_id is required')
     return host, field, area, config
@@ -1026,9 +1229,8 @@ def _resolve_availability_host_and_validate(payload, current_user: User, db: Ses
 def create_hosting_availability(payload: HostingAvailabilityCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     host, field, area, config = _resolve_availability_host_and_validate(payload, current_user, db)
     x = HostingAvailability(**payload.model_dump())
-    if payload.host_location_id:
-        x.organization_id = host.organization_id
-        x.host_location_id = host.id
+    x.organization_id = host.organization_id
+    x.host_location_id = host.id
     db.add(x); db.flush()
     _regenerate_generated_slots(db, x, host.id)
     db.commit(); db.refresh(x); return x
@@ -1054,9 +1256,8 @@ def upd_hosting_availability(item_id: uuid.UUID, payload: HostingAvailabilityCre
     if not x: raise HTTPException(404, 'Hosting availability not found')
     host, field, area, config = _resolve_availability_host_and_validate(payload, current_user, db)
     for k, v in payload.model_dump().items(): setattr(x, k, v)
-    if payload.host_location_id:
-        x.organization_id = host.organization_id
-        x.host_location_id = host.id
+    x.organization_id = host.organization_id
+    x.host_location_id = host.id
     db.flush()
     _regenerate_generated_slots(db, x, host.id)
     db.commit(); db.refresh(x); return x
@@ -1098,9 +1299,8 @@ def bulk_upsert_hosting_availabilities(payload: HostingAvailabilityBulkUpsertReq
             _regenerate_generated_slots(db, existing, host.id)
         else:
             availability = HostingAvailability(**slot.model_dump())
-            if slot.host_location_id:
-                availability.organization_id = host.organization_id
-                availability.host_location_id = host.id
+            availability.organization_id = host.organization_id
+            availability.host_location_id = host.id
             db.add(availability)
             db.flush()
             _regenerate_generated_slots(db, availability, host.id)
@@ -1179,17 +1379,19 @@ def list_saved_hosting_availability(organization_id: uuid.UUID | None = None, ho
         host_id = str(host.id)
         key = (str(row.available_date), str(area.id), layout_name)
         if key not in grouped:
-            layout_small = int(option.thirty_yard_capacity) if option and option.is_active else 0
-            layout_large = int(option.fifty_three_yard_capacity) if option and option.is_active else 0
+            layout_small = int((option.small_field_count or option.thirty_yard_capacity) if option and option.is_active else 0)
+            layout_medium = int(option.medium_field_count if option and option.is_active else 0)
+            layout_large = int((option.large_field_count or option.fifty_three_yard_capacity) if option and option.is_active else 0)
             layout_key = (host_id, layout_name)
             layout_counts = field_counts_by_layout.setdefault(
                 layout_key,
-                {'small': layout_small, 'large': layout_large, 'total': layout_small + layout_large, 'inactive': 0, 'unmatched': 0, 'mismatch': False, 'fields': []},
+                {'small': layout_small, 'medium': layout_medium, 'large': layout_large, 'total': layout_small + layout_medium + layout_large, 'inactive': 0, 'unmatched': 0, 'mismatch': False, 'fields': []},
             )
             layout_counts['small'] = layout_small
+            layout_counts['medium'] = layout_medium
             layout_counts['large'] = layout_large
-            layout_counts['total'] = layout_small + layout_large
-            layout_counts['mismatch'] = layout_small + layout_large == 0
+            layout_counts['total'] = layout_small + layout_medium + layout_large
+            layout_counts['mismatch'] = layout_small + layout_medium + layout_large == 0
             grouped[key] = {
                 'id': row.id,
                 'available_date': row.available_date,
@@ -1200,6 +1402,7 @@ def list_saved_hosting_availability(organization_id: uuid.UUID | None = None, ho
                 'site_type': area.field_space_type,
                 'available_layout': layout_name,
                 'small_field_capacity': layout_counts['small'],
+                'medium_field_capacity': layout_counts.get('medium', 0),
                 'large_field_capacity': layout_counts['large'],
                 'total_fields_found': layout_counts['total'],
                 'inactive_field_count': layout_counts['inactive'],
@@ -1211,6 +1414,7 @@ def list_saved_hosting_availability(organization_id: uuid.UUID | None = None, ho
                         'configuration_option_name': layout_name,
                         'raw_field_type_value': option.name if option else None,
                         'small_field_count': layout_counts['small'],
+                        'medium_field_count': layout_counts.get('medium', 0),
                         'large_field_count': layout_counts['large'],
                         'is_active': bool(option.is_active) if option else False,
                     }
@@ -1243,6 +1447,7 @@ def list_saved_hosting_availability(organization_id: uuid.UUID | None = None, ho
         layout_name = config.configuration_name if config else 'CUSTOM'
         templates = _configuration_field_templates(layout_name, None)
         small = sum(1 for _, field_type in templates if field_type == 'SMALL')
+        medium = sum(1 for _, field_type in templates if field_type == 'MEDIUM')
         large = sum(1 for _, field_type in templates if field_type == 'LARGE')
         key = (str(row.available_date), str(host.id), layout_name)
         if key not in grouped:
@@ -1256,6 +1461,7 @@ def list_saved_hosting_availability(organization_id: uuid.UUID | None = None, ho
                 'site_type': host.surface_type,
                 'available_layout': layout_name,
                 'small_field_capacity': small,
+                'medium_field_capacity': medium,
                 'large_field_capacity': large,
                 'total_fields_found': len(templates),
                 'inactive_field_count': 0,
@@ -1267,10 +1473,57 @@ def list_saved_hosting_availability(organization_id: uuid.UUID | None = None, ho
                         'configuration_option_name': layout_name,
                         'raw_field_type_value': layout_name,
                         'small_field_count': small,
+                        'medium_field_count': medium,
                         'large_field_count': large,
                         'is_active': bool(config.is_active) if config else False,
                     }
                 ],
+                'hours': [],
+            }
+        grouped[key]['hours'].extend(range(row.start_time.hour, row.end_time.hour))
+
+    field_q = db.query(HostingAvailability).join(HostingAvailability.field).join(Field.host_location).filter(
+        HostingAvailability.is_available.is_(True),
+        HostingAvailability.field_id.is_not(None),
+    )
+    if current_user.role.name == ROLE_COMMUNITY_SCHEDULER:
+        field_q = field_q.filter(HostLocation.organization_id == current_user.organization_id)
+    elif organization_id:
+        field_q = field_q.filter(HostLocation.organization_id == organization_id)
+    if host_location_id:
+        field_q = field_q.filter(HostLocation.id == host_location_id)
+    if site_type:
+        field_q = field_q.filter(HostLocation.surface_type == site_type)
+    if available_date:
+        field_q = field_q.filter(func.cast(HostingAvailability.available_date, str) == available_date)
+    for row in field_q.order_by(HostingAvailability.available_date, HostLocation.name, Field.name, HostingAvailability.start_time).all():
+        host = row.field.host_location
+        field_type = _normalize_field_size(row.field.layout_type)
+        if not field_type:
+            continue
+        layout_name = row.field.name
+        key = (str(row.available_date), str(row.field.id), layout_name)
+        if key not in grouped:
+            small = 1 if field_type == FIELD_SIZE_SMALL else 0
+            medium = 1 if field_type == FIELD_SIZE_MEDIUM else 0
+            large = 1 if field_type == FIELD_SIZE_LARGE else 0
+            grouped[key] = {
+                'id': row.id,
+                'available_date': row.available_date,
+                'organization_id': host.organization_id,
+                'organization_name': host.organization.name if host.organization else None,
+                'host_location_id': host.id,
+                'host_location_name': host.name,
+                'site_type': host.surface_type,
+                'available_layout': layout_name,
+                'small_field_capacity': small,
+                'medium_field_capacity': medium,
+                'large_field_capacity': large,
+                'total_fields_found': 1,
+                'inactive_field_count': 0 if row.field.is_active else 1,
+                'unmatched_field_records': 0,
+                'has_field_inventory_mismatch': not row.field.is_active,
+                'fields': [{'configuration_option_id': str(row.field.id), 'configuration_option_name': layout_name, 'raw_field_type_value': row.field.layout_type, 'small_field_count': small, 'medium_field_count': medium, 'large_field_count': large, 'is_active': bool(row.field.is_active)}],
                 'hours': [],
             }
         grouped[key]['hours'].extend(range(row.start_time.hour, row.end_time.hour))
@@ -1298,6 +1551,7 @@ def list_saved_hosting_availability(organization_id: uuid.UUID | None = None, ho
             'site_type': data['site_type'],
             'available_layout': data['available_layout'],
             'small_field_capacity': data['small_field_capacity'],
+            'medium_field_capacity': data.get('medium_field_capacity', 0),
             'large_field_capacity': data['large_field_capacity'],
             'total_fields_found': data['total_fields_found'],
             'inactive_field_count': data['inactive_field_count'],
@@ -1307,6 +1561,7 @@ def list_saved_hosting_availability(organization_id: uuid.UUID | None = None, ho
             'hostLocationId': data['host_location_id'],
             'hostLocationName': data['host_location_name'],
             'smallFieldCount': data['small_field_capacity'],
+            'mediumFieldCount': data.get('medium_field_capacity', 0),
             'largeFieldCount': data['large_field_capacity'],
             'fields': data['fields'],
         })
@@ -5406,10 +5661,20 @@ def list_public_schedule_filters(season_id: uuid.UUID | None = None, db: Session
 
 def _required_field_type_for_division(division: Division | None) -> str:
     if not division:
-        return 'SMALL'
-    layout_type = (division.required_field_layout_type or '').strip().upper()
-    large_layout_tokens = ('FIFTY_THREE', '53', 'LARGE', 'FULL')
-    return 'LARGE' if any(token in layout_type for token in large_layout_tokens) else 'SMALL'
+        return FIELD_SIZE_SMALL
+    division_label = normalized_division_key(getattr(division, 'division_group', None), getattr(division, 'name', None))
+    small_divisions = {'coed_k_1st', 'girls_k_1st', 'coed_k1st', 'girls_k1st', 'coed_2nd_3rd', 'girls_2nd_3rd'}
+    medium_divisions = {'coed_4th_5th', 'girls_4th_5th'}
+    large_divisions = {'coed_6th_7th', 'girls_6th_7th', 'girls_6th_7th_8th', 'coed_8th', 'girls_8th'}
+    if division_label in small_divisions:
+        return FIELD_SIZE_SMALL
+    if division_label in medium_divisions:
+        return FIELD_SIZE_MEDIUM
+    if division_label in large_divisions:
+        return FIELD_SIZE_LARGE
+    layout_type = (getattr(division, 'required_field_layout_type', None) or '').strip().upper()
+    normalized_size = _normalize_field_size(layout_type)
+    return normalized_size or FIELD_SIZE_SMALL
 
 
 def _game_required_field_type(game: Game | None) -> str | None:
