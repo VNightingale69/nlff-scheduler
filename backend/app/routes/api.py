@@ -8,7 +8,7 @@ from fastapi.responses import StreamingResponse
 import logging
 from datetime import date, datetime, time, timedelta
 
-from sqlalchemy import and_, delete, func, or_, select, text
+from sqlalchemy import String, and_, delete, func, or_, select, text
 from sqlalchemy.exc import ProgrammingError, SQLAlchemyError
 from sqlalchemy.orm import Session, aliased
 
@@ -2222,12 +2222,105 @@ def list_seasons(page:int=1,page_size:int=50, db:Session=Depends(get_db)):
     q=db.query(Season).order_by(Season.start_date.desc())
     return PagedResponse(items=[{"id":x.id,"name":x.name, "schedule_status": x.schedule_status} for x in q.offset((page-1)*page_size).limit(page_size).all()], total=q.count(), page=page, page_size=page_size)
 
+WEEK_STATUSES = {'draft', 'active', 'locked', 'completed', 'cancelled'}
+
+
+def _parse_week_date(payload: dict, field: str, required: bool = True) -> date | None:
+    value = payload.get(field)
+    if value in (None, ''):
+        if required:
+            raise HTTPException(422, f'{field} is required')
+        return None
+    if isinstance(value, date):
+        return value
+    try:
+        return date.fromisoformat(str(value))
+    except ValueError:
+        raise HTTPException(422, f'{field} must be a valid date')
+
+
+def _normalize_week_payload(payload: dict, db: Session, week_id: uuid.UUID | None = None) -> dict:
+    season_id = payload.get('season_id')
+    if not season_id:
+        raise HTTPException(422, 'season_id is required')
+    season = db.query(Season).filter(Season.id == season_id).first()
+    if not season:
+        raise HTTPException(422, 'season_id must reference an existing season')
+
+    week_number = payload.get('week_number')
+    if week_number in (None, ''):
+        raise HTTPException(422, 'week_number is required')
+    try:
+        week_number = int(week_number)
+    except (TypeError, ValueError):
+        raise HTTPException(422, 'week_number must be a number')
+
+    duplicate = db.query(Week).filter(Week.season_id == season_id, Week.week_number == week_number)
+    if week_id:
+        duplicate = duplicate.filter(Week.id != week_id)
+    if duplicate.first():
+        raise HTTPException(422, 'Week numbers must be unique within a season')
+
+    start_date = _parse_week_date(payload, 'start_date')
+    end_date = _parse_week_date(payload, 'end_date')
+    primary_game_date = _parse_week_date(payload, 'primary_game_date')
+    if end_date < start_date:
+        raise HTTPException(422, 'end_date cannot be before start_date')
+    if primary_game_date < start_date or primary_game_date > end_date:
+        raise HTTPException(422, 'primary_game_date must fall within the start/end date range')
+
+    status = str(payload.get('status') or 'draft').lower()
+    if status not in WEEK_STATUSES:
+        raise HTTPException(422, 'status must be one of draft, active, locked, completed, cancelled')
+
+    return {
+        'season_id': season_id,
+        'week_number': week_number,
+        'label': payload.get('label') or None,
+        'start_date': start_date,
+        'end_date': end_date,
+        'primary_game_date': primary_game_date,
+        'notes': payload.get('notes') or None,
+        'status': status,
+    }
+
+
+def _week_to_dict(week: Week, counts: dict[str, dict[uuid.UUID, int]] | None = None) -> dict:
+    counts = counts or {}
+    return {
+        'id': week.id,
+        'season_id': week.season_id,
+        'week_number': week.week_number,
+        'label': week.label,
+        'start_date': week.start_date,
+        'end_date': week.end_date,
+        'primary_game_date': week.primary_game_date or week.start_date,
+        'notes': week.notes,
+        'status': week.status or 'draft',
+        'hosting_availability_count': counts.get('hosting_availability', {}).get(week.id, 0),
+        'generated_slots_count': counts.get('generated_slots', {}).get(week.id, 0),
+        'scheduled_games_count': counts.get('scheduled_games', {}).get(week.id, 0),
+    }
+
+
 @router.get('/weeks', response_model=PagedResponse[dict], dependencies=[Depends(get_current_user)])
-def list_weeks(season_id:uuid.UUID|None=None, page:int=1,page_size:int=100, db:Session=Depends(get_db)):
+def list_weeks(season_id:uuid.UUID|None=None, status:str|None=None, start_date:date|None=None, end_date:date|None=None, search:str|None=None, page:int=1,page_size:int=100, db:Session=Depends(get_db)):
     q=db.query(Week)
     if season_id: q=q.filter(Week.season_id==season_id)
-    q=q.order_by(Week.week_number)
-    return PagedResponse(items=[{"id":x.id,"season_id":x.season_id,"week_number":x.week_number} for x in q.offset((page-1)*page_size).limit(page_size).all()], total=q.count(), page=page, page_size=page_size)
+    if status: q=q.filter(Week.status==status.lower())
+    if start_date: q=q.filter(Week.end_date>=start_date)
+    if end_date: q=q.filter(Week.start_date<=end_date)
+    if search:
+        q=q.filter(or_(Week.label.ilike(f'%{search}%'), func.cast(Week.week_number, String).ilike(f'%{search}%')))
+    q=q.order_by(Week.start_date, Week.week_number)
+    total=q.count()
+    weeks=q.offset((page-1)*page_size).limit(page_size).all()
+    counts = {'hosting_availability': {}, 'generated_slots': {}, 'scheduled_games': {}}
+    for week in weeks:
+        counts['hosting_availability'][week.id] = db.query(func.count(func.distinct(HostingAvailability.host_location_id))).filter(HostingAvailability.available_date >= week.start_date, HostingAvailability.available_date <= week.end_date, HostingAvailability.is_available.is_(True)).scalar() or 0
+        counts['generated_slots'][week.id] = db.query(func.count(GameSlot.id)).filter(GameSlot.slot_date >= week.start_date, GameSlot.slot_date <= week.end_date).scalar() or 0
+        counts['scheduled_games'][week.id] = db.query(func.count(Game.id)).filter(Game.week_id == week.id).scalar() or 0
+    return PagedResponse(items=[_week_to_dict(x, counts) for x in weeks], total=total, page=page, page_size=page_size)
 
 @router.post('/seasons', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def create_season(payload: dict, db: Session = Depends(get_db)):
@@ -2381,16 +2474,28 @@ def unpublish_schedule(season_id: uuid.UUID, db: Session = Depends(get_db)):
 
 @router.post('/weeks', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def create_week(payload: dict, db: Session = Depends(get_db)):
-    week = Week(season_id=payload['season_id'], week_number=payload['week_number'], start_date=payload['start_date'], end_date=payload['end_date'])
+    data = _normalize_week_payload(payload, db)
+    week = Week(**data)
     db.add(week); db.commit(); db.refresh(week)
-    return {"id": week.id, "week_number": week.week_number, "season_id": week.season_id}
+    return _week_to_dict(week)
 
 @router.put('/weeks/{week_id}', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def update_week(week_id: uuid.UUID, payload: dict, db: Session = Depends(get_db)):
     week = db.query(Week).filter(Week.id == week_id).first()
     if not week: raise HTTPException(404, 'Week not found')
-    week.season_id = payload.get('season_id', week.season_id); week.week_number = payload.get('week_number', week.week_number); week.start_date = payload.get('start_date', week.start_date); week.end_date = payload.get('end_date', week.end_date)
-    db.commit(); db.refresh(week); return {"id": week.id, "week_number": week.week_number, "season_id": week.season_id}
+    data = _normalize_week_payload({
+        'season_id': payload.get('season_id', week.season_id),
+        'week_number': payload.get('week_number', week.week_number),
+        'label': payload.get('label', week.label),
+        'start_date': payload.get('start_date', week.start_date),
+        'end_date': payload.get('end_date', week.end_date),
+        'primary_game_date': payload.get('primary_game_date', week.primary_game_date or week.start_date),
+        'notes': payload.get('notes', week.notes),
+        'status': payload.get('status', week.status),
+    }, db, week_id)
+    for key, value in data.items():
+        setattr(week, key, value)
+    db.commit(); db.refresh(week); return _week_to_dict(week)
 
 def _to_game_read(
     g: Game,
@@ -2478,7 +2583,7 @@ def manual_schedule_builder_options(db: Session = Depends(get_db)):
         'teams': [{'id': t.id, 'name': t.name, 'division_id': t.division_id, 'is_active': t.is_active} for t in teams],
         'host_locations': [{'id': h.id, 'name': h.name} for h in host_locations],
         'seasons': [{'id': s.id, 'name': s.name, 'start_date': s.start_date, 'end_date': s.end_date, 'is_active': s.is_active} for s in seasons],
-        'weeks': [{'id': w.id, 'season_id': w.season_id, 'week_number': w.week_number, 'start_date': w.start_date, 'end_date': w.end_date} for w in weeks],
+        'weeks': [{'id': w.id, 'season_id': w.season_id, 'week_number': w.week_number, 'label': w.label or f'Week {w.week_number}', 'start_date': w.start_date, 'end_date': w.end_date, 'primary_game_date': w.primary_game_date or w.start_date, 'status': w.status} for w in weeks],
         'organizations': [{'id': o.id, 'name': o.name} for o in organizations],
     }
 
@@ -5968,7 +6073,7 @@ def list_public_schedule_filters(season_id: uuid.UUID | None = None, db: Session
         'host_locations': [{'id': item.id, 'name': item.name} for item in host_locations],
         'organizations': [{'id': item.id, 'name': item.name} for item in organizations],
         'divisions': [{'id': item.id, 'name': item.name, 'division_group': item.division_group} for item in divisions],
-        'weeks': [{'id': item.id, 'week_number': item.week_number, 'start_date': item.start_date, 'label': f'Week {item.week_number}'} for item in weeks],
+        'weeks': [{'id': item.id, 'week_number': item.week_number, 'start_date': item.start_date, 'end_date': item.end_date, 'primary_game_date': item.primary_game_date or item.start_date, 'label': item.label or f'Week {item.week_number}'} for item in weeks],
         'teams': [{'id': item.id, 'name': item.name} for item in teams],
         'fields': [{'id': item.id, 'name': item.field_name} for item in fields],
     }

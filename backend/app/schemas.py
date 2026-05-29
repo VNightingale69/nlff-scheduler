@@ -194,8 +194,12 @@ class SeasonRead(BaseSchema, SeasonCreate):
 class WeekCreate(BaseModel):
     season_id: uuid.UUID
     week_number: int
+    label: str | None = None
     start_date: date
     end_date: date
+    primary_game_date: date | None = None
+    notes: str | None = None
+    status: str = 'draft'
 
 class WeekRead(BaseSchema, WeekCreate):
     pass

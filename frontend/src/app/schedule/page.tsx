@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { API_URL } from '@/lib/api';
 import { getDivisionLabel } from '@/lib/divisionLabel';
 import { formatDisplayDate, formatDisplayTime } from '@/lib/displayFormat';
@@ -68,8 +69,9 @@ const buildScheduleQuery = (activeFilters: PublicScheduleFilters) => {
 };
 
 export default function PublicSchedulePage() {
+  const searchParams = useSearchParams();
   const [games, setGames] = useState<Game[]>([]);
-  const [filters, setFilters] = useState<PublicScheduleFilters>({});
+  const [filters, setFilters] = useState<PublicScheduleFilters>({ week_id: searchParams.get('week_id') || undefined });
   const [options, setOptions] = useState<PublicScheduleOptions>(emptyOptions);
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState('');

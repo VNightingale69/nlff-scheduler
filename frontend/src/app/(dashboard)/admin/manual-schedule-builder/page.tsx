@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { ApiError, apiFetch } from '@/lib/api';
 import { getToken } from '@/lib/auth';
 import { getDivisionLabel } from '@/lib/divisionLabel';
@@ -8,9 +9,10 @@ import { formatDisplayDate, formatDisplayDateTime, formatDisplayTime } from '@/l
 
 export default function ManualScheduleBuilderPage() {
   const token = getToken();
+  const searchParams = useSearchParams();
   const [options, setOptions] = useState<any>({ divisions: [], teams: [], host_locations: [], seasons: [], weeks: [], organizations: [], game_statuses: [] });
-  const [seasonId, setSeasonId] = useState('');
-  const [weekId, setWeekId] = useState('');
+  const [seasonId, setSeasonId] = useState(searchParams.get('season_id') || '');
+  const [weekId, setWeekId] = useState(searchParams.get('week_id') || '');
   const [divisionId, setDivisionId] = useState('');
   const [homeTeamId, setHomeTeamId] = useState('');
   const [awayTeamId, setAwayTeamId] = useState('');

@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { API_URL, ApiError, apiFetch } from '@/lib/api';
 import { getToken } from '@/lib/auth';
 import { getDivisionLabel } from '@/lib/divisionLabel';
@@ -13,6 +14,7 @@ type Severity = 'OK' | 'Info' | 'Warning' | 'Issue';
 
 export default function ScheduleManagementPage() {
   const token = getToken();
+  const searchParams = useSearchParams();
   const [tab, setTab] = useState<TabKey>('By Date');
   const [options, setOptions] = useState<any>({
     divisions: [],
@@ -20,6 +22,7 @@ export default function ScheduleManagementPage() {
     host_locations: [],
     organizations: [],
     fields: [],
+    weeks: [],
   });
   const [filters, setFilters] = useState<any>({
     date: '',
@@ -28,6 +31,7 @@ export default function ScheduleManagementPage() {
     host_location_id: '',
     field_id: '',
     team_id: '',
+    week_id: searchParams.get('week_id') || '',
   });
   const [games, setGames] = useState<any[]>([]);
   const [conflicts, setConflicts] = useState<any[]>([]);
@@ -226,7 +230,7 @@ export default function ScheduleManagementPage() {
         </div>
       </div> : null}
 
-      <div className='grid gap-2 md:grid-cols-6'>
+      <div className='grid gap-2 md:grid-cols-7'>
         <input type='date' className='rounded border p-2' value={filters.date} onChange={(e) => setFilters({ ...filters, date: e.target.value })} aria-label='Date' />
 
         <select className='rounded border p-2' value={filters.division_id} onChange={(e) => setFilters({ ...filters, division_id: e.target.value })}>
@@ -273,6 +277,15 @@ export default function ScheduleManagementPage() {
             </option>
           ))}
         </select>
+        <select className='rounded border p-2' value={filters.week_id} onChange={(e) => setFilters({ ...filters, week_id: e.target.value })}>
+          <option value=''>Week</option>
+          {options.weeks.map((week: any) => (
+            <option key={week.id} value={week.id}>
+              {week.label || `Week ${week.week_number}`}
+            </option>
+          ))}
+        </select>
+
       </div>
 
       <div className='flex flex-wrap gap-2'>

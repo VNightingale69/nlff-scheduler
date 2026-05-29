@@ -177,8 +177,12 @@ class Week(Base, TimestampMixin):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     season_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('seasons.id'), nullable=True)
     week_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    label: Mapped[str | None] = mapped_column(String(120), nullable=True)
     start_date: Mapped[Date] = mapped_column(Date, nullable=False)
     end_date: Mapped[Date] = mapped_column(Date, nullable=False)
+    primary_game_date: Mapped[Date | None] = mapped_column(Date, nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default='draft')
     season = relationship('Season')
     __table_args__ = (UniqueConstraint('season_id', 'week_number', name='uq_week_season_number'),)
 
