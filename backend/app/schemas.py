@@ -370,11 +370,46 @@ class ScheduleReadinessHostDateRow(BaseModel):
     warnings: list[str] = []
 
 
+
+
+class HostingBalanceRow(BaseModel):
+    community_id: uuid.UUID | None = None
+    community: str
+    available_host_dates: int
+    games_hosted_this_week: int
+    games_hosted_season_to_date: int
+    expected_host_share: float
+    hosting_delta: float
+    status: str
+
+
+class FieldConfigurationEfficiencyRow(BaseModel):
+    host_location_id: uuid.UUID | None = None
+    host_location: str
+    host_date: date
+    selected_turf_layout: str | None = None
+    field_size_blocks: list[str] = []
+    layout_changes: int
+    transition_windows_required: int
+    warnings: list[str] = []
+
+
+class WeeklyFieldDemandRow(BaseModel):
+    host_date: date
+    small_games_required: int
+    medium_games_required: int
+    large_games_required: int
+    available_capacity_by_community: list[dict] = []
+
+
 class ScheduleReadinessResponse(BaseModel):
     rows: list[ScheduleReadinessDivisionRow]
     totals: ScheduleReadinessTotals
     warnings: list[str] = []
     host_dates: list[ScheduleReadinessHostDateRow] = []
+    hosting_balance: list[HostingBalanceRow] = []
+    field_configuration_efficiency: list[FieldConfigurationEfficiencyRow] = []
+    weekly_field_demand: list[WeeklyFieldDemandRow] = []
 
 
 class HostingGenerationLocationResult(BaseModel):

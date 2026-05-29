@@ -68,6 +68,9 @@ export default function ScheduleReadinessPage() {
   const [error, setError] = useState('');
   const [warnings, setWarnings] = useState<string[]>([]);
   const [hostDates, setHostDates] = useState<HostDateReadiness[]>([]);
+  const [hostingBalance, setHostingBalance] = useState<any[]>([]);
+  const [fieldEfficiency, setFieldEfficiency] = useState<any[]>([]);
+  const [weeklyDemand, setWeeklyDemand] = useState<any[]>([]);
 
   useEffect(() => {
     (async () => {
@@ -77,6 +80,9 @@ export default function ScheduleReadinessPage() {
         setTotals(data?.totals || null);
         setWarnings(data?.warnings || []);
         setHostDates(data?.host_dates || []);
+        setHostingBalance(data?.hosting_balance || []);
+        setFieldEfficiency(data?.field_configuration_efficiency || []);
+        setWeeklyDemand(data?.weekly_field_demand || []);
       } catch (e: any) {
         setError(e?.message || 'Failed to load schedule readiness report');
       }
@@ -106,6 +112,46 @@ export default function ScheduleReadinessPage() {
           <div><div className='text-slate-500'>Total Open Slots</div><div className='font-semibold'>{totals.total_open_slots}</div></div>
         </div>
       ) : null}
+
+
+
+      <section className='rounded border bg-white p-3'>
+        <h2 className='mb-2 font-semibold'>Hosting Balance</h2>
+        {!hostingBalance.length ? <p className='text-sm text-slate-500'>No active host availability found yet.</p> : (
+          <div className='overflow-auto'>
+            <table className='min-w-full text-sm'>
+              <thead><tr className='border-b text-left'><th className='p-2'>Community</th><th className='p-2'>Available host dates</th><th className='p-2'>Games hosted this week</th><th className='p-2'>Games hosted season-to-date</th><th className='p-2'>Expected hosting share</th><th className='p-2'>Hosting delta</th><th className='p-2'>Status</th></tr></thead>
+              <tbody>{hostingBalance.map((row) => <tr key={row.community_id || row.community} className='border-b'><td className='p-2'>{row.community}</td><td className='p-2'>{row.available_host_dates}</td><td className='p-2'>{row.games_hosted_this_week}</td><td className='p-2'>{row.games_hosted_season_to_date}</td><td className='p-2'>{row.expected_host_share}</td><td className='p-2'>{row.hosting_delta}</td><td className='p-2'>{row.status}</td></tr>)}</tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      <section className='rounded border bg-white p-3'>
+        <h2 className='mb-2 font-semibold'>Weekly Field Demand</h2>
+        {!weeklyDemand.length ? <p className='text-sm text-slate-500'>No weekly demand or generated capacity found yet.</p> : (
+          <div className='space-y-2'>
+            {weeklyDemand.map((row) => <div key={row.host_date} className='rounded border bg-slate-50 p-3 text-sm'>
+              <div className='font-medium'>{row.host_date}</div>
+              <div>Required: {row.small_games_required} Small / {row.medium_games_required} Medium / {row.large_games_required} Large</div>
+              <div className='mt-1 text-slate-600'>Available capacity by community and host location:</div>
+              <ul className='list-disc pl-5'>{(row.available_capacity_by_community || []).map((community: any) => <li key={community.community_id}>{community.community}: {community.small_capacity} Small / {community.medium_capacity} Medium / {community.large_capacity} Large{community.host_locations?.length ? ` (${community.host_locations.map((host: any) => `${host.host_location}: ${host.small_capacity}/${host.medium_capacity}/${host.large_capacity}`).join('; ')})` : ''}</li>)}</ul>
+            </div>)}
+          </div>
+        )}
+      </section>
+
+      <section className='rounded border bg-white p-3'>
+        <h2 className='mb-2 font-semibold'>Field Configuration Efficiency</h2>
+        {!fieldEfficiency.length ? <p className='text-sm text-slate-500'>No generated host-location slots found yet.</p> : (
+          <div className='overflow-auto'>
+            <table className='min-w-full text-sm'>
+              <thead><tr className='border-b text-left'><th className='p-2'>Host location</th><th className='p-2'>Date</th><th className='p-2'>Selected turf layout</th><th className='p-2'>Field-size blocks</th><th className='p-2'>Layout changes</th><th className='p-2'>Transition windows required</th><th className='p-2'>Warnings</th></tr></thead>
+              <tbody>{fieldEfficiency.map((row) => <tr key={`${row.host_location_id}-${row.host_date}`} className='border-b'><td className='p-2'>{row.host_location}</td><td className='p-2'>{row.host_date}</td><td className='p-2'>{row.selected_turf_layout || '—'}</td><td className='p-2'>{row.field_size_blocks?.length ? row.field_size_blocks.join(', ') : '—'}</td><td className='p-2'>{row.layout_changes}</td><td className='p-2'>{row.transition_windows_required}</td><td className='p-2'>{row.warnings?.length ? row.warnings.join('; ') : '—'}</td></tr>)}</tbody>
+            </table>
+          </div>
+        )}
+      </section>
 
       <section className='rounded border bg-white p-3'>
         <h2 className='mb-2 font-semibold'>Host Date / Host Site Readiness</h2>
