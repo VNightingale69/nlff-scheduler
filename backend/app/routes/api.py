@@ -3528,8 +3528,31 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     week = db.query(Week).filter(Week.id == week_id, Week.season_id == season_id).first()
     if not division or not week:
         raise HTTPException(404, 'Selected season/week/division is invalid')
-    season_weeks = db.query(Week).filter(Week.season_id == season_id).all()
+    season_weeks = (
+        db.query(Week)
+        .filter(Week.season_id == season_id)
+        .order_by(Week.week_number)
+        .all()
+    )
     week_numbers_by_id = {w.id: int(w.week_number) for w in season_weeks}
+
+    def _date_value(value):
+        if isinstance(value, datetime):
+            return value.date()
+        return value
+
+    def _last_hosted_week_number(host_dates: set[date], target_date: date | None) -> int | None:
+        comparable_host_dates = {
+            _date_value(host_date)
+            for host_date in host_dates
+            if host_date and (not target_date or _date_value(host_date) < target_date)
+        }
+        hosted_week_numbers = [
+            week_numbers_by_id.get(season_week.id)
+            for season_week in season_weeks
+            if _date_value(season_week.start_date) in comparable_host_dates
+        ]
+        return max([week_number for week_number in hosted_week_numbers if week_number is not None], default=None)
     division_group_key = (division.division_group or '').strip().upper()
     selected_division_key = canonical_division_id_from_division(division)
     selected_division_normalized = normalized_division_key(division.division_group, division.name)
@@ -5185,7 +5208,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                     'community_id': str(org_id),
                     'community': org_names_by_id.get(org_id, str(org_id)),
                     'host_weeks_used': len(regular_season_host_occurrences_by_community.get(org_id, set())),
-                    'last_hosted_week_number': max([week_numbers_by_id.get(w.id) for w in weeks if w.start_date in regular_season_host_occurrences_by_community.get(org_id, set())] or [None]),
+                    'last_hosted_week_number': _last_hosted_week_number(regular_season_host_occurrences_by_community.get(org_id, set()), week.start_date),
                     'weeks_since_last_hosted': None if _days_since_last_hosted(regular_season_host_occurrences_by_community.get(org_id, set()), week.start_date) >= 999_999 else round(_days_since_last_hosted(regular_season_host_occurrences_by_community.get(org_id, set()), week.start_date) / 7, 2),
                     'days_since_last_hosted': _days_since_last_hosted(regular_season_host_occurrences_by_community.get(org_id, set()), week.start_date),
                     'games_hosted_season_to_date': community_games_hosted_to_date.get(org_id, 0),

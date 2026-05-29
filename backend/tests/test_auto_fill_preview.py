@@ -751,6 +751,57 @@ class AutoFillPreviewTest(unittest.TestCase):
         self.assertIn('balanced_hosting_achieved', preview['audit'])
         self.assertFalse(preview['audit']['postseason_host_limit_exempt'])
 
+    def test_host_rotation_audit_reports_prior_last_hosted_week_and_none_for_new_host(self):
+        prior_game = self.db.query(Game).filter(Game.week_id == self.week1.id).first()
+        week1_field = FieldInstance(
+            id=uuid.uuid4(),
+            host_location_id=self.host.id,
+            hosting_availability_id=uuid.uuid4(),
+            instance_date=self.week1.start_date,
+            field_name='Small Field Prior Week',
+            field_type='SMALL',
+            is_active=True,
+        )
+        week1_slot = GameSlot(
+            id=uuid.uuid4(),
+            field_instance_id=week1_field.id,
+            host_location_id=self.host.id,
+            slot_date=self.week1.start_date,
+            start_time=time(11, 0),
+            end_time=time(12, 0),
+            field_type='SMALL',
+            status='BOOKED',
+            assigned_game_id=prior_game.id,
+        )
+        antioch_host = HostLocation(id=uuid.uuid4(), organization_id=self.org_a.id, name='Antioch Park', is_active=True)
+        antioch_field = FieldInstance(
+            id=uuid.uuid4(),
+            host_location_id=antioch_host.id,
+            hosting_availability_id=uuid.uuid4(),
+            instance_date=self.week2.start_date,
+            field_name='Antioch Small Field',
+            field_type='SMALL',
+            is_active=True,
+        )
+        antioch_slot = GameSlot(
+            id=uuid.uuid4(),
+            field_instance_id=antioch_field.id,
+            host_location_id=antioch_host.id,
+            slot_date=self.week2.start_date,
+            start_time=time(9, 0),
+            end_time=time(10, 0),
+            field_type='SMALL',
+            status='OPEN',
+        )
+        self.db.add_all([week1_field, week1_slot, antioch_host, antioch_field, antioch_slot])
+        self.db.commit()
+
+        preview = auto_fill_preview({'season_id': self.season.id, 'week_id': self.week2.id, 'division_id': self.division.id}, db=self.db)
+
+        ranking_by_community = {row['community']: row for row in preview['audit']['host_rotation_ranking']}
+        self.assertEqual(ranking_by_community['Westosha']['last_hosted_week_number'], 1)
+        self.assertIsNone(ranking_by_community['Antioch']['last_hosted_week_number'])
+
     def test_postseason_exempts_host_rotation_limits(self):
         preview = auto_fill_preview({
             'season_id': self.season.id,
