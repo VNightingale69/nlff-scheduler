@@ -281,6 +281,30 @@ def _apply_turf_configuration_metadata(obj, configuration_name: str) -> None:
     obj.small_field_count = counts[FIELD_SIZE_SMALL]
 
 
+
+def _ensure_approved_turf_configurations(db: Session, host: HostLocation) -> bool:
+    if (host.surface_type or 'GRASS_FIELD') != 'TURF_STADIUM':
+        return False
+    existing = {
+        _normalize_configuration_name(config.configuration_name): config
+        for config in db.query(HostLocationConfiguration).filter(HostLocationConfiguration.host_location_id == host.id).all()
+    }
+    changed = False
+    for config_name in TURF_STADIUM_CONFIGURATIONS:
+        config = existing.get(config_name)
+        if not config:
+            config = HostLocationConfiguration(host_location_id=host.id, configuration_name=config_name, is_active=True)
+            db.add(config)
+            changed = True
+        if not config.is_active:
+            config.is_active = True
+            changed = True
+        before = (config.configuration_name, config.surface_type, config.space_used_yards, config.remaining_yards, config.large_field_count, config.medium_field_count, config.small_field_count)
+        _apply_turf_configuration_metadata(config, config_name)
+        after = (config.configuration_name, config.surface_type, config.space_used_yards, config.remaining_yards, config.large_field_count, config.medium_field_count, config.small_field_count)
+        changed = changed or before != after
+    return changed
+
 def _attach_configuration_instances(config: HostLocationConfiguration) -> HostLocationConfiguration:
     config.field_instances = [field_name for field_name, _field_type in _configuration_field_templates(config.configuration_name)]
     return config
@@ -1062,7 +1086,9 @@ def create_host_location(payload: HostLocationCreate, current_user: User = Depen
     surface_type = payload.surface_type or 'GRASS_FIELD'
     if surface_type not in ALLOWED_SURFACE_TYPES:
         raise HTTPException(400, f'Invalid surface type: {surface_type}')
-    x = HostLocation(**{**payload.model_dump(), 'surface_type': surface_type}); db.add(x); db.commit(); db.refresh(x); return x
+    x = HostLocation(**{**payload.model_dump(), 'surface_type': surface_type}); db.add(x); db.flush()
+    _ensure_approved_turf_configurations(db, x)
+    db.commit(); db.refresh(x); return x
 
 @router.get('/host-locations', response_model=PagedResponse[HostLocationRead], dependencies=[Depends(get_current_user)])
 def list_host_locations(search: str | None = None, organization_id: uuid.UUID | None = None, is_active: bool | None = None, page: int = 1, page_size: int = 20, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -1072,6 +1098,11 @@ def list_host_locations(search: str | None = None, organization_id: uuid.UUID | 
     if search: q = q.filter(func.lower(HostLocation.name).like(f"%{search.lower()}%"))
     if is_active is not None: q = q.filter(HostLocation.is_active == is_active)
     page_data = paginate(q.order_by(HostLocation.name), page, page_size)
+    ensured_any = False
+    for item in page_data.items:
+        ensured_any = _ensure_approved_turf_configurations(db, item) or ensured_any
+    if ensured_any:
+        db.commit()
     active_area_host_ids = {host_id for (host_id,) in db.query(PhysicalFieldArea.host_location_id).filter(PhysicalFieldArea.is_active.is_(True)).distinct().all()}
     active_field_host_ids = {host_id for (host_id,) in db.query(Field.host_location_id).filter(Field.is_active.is_(True)).distinct().all()}
     active_config_host_ids = {host_id for (host_id,) in db.query(HostLocationConfiguration.host_location_id).filter(HostLocationConfiguration.is_active.is_(True)).distinct().all()}
@@ -1100,6 +1131,7 @@ def upd_host_location(item_id: uuid.UUID, payload: HostLocationCreate, current_u
     if surface_type not in ALLOWED_SURFACE_TYPES:
         raise HTTPException(400, f'Invalid surface type: {surface_type}')
     for k, v in {**payload.model_dump(), 'surface_type': surface_type}.items(): setattr(x, k, v)
+    _ensure_approved_turf_configurations(db, x)
     db.commit(); db.refresh(x); return x
 
 
@@ -1123,8 +1155,20 @@ def list_host_location_configurations(host_location_id: uuid.UUID | None = None,
         q = q.filter(HostLocation.organization_id == current_user.organization_id)
     elif organization_id:
         q = q.filter(HostLocation.organization_id == organization_id)
+    turf_hosts_query = db.query(HostLocation)
+    if current_user.role.name == ROLE_COMMUNITY_SCHEDULER:
+        turf_hosts_query = turf_hosts_query.filter(HostLocation.organization_id == current_user.organization_id)
+    elif organization_id:
+        turf_hosts_query = turf_hosts_query.filter(HostLocation.organization_id == organization_id)
     if host_location_id:
+        turf_hosts_query = turf_hosts_query.filter(HostLocation.id == host_location_id)
         q = q.filter(HostLocationConfiguration.host_location_id == host_location_id)
+    turf_hosts = turf_hosts_query.filter(HostLocation.surface_type == 'TURF_STADIUM').all()
+    ensured_any = False
+    for host in turf_hosts:
+        ensured_any = _ensure_approved_turf_configurations(db, host) or ensured_any
+    if ensured_any:
+        db.commit()
     page_data = paginate(q.order_by(HostLocation.name, HostLocationConfiguration.configuration_name), page, page_size)
     for config in page_data.items:
         _attach_configuration_instances(config)
@@ -1473,9 +1517,8 @@ def bulk_upsert_hosting_availabilities(payload: HostingAvailabilityBulkUpsertReq
     updated = 0
     for slot in payload.slots:
         host, field, area, config = _resolve_availability_host_and_validate(slot, current_user, db)
-        existing = db.query(HostingAvailability).filter(
+        existing_query = db.query(HostingAvailability).filter(
             HostingAvailability.host_location_id == slot.host_location_id,
-            HostingAvailability.selected_configuration_id == slot.selected_configuration_id,
             HostingAvailability.field_id == slot.field_id,
             HostingAvailability.physical_field_area_id == slot.physical_field_area_id,
             HostingAvailability.available_date == slot.available_date,
@@ -1483,10 +1526,15 @@ def bulk_upsert_hosting_availabilities(payload: HostingAvailabilityBulkUpsertReq
             HostingAvailability.end_time == slot.end_time,
             HostingAvailability.layout_type == slot.layout_type,
             HostingAvailability.slot_index == slot.slot_index,
-        ).first()
+        )
+        is_turf_host_slot = (host.surface_type or 'GRASS_FIELD') == 'TURF_STADIUM' and slot.host_location_id is not None
+        if not is_turf_host_slot:
+            existing_query = existing_query.filter(HostingAvailability.selected_configuration_id == slot.selected_configuration_id)
+        existing = existing_query.first()
         if existing:
             existing.is_available = slot.is_available
             existing.notes = slot.notes
+            existing.selected_configuration_id = slot.selected_configuration_id
             existing.auto_select_turf_layout = slot.auto_select_turf_layout
             existing.lock_selected_layout = slot.lock_selected_layout
             existing.allow_turf_layout_changes = slot.allow_turf_layout_changes
