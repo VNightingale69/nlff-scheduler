@@ -393,6 +393,10 @@ class HostingRotationRow(BaseModel):
     week: str
     available_communities: list[str] = []
     selected_host_communities: list[str] = []
+    selected_host_locations_by_community: list[dict] = []
+    combined_community_capacity: int = 0
+    selected_community_could_host_all_games: bool = False
+    additional_communities_needed: bool = False
     skipped_communities: list[dict] = []
     rotation_ranking: list[dict] = []
     reason_selected: list[str] = []
