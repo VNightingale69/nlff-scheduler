@@ -289,6 +289,10 @@ def _grass_capacity_limits_for_host(db: Session, host: HostLocation) -> dict[str
     return legacy_counts
 
 
+def _estimated_games_from_team_count(team_count: int | None) -> int:
+    return (max(int(team_count or 0), 0) + 1) // 2
+
+
 def _grass_demand_counts_for_date(db: Session, host: HostLocation, available_date: date) -> dict[str, int]:
     counts = {FIELD_SIZE_SMALL: 0, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_LARGE: 0}
     game_rows = (
@@ -305,6 +309,25 @@ def _grass_demand_counts_for_date(db: Session, host: HostLocation, available_dat
         required = _required_field_type_for_division(division)
         if required in counts:
             counts[required] += 1
+
+    if not any(counts.values()):
+        # Before auto-schedule creates games, forecast grass setups from active participation.
+        # Count games, not teams, so Medium/Large divisions get compatible slots without
+        # inflating the number of fixed grass field instances.
+        participation_rows = (
+            db.query(Division, OrganizationDivisionParticipation.team_count)
+            .join(OrganizationDivisionParticipation, OrganizationDivisionParticipation.division_id == Division.id)
+            .filter(
+                OrganizationDivisionParticipation.organization_id == host.organization_id,
+                OrganizationDivisionParticipation.is_active.is_(True),
+                OrganizationDivisionParticipation.is_participating.is_(True),
+            )
+            .all()
+        )
+        for division, team_count in participation_rows:
+            required = _required_field_type_for_division(division)
+            if required in counts:
+                counts[required] += _estimated_games_from_team_count(team_count)
     return counts
 
 
@@ -418,7 +441,7 @@ def _turf_demand_counts_for_date(db: Session, host: HostLocation, available_date
         for division, team_count in participation_rows:
             required = _required_field_type_for_division(division)
             if required in counts:
-                counts[required] += max(int(team_count or 0), 0)
+                counts[required] += _estimated_games_from_team_count(team_count)
 
     if subtract_selected_grass:
         grass_capacity = _grass_capacity_for_community_date(db, host.organization_id, available_date)
@@ -701,13 +724,13 @@ def _regenerate_generated_slots(db: Session, availability: HostingAvailability, 
         else:
             configuration_name = host_configuration.configuration_name
             templates = _configuration_field_templates(configuration_name)
+    elif host and surface_type == 'GRASS_FIELD' and availability.host_location_id:
+        forecast = _grass_setup_forecast_for_availability(db, host, availability)
+        templates = _grass_field_templates_from_forecast(forecast['forecast'])
     elif field:
         field_size = _normalize_field_size(field.layout_type)
         if field.is_active and field_size:
             templates = [(field.name, field_size)]
-    elif host and surface_type == 'GRASS_FIELD':
-        forecast = _grass_setup_forecast_for_availability(db, host, availability)
-        templates = _grass_field_templates_from_forecast(forecast['forecast'])
     else:
         configuration_name = availability.layout_type or (option.name if option else None)
         if option and not option.is_active:
@@ -7218,6 +7241,33 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
             total += _division_required_games(_active_team_count(division.id))
         return total
 
+    slot_preflight = _regenerate_and_validate_slots_for_weeks(db, weeks, division_order)
+    slot_preflight_errors = list(slot_preflight.get('validation_errors') or [])
+    if slot_preflight_errors:
+        validation_errors.extend(slot_preflight_errors)
+        db.commit()
+        return {
+            'status': 'incomplete',
+            'message': 'Auto-schedule stopped before placement because generated slot capacity is missing for required field sizes.',
+            'total_games_created': 0,
+            'games_skipped': 0,
+            'skipped_attempts_message': '0 placement attempts skipped; placement was not started because slot preflight validation failed.',
+            'skipped_attempts_summary': skipped_attempts_summary,
+            'skipped_attempts_by_reason': skipped_attempts_by_reason,
+            'required_games_still_missing': [],
+            'warnings': warnings,
+            'validation_errors': validation_errors,
+            'validation_warnings': validation_warnings,
+            'slot_capacity_validation': slot_preflight,
+            'weekly_schedule_diagnostics': [],
+            'division_week_schedule_diagnostics': [],
+            'hard_validation': [],
+            'post_run_validation': [],
+            'divisions_completed': [],
+            'divisions_with_unresolved_games': [],
+            'post_schedule_repair': {'ran': False, 'note': 'Run manual optimization endpoint to execute repairs.'},
+        }
+
     for group, name in division_order:
         requested_label = f'{group} {name}'
         requested_normalized = normalize_division_name(requested_label)
@@ -7538,6 +7588,8 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
     return {
         'status': 'complete' if schedule_complete else 'incomplete',
         'message': 'Auto-schedule completed.' if schedule_complete else 'Auto-schedule completed with missing required games; review validation_errors and diagnostics.',
+        'total_games_created': total_games_created,
+        'slot_capacity_validation': slot_preflight,
         'season_date_diagnostics': {
             'target_date_checked': f"{season.start_date.year}-09-13" if season.start_date else None,
             'matching_week_numbers': [w.week_number for w in september_13_weeks],
@@ -7772,6 +7824,132 @@ def _required_field_type_for_division(division: Division | None) -> str:
     layout_type = (getattr(division, 'required_field_layout_type', None) or '').strip().upper()
     normalized_size = _normalize_field_size(layout_type)
     return normalized_size or FIELD_SIZE_SMALL
+
+
+def _active_division_week_demand_by_size(db: Session, division_order: list[tuple[str, str]]) -> dict[str, int]:
+    demand = {FIELD_SIZE_SMALL: 0, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_LARGE: 0}
+    all_divisions = db.query(Division).all()
+    divisions_by_key = {canonical_division_id_from_division(d): d for d in all_divisions}
+    divisions_by_normalized_name = {
+        normalize_division_name(f'{d.division_group or ""} {d.name or ""}'): d
+        for d in all_divisions
+    }
+    for group, name in division_order:
+        division = divisions_by_key.get(canonical_division_id(group, name)) or divisions_by_normalized_name.get(normalize_division_name(f'{group} {name}'))
+        if not division or not division.is_active:
+            continue
+        active_team_count = db.query(Team.id).filter(Team.division_id == division.id, Team.is_active.is_(True)).count()
+        required_games = _estimated_games_from_team_count(active_team_count)
+        required_size = _required_field_type_for_division(division)
+        if required_size in demand:
+            demand[required_size] += required_games
+    return demand
+
+
+def _availability_generation_reason(db: Session, host: HostLocation, availability: HostingAvailability) -> str:
+    surface_type = (host.surface_type or 'GRASS_FIELD') if host else 'GRASS_FIELD'
+    hours = _hours_between(availability.start_time, availability.end_time, availability.available_date)
+    if not availability.is_available:
+        return f'{host.name}: availability is marked unavailable.'
+    if surface_type == 'TURF_STADIUM':
+        active_configs = db.query(HostLocationConfiguration).filter(
+            HostLocationConfiguration.host_location_id == host.id,
+            HostLocationConfiguration.is_active.is_(True),
+        ).all()
+        active_names = sorted(_available_turf_configuration_names(active_configs))
+        demand = _turf_demand_counts_for_date(db, host, availability.available_date)
+        selected = availability.selected_configuration.configuration_name if availability.selected_configuration else None
+        if availability.auto_select_turf_layout and not availability.lock_selected_layout:
+            plan = _plan_turf_layout_blocks(demand, hours, set(active_names))
+            return (
+                f'{host.name}: turf auto layout evaluated approved layouts {active_names or ["none"]}; '
+                f'demand small={demand[FIELD_SIZE_SMALL]}, medium={demand[FIELD_SIZE_MEDIUM]}, large={demand[FIELD_SIZE_LARGE]}; '
+                f'planned waves={plan or "none"}.'
+            )
+        return f'{host.name}: turf locked/selected layout={selected or "none"}; active approved layouts={active_names or ["none"]}.'
+    forecast = _grass_setup_forecast_for_availability(db, host, availability)
+    return (
+        f'{host.name}: grass forecast demand={forecast["demand"]}, requested_fields={forecast["requested"]}, '
+        f'capacity={forecast["capacity"]}, forecast_fields={forecast["forecast"]}, status={forecast["capacity_status"]}; '
+        f'warnings={forecast["warnings"] or "none"}.'
+    )
+
+
+def _regenerate_and_validate_slots_for_weeks(
+    db: Session,
+    weeks: list[Week],
+    division_order: list[tuple[str, str]],
+) -> dict[str, object]:
+    week_dates = {week.start_date for week in weeks if week.start_date}
+    hosts = db.query(HostLocation).join(HostLocation.organization).filter(
+        HostLocation.is_active.is_(True),
+        Organization.is_active.is_(True),
+    ).order_by(HostLocation.name).all()
+    generation_results: list[dict[str, object]] = []
+    evaluated_hosts_by_date: dict[date, list[str]] = {week_date: [] for week_date in week_dates}
+    generation_reasons_by_date: dict[date, list[str]] = {week_date: [] for week_date in week_dates}
+    for host in hosts:
+        availabilities = db.query(HostingAvailability).outerjoin(HostingAvailability.physical_field_area).filter(
+            or_(HostingAvailability.host_location_id == host.id, PhysicalFieldArea.host_location_id == host.id),
+            HostingAvailability.is_available.is_(True),
+            HostingAvailability.available_date.in_(week_dates),
+        ).order_by(HostingAvailability.available_date, HostingAvailability.start_time).all()
+        if not availabilities:
+            continue
+        result = _regenerate_hosting_day(db, availabilities, host)
+        generation_results.append({
+            'host_location_id': str(host.id),
+            'host_location_name': host.name,
+            'surface_type': host.surface_type or 'GRASS_FIELD',
+            'slots_created': result.slots_created,
+            'new_slots_created': result.new_slots_created,
+            'slots_regenerated': result.slots_regenerated,
+            'locked_slots_skipped': result.locked_slots_skipped,
+            'errors': result.errors,
+        })
+        for availability in availabilities:
+            evaluated_hosts_by_date.setdefault(availability.available_date, []).append(host.name)
+            generation_reasons_by_date.setdefault(availability.available_date, []).append(_availability_generation_reason(db, host, availability))
+    db.flush()
+
+    required_games_by_size = _active_division_week_demand_by_size(db, division_order)
+    validation_errors: list[str] = []
+    validation_rows: list[dict[str, object]] = []
+    for week in weeks:
+        if not week.start_date:
+            continue
+        slot_counts = {FIELD_SIZE_SMALL: 0, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_LARGE: 0}
+        for field_type, count in db.query(GameSlot.field_type, func.count(GameSlot.id)).filter(
+            GameSlot.slot_date == week.start_date,
+        ).group_by(GameSlot.field_type).all():
+            size = _normalize_field_size(field_type)
+            if size in slot_counts:
+                slot_counts[size] += int(count or 0)
+        missing_sizes = [
+            size for size in FIELD_SIZE_ORDER
+            if int(required_games_by_size.get(size, 0) or 0) > 0 and int(slot_counts.get(size, 0) or 0) == 0
+        ]
+        row = {
+            'week': week.week_number,
+            'week_start_date': str(week.start_date),
+            'required_games_by_size': dict(required_games_by_size),
+            'generated_slots_by_size': dict(slot_counts),
+            'missing_field_sizes': missing_sizes,
+            'host_locations_evaluated': sorted(set(evaluated_hosts_by_date.get(week.start_date, []))),
+            'generation_reasons': generation_reasons_by_date.get(week.start_date, []),
+        }
+        validation_rows.append(row)
+        for size in missing_sizes:
+            validation_errors.append(
+                f'Week {week.week_number} ({week.start_date}) requires {required_games_by_size[size]} {size} game(s) but generated 0 {size} slot(s). '
+                f'Host locations evaluated: {", ".join(row["host_locations_evaluated"]) or "none"}. '
+                f'Reasons: {" | ".join(row["generation_reasons"]) or "No hosting availability was evaluated for this week."}'
+            )
+    return {
+        'generation_results': generation_results,
+        'validation_rows': validation_rows,
+        'validation_errors': validation_errors,
+    }
 
 
 def _game_required_field_type(game: Game | None) -> str | None:

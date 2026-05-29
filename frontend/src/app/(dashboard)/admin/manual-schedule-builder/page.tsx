@@ -506,6 +506,20 @@ export default function ManualScheduleBuilderPage() {
             <div className='font-semibold'>5. Validation failures</div>
             <ul className='list-inside list-disc'>{(autoScheduleDiagnostics.validation_errors || []).map((w: string, i: number) => <li key={i}>{w}</li>)}</ul>
           </div>
+          {autoScheduleDiagnostics.slot_capacity_validation ? <div>
+            <div className='font-semibold'>6. Generated slot capacity preflight</div>
+            <div className='mt-1 text-slate-700'>Hosts evaluated and field-size slot counts before placement.</div>
+            <div className='mt-2 space-y-2'>
+              {(autoScheduleDiagnostics.slot_capacity_validation.validation_rows || []).map((row: any, idx: number) => <div key={`${row.week_start_date}-${idx}`} className='rounded border border-slate-200 bg-white p-2'>
+                <div className='font-medium'>Week {row.week} ({row.week_start_date})</div>
+                <div>Required games by size: Small {row.required_games_by_size?.SMALL ?? 0}, Medium {row.required_games_by_size?.MEDIUM ?? 0}, Large {row.required_games_by_size?.LARGE ?? 0}</div>
+                <div>Generated slots by size: Small {row.generated_slots_by_size?.SMALL ?? 0}, Medium {row.generated_slots_by_size?.MEDIUM ?? 0}, Large {row.generated_slots_by_size?.LARGE ?? 0}</div>
+                {row.missing_field_sizes?.length ? <div className='font-semibold text-rose-700'>Missing slot sizes: {row.missing_field_sizes.join(', ')}</div> : null}
+                <div>Host locations evaluated: {row.host_locations_evaluated?.length ? row.host_locations_evaluated.join(', ') : 'None'}</div>
+                {row.generation_reasons?.length ? <ul className='mt-1 list-inside list-disc text-slate-600'>{row.generation_reasons.map((reason: string, reasonIdx: number) => <li key={reasonIdx}>{reason}</li>)}</ul> : null}
+              </div>)}
+            </div>
+          </div> : null}
         </div>
       </details> : null}
     </div>

@@ -358,6 +358,68 @@ class TurfMixedLayoutPlanningTest(unittest.TestCase):
         self.db.commit()
         return host, availability
 
+
+    def test_grass_forecast_without_existing_games_creates_medium_and_large_slots(self):
+        from app.models import GameSlot, HostLocation, HostingAvailability
+        from app.routes.api import _regenerate_generated_slots
+
+        host_date = date(2026, 9, 13)
+        medium_division = Division(id=uuid.uuid4(), division_group='COED', name='4th/5th', required_field_layout_type='MEDIUM', is_active=True)
+        large_division = Division(id=uuid.uuid4(), division_group='COED', name='6th/7th', required_field_layout_type='LARGE', is_active=True)
+        medium_participation = OrganizationDivisionParticipation(id=uuid.uuid4(), organization_id=self.org.id, division_id=medium_division.id, is_participating=True, team_count=4, is_active=True)
+        large_participation = OrganizationDivisionParticipation(id=uuid.uuid4(), organization_id=self.org.id, division_id=large_division.id, is_participating=True, team_count=4, is_active=True)
+        host = HostLocation(
+            id=uuid.uuid4(),
+            organization_id=self.org.id,
+            name='Forecast Grass',
+            surface_type='GRASS_FIELD',
+            max_medium_fields=1,
+            max_large_fields=1,
+            max_total_fields=2,
+            is_active=True,
+        )
+        availability = HostingAvailability(
+            id=uuid.uuid4(),
+            organization_id=self.org.id,
+            host_location_id=host.id,
+            available_date=host_date,
+            start_time=time(9, 0),
+            end_time=time(17, 0),
+            is_available=True,
+        )
+        self.db.add_all([medium_division, large_division, medium_participation, large_participation, host, availability])
+        self.db.commit()
+
+        _regenerate_generated_slots(self.db, availability, host.id)
+        self.db.commit()
+
+        slots = self.db.query(GameSlot).filter(GameSlot.host_location_id == host.id).all()
+        self.assertEqual({slot.field_type for slot in slots}, {'MEDIUM', 'LARGE'})
+        self.assertEqual(sum(1 for slot in slots if slot.field_type == 'MEDIUM'), 8)
+        self.assertEqual(sum(1 for slot in slots if slot.field_type == 'LARGE'), 8)
+
+    def test_turf_participation_forecast_without_existing_games_creates_medium_and_large_slots(self):
+        from app.models import GameSlot
+        from app.routes.api import _regenerate_generated_slots
+
+        host_date = date(2026, 9, 13)
+        medium_division = Division(id=uuid.uuid4(), division_group='GIRLS', name='4th/5th', required_field_layout_type='MEDIUM', is_active=True)
+        large_division = Division(id=uuid.uuid4(), division_group='GIRLS', name='6th/7th/8th', required_field_layout_type='LARGE', is_active=True)
+        medium_participation = OrganizationDivisionParticipation(id=uuid.uuid4(), organization_id=self.org.id, division_id=medium_division.id, is_participating=True, team_count=4, is_active=True)
+        large_participation = OrganizationDivisionParticipation(id=uuid.uuid4(), organization_id=self.org.id, division_id=large_division.id, is_participating=True, team_count=4, is_active=True)
+        self.db.add_all([medium_division, large_division, medium_participation, large_participation])
+        self.db.commit()
+        host, availability = self._add_turf_host_with_availability(host_date)
+
+        _regenerate_generated_slots(self.db, availability, host.id)
+        self.db.commit()
+
+        slots = self.db.query(GameSlot).filter(GameSlot.host_location_id == host.id).all()
+        self.assertIn('MEDIUM', {slot.field_type for slot in slots})
+        self.assertIn('LARGE', {slot.field_type for slot in slots})
+        self.assertTrue(any(slot.field_instance.field_name.startswith('Wave 1 ONE_MEDIUM_TWO_SMALL') for slot in slots if slot.field_type == 'MEDIUM'))
+        self.assertTrue(any(slot.field_instance.field_name.startswith('Wave 2 TWO_LARGE') for slot in slots if slot.field_type == 'LARGE'))
+
     def test_auto_turf_planning_uses_mixed_small_medium_before_large(self):
         from app.models import GameSlot
         from app.routes.api import _regenerate_generated_slots
