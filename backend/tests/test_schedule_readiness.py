@@ -143,6 +143,103 @@ class MultiLocationHostingAvailabilityTest(unittest.TestCase):
         self.assertEqual(grass_site.grass_field_capacity, 1)
         self.assertIsNotNone(turf_site.selected_turf_layout)
 
+
+class GrassFieldForecastTest(unittest.TestCase):
+    def setUp(self):
+        engine = create_engine('sqlite+pysqlite:///:memory:', future=True)
+        Base.metadata.create_all(engine)
+        self.db: Session = sessionmaker(bind=engine)()
+        self.org = Organization(id=uuid.uuid4(), name='Grass Community', is_active=True)
+        self.db.add(self.org)
+        self.db.commit()
+
+    def tearDown(self):
+        self.db.close()
+
+    def _add_grass_host_with_fields(self, field_specs: list[tuple[str, str, bool]]):
+        from app.models import Field, HostLocation
+
+        host = HostLocation(id=uuid.uuid4(), organization_id=self.org.id, name='Grass Complex', surface_type='GRASS_FIELD', is_active=True)
+        self.db.add(host)
+        self.db.flush()
+        fields = [
+            Field(id=uuid.uuid4(), host_location_id=host.id, name=name, layout_type=layout_type, is_active=is_active)
+            for name, layout_type, is_active in field_specs
+        ]
+        self.db.add_all(fields)
+        self.db.commit()
+        return host, fields
+
+    def _add_grass_availability(self, host_id: uuid.UUID, host_date: date, start: time = time(9, 0), end: time = time(12, 0)):
+        from app.models import HostingAvailability
+
+        availability = HostingAvailability(
+            id=uuid.uuid4(),
+            organization_id=self.org.id,
+            host_location_id=host_id,
+            available_date=host_date,
+            start_time=start,
+            end_time=end,
+            is_available=True,
+        )
+        self.db.add(availability)
+        self.db.commit()
+        return availability
+
+    def test_grass_fixed_setup_forecast_uses_active_configured_fields(self):
+        from app.models import GameSlot
+        from app.routes.api import _regenerate_generated_slots
+
+        host_date = date(2026, 9, 19)
+        host, _fields = self._add_grass_host_with_fields([
+            ('Grass Small 1', 'SMALL', True),
+            ('Grass Medium 1', 'MEDIUM', True),
+            ('Grass Large Inactive', 'LARGE', False),
+        ])
+        availability = self._add_grass_availability(host.id, host_date)
+
+        metrics = _regenerate_generated_slots(self.db, availability, host.id)
+        self.db.commit()
+
+        slots = self.db.query(GameSlot).join(GameSlot.field_instance).filter(GameSlot.host_location_id == host.id).all()
+        self.assertEqual(metrics['new_slots_created'], 6)
+        self.assertEqual({slot.field_instance.field_name for slot in slots}, {'Grass Small 1', 'Grass Medium 1'})
+        self.assertEqual({slot.field_type for slot in slots}, {'SMALL', 'MEDIUM'})
+
+        readiness = get_schedule_readiness(current_user=None, db=self.db)
+        host_day = next(row for row in readiness.host_dates if row.host_date == host_date)
+        grass_site = next(site for site in host_day.host_sites if site.host_location_id == host.id)
+        self.assertEqual(grass_site.surface_type, 'GRASS_FIELD')
+        self.assertEqual(grass_site.grass_field_capacity, 2)
+        self.assertCountEqual(grass_site.active_fields, ['Grass Medium 1', 'Grass Small 1'])
+        self.assertEqual(grass_site.field_counts_by_size, {'SMALL': 1, 'MEDIUM': 1, 'LARGE': 0})
+        self.assertEqual(host_day.field_counts_by_size, {'SMALL': 1, 'MEDIUM': 1, 'LARGE': 0})
+
+    def test_grass_fixed_setup_forecast_regenerates_when_fields_change(self):
+        from app.models import Field, GameSlot
+        from app.routes.api import _regenerate_generated_slots
+
+        host_date = date(2026, 9, 20)
+        host, _fields = self._add_grass_host_with_fields([('Grass Small 1', 'SMALL', True)])
+        availability = self._add_grass_availability(host.id, host_date, time(9, 0), time(11, 0))
+        _regenerate_generated_slots(self.db, availability, host.id)
+        self.db.commit()
+
+        self.db.add(Field(id=uuid.uuid4(), host_location_id=host.id, name='Grass Large 1', layout_type='LARGE', is_active=True))
+        self.db.commit()
+        metrics = _regenerate_generated_slots(self.db, availability, host.id)
+        self.db.commit()
+
+        slots = self.db.query(GameSlot).join(GameSlot.field_instance).filter(GameSlot.host_location_id == host.id).all()
+        self.assertEqual(metrics['obsolete_unused_slots_removed'], 2)
+        self.assertEqual(metrics['new_slots_created'], 4)
+        self.assertEqual({slot.field_instance.field_name for slot in slots}, {'Grass Small 1', 'Grass Large 1'})
+
+        readiness = get_schedule_readiness(current_user=None, db=self.db)
+        grass_site = next(site for day in readiness.host_dates for site in day.host_sites if site.host_location_id == host.id)
+        self.assertEqual(grass_site.grass_field_capacity, 2)
+        self.assertEqual(grass_site.field_counts_by_size, {'SMALL': 1, 'MEDIUM': 0, 'LARGE': 1})
+
 class TurfMixedLayoutPlanningTest(unittest.TestCase):
     def setUp(self):
         engine = create_engine('sqlite+pysqlite:///:memory:', future=True)
