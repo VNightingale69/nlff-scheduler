@@ -98,7 +98,7 @@ ALLOWED_SURFACE_TYPES = {'TURF_STADIUM', 'GRASS_FIELD'}
 FIELD_SIZE_SMALL = 'SMALL'
 FIELD_SIZE_MEDIUM = 'MEDIUM'
 FIELD_SIZE_LARGE = 'LARGE'
-FIELD_SIZE_ORDER = (FIELD_SIZE_LARGE, FIELD_SIZE_MEDIUM, FIELD_SIZE_SMALL)
+FIELD_SIZE_ORDER = (FIELD_SIZE_SMALL, FIELD_SIZE_MEDIUM, FIELD_SIZE_LARGE)
 TURF_STADIUM_CONFIGURATIONS = {
     'TWO_LARGE': {
         'configuration_name': '2 Large',
@@ -836,6 +836,75 @@ def _scheduled_game_counts_by_host_community(db: Session, season_id: uuid.UUID |
     return {org_id: int(count or 0) for org_id, count in query.group_by(HostLocation.organization_id).all() if org_id}
 
 
+def _hosting_equity_status(delta: float, expected_games_hosted: float) -> str:
+    tolerance = abs(expected_games_hosted) * 0.10
+    if expected_games_hosted <= 0:
+        tolerance = 0.0
+    if delta < -tolerance:
+        return 'Underused'
+    if delta > tolerance:
+        return 'Overused'
+    return 'Balanced'
+
+
+def _hosting_share_warning_status(delta: float, expected_games_hosted: float) -> str | None:
+    if expected_games_hosted <= 0:
+        return None
+    if delta > expected_games_hosted * 0.25:
+        return 'above'
+    if delta < -(expected_games_hosted * 0.25):
+        return 'below'
+    return None
+
+
+def _scheduled_host_weeks_by_community(db: Session, season_id: uuid.UUID | None = None, up_to_date: date | None = None) -> dict[uuid.UUID, set[date]]:
+    query = db.query(HostLocation.organization_id, GameSlot.slot_date).select_from(Game).join(
+        GameSlot, GameSlot.assigned_game_id == Game.id
+    ).join(HostLocation, HostLocation.id == GameSlot.host_location_id).join(Game.status).filter(
+        GameStatus.code == 'SCHEDULED',
+        GameStatus.is_active.is_(True),
+        HostLocation.organization_id.isnot(None),
+        GameSlot.slot_date.isnot(None),
+    )
+    if season_id:
+        query = query.filter(Game.season_id == season_id)
+    if up_to_date:
+        query = query.filter(GameSlot.slot_date < up_to_date)
+    result: dict[uuid.UUID, set[date]] = {}
+    for org_id, slot_date in query.distinct().all():
+        if org_id and slot_date:
+            result.setdefault(org_id, set()).add(slot_date)
+    return result
+
+
+def _consecutive_host_count_before_date(host_dates: set[date], target_date: date | None) -> int:
+    if not target_date or not host_dates:
+        return 0
+    count = 0
+    cursor = target_date - timedelta(days=7)
+    while cursor in host_dates:
+        count += 1
+        cursor = cursor - timedelta(days=7)
+    return count
+
+
+def _last_hosted_week_label(host_dates: set[date], weeks_by_date: dict[date, int]) -> str | None:
+    if not host_dates:
+        return None
+    last_date = max(host_dates)
+    week_number = weeks_by_date.get(last_date)
+    return f'Week {week_number}' if week_number is not None else str(last_date)
+
+
+def _days_since_last_hosted(host_dates: set[date], target_date: date | None) -> int:
+    if not target_date or not host_dates:
+        return 999_999
+    previous_dates = [host_date for host_date in host_dates if host_date < target_date]
+    if not previous_dates:
+        return 999_999
+    return (target_date - max(previous_dates)).days
+
+
 def _field_size_blocks_from_slots(slots: list[GameSlot]) -> list[str]:
     ordered = sorted(slots, key=lambda slot: (slot.start_time, _field_size_sequence_rank(slot.field_type), str(slot.field_instance_id)))
     blocks: list[str] = []
@@ -1004,6 +1073,8 @@ def _build_hosting_balance_readiness(db: Session) -> list[dict[str, object]]:
     if not available_dates_by_org:
         return []
     hosted_to_date = _scheduled_game_counts_by_host_community(db)
+    host_weeks_by_org = _scheduled_host_weeks_by_community(db)
+    weeks_by_date = {week.start_date: week.week_number for week in db.query(Week).all() if week.start_date}
     hosted_this_week: dict[uuid.UUID, int] = {}
     active_host_dates = sorted({available_date for dates in available_dates_by_org.values() for available_date in dates})
     this_week_query = db.query(HostLocation.organization_id, func.count(Game.id)).select_from(Game).join(
@@ -1019,25 +1090,107 @@ def _build_hosting_balance_readiness(db: Session) -> list[dict[str, object]]:
         hosted_this_week[org_id] = int(count or 0)
     expected_share = (sum(hosted_to_date.values()) / max(len(available_dates_by_org), 1)) if available_dates_by_org else 0.0
     rows = []
+    streak_target_date = (max(active_host_dates) + timedelta(days=7)) if active_host_dates else date.today()
     for org_id in sorted(available_dates_by_org, key=lambda value: org_names.get(value, '')):
         hosted = int(hosted_to_date.get(org_id, 0) or 0)
+        host_dates = host_weeks_by_org.get(org_id, set())
         delta = hosted - expected_share
-        if delta < -0.5:
-            status = 'Underused'
-        elif delta > 0.5:
-            status = 'Overused'
-        else:
-            status = 'Balanced'
         rows.append({
             'community_id': org_id,
             'community': org_names.get(org_id, 'Unknown community'),
             'available_host_dates': len(available_dates_by_org.get(org_id, set())),
+            'available_host_weeks': len(available_dates_by_org.get(org_id, set())),
+            'host_weeks_used': len(host_dates),
             'games_hosted_this_week': int(hosted_this_week.get(org_id, 0) or 0),
             'games_hosted_season_to_date': hosted,
+            'games_hosted': hosted,
             'expected_host_share': round(expected_share, 2),
+            'expected_games_hosted': round(expected_share, 2),
             'hosting_delta': round(delta, 2),
-            'status': status,
+            'last_hosted_week': _last_hosted_week_label(host_dates, weeks_by_date),
+            'consecutive_host_count': _consecutive_host_count_before_date(host_dates, streak_target_date) if host_dates else 0,
+            'status': _hosting_equity_status(delta, expected_share),
         })
+    return rows
+
+
+def _build_hosting_rotation_readiness(db: Session) -> list[dict[str, object]]:
+    availability_rows = db.query(HostingAvailability.available_date, HostLocation.organization_id, Organization.name).join(
+        HostLocation, HostingAvailability.host_location_id == HostLocation.id
+    ).join(Organization, HostLocation.organization_id == Organization.id).filter(
+        HostingAvailability.is_available.is_(True),
+        HostingAvailability.active.is_(True),
+        HostLocation.is_active.is_(True),
+        Organization.is_active.is_(True),
+    ).all()
+    if not availability_rows:
+        return []
+    org_names: dict[uuid.UUID, str] = {}
+    available_orgs_by_date: dict[date, set[uuid.UUID]] = {}
+    for available_date, org_id, org_name in availability_rows:
+        if available_date and org_id:
+            available_orgs_by_date.setdefault(available_date, set()).add(org_id)
+            org_names[org_id] = org_name or 'Unknown community'
+    selected_by_date: dict[date, set[uuid.UUID]] = {}
+    games_by_date_org: dict[tuple[date, uuid.UUID], int] = {}
+    scheduled_rows = db.query(GameSlot.slot_date, HostLocation.organization_id, func.count(Game.id)).select_from(Game).join(
+        GameSlot, GameSlot.assigned_game_id == Game.id
+    ).join(HostLocation, HostLocation.id == GameSlot.host_location_id).join(Game.status).filter(
+        GameStatus.code == 'SCHEDULED',
+        GameStatus.is_active.is_(True),
+        HostLocation.organization_id.isnot(None),
+        GameSlot.slot_date.isnot(None),
+    ).group_by(GameSlot.slot_date, HostLocation.organization_id).all()
+    for slot_date, org_id, count in scheduled_rows:
+        selected_by_date.setdefault(slot_date, set()).add(org_id)
+        games_by_date_org[(slot_date, org_id)] = int(count or 0)
+    rows: list[dict[str, object]] = []
+    cumulative_games = {org_id: 0 for org_id in org_names}
+    cumulative_host_weeks: dict[uuid.UUID, set[date]] = {org_id: set() for org_id in org_names}
+    weeks_by_date = {week.start_date: week.week_number for week in db.query(Week).all() if week.start_date}
+    for host_date in sorted(available_orgs_by_date):
+        available_orgs = available_orgs_by_date[host_date]
+        expected = (sum(cumulative_games.values()) / max(len(available_orgs), 1)) if available_orgs else 0.0
+        ranking = []
+        capacity_by_org: dict[uuid.UUID, int] = {}
+        for org_id, capacity in db.query(HostLocation.organization_id, func.count(GameSlot.id)).select_from(GameSlot).join(
+            HostLocation, HostLocation.id == GameSlot.host_location_id
+        ).filter(GameSlot.slot_date == host_date, HostLocation.organization_id.in_(list(available_orgs))).group_by(HostLocation.organization_id).all():
+            capacity_by_org[org_id] = int(capacity or 0)
+        for org_id in available_orgs:
+            host_dates = cumulative_host_weeks.get(org_id, set())
+            delta = cumulative_games.get(org_id, 0) - expected
+            ranking.append({
+                'community_id': str(org_id),
+                'community': org_names.get(org_id, 'Unknown community'),
+                'host_weeks_used': len(host_dates),
+                'days_since_last_hosted': _days_since_last_hosted(host_dates, host_date),
+                'games_hosted': cumulative_games.get(org_id, 0),
+                'hosting_delta': round(delta, 2),
+                'capacity_score': capacity_by_org.get(org_id, 0),
+                'status': _hosting_equity_status(delta, expected),
+            })
+        ranking.sort(key=lambda item: (item['host_weeks_used'], -item['days_since_last_hosted'], item['games_hosted'], item['hosting_delta'], -item['capacity_score'], item['community']))
+        selected = selected_by_date.get(host_date, set())
+        reason_selected = []
+        reason_skipped = []
+        selected_names = [org_names.get(org_id, 'Unknown community') for org_id in sorted(selected, key=lambda value: org_names.get(value, ''))]
+        selected_set = {str(org_id) for org_id in selected}
+        for index, item in enumerate(ranking, start=1):
+            if item['community_id'] in selected_set:
+                reason_selected.append(f"#{index} {item['community']}: selected; {item['status'].lower()} rotation profile with {item['capacity_score']} available slots")
+            else:
+                reason_skipped.append(f"#{index} {item['community']}: skipped; no games assigned or capacity used elsewhere")
+        rows.append({
+            'week': f"Week {weeks_by_date.get(host_date)}" if weeks_by_date.get(host_date) is not None else str(host_date),
+            'selected_host_communities': selected_names,
+            'rotation_ranking': ranking,
+            'reason_selected': reason_selected,
+            'reason_skipped': reason_skipped,
+        })
+        for org_id in selected:
+            cumulative_host_weeks.setdefault(org_id, set()).add(host_date)
+            cumulative_games[org_id] = cumulative_games.get(org_id, 0) + games_by_date_org.get((host_date, org_id), 0)
     return rows
 
 
@@ -1054,27 +1207,37 @@ def _build_field_configuration_efficiency_readiness(db: Session) -> list[dict[st
         host = grouped_slots[0].host_location
         layouts = sorted({slot.field_instance.hosting_availability.selected_configuration.configuration_name for slot in grouped_slots if slot.field_instance and slot.field_instance.hosting_availability and slot.field_instance.hosting_availability.selected_configuration})
         sizes_by_time: list[str] = []
-        seen_windows: set[tuple[object, str]] = set()
+        sizes_for_time: dict[object, set[str]] = {}
         for slot in sorted(grouped_slots, key=lambda item: (item.start_time, _field_size_sequence_rank(item.field_type))):
             size = _normalize_field_size(slot.field_type) or str(slot.field_type or '')
-            key = (slot.start_time, size)
-            if key not in seen_windows:
-                seen_windows.add(key)
-                sizes_by_time.append(size)
+            sizes_for_time.setdefault(slot.start_time, set()).add(size)
+        for slot_time in sorted(sizes_for_time):
+            size_set = sizes_for_time[slot_time]
+            sizes_by_time.append('MIXED' if len(size_set) > 1 else next(iter(size_set)))
         layout_changes = max(0, len([size for index, size in enumerate(sizes_by_time) if index == 0 or size != sizes_by_time[index - 1]]) - 1)
+        assigned_slots = [slot for slot in grouped_slots if slot.assigned_game_id]
+        unused_capacity = max(0, len(grouped_slots) - len(assigned_slots))
+        small_fields = len({slot.field_instance_id for slot in grouped_slots if _normalize_field_size(slot.field_type) == FIELD_SIZE_SMALL})
+        medium_fields = len({slot.field_instance_id for slot in grouped_slots if _normalize_field_size(slot.field_type) == FIELD_SIZE_MEDIUM})
+        large_fields = len({slot.field_instance_id for slot in grouped_slots if _normalize_field_size(slot.field_type) == FIELD_SIZE_LARGE})
         warnings: list[str] = []
         if (host.surface_type or 'GRASS_FIELD') == 'TURF_STADIUM' and len(layouts) > 1:
             warnings.append('Avoidable reconfiguration risk: multiple turf layouts are present for one host date.')
         if layout_changes > 0 and (host.surface_type or 'GRASS_FIELD') == 'TURF_STADIUM':
-            warnings.append('Group same-size games into continuous Small, Medium, then Large blocks or use one mixed layout concurrently.')
+            warnings.append('Excessive field reconfiguration: group same-size games into continuous Small, Medium, then Large blocks or use one mixed layout concurrently.')
         rows.append({
             'host_location_id': host_id,
             'host_location': host.name if host else str(host_id),
             'host_date': host_date,
             'selected_turf_layout': ', '.join(layouts) if layouts and (host.surface_type or 'GRASS_FIELD') == 'TURF_STADIUM' else None,
+            'small_fields': small_fields,
+            'medium_fields': medium_fields,
+            'large_fields': large_fields,
             'field_size_blocks': _field_size_blocks_from_slots(grouped_slots),
             'layout_changes': layout_changes,
             'transition_windows_required': layout_changes,
+            'transition_windows': [str(size) for size in sizes_by_time],
+            'unused_capacity': unused_capacity,
             'warnings': warnings,
         })
     return rows
@@ -1126,11 +1289,18 @@ def _build_weekly_field_demand_readiness(db: Session) -> list[dict[str, object]]
             row['host_locations'] = list(row['host_locations'].values())
             day_capacity.append(row)
         demand = demand_by_date[host_date]
+        capacity_available = sum(
+            int(row.get('small_capacity') or 0) + int(row.get('medium_capacity') or 0) + int(row.get('large_capacity') or 0)
+            for row in day_capacity
+        )
+        capacity_used = int(demand.get(FIELD_SIZE_SMALL, 0) or 0) + int(demand.get(FIELD_SIZE_MEDIUM, 0) or 0) + int(demand.get(FIELD_SIZE_LARGE, 0) or 0)
         rows.append({
             'host_date': host_date,
             'small_games_required': demand.get(FIELD_SIZE_SMALL, 0),
             'medium_games_required': demand.get(FIELD_SIZE_MEDIUM, 0),
             'large_games_required': demand.get(FIELD_SIZE_LARGE, 0),
+            'capacity_available': capacity_available,
+            'capacity_used': capacity_used,
             'available_capacity_by_community': sorted(day_capacity, key=lambda item: item.get('community') or ''),
         })
     return rows
@@ -1239,6 +1409,35 @@ def get_schedule_readiness(current_user: User = Depends(get_current_user), db: S
     inactive_field_used_count = db.query(Game).join(Game.field_instance).filter(FieldInstance.is_active.is_(False)).count()
     if inactive_field_used_count:
         warnings.append(f"{inactive_field_used_count} scheduled game(s) use inactive generated fields.")
+    for row in _build_hosting_balance_readiness(db):
+        share_warning = _hosting_share_warning_status(float(row.get('hosting_delta') or 0), float(row.get('expected_games_hosted') or row.get('expected_host_share') or 0))
+        if share_warning == 'above':
+            warnings.append(f"{row.get('community')} is more than 25% above expected hosting share.")
+        elif share_warning == 'below':
+            warnings.append(f"{row.get('community')} is more than 25% below expected hosting share.")
+        if int(row.get('consecutive_host_count') or 0) > 2:
+            warnings.append(f"{row.get('community')} has hosted more than 2 consecutive weeks.")
+    for row in _build_hosting_rotation_readiness(db):
+        selected_names = set(row.get('selected_host_communities') or [])
+        for ranking in row.get('rotation_ranking') or []:
+            if ranking.get('status') == 'Underused' and ranking.get('community') not in selected_names:
+                warnings.append(f"{row.get('week')}: available underused community not selected: {ranking.get('community')}.")
+    for row in _build_field_configuration_efficiency_readiness(db):
+        if int(row.get('layout_changes') or 0) > 1:
+            warnings.append(f"Excessive field reconfiguration at {row.get('host_location')} on {row.get('host_date')}.")
+    invalid_field_size_rows = db.query(GameSlot.field_type, Division.required_field_layout_type).select_from(Game).join(
+        GameSlot, GameSlot.assigned_game_id == Game.id
+    ).join(Team, Game.home_team_id == Team.id).join(Division, Team.division_id == Division.id).filter(
+        GameSlot.field_type.isnot(None),
+        Division.required_field_layout_type.isnot(None),
+    ).all()
+    invalid_field_size_total = sum(
+        1
+        for slot_field_type, required_field_layout_type in invalid_field_size_rows
+        if _normalize_field_size(slot_field_type) != _normalize_field_size(required_field_layout_type)
+    )
+    if invalid_field_size_total:
+        warnings.append(f"{invalid_field_size_total} invalid field-size assignment(s) found.")
 
     return ScheduleReadinessResponse(
         rows=rows,
@@ -1254,6 +1453,7 @@ def get_schedule_readiness(current_user: User = Depends(get_current_user), db: S
         warnings=warnings,
         host_dates=_build_host_date_readiness(db),
         hosting_balance=_build_hosting_balance_readiness(db),
+        hosting_rotation=_build_hosting_rotation_readiness(db),
         field_configuration_efficiency=_build_field_configuration_efficiency_readiness(db),
         weekly_field_demand=_build_weekly_field_demand_readiness(db),
     )
@@ -3523,7 +3723,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             away_org_id = game.away_team.organization_id if game.away_team else None
             if home_org_id and away_org_id:
                 prior_week_community_pairs.add(tuple(sorted((home_org_id, away_org_id))))
-    regular_season_host_occurrences_by_community: dict[uuid.UUID, set[tuple[uuid.UUID, date]]] = {}
+    regular_season_host_occurrences_by_community: dict[uuid.UUID, set[date]] = {}
     regular_season_host_occurrences_by_location: dict[uuid.UUID, set[date]] = {}
     if not postseason_week:
         season_scheduled_rows_query = db.query(
@@ -3551,7 +3751,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                 continue
             regular_season_host_occurrences_by_location.setdefault(host_location_id, set()).add(slot_date)
             if host_org_id:
-                regular_season_host_occurrences_by_community.setdefault(host_org_id, set()).add((host_location_id, slot_date))
+                regular_season_host_occurrences_by_community.setdefault(host_org_id, set()).add(slot_date)
     plans = []
     skipped: list[dict[str, str]] = []
     skipped_seen: set[str] = set()
@@ -3630,10 +3830,12 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'host_location_name': slot.host_location.name if slot.host_location else '',
             'owning_community_id': str(slot.host_location.organization_id) if slot.host_location and slot.host_location.organization_id else None,
             'small_field_capacity': 0,
+            'medium_field_capacity': 0,
             'large_field_capacity': 0,
             'total_game_capacity': 0,
             'remaining_unused_capacity': 0,
             'small_fields': set(),
+            'medium_fields': set(),
             'large_fields': set(),
             'current_season_host_count_location': len(regular_season_host_occurrences_by_location.get(slot.host_location_id, set())),
             'current_season_host_count_community': len(regular_season_host_occurrences_by_community.get(slot.host_location.organization_id, set())) if slot.host_location and slot.host_location.organization_id else 0,
@@ -3643,6 +3845,9 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         if slot.field_type == 'SMALL':
             row['small_field_capacity'] += 1
             row['small_fields'].add(str(slot.field_instance_id))
+        elif slot.field_type == 'MEDIUM':
+            row['medium_field_capacity'] += 1
+            row['medium_fields'].add(str(slot.field_instance_id))
         elif slot.field_type == 'LARGE':
             row['large_field_capacity'] += 1
             row['large_fields'].add(str(slot.field_instance_id))
@@ -3675,7 +3880,20 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     total_games_hosted_to_date = sum(community_games_hosted_to_date.values())
     expected_host_share = (total_games_hosted_to_date / max(len(available_host_community_ids), 1)) if available_host_community_ids else 0.0
     hosting_delta_by_org = {org_id: community_games_hosted_to_date.get(org_id, 0) - expected_host_share for org_id in available_host_community_ids}
+    capacity_score_by_org = {
+        org_id: sum(host_capacity_by_id.get(host_id, 0) for host_id in host_ids)
+        for org_id, host_ids in host_ids_by_org.items()
+    }
+    community_rotation_ranking = sorted(available_host_community_ids, key=lambda org_id: (
+        len(regular_season_host_occurrences_by_community.get(org_id, set())),
+        -_days_since_last_hosted(regular_season_host_occurrences_by_community.get(org_id, set()), week.start_date),
+        community_games_hosted_to_date.get(org_id, 0),
+        hosting_delta_by_org.get(org_id, 0.0),
+        -capacity_score_by_org.get(org_id, 0),
+    ))
+    community_rotation_rank_by_org = {org_id: index for index, org_id in enumerate(community_rotation_ranking)}
     host_capacity.sort(key=lambda x: (
+        community_rotation_rank_by_org.get(host_org_by_id.get(x['host_id']), 999),
         hosting_delta_by_org.get(host_org_by_id.get(x['host_id']), 0),
         -(x['slot_count'] >= games_required),
         -(x['slot_count']),
@@ -3993,12 +4211,12 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                         prior_week_community_repeat = bool(community_pair and community_pair in prior_week_community_pairs)
                         community_repeat_count = community_matchup_counts.get(community_pair, 0) if community_pair else 0
     
-                        score = 100
-                        reason_bits = ['scheduled game (+100)']
+                        score = 1000
+                        reason_bits = ['scheduled game (+1000)']
                         warning_bits = []
                         if _normalize_field_size(selected_field_slot.field_type) == _normalize_field_size(required_field_type):
-                            score += 25
-                            reason_bits.append('exact field-size match (+25)')
+                            score += 100
+                            reason_bits.append('exact field-size match (+100)')
                         else:
                             score -= 1000
                             warning_bits.append('incompatible field-size assignment (-1000)')
@@ -4167,22 +4385,22 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                             min_delta = min(hosting_delta_by_org.values(), default=0.0)
                             projected_community_games = projected_games_by_host.get(candidate_host_id, 0)
                             if candidate_delta < 0:
-                                score += 50
-                                reason_bits.append('community below expected hosting share (+50)')
+                                score += 300
+                                reason_bits.append('host week assigned to community below expected share (+300)')
                             if candidate_delta <= min_delta:
-                                score += 15
-                                reason_bits.append('available community has hosted fewer games (+15)')
+                                score += 200
+                                reason_bits.append('improves season-to-date hosting balance (+200)')
                             if candidate_delta > 0:
-                                score -= 75
-                                warning_bits.append('community already above expected hosting share (-75)')
+                                score -= 200
+                                warning_bits.append('community already above expected hosting share (-200)')
                             if projected_community_games > 0 and any(
                                 hosting_delta_by_org.get(other_org_id, 0.0) < candidate_delta
                                 and any(s.host_location_id in host_ids_by_org.get(other_org_id, set()) for s in remaining_slots)
                                 for other_org_id in available_host_community_ids
                                 if other_org_id != candidate_host_org_id
                             ):
-                                score -= 250
-                                warning_bits.append('unnecessary extra use of already-used host community while underused communities have capacity (-250)')
+                                score -= 750
+                                warning_bits.append('overuse one host location while other communities are available (-750)')
 
                         if candidate_host_id and candidate_host_org_id and not postseason_week:
                             location_host_count = len(regular_season_host_occurrences_by_location.get(candidate_host_id, set()))
@@ -4190,10 +4408,10 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                             min_location_host_count = min((len(v) for v in regular_season_host_occurrences_by_location.values()), default=0)
                             min_community_host_count = min((len(v) for v in regular_season_host_occurrences_by_community.values()), default=0)
                             if location_host_count == min_location_host_count or community_host_count == min_community_host_count:
-                                score += 120
-                                reason_bits.append('fewest season host assignments (+120)')
+                                score += 500
+                                reason_bits.append('assign game to underused/fewest-host-weeks community (+500)')
                             projected_location_count = location_host_count + (0 if slot.slot_date in regular_season_host_occurrences_by_location.get(candidate_host_id, set()) else 1)
-                            projected_community_count = community_host_count + (0 if (candidate_host_org_id and (candidate_host_id, slot.slot_date) in regular_season_host_occurrences_by_community.get(candidate_host_org_id, set())) else 1)
+                            projected_community_count = community_host_count + (0 if (candidate_host_org_id and slot.slot_date in regular_season_host_occurrences_by_community.get(candidate_host_org_id, set())) else 1)
                             all_projected_location_counts = [len(v) for v in regular_season_host_occurrences_by_location.values()]
                             all_projected_community_counts = [len(v) for v in regular_season_host_occurrences_by_community.values()]
                             all_projected_location_counts.append(projected_location_count)
@@ -4202,8 +4420,24 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                                 loc_spread = max(all_projected_location_counts) - min(all_projected_location_counts)
                                 comm_spread = max(all_projected_community_counts) - min(all_projected_community_counts)
                                 if loc_spread <= 1 and comm_spread <= 1:
-                                    score += 80
-                                    reason_bits.append('balanced host distribution (+80)')
+                                    score += 200
+                                    reason_bits.append('improves season-to-date hosting balance (+200)')
+                            consecutive_count = _consecutive_host_count_before_date(regular_season_host_occurrences_by_community.get(candidate_host_org_id, set()), slot.slot_date)
+                            if consecutive_count > 0:
+                                alternative_non_consecutive_exists = any(
+                                    alt_org_id != candidate_host_org_id
+                                    and _consecutive_host_count_before_date(regular_season_host_occurrences_by_community.get(alt_org_id, set()), slot.slot_date) == 0
+                                    and any(s.host_location_id in host_ids_by_org.get(alt_org_id, set()) for s in remaining_slots)
+                                    for alt_org_id in available_host_community_ids
+                                )
+                                if alternative_non_consecutive_exists:
+                                    score -= 300
+                                    warning_bits.append('consecutive host week when alternatives exist (-300)')
+                                else:
+                                    reason_bits.append('consecutive hosting allowed: no valid non-consecutive alternative')
+                            if _days_since_last_hosted(regular_season_host_occurrences_by_community.get(candidate_host_org_id, set()), slot.slot_date) >= 14:
+                                score += 250
+                                reason_bits.append('community has not hosted recently (+250)')
                             if projected_location_count > regular_season_host_limit or projected_community_count > regular_season_host_limit:
                                 alternative_under_limit_exists = False
                                 for alternative_slot in remaining_slots:
@@ -4215,13 +4449,13 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                                     alt_loc_count = len(regular_season_host_occurrences_by_location.get(alt_host_id, set()))
                                     alt_comm_count = len(regular_season_host_occurrences_by_community.get(alt_org_id, set())) if alt_org_id else 0
                                     alt_projected_loc = alt_loc_count + (0 if alternative_slot.slot_date in regular_season_host_occurrences_by_location.get(alt_host_id, set()) else 1)
-                                    alt_projected_comm = alt_comm_count + (0 if (alt_org_id and (alt_host_id, alternative_slot.slot_date) in regular_season_host_occurrences_by_community.get(alt_org_id, set())) else 1)
+                                    alt_projected_comm = alt_comm_count + (0 if (alt_org_id and alternative_slot.slot_date in regular_season_host_occurrences_by_community.get(alt_org_id, set())) else 1)
                                     if alt_projected_loc <= regular_season_host_limit and alt_projected_comm <= regular_season_host_limit:
                                         alternative_under_limit_exists = True
                                         break
                                 if alternative_under_limit_exists:
-                                    score -= 150
-                                    warning_bits.append('third regular-season host occurrence while alternatives exist (-150)')
+                                    score -= 300
+                                    warning_bits.append('host rotation fairness penalty while alternatives exist (-300)')
                                 else:
                                     reason_bits.append('host rotation limit relaxed: no valid under-limit alternative for this slot')
                         if split_host_week and candidate_host_id:
@@ -4494,7 +4728,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                 regular_season_host_occurrences_by_location.setdefault(selected_field_slot.host_location_id, set()).add(selected_field_slot.slot_date)
                 selected_host_org_id = selected_field_slot.host_location.organization_id if selected_field_slot.host_location else None
                 if selected_host_org_id:
-                    regular_season_host_occurrences_by_community.setdefault(selected_host_org_id, set()).add((selected_field_slot.host_location_id, selected_field_slot.slot_date))
+                    regular_season_host_occurrences_by_community.setdefault(selected_host_org_id, set()).add(selected_field_slot.slot_date)
             if not preferred_host_id:
                 preferred_host_id = selected_field_slot.host_location_id
             for team_id in (best['home_team_id'], best['away_team_id']):
@@ -4822,6 +5056,17 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'eligible_pairings_generated': len(plans),
             'compatible_slots_found': compatible_slots_found,
             'postseason_host_limit_exempt': postseason_week,
+            'host_rotation_ranking': [
+                {
+                    'community_id': str(org_id),
+                    'host_weeks_used': len(regular_season_host_occurrences_by_community.get(org_id, set())),
+                    'days_since_last_hosted': _days_since_last_hosted(regular_season_host_occurrences_by_community.get(org_id, set()), week.start_date),
+                    'games_hosted_to_date': community_games_hosted_to_date.get(org_id, 0),
+                    'hosting_delta': round(hosting_delta_by_org.get(org_id, 0.0), 2),
+                    'capacity_score': capacity_score_by_org.get(org_id, 0),
+                }
+                for org_id in community_rotation_ranking
+            ],
             'total_host_occurrences_by_community': [
                 {'community_id': str(org_id), 'host_occurrences': len(occurrences)}
                 for org_id, occurrences in regular_season_host_occurrences_by_community.items()
