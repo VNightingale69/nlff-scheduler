@@ -418,6 +418,49 @@ class AutoFillPreviewTest(unittest.TestCase):
         self.assertEqual(result['proposed_game_count'], 3)
         self.assertTrue(any('Accepted as required double header due to odd team count' in row['reason'] for row in result['proposals']))
 
+    def test_odd_large_division_adds_overflow_host_for_adjacent_doubleheader(self):
+        large_division = Division(id=uuid.uuid4(), division_group='COED', name='6th/7th', required_field_layout_type='LARGE', is_active=True)
+        antioch_host = HostLocation(id=uuid.uuid4(), organization_id=self.org_a.id, name='Antioch Large Complex', is_active=True)
+        self.db.add_all([large_division, antioch_host])
+        teams = [
+            Team(id=uuid.uuid4(), organization_id=self.org_a.id, division_id=large_division.id, name='Antioch 6th/7th Gold', is_active=True),
+            Team(id=uuid.uuid4(), organization_id=self.org_a.id, division_id=large_division.id, name="J'Burg 6th/7th Blue", is_active=True),
+            Team(id=uuid.uuid4(), organization_id=self.org_w.id, division_id=large_division.id, name='Lake County Stallions 6th/7th Black', is_active=True),
+            Team(id=uuid.uuid4(), organization_id=self.org_w.id, division_id=large_division.id, name='Lake County Stallions 6th/7th Red', is_active=True),
+            Team(id=uuid.uuid4(), organization_id=self.org_w.id, division_id=large_division.id, name='Westosha 6th/7th Maroon', is_active=True),
+        ]
+        self.db.add_all(teams)
+        # Westosha is the selected rotation community and has enough large slots by count,
+        # but not enough adjacent same-site capacity for the mandatory odd-team doubleheader.
+        for hour in (9, 11, 13):
+            fi = FieldInstance(id=uuid.uuid4(), host_location_id=self.host.id, hosting_availability_id=uuid.uuid4(), instance_date=self.week2.start_date, field_name=f'Westosha Large {hour}', field_type='LARGE', is_active=True)
+            slot = GameSlot(id=uuid.uuid4(), field_instance_id=fi.id, host_location_id=self.host.id, slot_date=self.week2.start_date, start_time=time(hour, 0), end_time=time(hour + 1, 0), field_type='LARGE', status='OPEN')
+            self.db.add_all([fi, slot])
+        # Antioch supplies compatible back-to-back large slots and must be added instead of omitting the division.
+        for hour in (9, 10, 11):
+            fi = FieldInstance(id=uuid.uuid4(), host_location_id=antioch_host.id, hosting_availability_id=uuid.uuid4(), instance_date=self.week2.start_date, field_name=f'Antioch Large {hour}', field_type='LARGE', is_active=True)
+            slot = GameSlot(id=uuid.uuid4(), field_instance_id=fi.id, host_location_id=antioch_host.id, slot_date=self.week2.start_date, start_time=time(hour, 0), end_time=time(hour + 1, 0), field_type='LARGE', status='OPEN')
+            self.db.add_all([fi, slot])
+        self.db.commit()
+
+        result = auto_fill_preview({'season_id': self.season.id, 'week_id': self.week2.id, 'division_id': large_division.id, 'no_byes': True}, db=self.db)
+
+        self.assertEqual(result['max_allowed_game_count'], 3)
+        self.assertEqual(result['generated_required_game_groups'], 3)
+        self.assertEqual(result['proposed_game_count'], 3)
+        self.assertTrue(all(row['field_type'] == 'LARGE' for row in result['proposals']))
+        team_counts: dict[str, int] = {}
+        for row in result['proposals']:
+            team_counts[row['home_team_id']] = team_counts.get(row['home_team_id'], 0) + 1
+            team_counts[row['away_team_id']] = team_counts.get(row['away_team_id'], 0) + 1
+        self.assertEqual(len(team_counts), 5)
+        doubleheader_team_ids = [team_id for team_id, count in team_counts.items() if count == 2]
+        self.assertEqual(len(doubleheader_team_ids), 1)
+        dh_games = [row for row in result['proposals'] if doubleheader_team_ids[0] in {row['home_team_id'], row['away_team_id']}]
+        self.assertEqual(len({row['host_location_id'] for row in dh_games}), 1)
+        starts = sorted(int(row['proposed_start_time'].split(':')[0]) for row in dh_games)
+        self.assertEqual(starts[1] - starts[0], 1)
+
     def test_apply_odd_division_uses_later_compatible_slot_when_adjacent_unavailable(self):
         odd_team = Team(id=uuid.uuid4(), organization_id=self.org_w.id, division_id=self.division.id, name='Westosha White', is_active=True)
         self.db.add(odd_team)
