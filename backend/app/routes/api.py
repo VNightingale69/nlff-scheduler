@@ -2428,10 +2428,15 @@ def _host_availability_matrix_response(db: Session, season_id: uuid.UUID) -> dic
         game_date = date_info['game_date']
         selected_rows = []
         excluded_rows = []
+        available_locations = []
+        available_communities: set[str] = set()
         capacity = {FIELD_SIZE_SMALL: 0, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_LARGE: 0}
         community_split: dict[str, int] = {}
         for row in rows:
             cell = row['cells'][str(game_date)]
+            if cell.get('has_saved_availability') or cell['status'] == 'OVERFLOW':
+                available_communities.add(row['community_name'])
+                available_locations.append({'community_name': row['community_name'], 'host_location_name': row['host_location_name']})
             if cell['status'] in HOST_PLAN_SCHEDULABLE_STATUSES or cell.get('locked'):
                 selected_rows.append({'community_name': row['community_name'], 'host_location_name': row['host_location_name']})
                 for size in capacity:
@@ -2452,7 +2457,10 @@ def _host_availability_matrix_response(db: Session, season_id: uuid.UUID) -> dic
             **date_info,
             'total_games_required': total_required,
             'games_required_by_size': required_by_size,
+            'available_communities': sorted(available_communities),
+            'available_locations': available_locations,
             'selected_communities': sorted(community_split),
+            'expected_host_communities': sorted(community_split),
             'selected_fields': selected_rows,
             'excluded_available_fields': excluded_rows,
             'estimated_capacity_by_field_size': capacity,
@@ -2462,8 +2470,8 @@ def _host_availability_matrix_response(db: Session, season_id: uuid.UUID) -> dic
     return {'season': {'id': season.id, 'name': season.name}, 'dates': dates, 'rows': rows, 'summaries': summaries, 'status_options': sorted(HOST_PLAN_SELECTION_STATUSES)}
 
 
-@router.get('/host-availability-matrix', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
-def get_host_availability_matrix(season_id: uuid.UUID, db: Session = Depends(get_db)):
+@router.get('/host-availability-matrix')
+def get_host_availability_matrix(season_id: uuid.UUID, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     return _host_availability_matrix_response(db, season_id)
 
 

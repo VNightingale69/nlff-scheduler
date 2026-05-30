@@ -35,6 +35,9 @@ type MatrixRow = {
 
 type WeeklySummary = MatrixDate & {
   total_games_required: number;
+  available_communities?: string[];
+  available_locations?: Array<{ community_name: string; host_location_name: string }>;
+  expected_host_communities?: string[];
   games_required_by_size: Record<string, number>;
   selected_communities: string[];
   selected_fields: Array<{ community_name: string; host_location_name: string }>;
@@ -99,6 +102,9 @@ export default function HostAvailabilityMatrix() {
   const [seasonId, setSeasonId] = useState('');
   const [matrix, setMatrix] = useState<MatrixResponse>(emptyMatrix());
   const [selectedDate, setSelectedDate] = useState('');
+  const [weekFilterDate, setWeekFilterDate] = useState('');
+  const [communityFilter, setCommunityFilter] = useState('');
+  const [locationFilter, setLocationFilter] = useState('');
   const [dirtyCells, setDirtyCells] = useState<Record<string, MatrixCell>>({});
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -110,6 +116,7 @@ export default function HostAvailabilityMatrix() {
   }, []);
 
   const canModifyMatrix = currentUser?.email?.trim().toLowerCase() === HOST_PLAN_SELECTION_ADMIN_EMAIL;
+
 
   useEffect(() => {
     apiFetch('/seasons?page_size=100', {}, token).then((res: any) => {
@@ -131,6 +138,7 @@ export default function HostAvailabilityMatrix() {
       setMatrix(res);
       const params = new URLSearchParams(window.location.search);
       const requestedDate = params.get('game_date') || params.get('start_date');
+      if (requestedDate && res.dates.some((date) => date.game_date === requestedDate)) setWeekFilterDate(requestedDate);
       setSelectedDate((current) => {
         if (requestedDate && res.dates.some((date) => date.game_date === requestedDate)) return requestedDate;
         if (current && res.dates.some((date) => date.game_date === current)) return current;
@@ -154,19 +162,74 @@ export default function HostAvailabilityMatrix() {
     [matrix.summaries, selectedDate]
   );
 
+  const filteredDates = useMemo(() => {
+    if (!weekFilterDate) return matrix.dates;
+    return matrix.dates.filter((date) => date.game_date === weekFilterDate);
+  }, [matrix.dates, weekFilterDate]);
+
+  const filteredRows = useMemo(() => {
+    const communityNeedle = communityFilter.trim().toLowerCase();
+    const locationNeedle = locationFilter.trim().toLowerCase();
+    return matrix.rows.filter((row) => {
+      const communityMatch = !communityNeedle || row.community_name.toLowerCase().includes(communityNeedle);
+      const locationMatch = !locationNeedle || row.host_location_name.toLowerCase().includes(locationNeedle);
+      return communityMatch && locationMatch;
+    });
+  }, [communityFilter, locationFilter, matrix.rows]);
+
   const groupedRows = useMemo(() => {
     const groups: Array<{ community: string; rows: MatrixRow[] }> = [];
-    for (const row of matrix.rows) {
+    for (const row of filteredRows) {
       const last = groups[groups.length - 1];
       if (!last || last.community !== row.community_name) groups.push({ community: row.community_name, rows: [row] });
       else last.rows.push(row);
     }
     return groups;
-  }, [matrix.rows]);
+  }, [filteredRows]);
 
   const cellKey = (row: MatrixRow, date: MatrixDate) => `${row.host_location_id}:${date.game_date}`;
 
   const getCell = (row: MatrixRow, date: MatrixDate) => dirtyCells[cellKey(row, date)] || row.cells[date.game_date] || { status: 'BLANK', locked: false, reason: null, availability_id: null, has_saved_availability: false, available_slot_count: 0, capacity_by_size: {} };
+
+  const selectedSummaryDetails = useMemo(() => {
+    if (!selectedDate) return null;
+    const availableCommunities = new Set<string>();
+    const availableLocations: Array<{ community_name: string; host_location_name: string }> = [];
+    const selectedLocations: Array<{ community_name: string; host_location_name: string }> = [];
+    const excludedLocations: Array<{ community_name: string; host_location_name: string }> = [];
+    const capacity = { SMALL: 0, MEDIUM: 0, LARGE: 0 };
+
+    for (const row of filteredRows) {
+      const date = matrix.dates.find((item) => item.game_date === selectedDate);
+      if (!date) continue;
+      const cell = getCell(row, date);
+      const status = cell.locked ? 'LOCKED' : cell.status;
+      if (cell.has_saved_availability || status === 'OVERFLOW') {
+        availableCommunities.add(row.community_name);
+        availableLocations.push({ community_name: row.community_name, host_location_name: row.host_location_name });
+      }
+      if (['SELECTED', 'LOCKED', 'OVERFLOW'].includes(status)) {
+        selectedLocations.push({ community_name: row.community_name, host_location_name: row.host_location_name });
+        for (const size of Object.keys(capacity) as Array<keyof typeof capacity>) {
+          capacity[size] += Number((cell.capacity_by_size || row.capacity_by_size || {})[size] || 0);
+        }
+      }
+      if (status === 'EXCLUDED') excludedLocations.push({ community_name: row.community_name, host_location_name: row.host_location_name });
+    }
+
+    return {
+      availableCommunities: Array.from(availableCommunities).sort(),
+      availableLocations,
+      selectedLocations,
+      excludedLocations,
+      capacity,
+      expectedHostCommunities: Array.from(new Set(selectedLocations.map((field) => field.community_name))).sort(),
+    };
+  }, [dirtyCells, filteredRows, matrix.dates, selectedDate]);
+
+  const visibleSelectedFields = selectedSummaryDetails?.selectedLocations || selectedSummary?.selected_fields || [];
+  const visibleExcludedFields = selectedSummaryDetails?.excludedLocations || selectedSummary?.excluded_available_fields || [];
+  const visibleCapacity: Record<string, number> = selectedSummaryDetails?.capacity || selectedSummary?.estimated_capacity_by_field_size || {};
 
   const updateCell = (row: MatrixRow, date: MatrixDate, cell: MatrixCell) => {
     setDirtyCells((prev) => ({ ...prev, [cellKey(row, date)]: cell }));
@@ -199,12 +262,16 @@ export default function HostAvailabilityMatrix() {
     }
     setSelectedDate(date.game_date);
     const cell = getCell(row, date);
-    const action = window.prompt('Cell menu: type LOCK, OVERFLOW, NOTE, or CLEAR', cell.status === 'OVERFLOW' ? 'CLEAR' : 'OVERFLOW');
+    const action = window.prompt('Cell menu: type LOCK, UNLOCK, OVERFLOW, NOTE, or CLEAR', cell.locked || cell.status === 'LOCKED' ? 'UNLOCK' : 'OVERFLOW');
     const normalized = (action || '').trim().toUpperCase();
     if (!normalized) return;
     if (normalized === 'LOCK') {
       if (!cell.has_saved_availability && cell.status === 'BLANK') return;
       updateCell(row, date, { ...cell, status: 'LOCKED', locked: true });
+      return;
+    }
+    if (normalized === 'UNLOCK') {
+      updateCell(row, date, { ...cell, status: cell.status === 'LOCKED' ? 'SELECTED' : cell.status, locked: false });
       return;
     }
     if (normalized === 'OVERFLOW') {
@@ -301,6 +368,23 @@ export default function HostAvailabilityMatrix() {
         </select>
       </div>
       {!canModifyMatrix ? <div className='mt-4 rounded bg-amber-50 p-3 text-sm font-medium text-amber-900'>{HOST_PLAN_SELECTION_PERMISSION_MESSAGE}</div> : null}
+      <div className='mt-4 grid gap-3 md:grid-cols-4'>
+        <label className='text-sm font-medium text-slate-700'>Weekly filter
+          <select className='mt-1 w-full rounded border p-2 font-normal' value={weekFilterDate} onChange={(e) => { setWeekFilterDate(e.target.value); if (e.target.value) setSelectedDate(e.target.value); }}>
+            <option value=''>All season dates</option>
+            {matrix.dates.map((date) => <option key={date.game_date} value={date.game_date}>Week {date.week_number ?? '—'} · {formatDate(date.game_date)}</option>)}
+          </select>
+        </label>
+        <label className='text-sm font-medium text-slate-700'>Filter by community
+          <input className='mt-1 w-full rounded border p-2 font-normal' placeholder='Search community…' value={communityFilter} onChange={(e) => setCommunityFilter(e.target.value)} />
+        </label>
+        <label className='text-sm font-medium text-slate-700'>Filter by location
+          <input className='mt-1 w-full rounded border p-2 font-normal' placeholder='Search location…' value={locationFilter} onChange={(e) => setLocationFilter(e.target.value)} />
+        </label>
+        <div className='flex items-end'>
+          <button className='rounded border px-3 py-2 text-sm font-semibold text-slate-700' onClick={() => { setWeekFilterDate(''); setCommunityFilter(''); setLocationFilter(''); }}>Clear Filters</button>
+        </div>
+      </div>
       <div className='mt-4 flex flex-wrap gap-2'>
         <button className='rounded bg-indigo-600 px-3 py-2 text-sm font-semibold text-white disabled:bg-slate-300' disabled={!canModifyMatrix || !selectedDate} onClick={() => runAction('generate')}>Generate Suggested Host Plan</button>
         <button className='rounded bg-emerald-700 px-3 py-2 text-sm font-semibold text-white disabled:bg-slate-300' disabled={!canModifyMatrix || saving || !Object.keys(dirtyCells).length} onClick={saveChanges}>Save Matrix Changes</button>
@@ -310,7 +394,7 @@ export default function HostAvailabilityMatrix() {
         <button className='rounded bg-slate-900 px-3 py-2 text-sm font-semibold text-white disabled:bg-slate-300' disabled={!canModifyMatrix || !seasonId} onClick={() => runAction('auto')}>Run Auto-Schedule Using Selected Fields</button>
       </div>
       <div className='mt-3 flex flex-wrap gap-3 text-xs text-slate-600'>
-        <span><b>Blank</b> = not available</span><span><b>X</b> = available</span><span><b>✓</b> = selected</span><span><b>O</b> = excluded</span><span><b>P</b> = playoff/championship date</span><span><b>L</b> = locked</span>{canModifyMatrix ? <><span><b>Shift-click</b> = lock/unlock</span><span><b>Right-click</b> = overflow/note menu</span></> : <span><b>Read-only</b> = editing disabled</span>}
+        <span><b>Blank</b> = not available</span><span><b>X</b> = available</span><span><b>✓</b> = selected for auto-schedule</span><span><b>O</b> = excluded</span><span><b>P</b> = playoff/championship date</span><span><b>L</b> = locked</span>{canModifyMatrix ? <><span><b>Click</b> = available → selected → excluded</span><span><b>Shift-click</b> = lock/unlock</span><span><b>Right-click</b> = lock, unlock, overflow, or note</span></> : <span><b>Read-only</b> = editing disabled</span>}
       </div>
       {message ? <div className='mt-3 rounded bg-emerald-50 p-2 text-sm text-emerald-800'>{message}</div> : null}
       {error ? <div className='mt-3 rounded bg-rose-50 p-2 text-sm text-rose-800'>{error}</div> : null}
@@ -323,16 +407,16 @@ export default function HostAvailabilityMatrix() {
             <tr>
               <th className='sticky left-0 z-20 border-b bg-slate-100 px-3 py-2 text-left'>Community</th>
               <th className='sticky left-36 z-20 border-b bg-slate-100 px-3 py-2 text-left'>Host Location</th>
-              {matrix.dates.map((date) => <th key={date.game_date} className={`border-b px-2 py-2 text-center ${date.is_postseason ? 'bg-amber-100 font-bold text-amber-900' : ''}`}>
+              {filteredDates.map((date) => <th key={date.game_date} className={`border-b px-2 py-2 text-center ${date.is_postseason ? 'bg-amber-100 font-bold text-amber-900' : ''}`}>
                 <button className='min-w-16' onClick={() => setSelectedDate(date.game_date)}>{date.is_postseason ? 'P ' : ''}{formatDate(date.game_date)}</button>
               </th>)}
             </tr>
           </thead>
           <tbody>
-            {loading ? <tr><td className='p-4 text-slate-500' colSpan={matrix.dates.length + 2}>Loading matrix…</td></tr> : groupedRows.map((group) => group.rows.map((row, index) => <tr key={row.host_location_id} className='border-t'>
+            {loading ? <tr><td className='p-4 text-slate-500' colSpan={filteredDates.length + 2}>Loading matrix…</td></tr> : groupedRows.map((group) => group.rows.map((row, index) => <tr key={row.host_location_id} className='border-t'>
               <td className='sticky left-0 bg-white px-3 py-2 font-semibold text-slate-800'>{index === 0 ? group.community : ''}</td>
               <td className='sticky left-36 bg-white px-3 py-2 text-slate-700'>{row.host_location_name}<div className='text-xs text-slate-400'>{row.surface_type}</div></td>
-              {matrix.dates.map((date) => {
+              {filteredDates.map((date) => {
                 const cell = getCell(row, date);
                 const status = cell.locked ? 'LOCKED' : cell.status;
                 const classes = CELL_CLASSES[status] || CELL_CLASSES.AVAILABLE;
@@ -347,6 +431,7 @@ export default function HostAvailabilityMatrix() {
                 </td>;
               })}
             </tr>))}
+            {!loading && !filteredRows.length ? <tr><td className='p-4 text-slate-500' colSpan={filteredDates.length + 2}>No host locations match the current filters.</td></tr> : null}
           </tbody>
         </table>
       </div>
@@ -359,20 +444,28 @@ export default function HostAvailabilityMatrix() {
             <div className='text-slate-500'>{selectedSummary.label}{selectedSummary.is_postseason ? ' • Playoff/Championship' : ''}</div>
           </div>
           <div className='grid grid-cols-2 gap-2'>
+            <div className='rounded bg-slate-50 p-2'><div className='text-xs text-slate-500'>Available communities</div><div className='text-lg font-bold'>{selectedSummaryDetails?.availableCommunities.length ?? selectedSummary.available_communities?.length ?? 0}</div></div>
+            <div className='rounded bg-slate-50 p-2'><div className='text-xs text-slate-500'>Available locations</div><div className='text-lg font-bold'>{selectedSummaryDetails?.availableLocations.length ?? selectedSummary.available_locations?.length ?? 0}</div></div>
+            <div className='rounded bg-slate-50 p-2'><div className='text-xs text-slate-500'>Selected locations</div><div className='text-lg font-bold'>{visibleSelectedFields.length}</div></div>
+            <div className='rounded bg-slate-50 p-2'><div className='text-xs text-slate-500'>Excluded locations</div><div className='text-lg font-bold'>{visibleExcludedFields.length}</div></div>
             <div className='rounded bg-slate-50 p-2'><div className='text-xs text-slate-500'>Total games required</div><div className='text-lg font-bold'>{selectedSummary.total_games_required}</div></div>
-            {['SMALL', 'MEDIUM', 'LARGE'].map((size) => <div key={size} className='rounded bg-slate-50 p-2'><div className='text-xs text-slate-500'>{size.charAt(0) + size.slice(1).toLowerCase()} games</div><div className='font-bold'>{selectedSummary.games_required_by_size[size] || 0}</div></div>)}
+            {['SMALL', 'MEDIUM', 'LARGE'].map((size) => <div key={size} className='rounded bg-slate-50 p-2'><div className='text-xs text-slate-500'>{size.charAt(0) + size.slice(1).toLowerCase()} capacity</div><div className='font-bold'>{visibleCapacity[size] || 0}</div></div>)}
           </div>
           <section>
             <h3 className='font-semibold'>Selected</h3>
-            <ul className='mt-1 list-disc pl-5 text-slate-700'>{selectedSummary.selected_fields.map((field) => <li key={`${field.community_name}-${field.host_location_name}`}>{field.community_name} / {field.host_location_name}</li>)}{!selectedSummary.selected_fields.length ? <li className='text-slate-400'>No selected fields.</li> : null}</ul>
+            <ul className='mt-1 list-disc pl-5 text-slate-700'>{visibleSelectedFields.map((field) => <li key={`${field.community_name}-${field.host_location_name}`}>{field.community_name} / {field.host_location_name}</li>)}{!visibleSelectedFields.length ? <li className='text-slate-400'>No selected fields.</li> : null}</ul>
           </section>
           <section>
             <h3 className='font-semibold'>Excluded available fields</h3>
-            <ul className='mt-1 list-disc pl-5 text-slate-700'>{selectedSummary.excluded_available_fields.map((field) => <li key={`${field.community_name}-${field.host_location_name}`}>{field.community_name} / {field.host_location_name}</li>)}{!selectedSummary.excluded_available_fields.length ? <li className='text-slate-400'>None.</li> : null}</ul>
+            <ul className='mt-1 list-disc pl-5 text-slate-700'>{visibleExcludedFields.map((field) => <li key={`${field.community_name}-${field.host_location_name}`}>{field.community_name} / {field.host_location_name}</li>)}{!visibleExcludedFields.length ? <li className='text-slate-400'>None.</li> : null}</ul>
           </section>
           <section>
             <h3 className='font-semibold'>Estimated capacity by field size</h3>
-            <div className='mt-1 grid grid-cols-3 gap-2'>{['SMALL', 'MEDIUM', 'LARGE'].map((size) => <div key={size} className='rounded border p-2 text-center'><div className='text-xs text-slate-500'>{size}</div><div className='font-bold'>{selectedSummary.estimated_capacity_by_field_size[size] || 0}</div></div>)}</div>
+            <div className='mt-1 grid grid-cols-3 gap-2'>{['SMALL', 'MEDIUM', 'LARGE'].map((size) => <div key={size} className='rounded border p-2 text-center'><div className='text-xs text-slate-500'>{size}</div><div className='font-bold'>{visibleCapacity[size] || 0}</div></div>)}</div>
+          </section>
+          <section>
+            <h3 className='font-semibold'>Expected host communities</h3>
+            <ul className='mt-1 list-disc pl-5 text-slate-700'>{(selectedSummaryDetails?.expectedHostCommunities || selectedSummary.expected_host_communities || selectedSummary.selected_communities).map((community) => <li key={community}>{community}</li>)}{!(selectedSummaryDetails?.expectedHostCommunities || selectedSummary.expected_host_communities || selectedSummary.selected_communities).length ? <li className='text-slate-400'>No expected host communities.</li> : null}</ul>
           </section>
           <section>
             <h3 className='font-semibold'>Target game split</h3>
