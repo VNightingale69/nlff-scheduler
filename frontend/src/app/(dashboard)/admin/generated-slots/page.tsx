@@ -16,6 +16,7 @@ export default function GeneratedSlotsPage() {
   const [slots, setSlots] = useState<any[]>([]);
   const [fieldInstances, setFieldInstances] = useState<any[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [isClearing, setIsClearing] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const [results, setResults] = useState<any[]>([]);
@@ -74,6 +75,34 @@ export default function GeneratedSlotsPage() {
     }
   };
 
+  const onClear = async () => {
+    if (!hostId) {
+      setError('Select a host location before clearing slots.');
+      setMessage('');
+      return;
+    }
+
+    const confirmed = window.confirm('Clear generated slots for this host location? This will remove unassigned generated slots. Slots or field instances referenced by scheduled games will be preserved.');
+    if (!confirmed) return;
+
+    setIsClearing(true);
+    setMessage('Clearing slots...');
+    setError('');
+    try {
+      const response: any = await apiFetch(`/generated-game-slots?host_location_id=${encodeURIComponent(hostId)}`, { method: 'DELETE' }, token);
+      const warning = response?.warning ? ` ${response.warning}` : '';
+      setMessage(`Cleared ${response?.slots_deleted ?? 0} generated slots and ${response?.field_instances_deleted ?? 0} field instances. Preserved ${response?.field_instances_preserved ?? 0} field instances and ${response?.games_preserved ?? 0} scheduled games.${warning}`);
+      setResults([]);
+      await loadHostData(hostId);
+    } catch (e: any) {
+      const detail = e?.message || 'Failed to clear slots';
+      setError(detail);
+      setMessage('');
+    } finally {
+      setIsClearing(false);
+    }
+  };
+
   return (
     <div className='space-y-4'>
       <h1 className='text-2xl font-bold'>Generated Slots</h1>
@@ -81,8 +110,11 @@ export default function GeneratedSlotsPage() {
         {hosts.map((h) => <option key={h.id} value={h.id}>{h.name}</option>)}
       </select>
       <div className='flex items-center gap-3'>
-        <button onClick={onGenerate} disabled={isGenerating} className='rounded bg-blue-600 px-4 py-2 text-white disabled:opacity-60'>
+        <button onClick={onGenerate} disabled={isGenerating || isClearing} className='rounded bg-blue-600 px-4 py-2 text-white disabled:opacity-60'>
           {isGenerating ? 'Generating...' : 'Generate Slots'}
+        </button>
+        <button onClick={onClear} disabled={!hostId || isGenerating || isClearing} className='rounded bg-red-600 px-4 py-2 text-white disabled:opacity-60'>
+          {isClearing ? 'Clearing...' : 'Clear Slots'}
         </button>
         {lastGeneratedAt ? <span className='text-sm text-slate-600'>Last Generated: {formatDisplayTimestamp(lastGeneratedAt)}</span> : null}
       </div>
@@ -106,7 +138,7 @@ export default function GeneratedSlotsPage() {
                 <div>- {row.field_instances_created} field instances created</div>
                 <div>- {row.slots_created} slots generated</div>
                 {row.skipped_reason ? <div>- {row.skipped_reason}</div> : null}
-                {row.errors?.length ? <div>- Errors: {[...new Set(row.errors)].join('; ')}</div> : null}
+                {row.errors?.length ? <div>- Errors: {Array.from(new Set(row.errors as string[])).join('; ')}</div> : null}
               </div>
             ))}
           </div>
