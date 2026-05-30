@@ -5116,6 +5116,13 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     reserved_double_header_slot_ids: set[str] = set()
     reserved_double_header_context: dict[str, object] = {}
     double_header_reservation_failure_reasons: list[str] = []
+    odd_double_header_candidate_ids: list[uuid.UUID] = []
+    generated_matchups_before_filter: list[dict[str, object]] = []
+    matchups_removed_by_filter: list[dict[str, object]] = []
+    required_matchup_pairs: set[tuple[uuid.UUID, uuid.UUID]] = set()
+    compatible_adjacent_slot_pairs_by_host: dict[str, list[dict[str, object]]] = {}
+    doubleheader_placement_attempts: list[dict[str, object]] = []
+    fallback_doubleheader_team_ids_attempted: list[uuid.UUID] = []
     placement_attempt_details: list[dict[str, object]] = []
     placement_attempt_counter = 0
     target_detailed_division_week = int(week.week_number or 0) == 8 and selected_division_key == 'COED_6_7'
@@ -5225,6 +5232,54 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             return 'No compatible remaining capacity for required field size.'
         return None
 
+    def _matchup_label(a: uuid.UUID, b: uuid.UUID) -> str:
+        return f'{teams_by_id[a].name} vs {teams_by_id[b].name}'
+
+    def _odd_week_matchups_for_doubleheader_team(doubleheader_team_id: uuid.UUID) -> list[tuple[uuid.UUID, uuid.UUID]]:
+        remaining_team_ids = [tid for tid in teams_by_id if tid != doubleheader_team_id and week_team_game_counts.get(tid, 0) < 1]
+        remaining_team_ids.sort(key=lambda tid: (
+            matchup_counts.get(tuple(sorted((doubleheader_team_id, tid))), 0),
+            1 if tuple(sorted((doubleheader_team_id, tid))) in prior_week_team_pairs else 0,
+            teams_by_id[tid].name,
+        ))
+        pairs: list[tuple[uuid.UUID, uuid.UUID]] = []
+        for opponent_id in remaining_team_ids[:2]:
+            pairs.append(tuple(sorted((doubleheader_team_id, opponent_id))))
+        rest = remaining_team_ids[2:]
+        rest.sort(key=lambda tid: teams_by_id[tid].name)
+        while len(rest) >= 2:
+            pairs.append(tuple(sorted((rest.pop(0), rest.pop(0)))))
+        return pairs[:max_new_games]
+
+    def _adjacent_doubleheader_slot_pairs(slots: list[GameSlot]) -> list[tuple[GameSlot, GameSlot]]:
+        site_day_slots: dict[tuple[uuid.UUID, object], list[GameSlot]] = {}
+        for candidate_slot in sorted(slots, key=lambda x: (x.slot_date, x.start_time, str(x.host_location_id), str(x.id))):
+            if not candidate_slot.host_location_id:
+                continue
+            site_day_slots.setdefault((candidate_slot.host_location_id, candidate_slot.slot_date), []).append(candidate_slot)
+        adjacent_pairs: list[tuple[GameSlot, GameSlot]] = []
+        for (host_id, _slot_date), host_slots in site_day_slots.items():
+            for i in range(len(host_slots)):
+                for j in range(i + 1, len(host_slots)):
+                    a_slot = host_slots[i]
+                    b_slot = host_slots[j]
+                    a_minutes = _minutes_from_time(a_slot.start_time)
+                    b_minutes = _minutes_from_time(b_slot.start_time)
+                    if a_minutes is None or b_minutes is None:
+                        continue
+                    if abs(a_minutes - b_minutes) == 60:
+                        first, second = (a_slot, b_slot) if a_minutes < b_minutes else (b_slot, a_slot)
+                        adjacent_pairs.append((first, second))
+                        host_key = str(host_id)
+                        compatible_adjacent_slot_pairs_by_host.setdefault(host_key, []).append({
+                            'host_location_id': host_key,
+                            'host_location': first.host_location.name if first.host_location else None,
+                            'slot_date': str(first.slot_date) if first.slot_date else None,
+                            'slot_ids': [str(first.id), str(second.id)],
+                            'start_times': [str(first.start_time), str(second.start_time)],
+                        })
+        return adjacent_pairs
+
     if is_odd_division and no_byes:
         min_dh = min(double_header_counts.values() or [0])
         min_count_candidates = [tid for tid, count in double_header_counts.items() if count == min_dh]
@@ -5248,39 +5303,51 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                 teams_by_id[tid].name,
             )
         candidates.sort(key=_dh_candidate_priority)
-        selected_double_header_team_id = candidates[0] if candidates else None
-        if selected_double_header_team_id:
-            site_day_slots: dict[tuple[uuid.UUID, object], list[GameSlot]] = {}
-            for s in sorted(remaining_slots, key=lambda x: (x.slot_date, x.start_time, str(x.host_location_id), str(x.id))):
-                if not s.host_location_id:
-                    continue
-                site_day_slots.setdefault((s.host_location_id, s.slot_date), []).append(s)
-            reservation_candidates: list[tuple[int, int, GameSlot, GameSlot, str]] = []
-            for _, slots in site_day_slots.items():
-                for i in range(len(slots)):
-                    for j in range(i + 1, len(slots)):
-                        a = slots[i]
-                        b = slots[j]
-                        a_minutes = _minutes_from_time(a.start_time)
-                        b_minutes = _minutes_from_time(b.start_time)
-                        if a_minutes is None or b_minutes is None:
-                            continue
-                        gap = abs(a_minutes - b_minutes)
-                        if gap == 60:
-                            reservation_candidates.append((0, gap, a, b, 'adjacent same-location slots'))
-            if not reservation_candidates:
-                double_header_reservation_failure_reasons.append('Unable to place required double-header because no same-location adjacent slots exist.')
-            else:
-                reservation_candidates.sort(key=lambda row: (row[0], row[1], row[2].slot_date, row[2].start_time, str(row[2].host_location_id)))
-                chosen_priority, _, r1, r2, reservation_mode = reservation_candidates[0]
-                reserved_double_header_slot_ids = {str(r1.id), str(r2.id)}
-                reserved_double_header_context = {
-                    'team_id': str(selected_double_header_team_id),
-                    'team_name': teams_by_id[selected_double_header_team_id].name if selected_double_header_team_id in teams_by_id else None,
-                    'slot_ids': sorted(list(reserved_double_header_slot_ids)),
-                    'reservation_mode': reservation_mode,
-                    'reservation_relaxed': chosen_priority > 0,
+        odd_double_header_candidate_ids = list(candidates)
+        adjacent_slot_pairs = _adjacent_doubleheader_slot_pairs(remaining_slots)
+        if not adjacent_slot_pairs:
+            double_header_reservation_failure_reasons.append('Unable to place required double-header because no same-location adjacent slots exist.')
+        for candidate_team_id in candidates:
+            candidate_pairs = _odd_week_matchups_for_doubleheader_team(candidate_team_id)
+            doubleheader_placement_attempts.append({
+                'team_id': str(candidate_team_id),
+                'team_name': teams_by_id[candidate_team_id].name,
+                'generated_matchups': [_matchup_label(a, b) for a, b in candidate_pairs],
+                'adjacent_slot_pairs_available': len(adjacent_slot_pairs),
+            })
+            if len(candidate_pairs) < max_new_games:
+                matchups_removed_by_filter.append({
+                    'team_id': str(candidate_team_id),
+                    'team_name': teams_by_id[candidate_team_id].name,
+                    'reason': 'not enough active opponents remained to build required odd-team weekly matchups',
+                })
+                fallback_doubleheader_team_ids_attempted.append(candidate_team_id)
+                continue
+            if not adjacent_slot_pairs:
+                fallback_doubleheader_team_ids_attempted.append(candidate_team_id)
+                continue
+            selected_double_header_team_id = candidate_team_id
+            required_matchup_pairs = set(candidate_pairs)
+            generated_matchups_before_filter = [
+                {
+                    'home_team_id': str(a),
+                    'away_team_id': str(b),
+                    'matchup': _matchup_label(a, b),
+                    'includes_selected_doubleheader_team': selected_double_header_team_id in {a, b},
                 }
+                for a, b in candidate_pairs
+            ]
+            r1, r2 = adjacent_slot_pairs[0]
+            reserved_double_header_slot_ids = {str(r1.id), str(r2.id)}
+            reserved_double_header_context = {
+                'team_id': str(selected_double_header_team_id),
+                'team_name': teams_by_id[selected_double_header_team_id].name if selected_double_header_team_id in teams_by_id else None,
+                'slot_ids': sorted(list(reserved_double_header_slot_ids)),
+                'reservation_mode': 'adjacent same-location slots',
+                'reservation_relaxed': False,
+                'candidate_doubleheader_teams': [teams_by_id[tid].name for tid in candidates],
+            }
+            break
     while remaining_slots and len(plans) < max_new_games:
         if is_odd_division and no_byes and selected_double_header_team_id:
             available_team_ids = [tid for tid in teams_by_id if week_team_game_counts.get(tid, 0) < 1]
@@ -5331,6 +5398,14 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                         a = available_team_ids[i]
                         b = available_team_ids[j]
                         pair = tuple(sorted((a, b)))
+                        if required_matchup_pairs and pair not in required_matchup_pairs:
+                            matchups_removed_by_filter.append({
+                                'matchup': _matchup_label(a, b),
+                                'home_team_id': str(a),
+                                'away_team_id': str(b),
+                                'reason': 'not part of generated odd-team required matchup set for selected doubleheader team',
+                            })
+                            continue
                         if pair in used_pairs:
                             _record_placement_attempt(selected_field_slot, a, b, 'rejected', 'Matchup already used in this division/week.')
                             continue
@@ -5494,10 +5569,23 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                             ):
                                 teams_with_unused_unique_opponents.append(team_id)
                         unique_opponents_exhausted_for_pair = len(teams_with_unused_unique_opponents) == 0
-                        if repeat_count > 0 and not unique_opponents_exhausted_for_pair:
+                        required_odd_matchup = bool(required_matchup_pairs and pair in required_matchup_pairs)
+                        if repeat_count > 0 and not unique_opponents_exhausted_for_pair and not required_odd_matchup:
+                            matchups_removed_by_filter.append({
+                                'matchup': _matchup_label(a, b),
+                                'home_team_id': str(a),
+                                'away_team_id': str(b),
+                                'reason': 'repeat matchup filtered while unique opponents remain',
+                            })
                             continue
-                        if repeat_count >= 2 and not same_community_operationally_reasonable:
+                        if repeat_count >= 2 and not same_community_operationally_reasonable and not required_odd_matchup:
                             # Avoid third meetings unless the division's opponent graph makes repeats unavoidable.
+                            matchups_removed_by_filter.append({
+                                'matchup': _matchup_label(a, b),
+                                'home_team_id': str(a),
+                                'away_team_id': str(b),
+                                'reason': 'third-or-more meeting filtered while repeats are avoidable',
+                            })
                             continue
 
                         if repeat_count == 0:
@@ -6007,9 +6095,8 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         used_pairs.add(tuple(sorted((best['home_team_id'], best['away_team_id']))))
         week_team_game_counts[best['home_team_id']] = week_team_game_counts.get(best['home_team_id'], 0) + 1
         week_team_game_counts[best['away_team_id']] = week_team_game_counts.get(best['away_team_id'], 0) + 1
-        if not (is_odd_division and no_byes):
-            used_team_ids.add(best['home_team_id'])
-            used_team_ids.add(best['away_team_id'])
+        used_team_ids.add(best['home_team_id'])
+        used_team_ids.add(best['away_team_id'])
         if selected_field_slot.host_location_id:
             selected_assignment_host_org_id = host_org_by_id.get(selected_field_slot.host_location_id)
             selected_home_orgs = [
@@ -6079,7 +6166,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     } for tid in teams_by_id]
     duplicate_matchups = [p['proposed_matchup'] for p in plans if matchup_counts.get(tuple(sorted((uuid.UUID(p['home_team_id']), uuid.UUID(p['away_team_id'])))), 0) > 0]
     double_header_teams = [row['team_name'] for row in per_team_games if row['games_in_week'] > 1]
-    if len(plans) == 0 and len(teams) > 1:
+    if len(plans) == 0 and len(teams) > 1 and not generated_matchups_before_filter:
         _add_skipped('No eligible matchups available for this division/week.')
     total_created_games = existing_games_count + len(plans)
     if total_created_games < required_games_for_division_week:
@@ -6444,7 +6531,13 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                 'active_teams': [teams_by_id[tid].name for tid in sorted(teams_by_id.keys(), key=lambda item: teams_by_id[item].name)],
                 'expected_games': required_games_for_division_week,
                 'generated_game_groups': max_new_games,
-                'required_matchups_generated': [plan.get('proposed_matchup') for plan in plans],
+                'required_matchups_generated': [row.get('matchup') for row in generated_matchups_before_filter] or [plan.get('proposed_matchup') for plan in plans],
+                'generated_matchups_before_filter': generated_matchups_before_filter,
+                'matchups_removed_by_filter': matchups_removed_by_filter,
+                'candidate_doubleheader_teams': [teams_by_id[tid].name for tid in odd_double_header_candidate_ids],
+                'compatible_adjacent_slot_pairs_by_host': compatible_adjacent_slot_pairs_by_host,
+                'doubleheader_placement_attempts': doubleheader_placement_attempts,
+                'fallback_doubleheader_teams_attempted': [teams_by_id[tid].name for tid in fallback_doubleheader_team_ids_attempted],
                 'placement_attempts': placement_attempt_counter,
                 'valid_assignments_found': len(plans),
                 'scheduled_games': total_created_games,
@@ -6462,6 +6555,10 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                 'reserved_slot_ids': sorted(list(reserved_double_header_slot_ids)),
                 'reservation_context': reserved_double_header_context,
                 'reservation_failure_reasons': double_header_reservation_failure_reasons,
+                'candidate_doubleheader_teams': [teams_by_id[tid].name for tid in odd_double_header_candidate_ids],
+                'compatible_adjacent_slot_pairs_by_host': compatible_adjacent_slot_pairs_by_host,
+                'doubleheader_placement_attempts': doubleheader_placement_attempts,
+                'fallback_doubleheader_teams_attempted': [teams_by_id[tid].name for tid in fallback_doubleheader_team_ids_attempted],
             },
             'weekly_multi_host_assignment_summary': weekly_multi_host_assignment_summary,
             'weekly_host_planning_report': {
