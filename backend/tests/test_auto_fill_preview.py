@@ -50,6 +50,26 @@ class AutoFillPreviewTest(unittest.TestCase):
         self.assertIn('Avoids prior-week team repeat', result['proposals'][0]['reason'])
         self.assertIn('Avoids prior-week community repeat', result['proposals'][0]['reason'])
 
+
+    def test_weekly_host_plan_ignores_unused_available_locations(self):
+        antioch_host = HostLocation(id=uuid.uuid4(), organization_id=self.org_a.id, name='Antioch Complex', is_active=True)
+        antioch_field = FieldInstance(id=uuid.uuid4(), host_location_id=antioch_host.id, hosting_availability_id=uuid.uuid4(), instance_date=self.week2.start_date, field_name='Antioch Small 1', field_type='SMALL', is_active=True)
+        antioch_slot_1 = GameSlot(id=uuid.uuid4(), field_instance_id=antioch_field.id, host_location_id=antioch_host.id, slot_date=self.week2.start_date, start_time=time(9, 0), end_time=time(10, 0), field_type='SMALL', status='OPEN')
+        antioch_slot_2 = GameSlot(id=uuid.uuid4(), field_instance_id=antioch_field.id, host_location_id=antioch_host.id, slot_date=self.week2.start_date, start_time=time(10, 0), end_time=time(11, 0), field_type='SMALL', status='OPEN')
+        extra_westosha_slot = GameSlot(id=uuid.uuid4(), field_instance_id=self.fi.id, host_location_id=self.host.id, slot_date=self.week2.start_date, start_time=time(10, 0), end_time=time(11, 0), field_type='SMALL', status='OPEN')
+        self.db.add_all([antioch_host, antioch_field, antioch_slot_1, antioch_slot_2, extra_westosha_slot])
+        self.db.commit()
+
+        preview = auto_fill_preview({'season_id': self.season.id, 'week_id': self.week2.id, 'division_id': self.division.id}, db=self.db)
+
+        self.assertEqual(preview['proposed_game_count'], 2)
+        self.assertEqual({proposal['host_location_id'] for proposal in preview['proposals']}, {str(antioch_host.id)})
+        plan = preview['audit']['weekly_community_host_plan']
+        self.assertEqual(plan['diagnostic_label'], 'Weekly Host Plan Summary')
+        self.assertIn('Westosha Park', plan['unused_locations'])
+        westosha_status = next(row for row in plan['location_statuses'] if row['host_location'] == 'Westosha Park')
+        self.assertEqual(westosha_status['status'], 'unused_this_week')
+
     def test_large_field_division_only_uses_large_slots(self):
         self.division.required_field_layout_type = 'FIFTY_THREE_YARD_WIDTH'
         self.db.commit()
