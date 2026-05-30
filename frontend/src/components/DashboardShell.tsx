@@ -24,6 +24,7 @@ export default function DashboardShell({ children }: { children: React.ReactNode
     'seasons',
     'weeks',
     'hosting-availability',
+    'host-availability-matrix',
     'generated-slots',
     'schedule-readiness',
     'manual-schedule-builder',

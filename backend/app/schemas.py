@@ -235,6 +235,44 @@ class HostingAvailabilityRead(BaseSchema, HostingAvailabilityCreate):
     pass
 
 
+HOST_PLAN_SELECTION_STATUSES = {
+    'AVAILABLE',
+    'SELECTED',
+    'EXCLUDED',
+    'LOCKED',
+    'BLOCKED_CAPACITY',
+    'BLOCKED_ROTATION',
+    'BLOCKED_FIELD_SIZE',
+    'OVERFLOW',
+}
+
+
+class HostPlanSelectionUpdate(BaseModel):
+    season_id: uuid.UUID
+    week_id: uuid.UUID | None = None
+    game_date: date
+    community_id: uuid.UUID
+    host_location_id: uuid.UUID
+    availability_id: uuid.UUID | None = None
+    status: str
+    locked: bool = False
+    reason: str | None = None
+
+
+class HostPlanSelectionRead(BaseSchema, HostPlanSelectionUpdate):
+    pass
+
+
+class HostAvailabilityMatrixSaveRequest(BaseModel):
+    season_id: uuid.UUID
+    selections: list[HostPlanSelectionUpdate]
+
+
+class HostAvailabilityMatrixSaveResponse(BaseModel):
+    saved: int
+    selections: list[HostPlanSelectionRead]
+
+
 class HostingAvailabilityBulkSlot(BaseModel):
     season_id: uuid.UUID | None = None
     week_id: uuid.UUID | None = None

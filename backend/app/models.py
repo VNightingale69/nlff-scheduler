@@ -225,6 +225,30 @@ class HostingAvailability(Base, TimestampMixin):
     __table_args__ = (UniqueConstraint('field_id', 'physical_field_area_id', 'available_date', 'start_time', 'end_time', 'layout_type', 'slot_index', name='uq_field_availability_slot'),)
 
 
+class HostPlanSelection(Base, TimestampMixin):
+    __tablename__ = 'host_plan_selections'
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    season_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('seasons.id'), nullable=False)
+    week_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('weeks.id'), nullable=True)
+    game_date: Mapped[Date] = mapped_column(Date, nullable=False)
+    community_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('organizations.id'), nullable=False)
+    host_location_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('host_locations.id'), nullable=False)
+    availability_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('hosting_availabilities.id'), nullable=True)
+    status: Mapped[str] = mapped_column(String(40), nullable=False, default='AVAILABLE')
+    locked: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    season = relationship('Season')
+    week = relationship('Week')
+    community = relationship('Organization')
+    host_location = relationship('HostLocation')
+    availability = relationship('HostingAvailability')
+    __table_args__ = (
+        UniqueConstraint('season_id', 'game_date', 'host_location_id', name='uq_host_plan_selection_season_date_location'),
+        Index('ix_host_plan_selections_week_status', 'week_id', 'status'),
+        Index('ix_host_plan_selections_date_status', 'season_id', 'game_date', 'status'),
+    )
+
+
 class TurfWave(Base, TimestampMixin):
     __tablename__ = 'turf_waves'
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)

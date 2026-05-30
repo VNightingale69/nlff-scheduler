@@ -16,6 +16,7 @@ export const ENTITIES: Record<string, EntityConfig> = {
   weeks: { title: 'Season Weeks / Game Dates', path: '/weeks', nav: true, fields: [{ key: 'season_id', label: 'Season', type: 'select' }, { key: 'week_number', label: 'Week Number', type: 'number' }, { key: 'start_date', label: 'Start Date', type: 'date' }, { key: 'end_date', label: 'End Date', type: 'date' }] },
   games: { title: 'Games', path: '/games', nav: true, roles: ['league_admin'], fields: [] },
   'hosting-availability': { title: 'Hosting Availability', path: '/hosting-availabilities', nav: true, fields: [{ key: 'field_id', label: 'Field ID' }, { key: 'available_date', label: 'Available Date', type: 'date' }, { key: 'start_time', label: 'Start Time', type: 'time' }, { key: 'end_time', label: 'End Time', type: 'time' }, { key: 'is_available', label: 'Is Available', type: 'checkbox' }] },
+  'host-availability-matrix': { title: 'Host Availability Matrix', path: '/host-availability-matrix', nav: true, roles: ['league_admin'], fields: [] },
   'generated-slots': { title: 'Generated Slots', path: '/generated-game-slots', nav: true, fields: [] },
   'schedule-readiness': { title: 'Schedule Readiness', path: '/schedule-readiness', nav: true, fields: [] },
   'manual-schedule-builder': { title: 'Manual Schedule Builder', path: '/manual-schedule-builder', nav: true, fields: [] },

@@ -14,14 +14,14 @@ from sqlalchemy.orm import Session, aliased
 
 from app.auth import ROLE_COMMUNITY_SCHEDULER, ROLE_LEAGUE_ADMIN, enforce_organization_scope, get_current_user, require_roles
 from app.database import get_db
-from app.models import Division, Field, FieldConfigurationOption, FieldInstance, Game, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Season, Team, TurfWave, User, Week
+from app.models import Division, Field, FieldConfigurationOption, FieldInstance, Game, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostPlanSelection, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Season, Team, TurfWave, User, Week
 from app.schemas import (
     DivisionCreate, DivisionRead, FieldConfigurationOptionCreate, FieldConfigurationOptionRead, FieldCreate, FieldRead, GameCreate, GameRead, GameSaveResponse,
     OrganizationDivisionParticipationBulkUpsertRequest, OrganizationDivisionParticipationRead,
-    GeneratedSlotRead, GeneratedSlotsClearResponse, HostLocationCreate, HostLocationRead, HostLocationConfigurationCreate, HostLocationConfigurationRead, HostingAvailabilityCreate, HostingAvailabilityRead, HostingAvailabilityBulkUpsertRequest, HostingAvailabilityBulkUpsertResponse, HostingGenerationRunResult, HostingGenerationLocationResult, PhysicalFieldAreaCreate, PhysicalFieldAreaRead, SavedAvailabilityResponse,
+    GeneratedSlotRead, GeneratedSlotsClearResponse, HostAvailabilityMatrixSaveRequest, HostAvailabilityMatrixSaveResponse, HostLocationCreate, HostLocationRead, HostLocationConfigurationCreate, HostLocationConfigurationRead, HostingAvailabilityCreate, HostingAvailabilityRead, HostingAvailabilityBulkUpsertRequest, HostingAvailabilityBulkUpsertResponse, HostingGenerationRunResult, HostingGenerationLocationResult, PhysicalFieldAreaCreate, PhysicalFieldAreaRead, SavedAvailabilityResponse,
     LoginRequest, OrganizationCreate, OrganizationRead, PagedResponse, PublicGameRead, RefreshRequest,
     TeamCreate, TeamRead, TeamUpdate, TokenResponse, UserCreate, UserRead,
-    ScheduleReadinessDivisionRow, ScheduleReadinessHostDateRow, ScheduleReadinessHostSiteRow, ScheduleReadinessResponse, ScheduleReadinessTotals, ScheduleReadinessTurfWaveRow, ScheduleReadinessTurfWaveSlotRow
+    HOST_PLAN_SELECTION_STATUSES, ScheduleReadinessDivisionRow, ScheduleReadinessHostDateRow, ScheduleReadinessHostSiteRow, ScheduleReadinessResponse, ScheduleReadinessTotals, ScheduleReadinessTurfWaveRow, ScheduleReadinessTurfWaveSlotRow
 )
 from app.security import create_access_token, create_refresh_token, hash_password, validate_password_strength, verify_password, decode_token
 from app.services.game_statuses import REQUIRED_GAME_STATUSES, ensure_required_game_statuses
@@ -2288,6 +2288,282 @@ def get_schedule_readiness(current_user: User = Depends(get_current_user), db: S
         field_configuration_efficiency=_build_field_configuration_efficiency_readiness(db),
         weekly_field_demand=_build_weekly_field_demand_readiness(db),
     )
+
+HOST_PLAN_SCHEDULABLE_STATUSES = {'SELECTED', 'LOCKED', 'OVERFLOW'}
+HOST_PLAN_IGNORED_STATUSES = {'AVAILABLE', 'EXCLUDED', 'BLOCKED_CAPACITY', 'BLOCKED_ROTATION', 'BLOCKED_FIELD_SIZE'}
+
+
+def _host_plan_allowed_host_ids_for_week(db: Session, season_id: uuid.UUID | str | None, week_id: uuid.UUID | str | None = None, game_date: date | None = None) -> set[uuid.UUID] | None:
+    if not season_id:
+        return None
+    query = db.query(HostPlanSelection).filter(HostPlanSelection.season_id == season_id)
+    if week_id:
+        query = query.filter(HostPlanSelection.week_id == week_id)
+    elif game_date:
+        query = query.filter(HostPlanSelection.game_date == game_date)
+    else:
+        return None
+    all_rows = query.all()
+    if not all_rows:
+        return None
+    return {row.host_location_id for row in all_rows if row.status in HOST_PLAN_SCHEDULABLE_STATUSES or row.locked}
+
+
+def _apply_host_plan_filter_to_slots(query, db: Session, season_id: uuid.UUID | str | None, week_id: uuid.UUID | str | None = None, game_date: date | None = None):
+    allowed_host_ids = _host_plan_allowed_host_ids_for_week(db, season_id, week_id, game_date)
+    if allowed_host_ids is None:
+        return query
+    if not allowed_host_ids:
+        return query.filter(GameSlot.host_location_id.in_([]))
+    return query.filter(GameSlot.host_location_id.in_(allowed_host_ids))
+
+
+def _is_playoff_or_championship_week(week: Week) -> bool:
+    text_value = ' '.join(str(v or '') for v in (week.label, week.status, week.notes)).lower()
+    return 'playoff' in text_value or 'championship' in text_value or 'champion' in text_value
+
+
+def _field_capacity_from_host(host: HostLocation) -> dict[str, int]:
+    return {
+        FIELD_SIZE_SMALL: int(host.max_small_fields or 0),
+        FIELD_SIZE_MEDIUM: int(host.max_medium_fields or 0),
+        FIELD_SIZE_LARGE: int(host.max_large_fields or 0),
+    }
+
+
+def _weekly_required_games_by_size(db: Session, season_id: uuid.UUID | str | None = None) -> dict[str, int]:
+    query = db.query(Division, func.count(Team.id)).outerjoin(Team, and_(Team.division_id == Division.id, Team.is_active.is_(True))).filter(Division.is_active.is_(True)).group_by(Division.id)
+    required = {FIELD_SIZE_SMALL: 0, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_LARGE: 0}
+    for division, team_count in query.all():
+        size = _required_field_type_for_division(division)
+        if size in required:
+            required[size] += math.ceil(int(team_count or 0) / 2)
+    return required
+
+
+def _host_availability_matrix_response(db: Session, season_id: uuid.UUID) -> dict:
+    season = db.query(Season).filter(Season.id == season_id).first()
+    if not season:
+        raise HTTPException(404, 'Season not found')
+    weeks = db.query(Week).filter(Week.season_id == season_id).order_by(Week.start_date, Week.week_number).all()
+    dates_by_value: dict[date, dict] = {}
+    for week in weeks:
+        game_date = week.primary_game_date or week.start_date
+        if game_date:
+            dates_by_value[game_date] = {
+                'game_date': game_date,
+                'week_id': week.id,
+                'week_number': week.week_number,
+                'label': week.label or f'Week {week.week_number}',
+                'is_postseason': _is_playoff_or_championship_week(week),
+                'status': week.status,
+            }
+    if not dates_by_value:
+        availability_dates = db.query(HostingAvailability.available_date).filter(HostingAvailability.season_id == season_id).distinct().all()
+        for (game_date,) in availability_dates:
+            dates_by_value[game_date] = {'game_date': game_date, 'week_id': None, 'week_number': None, 'label': str(game_date), 'is_postseason': False, 'status': None}
+    dates = [dates_by_value[key] for key in sorted(dates_by_value)]
+
+    hosts = db.query(HostLocation, Organization).join(Organization, Organization.id == HostLocation.organization_id).filter(HostLocation.is_active.is_(True), Organization.is_active.is_(True)).order_by(Organization.name, HostLocation.name).all()
+    host_ids = [host.id for host, _org in hosts]
+    availability_rows = db.query(HostingAvailability).filter(
+        HostingAvailability.season_id == season_id,
+        HostingAvailability.host_location_id.in_(host_ids) if host_ids else False,
+        HostingAvailability.active.is_(True),
+        HostingAvailability.is_available.is_(True),
+    ).all()
+    availability_by_host_date: dict[tuple[uuid.UUID, date], list[HostingAvailability]] = {}
+    for availability in availability_rows:
+        availability_by_host_date.setdefault((availability.host_location_id, availability.available_date), []).append(availability)
+
+    selection_rows = db.query(HostPlanSelection).filter(HostPlanSelection.season_id == season_id).all()
+    selection_by_host_date = {(selection.host_location_id, selection.game_date): selection for selection in selection_rows}
+
+    slot_counts: dict[tuple[uuid.UUID, date], dict[str, int]] = {}
+    slot_rows = db.query(GameSlot.host_location_id, GameSlot.slot_date, GameSlot.field_type, func.count(GameSlot.id)).filter(GameSlot.host_location_id.in_(host_ids) if host_ids else False).group_by(GameSlot.host_location_id, GameSlot.slot_date, GameSlot.field_type).all()
+    for host_id, slot_date, field_type, count in slot_rows:
+        slot_counts.setdefault((host_id, slot_date), {FIELD_SIZE_SMALL: 0, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_LARGE: 0})[_normalize_field_size(field_type) or field_type] = int(count or 0)
+
+    rows = []
+    for host, org in hosts:
+        cells = {}
+        for date_info in dates:
+            game_date = date_info['game_date']
+            availability_list = availability_by_host_date.get((host.id, game_date), [])
+            selection = selection_by_host_date.get((host.id, game_date))
+            status = selection.status if selection else ('AVAILABLE' if availability_list else 'BLANK')
+            locked = bool(selection.locked) or status == 'LOCKED'
+            capacity = slot_counts.get((host.id, game_date)) or _field_capacity_from_host(host)
+            cells[str(game_date)] = {
+                'status': status,
+                'locked': locked,
+                'reason': selection.reason if selection else None,
+                'availability_id': availability_list[0].id if availability_list else None,
+                'has_saved_availability': bool(availability_list),
+                'available_slot_count': len(availability_list),
+                'capacity_by_size': capacity,
+            }
+        rows.append({
+            'community_id': org.id,
+            'community_name': org.name,
+            'host_location_id': host.id,
+            'host_location_name': host.name,
+            'surface_type': host.surface_type,
+            'capacity_by_size': _field_capacity_from_host(host),
+            'cells': cells,
+        })
+
+    required_by_size = _weekly_required_games_by_size(db, season_id)
+    summaries = []
+    for date_info in dates:
+        game_date = date_info['game_date']
+        selected_rows = []
+        excluded_rows = []
+        capacity = {FIELD_SIZE_SMALL: 0, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_LARGE: 0}
+        community_split: dict[str, int] = {}
+        for row in rows:
+            cell = row['cells'][str(game_date)]
+            if cell['status'] in HOST_PLAN_SCHEDULABLE_STATUSES or cell.get('locked'):
+                selected_rows.append({'community_name': row['community_name'], 'host_location_name': row['host_location_name']})
+                for size in capacity:
+                    capacity[size] += int((cell.get('capacity_by_size') or {}).get(size, 0) or 0)
+                community_split[row['community_name']] = community_split.get(row['community_name'], 0) + 1
+            elif cell['status'] == 'EXCLUDED':
+                excluded_rows.append({'community_name': row['community_name'], 'host_location_name': row['host_location_name']})
+        total_selected_capacity = sum(capacity.values())
+        total_required = sum(required_by_size.values())
+        warnings = []
+        for size, required in required_by_size.items():
+            if capacity.get(size, 0) < required:
+                warnings.append(f'{size.title()} capacity short by {required - capacity.get(size, 0)}. Add an overflow field or select more fields.')
+        if total_selected_capacity < total_required:
+            warnings.append(f'Total selected capacity short by {total_required - total_selected_capacity}. Add an overflow field.')
+        split_total = max(len(community_split), 1)
+        summaries.append({
+            **date_info,
+            'total_games_required': total_required,
+            'games_required_by_size': required_by_size,
+            'selected_communities': sorted(community_split),
+            'selected_fields': selected_rows,
+            'excluded_available_fields': excluded_rows,
+            'estimated_capacity_by_field_size': capacity,
+            'target_game_split': {community: math.ceil(total_required / split_total) for community in sorted(community_split)},
+            'validation_warnings': warnings,
+        })
+    return {'season': {'id': season.id, 'name': season.name}, 'dates': dates, 'rows': rows, 'summaries': summaries, 'status_options': sorted(HOST_PLAN_SELECTION_STATUSES)}
+
+
+@router.get('/host-availability-matrix', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+def get_host_availability_matrix(season_id: uuid.UUID, db: Session = Depends(get_db)):
+    return _host_availability_matrix_response(db, season_id)
+
+
+@router.post('/host-availability-matrix/save', response_model=HostAvailabilityMatrixSaveResponse, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+def save_host_availability_matrix(payload: HostAvailabilityMatrixSaveRequest, db: Session = Depends(get_db)):
+    saved_rows: list[HostPlanSelection] = []
+    for item in payload.selections:
+        status = item.status.upper()
+        if status not in HOST_PLAN_SELECTION_STATUSES:
+            raise HTTPException(400, f'Invalid host plan status: {item.status}')
+        availability = db.query(HostingAvailability).filter(
+            HostingAvailability.season_id == item.season_id,
+            HostingAvailability.host_location_id == item.host_location_id,
+            HostingAvailability.available_date == item.game_date,
+            HostingAvailability.active.is_(True),
+            HostingAvailability.is_available.is_(True),
+        ).first()
+        if not availability and status != 'OVERFLOW':
+            raise HTTPException(400, 'Cannot select a blank field/date without saved availability. Add availability first or use overflow override.')
+        row = db.query(HostPlanSelection).filter(
+            HostPlanSelection.season_id == item.season_id,
+            HostPlanSelection.game_date == item.game_date,
+            HostPlanSelection.host_location_id == item.host_location_id,
+        ).first()
+        if not row:
+            row = HostPlanSelection(season_id=item.season_id, game_date=item.game_date, host_location_id=item.host_location_id, community_id=item.community_id)
+            db.add(row)
+        row.week_id = item.week_id
+        row.community_id = item.community_id
+        row.availability_id = item.availability_id or (availability.id if availability else None)
+        row.status = status
+        row.locked = bool(item.locked or status == 'LOCKED')
+        row.reason = item.reason
+        saved_rows.append(row)
+    db.commit()
+    for row in saved_rows:
+        db.refresh(row)
+    return {'saved': len(saved_rows), 'selections': saved_rows}
+
+
+@router.post('/host-availability-matrix/generate-suggested-plan', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+def generate_suggested_host_plan(payload: dict, db: Session = Depends(get_db)):
+    season_id = payload.get('season_id')
+    game_date_value = payload.get('game_date')
+    if not season_id or not game_date_value:
+        raise HTTPException(400, 'season_id and game_date are required')
+    game_date = date.fromisoformat(str(game_date_value))
+    week = db.query(Week).filter(Week.season_id == season_id, or_(Week.primary_game_date == game_date, Week.start_date == game_date)).first()
+    required = _weekly_required_games_by_size(db, season_id)
+    remaining = dict(required)
+    availability_rows = db.query(HostingAvailability, HostLocation).join(HostLocation, HostLocation.id == HostingAvailability.host_location_id).filter(
+        HostingAvailability.season_id == season_id,
+        HostingAvailability.available_date == game_date,
+        HostingAvailability.active.is_(True),
+        HostingAvailability.is_available.is_(True),
+        HostLocation.is_active.is_(True),
+    ).order_by(HostLocation.name).all()
+    selected = 0
+    seen_hosts: set[uuid.UUID] = set()
+    for availability, host in availability_rows:
+        if host.id in seen_hosts:
+            continue
+        seen_hosts.add(host.id)
+        capacity = _field_capacity_from_host(host)
+        choose = sum(max(0, remaining.get(size, 0)) for size in remaining) > 0
+        status = 'SELECTED' if choose else 'EXCLUDED'
+        row = db.query(HostPlanSelection).filter(HostPlanSelection.season_id == season_id, HostPlanSelection.game_date == game_date, HostPlanSelection.host_location_id == host.id).first()
+        if row and row.locked:
+            continue
+        if not row:
+            row = HostPlanSelection(season_id=season_id, game_date=game_date, host_location_id=host.id, community_id=host.organization_id)
+            db.add(row)
+        row.week_id = week.id if week else availability.week_id
+        row.community_id = host.organization_id
+        row.availability_id = availability.id
+        row.status = status
+        row.locked = False
+        row.reason = 'Generated suggested host plan' if choose else 'Available but not needed by suggested plan'
+        if choose:
+            selected += 1
+            for size in remaining:
+                remaining[size] = max(0, remaining[size] - int(capacity.get(size, 0) or 0))
+    db.commit()
+    return {**_host_availability_matrix_response(db, uuid.UUID(str(season_id))), 'generated_selected_count': selected}
+
+
+@router.post('/host-availability-matrix/week-lock', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+def set_host_plan_week_lock(payload: dict, db: Session = Depends(get_db)):
+    season_id = payload.get('season_id')
+    game_date_value = payload.get('game_date')
+    locked = bool(payload.get('locked', True))
+    if not season_id or not game_date_value:
+        raise HTTPException(400, 'season_id and game_date are required')
+    game_date = date.fromisoformat(str(game_date_value))
+    count = db.query(HostPlanSelection).filter(HostPlanSelection.season_id == season_id, HostPlanSelection.game_date == game_date).update({'locked': locked}, synchronize_session=False)
+    db.commit()
+    return {'updated': count, 'locked': locked}
+
+
+@router.delete('/host-availability-matrix/selections', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+def clear_host_plan_selections(season_id: uuid.UUID, game_date: str | None = None, db: Session = Depends(get_db)):
+    query = db.query(HostPlanSelection).filter(HostPlanSelection.season_id == season_id)
+    if game_date:
+        query = query.filter(HostPlanSelection.game_date == date.fromisoformat(game_date))
+    count = query.delete(synchronize_session=False)
+    db.commit()
+    return {'deleted': count}
+
+
 @router.post('/divisions', response_model=DivisionRead, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def create_division(payload: DivisionCreate, db: Session = Depends(get_db)):
     d = Division(**payload.model_dump()); db.add(d); db.commit(); db.refresh(d); return d
@@ -4528,6 +4804,9 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         GameSlot.field_type == required_field_type,
         GameSlot.assigned_game_id.is_(None),
     ).order_by(GameSlot.slot_date, GameSlot.start_time).all()
+    host_plan_allowed_ids = _host_plan_allowed_host_ids_for_week(db, season_id, week_id, week.start_date)
+    if host_plan_allowed_ids is not None:
+        open_slots = [slot for slot in open_slots if slot.host_location_id in host_plan_allowed_ids]
     compatible_slots_found = len(open_slots)
     logger.info(
         'division_lookup requested_division=%s normalized_division=%s matched_teams=%s matched_generated_slots=%s participation_rows=%s',
@@ -4825,6 +5104,8 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         GameSlot.slot_date == week.start_date,
         GameSlot.assigned_game_id.is_(None),
     ).all()
+    if host_plan_allowed_ids is not None:
+        all_open_slots_for_week = [slot for slot in all_open_slots_for_week if slot.host_location_id in host_plan_allowed_ids]
     # Weekly host planning is intentionally based on all available weekly slots, not only
     # the field size for the division currently being placed. This lets the scheduler
     # select the minimum set of host communities for the whole week and then ignore
@@ -7043,6 +7324,9 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         GameSlot.field_type == required_field_type,
         GameSlot.host_location_id.in_(_eligible_host_location_ids(db)),
     ).all()
+    host_plan_allowed_ids = _host_plan_allowed_host_ids_for_week(db, season_id, week_id, week.start_date)
+    if host_plan_allowed_ids is not None:
+        open_slots = [slot for slot in open_slots if slot.host_location_id in host_plan_allowed_ids]
     sorted_slots = sorted(
         open_slots or [],
         key=lambda s: (
@@ -7746,6 +8030,9 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
             GameSlot.assigned_game_id.is_(None),
             GameSlot.field_type == required_field_type,
         ).order_by(GameSlot.start_time.asc()).all()
+        host_plan_allowed_ids = _host_plan_allowed_host_ids_for_week(db, season_id, week_id, db.query(Week.start_date).filter(Week.id == week_id).scalar())
+        if host_plan_allowed_ids is not None:
+            open_slots = [slot for slot in open_slots if slot.host_location_id in host_plan_allowed_ids]
         while remaining_needed > 0:
             placed = False
             candidate_teams = sorted(

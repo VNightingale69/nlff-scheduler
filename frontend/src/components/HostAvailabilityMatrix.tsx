@@ -1,0 +1,355 @@
+'use client';
+
+import { useEffect, useMemo, useState } from 'react';
+import { apiFetch } from '@/lib/api';
+import { getToken } from '@/lib/auth';
+
+type MatrixDate = {
+  game_date: string;
+  week_id: string | null;
+  week_number: number | null;
+  label: string;
+  is_postseason: boolean;
+  status: string | null;
+};
+
+type MatrixCell = {
+  status: string;
+  locked: boolean;
+  reason: string | null;
+  availability_id: string | null;
+  has_saved_availability: boolean;
+  available_slot_count: number;
+  capacity_by_size: Record<string, number>;
+};
+
+type MatrixRow = {
+  community_id: string;
+  community_name: string;
+  host_location_id: string;
+  host_location_name: string;
+  surface_type: string;
+  capacity_by_size: Record<string, number>;
+  cells: Record<string, MatrixCell>;
+};
+
+type WeeklySummary = MatrixDate & {
+  total_games_required: number;
+  games_required_by_size: Record<string, number>;
+  selected_communities: string[];
+  selected_fields: Array<{ community_name: string; host_location_name: string }>;
+  excluded_available_fields: Array<{ community_name: string; host_location_name: string }>;
+  estimated_capacity_by_field_size: Record<string, number>;
+  target_game_split: Record<string, number>;
+  validation_warnings: string[];
+};
+
+type MatrixResponse = {
+  season: { id: string; name: string };
+  dates: MatrixDate[];
+  rows: MatrixRow[];
+  summaries: WeeklySummary[];
+};
+
+const CYCLE = ['AVAILABLE', 'SELECTED', 'EXCLUDED'];
+const LABELS: Record<string, string> = {
+  BLANK: '',
+  AVAILABLE: 'X',
+  SELECTED: '✓',
+  EXCLUDED: 'O',
+  LOCKED: 'L',
+  OVERFLOW: 'OF',
+  BLOCKED_CAPACITY: 'BC',
+  BLOCKED_ROTATION: 'BR',
+  BLOCKED_FIELD_SIZE: 'BF',
+};
+
+const CELL_CLASSES: Record<string, string> = {
+  BLANK: 'bg-slate-100 text-slate-300',
+  AVAILABLE: 'bg-white text-slate-800 hover:bg-slate-50',
+  SELECTED: 'bg-emerald-100 text-emerald-800 ring-1 ring-emerald-300',
+  EXCLUDED: 'bg-slate-200 text-slate-500',
+  LOCKED: 'bg-blue-100 text-blue-800 ring-2 ring-blue-500 font-bold',
+  OVERFLOW: 'bg-amber-100 text-amber-800 ring-1 ring-amber-300',
+  BLOCKED_CAPACITY: 'bg-rose-100 text-rose-700',
+  BLOCKED_ROTATION: 'bg-orange-100 text-orange-700',
+  BLOCKED_FIELD_SIZE: 'bg-purple-100 text-purple-700',
+};
+
+function formatDate(value: string) {
+  const [year, month, day] = value.split('-').map(Number);
+  if (!year || !month || !day) return value;
+  return new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' }).format(new Date(Date.UTC(year, month - 1, day)));
+}
+
+function emptyMatrix(): MatrixResponse {
+  return { season: { id: '', name: '' }, dates: [], rows: [], summaries: [] };
+}
+
+function extractError(error: unknown) {
+  return error instanceof Error ? error.message : 'Request failed.';
+}
+
+export default function HostAvailabilityMatrix() {
+  const token = getToken();
+  const [seasons, setSeasons] = useState<Array<{ id: string; name: string }>>([]);
+  const [seasonId, setSeasonId] = useState('');
+  const [matrix, setMatrix] = useState<MatrixResponse>(emptyMatrix());
+  const [selectedDate, setSelectedDate] = useState('');
+  const [dirtyCells, setDirtyCells] = useState<Record<string, MatrixCell>>({});
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState('');
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    apiFetch('/seasons?page_size=100', {}, token).then((res: any) => {
+      const items = res.items || [];
+      setSeasons(items);
+      const active = items.find((season: any) => season.is_active) || items[0];
+      if (active) setSeasonId(active.id);
+    }).catch((err: unknown) => setError(extractError(err)));
+  }, [token]);
+
+  const loadMatrix = async () => {
+    if (!seasonId) return;
+    setLoading(true);
+    setError('');
+    try {
+      const res = await apiFetch(`/host-availability-matrix?season_id=${seasonId}`, {}, token) as MatrixResponse;
+      setMatrix(res);
+      setSelectedDate((current) => current || res.dates[0]?.game_date || '');
+      setDirtyCells({});
+    } catch (err) {
+      setError(extractError(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadMatrix();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [seasonId]);
+
+  const selectedSummary = useMemo(
+    () => matrix.summaries.find((summary) => summary.game_date === selectedDate),
+    [matrix.summaries, selectedDate]
+  );
+
+  const groupedRows = useMemo(() => {
+    const groups: Array<{ community: string; rows: MatrixRow[] }> = [];
+    for (const row of matrix.rows) {
+      const last = groups[groups.length - 1];
+      if (!last || last.community !== row.community_name) groups.push({ community: row.community_name, rows: [row] });
+      else last.rows.push(row);
+    }
+    return groups;
+  }, [matrix.rows]);
+
+  const cellKey = (row: MatrixRow, date: MatrixDate) => `${row.host_location_id}:${date.game_date}`;
+
+  const getCell = (row: MatrixRow, date: MatrixDate) => dirtyCells[cellKey(row, date)] || row.cells[date.game_date] || { status: 'BLANK', locked: false, reason: null, availability_id: null, has_saved_availability: false, available_slot_count: 0, capacity_by_size: {} };
+
+  const updateCell = (row: MatrixRow, date: MatrixDate, cell: MatrixCell) => {
+    setDirtyCells((prev) => ({ ...prev, [cellKey(row, date)]: cell }));
+  };
+
+  const handleCellClick = (row: MatrixRow, date: MatrixDate, event: React.MouseEvent<HTMLButtonElement>) => {
+    setSelectedDate(date.game_date);
+    const cell = getCell(row, date);
+    if (event.shiftKey) {
+      if (!cell.has_saved_availability && cell.status === 'BLANK') return;
+      updateCell(row, date, { ...cell, status: cell.status === 'LOCKED' ? 'SELECTED' : 'LOCKED', locked: cell.status !== 'LOCKED' });
+      return;
+    }
+    if (!cell.has_saved_availability && cell.status === 'BLANK') return;
+    const current = cell.status === 'LOCKED' ? 'SELECTED' : cell.status;
+    const next = CYCLE[(CYCLE.indexOf(current) + 1) % CYCLE.length] || 'AVAILABLE';
+    updateCell(row, date, { ...cell, status: next, locked: next === 'LOCKED' ? true : cell.locked && next === 'SELECTED' });
+  };
+
+
+  const handleCellMenu = (row: MatrixRow, date: MatrixDate, event: React.MouseEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    setSelectedDate(date.game_date);
+    const cell = getCell(row, date);
+    const action = window.prompt('Cell menu: type LOCK, OVERFLOW, NOTE, or CLEAR', cell.status === 'OVERFLOW' ? 'CLEAR' : 'OVERFLOW');
+    const normalized = (action || '').trim().toUpperCase();
+    if (!normalized) return;
+    if (normalized === 'LOCK') {
+      if (!cell.has_saved_availability && cell.status === 'BLANK') return;
+      updateCell(row, date, { ...cell, status: 'LOCKED', locked: true });
+      return;
+    }
+    if (normalized === 'OVERFLOW') {
+      const reason = window.prompt('Overflow reason/note', cell.reason || 'Added as overflow by scheduler');
+      updateCell(row, date, { ...cell, status: 'OVERFLOW', locked: false, reason: reason || cell.reason || 'Added as overflow by scheduler' });
+      return;
+    }
+    if (normalized === 'NOTE') {
+      const reason = window.prompt('Reason/note', cell.reason || '');
+      updateCell(row, date, { ...cell, reason: reason || null });
+      return;
+    }
+    if (normalized === 'CLEAR') {
+      updateCell(row, date, { ...cell, status: cell.has_saved_availability ? 'AVAILABLE' : 'BLANK', locked: false, reason: null });
+    }
+  };
+
+  const saveChanges = async () => {
+    const selections = Object.entries(dirtyCells).map(([key, cell]) => {
+      const [hostLocationId, gameDate] = key.split(':');
+      const row = matrix.rows.find((item) => item.host_location_id === hostLocationId);
+      const dateInfo = matrix.dates.find((item) => item.game_date === gameDate);
+      return row && dateInfo ? {
+        season_id: seasonId,
+        week_id: dateInfo.week_id,
+        game_date: gameDate,
+        community_id: row.community_id,
+        host_location_id: row.host_location_id,
+        availability_id: cell.availability_id,
+        status: cell.status,
+        locked: cell.locked || cell.status === 'LOCKED',
+        reason: cell.reason,
+      } : null;
+    }).filter(Boolean);
+    if (!selections.length) {
+      setMessage('No matrix changes to save.');
+      return;
+    }
+    setSaving(true);
+    setError('');
+    try {
+      const res: any = await apiFetch('/host-availability-matrix/save', { method: 'POST', body: JSON.stringify({ season_id: seasonId, selections }) }, token);
+      setMessage(`Saved ${res.saved} host plan selection${res.saved === 1 ? '' : 's'}.`);
+      await loadMatrix();
+    } catch (err) {
+      setError(extractError(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const runAction = async (action: 'generate' | 'lock' | 'unlock' | 'clear' | 'auto') => {
+    if (!seasonId || !selectedDate) return;
+    setError('');
+    setMessage('');
+    try {
+      if (action === 'generate') {
+        await apiFetch('/host-availability-matrix/generate-suggested-plan', { method: 'POST', body: JSON.stringify({ season_id: seasonId, game_date: selectedDate }) }, token);
+        setMessage('Generated a suggested host plan for the selected week.');
+      } else if (action === 'lock' || action === 'unlock') {
+        await apiFetch('/host-availability-matrix/week-lock', { method: 'POST', body: JSON.stringify({ season_id: seasonId, game_date: selectedDate, locked: action === 'lock' }) }, token);
+        setMessage(action === 'lock' ? 'Selected week locked.' : 'Selected week unlocked.');
+      } else if (action === 'clear') {
+        await apiFetch(`/host-availability-matrix/selections?season_id=${seasonId}&game_date=${selectedDate}`, { method: 'DELETE' }, token);
+        setMessage('Cleared host plan selections for the selected week. Availability records were not deleted.');
+      } else {
+        await apiFetch('/manual-schedule-builder/auto-schedule-season', { method: 'POST', body: JSON.stringify({ season_id: seasonId, use_host_plan_selections: true }) }, token);
+        setMessage('Auto-schedule started using selected, locked, and overflow fields only.');
+      }
+      await loadMatrix();
+    } catch (err) {
+      setError(extractError(err));
+    }
+  };
+
+  return <div className='space-y-4'>
+    <div className='rounded border bg-white p-4 shadow-sm'>
+      <div className='flex flex-wrap items-center justify-between gap-3'>
+        <div>
+          <p className='text-sm font-semibold uppercase tracking-wide text-slate-500'>Admin → Scheduling</p>
+          <h1 className='text-2xl font-bold text-slate-900'>Host Availability Matrix</h1>
+          <p className='text-sm text-slate-600'>Select or exclude available host fields for auto-scheduling without deleting community availability.</p>
+        </div>
+        <select className='rounded border p-2' value={seasonId} onChange={(e) => setSeasonId(e.target.value)}>
+          {seasons.map((season) => <option key={season.id} value={season.id}>{season.name}</option>)}
+        </select>
+      </div>
+      <div className='mt-4 flex flex-wrap gap-2'>
+        <button className='rounded bg-indigo-600 px-3 py-2 text-sm font-semibold text-white disabled:bg-slate-300' disabled={!selectedDate} onClick={() => runAction('generate')}>Generate Suggested Host Plan</button>
+        <button className='rounded bg-emerald-700 px-3 py-2 text-sm font-semibold text-white disabled:bg-slate-300' disabled={saving || !Object.keys(dirtyCells).length} onClick={saveChanges}>Save Matrix Changes</button>
+        <button className='rounded bg-blue-700 px-3 py-2 text-sm font-semibold text-white disabled:bg-slate-300' disabled={!selectedDate} onClick={() => runAction('lock')}>Lock Selected Week</button>
+        <button className='rounded border border-blue-300 px-3 py-2 text-sm font-semibold text-blue-700 disabled:text-slate-300' disabled={!selectedDate} onClick={() => runAction('unlock')}>Unlock Selected Week</button>
+        <button className='rounded border border-rose-300 px-3 py-2 text-sm font-semibold text-rose-700 disabled:text-slate-300' disabled={!selectedDate} onClick={() => runAction('clear')}>Clear Host Plan Selections</button>
+        <button className='rounded bg-slate-900 px-3 py-2 text-sm font-semibold text-white disabled:bg-slate-300' disabled={!seasonId} onClick={() => runAction('auto')}>Run Auto-Schedule Using Selected Fields</button>
+      </div>
+      <div className='mt-3 flex flex-wrap gap-3 text-xs text-slate-600'>
+        <span><b>Blank</b> = not available</span><span><b>X</b> = available</span><span><b>✓</b> = selected</span><span><b>O</b> = excluded</span><span><b>P</b> = playoff/championship date</span><span><b>L</b> = locked</span><span><b>Shift-click</b> = lock/unlock</span><span><b>Right-click</b> = overflow/note menu</span>
+      </div>
+      {message ? <div className='mt-3 rounded bg-emerald-50 p-2 text-sm text-emerald-800'>{message}</div> : null}
+      {error ? <div className='mt-3 rounded bg-rose-50 p-2 text-sm text-rose-800'>{error}</div> : null}
+    </div>
+
+    <div className='grid gap-4 xl:grid-cols-[minmax(0,1fr)_340px]'>
+      <div className='overflow-auto rounded border bg-white shadow-sm'>
+        <table className='min-w-full border-collapse text-sm'>
+          <thead className='sticky top-0 z-10 bg-slate-100'>
+            <tr>
+              <th className='sticky left-0 z-20 border-b bg-slate-100 px-3 py-2 text-left'>Community</th>
+              <th className='sticky left-36 z-20 border-b bg-slate-100 px-3 py-2 text-left'>Field / Host Location</th>
+              {matrix.dates.map((date) => <th key={date.game_date} className={`border-b px-2 py-2 text-center ${date.is_postseason ? 'bg-amber-100 font-bold text-amber-900' : ''}`}>
+                <button className='min-w-16' onClick={() => setSelectedDate(date.game_date)}>{date.is_postseason ? 'P ' : ''}{formatDate(date.game_date)}</button>
+              </th>)}
+            </tr>
+          </thead>
+          <tbody>
+            {loading ? <tr><td className='p-4 text-slate-500' colSpan={matrix.dates.length + 2}>Loading matrix…</td></tr> : groupedRows.map((group) => group.rows.map((row, index) => <tr key={row.host_location_id} className='border-t'>
+              <td className='sticky left-0 bg-white px-3 py-2 font-semibold text-slate-800'>{index === 0 ? group.community : ''}</td>
+              <td className='sticky left-36 bg-white px-3 py-2 text-slate-700'>{row.host_location_name}<div className='text-xs text-slate-400'>{row.surface_type}</div></td>
+              {matrix.dates.map((date) => {
+                const cell = getCell(row, date);
+                const status = cell.locked ? 'LOCKED' : cell.status;
+                const classes = CELL_CLASSES[status] || CELL_CLASSES.AVAILABLE;
+                return <td key={date.game_date} className='px-1 py-1 text-center'>
+                  <button
+                    title={cell.has_saved_availability ? `${status}${cell.reason ? `: ${cell.reason}` : ''}` : 'No saved availability'}
+                    className={`h-9 w-12 rounded border text-sm font-semibold ${classes} ${selectedDate === date.game_date ? 'outline outline-2 outline-offset-1 outline-indigo-400' : ''}`}
+                    onClick={(event) => handleCellClick(row, date, event)}
+                    onContextMenu={(event) => handleCellMenu(row, date, event)}
+                  >{LABELS[status] ?? status.slice(0, 1)}</button>
+                </td>;
+              })}
+            </tr>))}
+          </tbody>
+        </table>
+      </div>
+
+      <aside className='rounded border bg-white p-4 shadow-sm'>
+        <h2 className='text-lg font-bold text-slate-900'>Weekly Summary</h2>
+        {selectedSummary ? <div className='mt-2 space-y-4 text-sm'>
+          <div>
+            <div className='font-semibold'>Week {selectedSummary.week_number ?? '—'}, {formatDate(selectedSummary.game_date)}</div>
+            <div className='text-slate-500'>{selectedSummary.label}{selectedSummary.is_postseason ? ' • Playoff/Championship' : ''}</div>
+          </div>
+          <div className='grid grid-cols-2 gap-2'>
+            <div className='rounded bg-slate-50 p-2'><div className='text-xs text-slate-500'>Total games required</div><div className='text-lg font-bold'>{selectedSummary.total_games_required}</div></div>
+            {['SMALL', 'MEDIUM', 'LARGE'].map((size) => <div key={size} className='rounded bg-slate-50 p-2'><div className='text-xs text-slate-500'>{size.charAt(0) + size.slice(1).toLowerCase()} games</div><div className='font-bold'>{selectedSummary.games_required_by_size[size] || 0}</div></div>)}
+          </div>
+          <section>
+            <h3 className='font-semibold'>Selected</h3>
+            <ul className='mt-1 list-disc pl-5 text-slate-700'>{selectedSummary.selected_fields.map((field) => <li key={`${field.community_name}-${field.host_location_name}`}>{field.community_name} / {field.host_location_name}</li>)}{!selectedSummary.selected_fields.length ? <li className='text-slate-400'>No selected fields.</li> : null}</ul>
+          </section>
+          <section>
+            <h3 className='font-semibold'>Excluded available fields</h3>
+            <ul className='mt-1 list-disc pl-5 text-slate-700'>{selectedSummary.excluded_available_fields.map((field) => <li key={`${field.community_name}-${field.host_location_name}`}>{field.community_name} / {field.host_location_name}</li>)}{!selectedSummary.excluded_available_fields.length ? <li className='text-slate-400'>None.</li> : null}</ul>
+          </section>
+          <section>
+            <h3 className='font-semibold'>Estimated capacity by field size</h3>
+            <div className='mt-1 grid grid-cols-3 gap-2'>{['SMALL', 'MEDIUM', 'LARGE'].map((size) => <div key={size} className='rounded border p-2 text-center'><div className='text-xs text-slate-500'>{size}</div><div className='font-bold'>{selectedSummary.estimated_capacity_by_field_size[size] || 0}</div></div>)}</div>
+          </section>
+          <section>
+            <h3 className='font-semibold'>Target game split</h3>
+            <ul className='mt-1 list-disc pl-5'>{Object.entries(selectedSummary.target_game_split).map(([community, games]) => <li key={community}>{community}: {games} games</li>)}{!Object.keys(selectedSummary.target_game_split).length ? <li className='text-slate-400'>Select fields to calculate split.</li> : null}</ul>
+          </section>
+          <section>
+            <h3 className='font-semibold'>Validation</h3>
+            {selectedSummary.validation_warnings.length ? <ul className='mt-1 list-disc pl-5 text-rose-700'>{selectedSummary.validation_warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul> : <p className='mt-1 text-emerald-700'>Selected capacity supports the estimated week demand.</p>}
+            <p className='mt-2 text-xs text-slate-500'>Odd-team doubleheader adjacency is enforced by the auto-scheduler; add an overflow field if adjacent same-location slots are unavailable.</p>
+          </section>
+        </div> : <p className='mt-2 text-sm text-slate-500'>Select a date column to view capacity, selected fields, excluded fields, and validation.</p>}
+      </aside>
+    </div>
+  </div>;
+}
