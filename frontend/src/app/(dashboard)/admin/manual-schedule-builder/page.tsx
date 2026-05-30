@@ -516,7 +516,9 @@ export default function ManualScheduleBuilderPage() {
           </div>
           {autoScheduleDiagnostics.auto_schedule_diagnostics ? <div>
             <div className='font-semibold'>6. Zero-game diagnostics</div>
-            <div>Weeks evaluated: {autoScheduleDiagnostics.auto_schedule_diagnostics.weeks_evaluated ?? 0}</div>
+            <div>Season: {autoScheduleDiagnostics.auto_schedule_diagnostics.season_name || 'Unknown'} ({autoScheduleDiagnostics.auto_schedule_diagnostics.season_id || 'no season id'})</div>
+            <div>Weeks found: {autoScheduleDiagnostics.auto_schedule_diagnostics.weeks_found ?? 0}</div>
+            <div>Regular season weeks found: {autoScheduleDiagnostics.auto_schedule_diagnostics.regular_season_weeks_found ?? autoScheduleDiagnostics.auto_schedule_diagnostics.weeks_evaluated ?? 0}</div>
             <div>Divisions evaluated: {autoScheduleDiagnostics.auto_schedule_diagnostics.divisions_evaluated ?? 0}</div>
             <div>Active teams: {autoScheduleDiagnostics.auto_schedule_diagnostics.active_teams_total ?? 0}</div>
             <div>Expected games: {autoScheduleDiagnostics.auto_schedule_diagnostics.expected_games_total ?? 0}</div>
@@ -524,6 +526,18 @@ export default function ManualScheduleBuilderPage() {
             <div>Host availability count: {autoScheduleDiagnostics.auto_schedule_diagnostics.host_availability_total ?? 0}</div>
             <div>Generated slots by size: Small {autoScheduleDiagnostics.auto_schedule_diagnostics.generated_slots_by_field_size?.SMALL ?? 0}, Medium {autoScheduleDiagnostics.auto_schedule_diagnostics.generated_slots_by_field_size?.MEDIUM ?? 0}, Large {autoScheduleDiagnostics.auto_schedule_diagnostics.generated_slots_by_field_size?.LARGE ?? 0}</div>
             {autoScheduleDiagnostics.auto_schedule_diagnostics.missing_generated_slot_field_sizes?.length ? <div className='font-semibold text-rose-700'>Missing generated slot sizes: {autoScheduleDiagnostics.auto_schedule_diagnostics.missing_generated_slot_field_sizes.join(', ')}</div> : null}
+            {autoScheduleDiagnostics.auto_schedule_diagnostics.active_teams_by_division?.length ? <div className='mt-2'>
+              <div className='font-semibold'>Active teams by division</div>
+              <ul className='list-inside list-disc'>{autoScheduleDiagnostics.auto_schedule_diagnostics.active_teams_by_division.map((row: any) => <li key={row.division_id}>{row.division_name}: {row.active_team_count} teams</li>)}</ul>
+            </div> : null}
+            {autoScheduleDiagnostics.auto_schedule_diagnostics.generated_game_groups_by_division_week?.length ? <div className='mt-2 overflow-x-auto'>
+              <div className='font-semibold'>Expected games vs generated game groups</div>
+              <table className='mt-1 min-w-full border text-xs'>
+                <thead><tr className='bg-slate-100'><th className='border p-1 text-left'>Division</th><th className='border p-1 text-left'>Week</th><th className='border p-1 text-right'>Expected</th><th className='border p-1 text-right'>Generated</th><th className='border p-1 text-right'>Existing scheduled</th></tr></thead>
+                <tbody>{autoScheduleDiagnostics.auto_schedule_diagnostics.generated_game_groups_by_division_week.map((row: any) => <tr key={`${row.division_id}-${row.week}`}><td className='border p-1'>{row.division_name}</td><td className='border p-1'>{row.week}</td><td className='border p-1 text-right'>{row.expected_games ?? 0}</td><td className='border p-1 text-right'>{row.generated_game_groups ?? 0}</td><td className='border p-1 text-right'>{row.existing_scheduled_games ?? 0}</td></tr>)}</tbody>
+              </table>
+            </div> : null}
+            {autoScheduleDiagnostics.auto_schedule_diagnostics.skipped_game_groups?.length ? <div className='mt-1'>Skipped game groups: {autoScheduleDiagnostics.auto_schedule_diagnostics.skipped_game_groups.map((row: any) => `${row.division_name} Week ${row.week} (${row.reason})`).join('; ')}</div> : null}
             {autoScheduleDiagnostics.auto_schedule_diagnostics.missing_division_week_generation?.length ? <div className='mt-1'>Missing division/week generation: {autoScheduleDiagnostics.auto_schedule_diagnostics.missing_division_week_generation.map((row: any) => `${row.division_name} Week ${row.week} (${row.reason})`).join('; ')}</div> : null}
           </div> : null}
           {autoScheduleDiagnostics.slot_capacity_validation ? <div>
