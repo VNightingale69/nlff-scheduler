@@ -4463,6 +4463,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     if teams and compatible_slots_found == 0:
         _msg = 'Division has teams but no compatible generated slots.'
         logger.warning('%s division=%s normalized_division=%s', _msg, full_division_label, selected_division_normalized)
+        max_new_games_without_slots = max(0, required_games_for_division_week - len(existing_division_games))
         return {
             'proposals': [],
             'scheduled_games': [],
@@ -4474,6 +4475,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'compatible_slot_count': 0,
             'skipped': [{'reason': _msg}],
             'proposed_game_count': 0,
+            'generated_required_game_groups': max_new_games_without_slots,
             'max_allowed_game_count': required_games_for_division_week,
             'existing_game_count': len(existing_division_games),
             'unused_team_ids': [str(tid) for tid in teams_by_id],
@@ -4483,6 +4485,31 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'active_teams_found': len(teams),
             'eligible_pairings_generated': 0,
             'compatible_slots_found': 0,
+            'final_validation': {
+                'active_team_count': team_count,
+                'required_game_count': required_games_for_division_week,
+                'created_game_count': len(existing_division_games),
+                'odd_even_status_source': 'division_active_team_count',
+                'unscheduled_teams': [teams_by_id[tid].name for tid in teams_by_id if week_team_game_counts.get(tid, 0) == 0],
+                'double_header_team': None,
+                'weekly_completion_status': 'incomplete' if max_new_games_without_slots else 'complete',
+            },
+            'diagnostics': {
+                'missing_division_week': {
+                    'week': week.week_number,
+                    'date': str(week.start_date) if week.start_date else None,
+                    'division': full_division_label,
+                    'active_teams': team_count,
+                    'expected_games': required_games_for_division_week,
+                    'generated_game_groups': max_new_games_without_slots,
+                    'scheduled_games': len(existing_division_games),
+                    'required_field_size': required_field_type,
+                    'compatible_slots_found': 0,
+                    'skipped_placement_reasons': [_msg],
+                    'doubleheader_team_selected': None,
+                    'doubleheader_placement_failed': bool(is_odd_division and no_byes and max_new_games_without_slots),
+                }
+            },
         }
     assigned_game_slots = db.query(Game, GameSlot).join(GameSlot, GameSlot.assigned_game_id == Game.id).filter(
         Game.game_date == week.start_date
@@ -4922,6 +4949,36 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                     host_lock_reason = 'rotation communities kept; extra capacity host locations added to avoid unscheduled games'
                     break
     two_location_rule_relaxed = False
+    if is_odd_division and no_byes and selected_host_ids:
+        def _host_ids_with_adjacent_doubleheader_capacity(host_ids: set[uuid.UUID]) -> set[uuid.UUID]:
+            adjacent_host_ids: set[uuid.UUID] = set()
+            slots_by_site_day: dict[tuple[uuid.UUID, object], list[GameSlot]] = {}
+            for slot in open_slots:
+                if not slot.host_location_id or slot.host_location_id not in host_ids:
+                    continue
+                slots_by_site_day.setdefault((slot.host_location_id, slot.slot_date), []).append(slot)
+            for (host_id, _slot_date), host_slots in slots_by_site_day.items():
+                slot_minutes = sorted(
+                    minute
+                    for minute in (_minutes_from_time(slot.start_time) for slot in host_slots)
+                    if minute is not None
+                )
+                if any((minute + 60) in slot_minutes for minute in slot_minutes):
+                    adjacent_host_ids.add(host_id)
+            return adjacent_host_ids
+
+        if not _host_ids_with_adjacent_doubleheader_capacity(selected_host_ids):
+            adjacent_overflow_hosts = _host_ids_with_adjacent_doubleheader_capacity({row['host_id'] for row in host_capacity})
+            for host in host_capacity:
+                host_id = host['host_id']
+                if host_id in selected_host_ids or host_id not in adjacent_overflow_hosts:
+                    continue
+                selected_host_ids.add(host_id)
+                overflow_host_ids.add(host_id)
+                locked_host_mode = 'doubleheader_adjacent_capacity_fallback'
+                host_lock_reason = 'additional compatible host location added to provide same-location back-to-back doubleheader capacity'
+                _add_skipped('Selected host communities lacked adjacent same-location doubleheader slots; overflow compatible host added.')
+                break
     if not selected_host_ids and games_required > 0:
         fallback_hosts = [row['host_id'] for row in host_capacity[:3]]
         if fallback_hosts:
@@ -6212,6 +6269,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         'proposals': plans,
         'skipped': skipped,
         'proposed_game_count': len(plans),
+        'generated_required_game_groups': max_new_games,
         'max_allowed_game_count': required_games_for_division_week,
         'existing_game_count': existing_games_count,
         'unused_team_ids': unused_team_ids,
@@ -8261,7 +8319,7 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
             try:
                 preview = auto_fill_preview({'season_id': season_id, 'week_id': week.id, 'division_id': division.id}, db)
                 proposals = preview.get('proposals') or []
-                generated_game_groups = len(proposals)
+                generated_game_groups = int(preview.get('generated_required_game_groups') if preview.get('generated_required_game_groups') is not None else len(proposals))
                 attempted_game_groups += len(proposals)
                 valid_assignments_found += len(proposals)
                 preview_assignments_count += len(proposals)
@@ -8323,13 +8381,15 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
                 logger.exception('auto_schedule_preview_failed_continuing season_id=%s week_id=%s division_id=%s', season_id, week.id, division.id)
             generated_game_groups = max(generated_game_groups, min(required_games, actual_created_games))
             all_skips_for_division_week = preview_skipped + apply_skipped
+            preview_diagnostics = preview.get('diagnostics') or {}
+            preview_dh = preview_diagnostics.get('odd_team_double_header_reservation') or {}
+            missing_preview_diagnostic = preview_diagnostics.get('missing_division_week') or {}
             skip_reasons = sorted({_skip_reason_code(str((row or {}).get('reason') or 'unknown')) for row in all_skips_for_division_week})
             division_week_diagnostic = {
                 'division_id': str(division.id),
                 'week': week.week_number,
                 'week_start_date': str(week.start_date) if week.start_date else None,
                 'division_name': division_label,
-                'required_field_size': _required_field_type_for_division(division),
                 'active_team_count': active_team_count,
                 'expected_games': required_games,
                 'generated_game_groups': generated_game_groups,
@@ -8337,6 +8397,17 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
                 'missing_games': max(0, required_games - actual_created_games),
                 'skipped_placements': len(all_skips_for_division_week),
                 'skip_reasons': skip_reasons or ([] if actual_created_games >= required_games else ['unknown']),
+                'date': str(week.start_date) if week.start_date else None,
+                'active_teams': active_team_count,
+                'required_field_size': _required_field_type_for_division(division),
+                'compatible_slots_found': int(preview.get('compatible_slots_found') or missing_preview_diagnostic.get('compatible_slots_found') or 0),
+                'skipped_placement_reasons': [str((row or {}).get('reason') or 'unknown') for row in all_skips_for_division_week],
+                'doubleheader_team_selected': preview_dh.get('selected_team_name') or missing_preview_diagnostic.get('doubleheader_team_selected'),
+                'doubleheader_placement_failed': bool(
+                    (active_team_count % 2 == 1)
+                    and required_games > actual_created_games
+                    and (preview_dh.get('reservation_failure_reasons') or missing_preview_diagnostic.get('doubleheader_placement_failed'))
+                ),
             }
             division_week_diagnostics.append(division_week_diagnostic)
             week_diagnostic = weekly_diagnostics_by_week_id.setdefault(week.id, {
