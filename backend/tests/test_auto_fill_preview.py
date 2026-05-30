@@ -298,6 +298,39 @@ class AutoFillPreviewTest(unittest.TestCase):
             self.assertIsNotNone(host)
             self.assertIn(host.organization_id, {home_team.organization_id, away_team.organization_id})
 
+
+    def test_multi_host_assignment_balances_selected_communities_and_reports_summary(self):
+        self.db.add_all([
+            Team(id=uuid.uuid4(), organization_id=self.org_w.id, division_id=self.division.id, name='Westosha Navy', is_active=True),
+            Team(id=uuid.uuid4(), organization_id=self.org_w.id, division_id=self.division.id, name='Westosha White', is_active=True),
+            Team(id=uuid.uuid4(), organization_id=self.org_a.id, division_id=self.division.id, name='Antioch Red', is_active=True),
+            Team(id=uuid.uuid4(), organization_id=self.org_a.id, division_id=self.division.id, name='Antioch Gold', is_active=True),
+        ])
+        # Give the first selected community two compatible slots, forcing a second selected
+        # community while still allowing an even 2/2 weekly split across the selected hosts.
+        westosha_extra_fi = FieldInstance(id=uuid.uuid4(), host_location_id=self.host.id, hosting_availability_id=uuid.uuid4(), instance_date=self.week2.start_date, field_name='Westosha Balance 2', field_type='SMALL', is_active=True)
+        westosha_extra_slot = GameSlot(id=uuid.uuid4(), field_instance_id=westosha_extra_fi.id, host_location_id=self.host.id, slot_date=self.week2.start_date, start_time=time(10, 0), end_time=time(11, 0), field_type='SMALL', status='OPEN')
+        antioch_host = HostLocation(id=uuid.uuid4(), organization_id=self.org_a.id, name='Antioch Park', is_active=True)
+        rows = [westosha_extra_fi, westosha_extra_slot, antioch_host]
+        for idx, hour in enumerate((9, 10, 11, 12), start=1):
+            fi = FieldInstance(id=uuid.uuid4(), host_location_id=antioch_host.id, hosting_availability_id=uuid.uuid4(), instance_date=self.week2.start_date, field_name=f'Antioch Balance {idx}', field_type='SMALL', is_active=True)
+            slot = GameSlot(id=uuid.uuid4(), field_instance_id=fi.id, host_location_id=antioch_host.id, slot_date=self.week2.start_date, start_time=time(hour, 0), end_time=time(hour + 1, 0), field_type='SMALL', status='OPEN')
+            rows.extend([fi, slot])
+        self.db.add_all(rows)
+        self.db.commit()
+
+        result = auto_fill_preview({'season_id': self.season.id, 'week_id': self.week2.id, 'division_id': self.division.id}, db=self.db)
+
+        self.assertEqual(result['max_allowed_game_count'], 4)
+        self.assertEqual(result['proposed_game_count'], 4)
+        summary = result['diagnostics']['weekly_multi_host_assignment_summary']
+        self.assertEqual(summary['diagnostic_label'], 'Weekly Multi-Host Assignment Summary')
+        self.assertEqual(summary['selected_host_community_count'], 2)
+        self.assertEqual(summary['actual_games_per_host_community']['Westosha'], 2)
+        self.assertEqual(summary['actual_games_per_host_community']['Antioch'], 2)
+        self.assertEqual(summary['home_team_games_forced_away'], 0)
+        self.assertEqual(summary['validation_flags'], [])
+
     def test_preview_locks_to_two_hosts_when_one_host_is_insufficient(self):
         second_host = HostLocation(id=uuid.uuid4(), organization_id=self.org_a.id, name='Antioch Park', is_active=True)
         third_host = HostLocation(id=uuid.uuid4(), organization_id=self.org_w.id, name='Wilmot Stadium', is_active=True)
