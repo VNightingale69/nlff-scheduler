@@ -4938,6 +4938,35 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         open_slots = [slot for slot in open_slots if slot.host_location_id in selected_host_ids]
         slots_by_host = {host_id: host_slots for host_id, host_slots in slots_by_host.items() if host_id in selected_host_ids}
     split_host_week = len(selected_host_ids) > 1
+    selected_week_org_ids: set[uuid.UUID] = set(selected_rotation_orgs) or {
+        org_id for host_id, org_id in host_org_by_id.items() if host_id in selected_host_ids
+    }
+    selected_week_host_ids_by_org: dict[uuid.UUID, set[uuid.UUID]] = {
+        org_id: set(host_ids_by_org.get(org_id, set())) & set(selected_host_ids)
+        for org_id in selected_week_org_ids
+    }
+    selected_week_target_base = (games_required / max(len(selected_week_org_ids), 1)) if selected_week_org_ids else 0.0
+    selected_week_team_counts = {
+        org_id: sum(1 for team in teams if team.organization_id == org_id)
+        for org_id in selected_week_org_ids
+    }
+    selected_week_total_selected_teams = sum(selected_week_team_counts.values())
+    selected_week_target_by_org: dict[uuid.UUID, float] = {}
+    for org_id in selected_week_org_ids:
+        if selected_week_total_selected_teams > 0:
+            team_weighted_target = games_required * (selected_week_team_counts.get(org_id, 0) / selected_week_total_selected_teams)
+            selected_week_target_by_org[org_id] = (selected_week_target_base + team_weighted_target) / 2
+        else:
+            selected_week_target_by_org[org_id] = selected_week_target_base
+    selected_week_target_floor_by_org = {
+        org_id: max(0, int(math.floor(target - 2)))
+        for org_id, target in selected_week_target_by_org.items()
+    }
+    selected_week_target_ceiling_by_org = {
+        org_id: int(math.ceil(target + 2))
+        for org_id, target in selected_week_target_by_org.items()
+    }
+    selected_week_assignment_events: list[dict[str, object]] = []
     projected_games_by_host: dict[uuid.UUID, int] = {}
     projected_games_by_community: dict[uuid.UUID, int] = {}
     preferred_host_id: uuid.UUID | None = primary_host_id
@@ -5000,6 +5029,22 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                 str(c.id),
             ),
         )
+    def _selected_org_has_compatible_remaining_capacity(org_id: uuid.UUID) -> bool:
+        return any(
+            s.host_location_id in selected_week_host_ids_by_org.get(org_id, set())
+            and _normalize_field_size(s.field_type) == _normalize_field_size(required_field_type)
+            for s in remaining_slots
+        )
+    def _weekly_selected_host_capacity_limitation(org_id: uuid.UUID) -> str | None:
+        compatible_capacity = sum(
+            1 for s in remaining_slots
+            if s.host_location_id in selected_week_host_ids_by_org.get(org_id, set())
+            and _normalize_field_size(s.field_type) == _normalize_field_size(required_field_type)
+        )
+        if compatible_capacity <= 0:
+            return 'No compatible remaining capacity for required field size.'
+        return None
+
     if is_odd_division and no_byes:
         min_dh = min(double_header_counts.values() or [0])
         min_count_candidates = [tid for tid, count in double_header_counts.items() if count == min_dh]
@@ -5133,8 +5178,8 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                             score += 500
                             reason_bits.append('exact field-size capacity fit (+500)')
                         else:
-                            score -= 1000
-                            warning_bits.append('incompatible field-size assignment (-1000)')
+                            score -= 10000
+                            warning_bits.append('field-size mismatch (-10000)')
                             if not bool(payload.get('admin_override_incompatible_field_size', False)):
                                 continue
                         if selected_field_slot.turf_wave_id:
@@ -5193,6 +5238,67 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                             )
                         if candidate_host_id and not candidate_host:
                             logger.warning(f"HostLocation not found for id {candidate_host_id}")
+                        candidate_host_org_id_for_week = candidate_host.organization_id if candidate_host else host_org_id
+                        selected_team_orgs_in_game = {
+                            org_id for org_id in (team_a.organization_id, team_b.organization_id)
+                            if org_id in selected_week_org_ids
+                        }
+                        selected_home_org_match = bool(candidate_host_org_id_for_week in selected_team_orgs_in_game)
+                        selected_neutral_game = bool(selected_week_org_ids and not selected_team_orgs_in_game)
+                        if selected_week_org_ids and candidate_host_org_id_for_week:
+                            candidate_week_count = projected_games_by_community.get(candidate_host_org_id_for_week, 0)
+                            candidate_week_projected = candidate_week_count + 1
+                            candidate_week_target = selected_week_target_by_org.get(candidate_host_org_id_for_week, selected_week_target_base)
+                            candidate_week_floor = selected_week_target_floor_by_org.get(candidate_host_org_id_for_week, max(0, int(math.floor(selected_week_target_base - 2))))
+                            candidate_week_ceiling = selected_week_target_ceiling_by_org.get(candidate_host_org_id_for_week, int(math.ceil(selected_week_target_base + 2)))
+                            current_week_counts = {org_id: projected_games_by_community.get(org_id, 0) for org_id in selected_week_org_ids}
+                            projected_week_counts = dict(current_week_counts)
+                            projected_week_counts[candidate_host_org_id_for_week] = candidate_week_projected
+                            projected_week_gap = max(projected_week_counts.values(), default=0) - min(projected_week_counts.values(), default=0)
+                            below_target_available_orgs = [
+                                org_id for org_id in selected_week_org_ids
+                                if org_id != candidate_host_org_id_for_week
+                                and current_week_counts.get(org_id, 0) < selected_week_target_floor_by_org.get(org_id, 0)
+                                and _selected_org_has_compatible_remaining_capacity(org_id)
+                            ]
+                            lowest_week_count = min(current_week_counts.values(), default=0)
+                            if candidate_host_org_id_for_week in selected_week_org_ids:
+                                if selected_home_org_match:
+                                    score += 20000
+                                    reason_bits.append('home team plays at selected home community (+20000)')
+                                if candidate_week_count < candidate_week_target:
+                                    score += 15000
+                                    reason_bits.append('selected host community below target weekly share (+15000)')
+                                if candidate_week_floor <= candidate_week_projected <= candidate_week_ceiling:
+                                    score += 10000
+                                    reason_bits.append('keeps selected communities within weekly target range (+10000)')
+                                if selected_neutral_game and candidate_week_count == lowest_week_count:
+                                    score += 5000
+                                    reason_bits.append('neutral game assigned to lowest assigned selected community (+5000)')
+                                if candidate_week_count >= candidate_week_ceiling and below_target_available_orgs:
+                                    score -= 20000
+                                    warning_bits.append('selected community above target while another selected community is below target with capacity (-20000)')
+                                if projected_week_gap > 4 and below_target_available_orgs:
+                                    score -= 15000
+                                    warning_bits.append('avoidable weekly selected-host imbalance greater than 4 games (-15000)')
+                            else:
+                                selected_capacity_exists = any(
+                                    _selected_org_has_compatible_remaining_capacity(org_id)
+                                    for org_id in selected_week_org_ids
+                                )
+                                if selected_capacity_exists:
+                                    score -= 10000
+                                    warning_bits.append('non-selected community used while selected communities have compatible capacity (-10000)')
+                        if (
+                            selected_team_orgs_in_game
+                            and candidate_host_org_id_for_week not in selected_team_orgs_in_game
+                            and any(_selected_org_has_compatible_remaining_capacity(org_id) for org_id in selected_team_orgs_in_game)
+                        ):
+                            score -= 25000
+                            warning_bits.append('selected host community home team sent away while compatible home capacity exists (-25000)')
+                        if _normalize_field_size(selected_field_slot.field_type) == _normalize_field_size(required_field_type):
+                            score += 2000
+                            reason_bits.append('preserves field-size compatibility (+2000)')
                         teams_with_unused_unique_opponents = []
                         for team_id in (a, b):
                             if any(
@@ -5595,12 +5701,12 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                                         prev_hour = int(str(prev_start).split(':')[0])
                                         cur_hour = int(str(slot.start_time).split(':')[0])
                                         if abs(cur_hour - prev_hour) == 1:
-                                            score += 100
-                                            reason_bits.append('double-header back-to-back (+100)')
+                                            score += 3000
+                                            reason_bits.append('preserving same-location/back-to-back doubleheader rule (+3000)')
                                             double_header_back_to_back = True
                                         else:
-                                            score -= 150
-                                            warning_bits.append('double-header separated by gap (-150)')
+                                            score -= 10000
+                                            warning_bits.append('breaking back-to-back doubleheader rule (-10000)')
                                     except Exception:
                                         pass
     
@@ -5685,6 +5791,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'host_location_id': str(selected_field_slot.host_location_id) if selected_field_slot.host_location_id else None,
             'field': selected_field_slot.field_instance.field_name if selected_field_slot.field_instance else '',
             'field_instance_id': str(selected_field_slot.field_instance_id) if selected_field_slot.field_instance_id else None,
+            'field_type': selected_field_slot.field_type,
             'score': int(best['score']),
             'reason': '; '.join(reason_bits + ['deterministic field assignment: earliest available time then first compatible open field by host order']),
             'warnings': best['warning_bits'],
@@ -5692,6 +5799,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'week': week.week_number,
             'division': full_division_label,
             'same_community_home_unavailable_reason': best.get('same_community_home_unavailable_reason'),
+            'compatible_home_slots_at_scheduling_time': int(best.get('compatible_home_slots_at_scheduling_time') or 0),
         })
         if (
             selected_host_ids
@@ -5715,6 +5823,26 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             used_team_ids.add(best['home_team_id'])
             used_team_ids.add(best['away_team_id'])
         if selected_field_slot.host_location_id:
+            selected_assignment_host_org_id = host_org_by_id.get(selected_field_slot.host_location_id)
+            selected_home_orgs = [
+                org_id for org_id in (home_team.organization_id, away_team.organization_id)
+                if org_id in selected_week_org_ids
+            ]
+            home_team_forced_away = bool(
+                home_team.organization_id in selected_week_org_ids
+                and selected_assignment_host_org_id != home_team.organization_id
+            )
+            selected_week_assignment_events.append({
+                'plan_index': len(plans),
+                'host_location_id': str(selected_field_slot.host_location_id),
+                'host_community_id': str(selected_assignment_host_org_id) if selected_assignment_host_org_id else None,
+                'home_team_id': str(home_team.id) if home_team else None,
+                'home_team_community_id': str(home_team.organization_id) if home_team and home_team.organization_id else None,
+                'home_team_hosted_at_home': bool(home_team and selected_assignment_host_org_id == home_team.organization_id and home_team.organization_id in selected_week_org_ids),
+                'home_team_forced_away': home_team_forced_away,
+                'selected_team_community_ids': [str(org_id) for org_id in selected_home_orgs],
+                'home_capacity_limitation': _weekly_selected_host_capacity_limitation(home_team.organization_id) if home_team and home_team.organization_id in selected_week_org_ids and home_team_forced_away else None,
+            })
             used_host_ids.add(selected_field_slot.host_location_id)
             if selected_host_ids and selected_field_slot.host_location_id not in selected_host_ids:
                 overflow_host_ids.add(selected_field_slot.host_location_id)
@@ -5990,6 +6118,93 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             return 'Slightly under season target but within the 10-game target range.'
         return 'On season target.'
 
+    selected_week_actual_games_by_org = {
+        org_id: projected_games_by_community.get(org_id, 0)
+        for org_id in selected_week_org_ids
+    }
+    selected_week_capacity_limitations = {
+        str(org_id): _weekly_selected_host_capacity_limitation(org_id)
+        for org_id in selected_week_org_ids
+        if _weekly_selected_host_capacity_limitation(org_id)
+    }
+    selected_week_validation_flags: list[dict[str, object]] = []
+    for org_id in sorted(selected_week_org_ids, key=lambda oid: org_names_by_id.get(oid, str(oid))):
+        actual_games = selected_week_actual_games_by_org.get(org_id, 0)
+        target_games = selected_week_target_by_org.get(org_id, selected_week_target_base)
+        deviation = actual_games - target_games
+        capacity_reason = selected_week_capacity_limitations.get(str(org_id))
+        if abs(deviation) > 4 and not capacity_reason:
+            selected_week_validation_flags.append({
+                'type': 'selected_host_weekly_target_deviation',
+                'community_id': str(org_id),
+                'community': org_names_by_id.get(org_id, str(org_id)),
+                'target_games': round(target_games, 2),
+                'actual_games': actual_games,
+                'deviation': round(deviation, 2),
+                'message': 'Selected host community is more than 4 games from its weekly target without a capacity reason.',
+            })
+    forced_away_events_without_capacity_reason = [
+        event for event in selected_week_assignment_events
+        if event.get('home_team_forced_away') and not event.get('home_capacity_limitation')
+    ]
+    if forced_away_events_without_capacity_reason:
+        selected_week_validation_flags.append({
+            'type': 'selected_home_team_forced_away_without_capacity_reason',
+            'count': len(forced_away_events_without_capacity_reason),
+            'message': 'A selected host community home team was assigned away while no selected-home capacity limitation was recorded.',
+        })
+
+    def _selected_week_imbalance_reason(org_id: uuid.UUID) -> str | None:
+        actual_games = selected_week_actual_games_by_org.get(org_id, 0)
+        target_games = selected_week_target_by_org.get(org_id, selected_week_target_base)
+        capacity_reason = selected_week_capacity_limitations.get(str(org_id))
+        if abs(actual_games - target_games) <= 4:
+            return 'Within weekly selected-host target range.'
+        if capacity_reason:
+            return capacity_reason
+        if actual_games > target_games:
+            return 'Above target because home-community priority, doubleheader continuity, or time-window constraints outweighed neutral load balancing.'
+        return 'Below target because matchup, home-community priority, doubleheader continuity, or time-window constraints consumed compatible slots elsewhere.'
+
+    weekly_multi_host_assignment_summary = {
+        'diagnostic_label': 'Weekly Multi-Host Assignment Summary',
+        'week': f'Week {week.week_number}',
+        'selected_host_communities': [
+            {
+                'community_id': str(org_id),
+                'community': org_names_by_id.get(org_id, str(org_id)),
+                'host_locations': [
+                    {
+                        'host_location_id': str(host_id),
+                        'host_location': host_name_by_id.get(host_id, str(host_id)),
+                    }
+                    for host_id in sorted(selected_week_host_ids_by_org.get(org_id, set()), key=lambda hid: host_name_by_id.get(hid, ''))
+                ],
+            }
+            for org_id in sorted(selected_week_org_ids, key=lambda oid: org_names_by_id.get(oid, str(oid)))
+        ],
+        'total_games': len(plans),
+        'selected_host_community_count': len(selected_week_org_ids),
+        'target_games_per_host_community': round(selected_week_target_base, 2) if selected_week_org_ids else 0,
+        'adjusted_target_games_by_host_community': {
+            org_names_by_id.get(org_id, str(org_id)): round(selected_week_target_by_org.get(org_id, selected_week_target_base), 2)
+            for org_id in sorted(selected_week_org_ids, key=lambda oid: org_names_by_id.get(oid, str(oid)))
+        },
+        'actual_games_per_host_community': {
+            org_names_by_id.get(org_id, str(org_id)): selected_week_actual_games_by_org.get(org_id, 0)
+            for org_id in sorted(selected_week_org_ids, key=lambda oid: org_names_by_id.get(oid, str(oid)))
+        },
+        'home_team_games_hosted_at_home': sum(1 for event in selected_week_assignment_events if event.get('home_team_hosted_at_home')),
+        'home_team_games_forced_away': sum(1 for event in selected_week_assignment_events if event.get('home_team_forced_away')),
+        'capacity_limitations': selected_week_capacity_limitations,
+        'reason_for_imbalance': {
+            org_names_by_id.get(org_id, str(org_id)): _selected_week_imbalance_reason(org_id)
+            for org_id in sorted(selected_week_org_ids, key=lambda oid: org_names_by_id.get(oid, str(oid)))
+        },
+        'validation_flags': selected_week_validation_flags,
+        'assignment_events': selected_week_assignment_events,
+    }
+
     logger.info(
         f'Selected host sites for scheduling: {selected_host_ids}'
     )
@@ -6038,6 +6253,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                 'reservation_context': reserved_double_header_context,
                 'reservation_failure_reasons': double_header_reservation_failure_reasons,
             },
+            'weekly_multi_host_assignment_summary': weekly_multi_host_assignment_summary,
             'weekly_host_planning_report': {
                 'selected_host_sites': selected_host_ids,
                 'overflow_sites_used': [str(hid) for hid in sorted(overflow_host_ids, key=str)],
@@ -6188,6 +6404,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                 'community_game_count_target_range': 10,
                 'community_game_count_gap_within_target': community_game_gap <= 10,
                 'community_game_count_gap_reason': None if community_game_gap <= 10 else 'Gap exceeds 10 because host-week rotation, compatible field sizes, doubleheader/time rules, or selected-community capacity constrained lower-hosted communities.',
+                'weekly_multi_host_assignment_summary': weekly_multi_host_assignment_summary,
             },
             'selected_host_locations_by_community': [
                 {
@@ -6234,6 +6451,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'single_site_game_limit': single_site_game_limit,
             'admin_override_third_host_locations': admin_override_third_host,
             'split_host_week': split_host_week,
+            'multi_host_assignment_validation_flags': selected_week_validation_flags,
             'single_site_possible': single_site_possible,
             'centralization_requested': centralization_requested,
             'staffing_limited': staffing_limited,
