@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import Base
 from app.models import Division, FieldInstance, Game, GameSlot, GameStatus, HostLocation, Organization, Season, Team, Week
-from app.routes.api import auto_fill_apply, auto_fill_preview
+from app.routes.api import auto_fill_apply, auto_fill_preview, auto_schedule_entire_season
 
 
 class AutoFillPreviewTest(unittest.TestCase):
@@ -858,3 +858,69 @@ class AutoFillPreviewTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class AutoScheduleRequiredGameGroupDiagnosticsTest(unittest.TestCase):
+    def setUp(self):
+        engine = create_engine('sqlite+pysqlite:///:memory:', future=True)
+        Base.metadata.create_all(engine)
+        self.db: Session = sessionmaker(bind=engine)()
+        self.season = Season(id=uuid.uuid4(), name='Fall 2026', start_date=date(2026, 9, 1), end_date=date(2026, 11, 1), is_active=True)
+        self.division = Division(id=uuid.uuid4(), division_group='COED', name='K/1ST', required_field_layout_type='THIRTY_YARD_WIDTH', is_active=True)
+        self.status = GameStatus(id=uuid.uuid4(), code='SCHEDULED', label='Scheduled', is_active=True)
+        self.week = Week(id=uuid.uuid4(), season_id=self.season.id, week_number=1, start_date=date(2026, 9, 5), end_date=date(2026, 9, 11))
+        self.org = Organization(id=uuid.uuid4(), name='League', is_active=True)
+        self.teams = [
+            Team(id=uuid.uuid4(), organization_id=self.org.id, division_id=self.division.id, name=f'Team {idx}', is_active=True)
+            for idx in range(1, 5)
+        ]
+        self.db.add_all([self.season, self.division, self.status, self.week, self.org, *self.teams])
+        self.db.commit()
+
+    def test_required_game_groups_are_reported_before_slot_preflight_failure(self):
+        result = auto_schedule_entire_season({'season_id': self.season.id}, db=self.db)
+
+        diagnostics = result['auto_schedule_diagnostics']
+        self.assertEqual(diagnostics['season_id'], str(self.season.id))
+        self.assertEqual(diagnostics['season_name'], 'Fall 2026')
+        self.assertEqual(diagnostics['weeks_found'], 1)
+        self.assertEqual(diagnostics['regular_season_weeks_found'], 1)
+        self.assertEqual(diagnostics['active_divisions_found'], 1)
+        self.assertEqual(diagnostics['active_teams_total'], 4)
+        self.assertEqual(diagnostics['expected_games_total'], 2)
+        self.assertEqual(diagnostics['generated_game_groups_total'], 2)
+        self.assertEqual(diagnostics['expected_games_by_week'], {'1': 2})
+        self.assertEqual(diagnostics['generated_game_groups_by_week'], {'1': 2})
+        self.assertNotIn('no_required_game_groups', result['root_cause_categories'])
+        self.assertIn('no_generated_slots', result['root_cause_categories'])
+
+    def test_all_games_already_scheduled_is_not_reported_as_no_required_groups(self):
+        self.db.add_all([
+            Game(
+                id=uuid.uuid4(),
+                season_id=self.season.id,
+                week_id=self.week.id,
+                home_team_id=self.teams[0].id,
+                away_team_id=self.teams[1].id,
+                game_status_id=self.status.id,
+                game_date=self.week.start_date,
+                kickoff_time=time(9, 0),
+            ),
+            Game(
+                id=uuid.uuid4(),
+                season_id=self.season.id,
+                week_id=self.week.id,
+                home_team_id=self.teams[2].id,
+                away_team_id=self.teams[3].id,
+                game_status_id=self.status.id,
+                game_date=self.week.start_date,
+                kickoff_time=time(10, 0),
+            ),
+        ])
+        self.db.commit()
+
+        result = auto_schedule_entire_season({'season_id': self.season.id}, db=self.db)
+
+        self.assertIn('all_games_already_scheduled', result['root_cause_categories'])
+        self.assertNotIn('no_required_game_groups', result['root_cause_categories'])
+        self.assertIn('all games already scheduled', result['message'])
