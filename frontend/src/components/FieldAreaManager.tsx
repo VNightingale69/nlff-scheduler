@@ -9,9 +9,9 @@ const GRASS_FIELD = 'GRASS_FIELD';
 const FIELD_TYPES = ['SMALL', 'MEDIUM', 'LARGE'];
 
 const DIVISION_COMPATIBILITY = {
-  SMALL: ['K/1 Coed', 'K/1 Girls', '2nd/3rd Coed', '2nd/3rd Girls'],
-  MEDIUM: ['4th/5th Coed', '4th/5th Girls'],
-  LARGE: ['6th/7th Coed', '6th/7th Girls', '6th/7th/8th Girls', '8th Coed', '8th Girls, if applicable'],
+  SMALL: ['Coed K-1', 'Coed 2-3', 'Girls K-2'],
+  MEDIUM: ['Coed 4-5', 'Girls 3-5'],
+  LARGE: ['Coed 6-7', 'Coed 8', 'Girls 6-8'],
 };
 
 const TURF_LAYOUTS = [
@@ -30,9 +30,9 @@ const configuredFieldsText = (count: number) => `${count} active configured fiel
 
 const supportedGroups = (layout: typeof TURF_LAYOUTS[number]) => {
   const groups: string[] = [];
-  if (layout.small) groups.push('K/1', '2nd/3rd');
-  if (layout.medium) groups.push('4th/5th');
-  if (layout.large) groups.push('6th/7th', '8th');
+  if (layout.small) groups.push('Coed K-1', 'Coed 2-3', 'Girls K-2');
+  if (layout.medium) groups.push('Coed 4-5', 'Girls 3-5');
+  if (layout.large) groups.push('Coed 6-7', 'Coed 8', 'Girls 6-8');
   return groups.join(', ');
 };
 

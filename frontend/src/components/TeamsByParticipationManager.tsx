@@ -5,7 +5,7 @@ import { getAuthUser, getToken } from '@/lib/auth';
 
 type FieldType = 'SMALL' | 'MEDIUM' | 'LARGE';
 
-const DIVISION_SORT_ORDER = ['K/1st', '2nd/3rd', '4th/5th', '6th/7th', '8th'];
+const DIVISION_SORT_ORDER = ['K-1', '2-3', '4-5', '6-7', '8', 'K-2', '3-5', '6-8'];
 
 const resolveDivisionLabel = (division: any) => `${division.division_group === 'COED' ? 'Coed' : 'Girls'} ${division.name}`;
 
@@ -19,13 +19,13 @@ const resolveFieldType = (division: any): FieldType => {
   const divisionName = String(division?.name || '').trim();
   const group = String(division?.division_group || '').toUpperCase();
   if (group === 'COED') {
-    if (['K/1st', '2nd/3rd'].includes(divisionName)) return 'SMALL';
-    if (divisionName === '4th/5th') return 'MEDIUM';
+    if (['K-1', '2-3'].includes(divisionName)) return 'SMALL';
+    if (divisionName === '4-5') return 'MEDIUM';
     return 'LARGE';
   }
   if (group === 'GIRLS') {
-    if (['K/1st', '2nd/3rd'].includes(divisionName)) return 'SMALL';
-    if (divisionName === '4th/5th') return 'MEDIUM';
+    if (divisionName === 'K-2') return 'SMALL';
+    if (divisionName === '3-5') return 'MEDIUM';
     return 'LARGE';
   }
   return 'LARGE';
@@ -59,7 +59,7 @@ export default function TeamsByParticipationManager() {
       apiFetch(`/organization-division-participation?organization_id=${selectedOrgId}`, {}, token),
     ]);
     const partMap = Object.fromEntries(parts.filter((p: any) => p.is_participating).map((p: any) => [p.division_id, p.team_count]));
-    setDivisions((divResp.items || []).filter((d: any) => partMap[d.id] !== undefined).map((d: any) => ({ ...d, expected_count: partMap[d.id] })));
+    setDivisions((divResp.items || []).filter((d: any) => d.is_active && partMap[d.id] !== undefined).map((d: any) => ({ ...d, expected_count: partMap[d.id] })));
     setTeams((teamResp.items || []).filter((t: any) => t.is_active));
   };
 
@@ -69,7 +69,7 @@ export default function TeamsByParticipationManager() {
       apiFetch('/divisions?page_size=500', {}, token),
       apiFetch('/teams?page_size=500', {}, token),
     ]);
-    setDivisions(divResp.items || []);
+    setDivisions((divResp.items || []).filter((d: any) => d.is_active));
     setTeams((teamResp.items || []).filter((t: any) => t.is_active));
   };
 

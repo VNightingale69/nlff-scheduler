@@ -561,8 +561,8 @@ export default function HostingAvailabilityManager() {
           <div className='rounded border p-3 text-sm'>
             <div className='font-medium'>Scheduling readiness checks</div>
             <ul className='mt-2 list-disc pl-5'>
-              <li>Small fields (K/1st–4th/5th): {readinessChecks.smallReady ? '✅ Ready' : '⚠️ Not enough capacity'}</li>
-              <li>Large fields (6th/7th, 8th, Girls 6th/7th/8th): {readinessChecks.largeReady ? '✅ Ready' : '⚠️ Not enough capacity'}</li>
+              <li>Small fields (Coed K-1, Coed 2-3, Girls K-2): {readinessChecks.smallReady ? '✅ Ready' : '⚠️ Not enough capacity'}</li>
+              <li>Large fields (Coed 6-7, Coed 8, Girls 6-8): {readinessChecks.largeReady ? '✅ Ready' : '⚠️ Not enough capacity'}</li>
               <li>Total projected slots support: {readinessChecks.slotReady ? `✅ Ready (${readinessChecks.totalSlots} slots)` : `⚠️ Not enough slots (${readinessChecks.totalSlots})`}</li>
             </ul>
           </div>
