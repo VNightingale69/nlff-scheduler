@@ -38,6 +38,7 @@ export default function ManualScheduleBuilderPage() {
   const [clearScheduleLoading, setClearScheduleLoading] = useState(false);
   const [showAutoScheduleSeasonModal, setShowAutoScheduleSeasonModal] = useState(false);
   const [clearExistingBeforeAutoSchedule, setClearExistingBeforeAutoSchedule] = useState(false);
+  const [autoScheduleDryRun, setAutoScheduleDryRun] = useState(true);
   const [autoScheduleSeasonLoading, setAutoScheduleSeasonLoading] = useState(false);
   const [autoScheduleDiagnostics, setAutoScheduleDiagnostics] = useState<any | null>(null);
   const [optimizeSameCommunityHome, setOptimizeSameCommunityHome] = useState(true);
@@ -453,6 +454,10 @@ export default function ManualScheduleBuilderPage() {
             <input type='checkbox' checked={clearExistingBeforeAutoSchedule} onChange={(e) => setClearExistingBeforeAutoSchedule(e.target.checked)} />
             Clear existing scheduled games before running
           </label>
+          <label className='mt-2 flex items-center gap-2 text-sm'>
+            <input type='checkbox' checked={autoScheduleDryRun} onChange={(e) => setAutoScheduleDryRun(e.target.checked)} />
+            Dry run (preview only, do not save)
+          </label>
           <div className='mt-4 flex justify-end gap-2'>
             <button className='rounded border px-3 py-2' disabled={autoScheduleSeasonLoading} onClick={() => setShowAutoScheduleSeasonModal(false)}>Cancel</button>
             <button
@@ -464,7 +469,7 @@ export default function ManualScheduleBuilderPage() {
                 setAutoScheduleDiagnostics(null);
                 setAutoScheduleSeasonLoading(true);
                 try {
-                  const res: any = await apiFetch('/manual-schedule-builder/auto-schedule-season', { method: 'POST', body: JSON.stringify({ season_id: seasonId, clear_existing: clearExistingBeforeAutoSchedule }) }, token);
+                  const res: any = await apiFetch('/manual-schedule-builder/auto-schedule-season', { method: 'POST', body: JSON.stringify({ season_id: seasonId, clear_existing: clearExistingBeforeAutoSchedule, dry_run: autoScheduleDryRun }) }, token);
                   setShowAutoScheduleSeasonModal(false);
                   await load();
                   await loadRecommendations();
@@ -473,10 +478,12 @@ export default function ManualScheduleBuilderPage() {
                   const warningCount = (res.warnings || []).length + (res.validation_errors || []).length;
                   const rootCauses = (res.root_cause_categories || res.auto_schedule_diagnostics?.root_cause_categories || []).join(', ');
                   const baseMessage = res.message || 'Auto-schedule completed.';
-                  if (res.status === 'warning' || Number(res.total_games_created || 0) === 0) {
+                  if (res.dry_run) {
+                    setSuccess(res.message || `Dry run completed: ${Number(res.preview_games_count || 0)} games would be scheduled. No games were saved.`);
+                  } else if (res.status === 'warning' || Number(res.committed_games_count ?? res.total_games_created ?? 0) === 0) {
                     setError(`${baseMessage}${rootCauses ? ` Root causes: ${rootCauses}.` : ''}`);
                   } else {
-                    setSuccess(`${baseMessage} ${Number(res.total_games_created || 0)} games scheduled, ${Number(res.games_skipped || 0)} placement attempts skipped, ${missing} required game groups still missing, ${warningCount} warnings/errors.`);
+                    setSuccess(`${baseMessage} ${Number(res.committed_games_count ?? res.total_games_created ?? 0)} games scheduled, ${Number(res.games_skipped || 0)} placement attempts skipped, ${missing} required game groups still missing, ${warningCount} warnings/errors.`);
                   }
                 } catch (e: unknown) {
                   setError(`Auto-schedule failed: ${extractError(e)}`);
@@ -495,7 +502,9 @@ export default function ManualScheduleBuilderPage() {
         <div className='mt-3 space-y-3 text-sm'>
           <div><span className='font-semibold'>Status:</span> {autoScheduleDiagnostics.status || 'unknown'} — {autoScheduleDiagnostics.message || 'No message returned.'}</div>
           <div><span className='font-semibold'>Root causes:</span> {(autoScheduleDiagnostics.root_cause_categories || autoScheduleDiagnostics.auto_schedule_diagnostics?.root_cause_categories || ['unknown']).join(', ')}</div>
-          <div><span className='font-semibold'>1. Games successfully scheduled:</span> {Number(autoScheduleDiagnostics.total_games_created || 0)}</div>
+          <div><span className='font-semibold'>Dry run:</span> {autoScheduleDiagnostics.dry_run ? 'Yes' : 'No'}</div>
+          <div><span className='font-semibold'>1. Games committed:</span> {Number(autoScheduleDiagnostics.committed_games_count ?? autoScheduleDiagnostics.total_games_created ?? 0)}</div>
+          <div><span className='font-semibold'>Preview games:</span> {Number(autoScheduleDiagnostics.preview_games_count ?? autoScheduleDiagnostics.auto_schedule_diagnostics?.preview_games_count ?? 0)}</div>
           <div>
             <div className='font-semibold'>2. Placement attempts skipped: {Number(autoScheduleDiagnostics.games_skipped || 0)}</div>
             <ul className='list-inside list-disc'>
@@ -523,9 +532,16 @@ export default function ManualScheduleBuilderPage() {
             <div>Active teams: {autoScheduleDiagnostics.auto_schedule_diagnostics.active_teams_total ?? 0}</div>
             <div>Expected games: {autoScheduleDiagnostics.auto_schedule_diagnostics.expected_games_total ?? 0}</div>
             <div>Generated game groups: {autoScheduleDiagnostics.auto_schedule_diagnostics.generated_game_groups_total ?? 0}</div>
+            <div>Placement attempts: {autoScheduleDiagnostics.auto_schedule_diagnostics.placement_attempts ?? 0}</div>
+            <div>Attempted game groups: {autoScheduleDiagnostics.auto_schedule_diagnostics.attempted_game_groups ?? 0}</div>
+            <div>Valid assignments found: {autoScheduleDiagnostics.auto_schedule_diagnostics.valid_assignments_found ?? 0}</div>
+            <div>Preview assignments: {autoScheduleDiagnostics.auto_schedule_diagnostics.preview_assignments_count ?? 0}</div>
+            <div>Committed assignments: {autoScheduleDiagnostics.auto_schedule_diagnostics.committed_assignments_count ?? 0}</div>
+            <div>Failed validation count: {autoScheduleDiagnostics.auto_schedule_diagnostics.failed_validation_count ?? 0}</div>
             <div>Host availability count: {autoScheduleDiagnostics.auto_schedule_diagnostics.host_availability_total ?? 0}</div>
             <div>Generated slots by size: Small {autoScheduleDiagnostics.auto_schedule_diagnostics.generated_slots_by_field_size?.SMALL ?? 0}, Medium {autoScheduleDiagnostics.auto_schedule_diagnostics.generated_slots_by_field_size?.MEDIUM ?? 0}, Large {autoScheduleDiagnostics.auto_schedule_diagnostics.generated_slots_by_field_size?.LARGE ?? 0}</div>
             {autoScheduleDiagnostics.auto_schedule_diagnostics.missing_generated_slot_field_sizes?.length ? <div className='font-semibold text-rose-700'>Missing generated slot sizes: {autoScheduleDiagnostics.auto_schedule_diagnostics.missing_generated_slot_field_sizes.join(', ')}</div> : null}
+            {Object.keys(autoScheduleDiagnostics.auto_schedule_diagnostics.failed_validation_reasons || {}).length ? <div>Failed validation reasons: {Object.entries(autoScheduleDiagnostics.auto_schedule_diagnostics.failed_validation_reasons || {}).map(([reason, count]: any) => `${reason}: ${count}`).join(', ')}</div> : null}
             {autoScheduleDiagnostics.auto_schedule_diagnostics.active_teams_by_division?.length ? <div className='mt-2'>
               <div className='font-semibold'>Active teams by division</div>
               <ul className='list-inside list-disc'>{autoScheduleDiagnostics.auto_schedule_diagnostics.active_teams_by_division.map((row: any) => <li key={row.division_id}>{row.division_name}: {row.active_team_count} teams</li>)}</ul>
