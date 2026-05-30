@@ -202,6 +202,7 @@ class WeekCreate(BaseModel):
     start_date: date
     end_date: date
     primary_game_date: date | None = None
+    date_type: str = 'REGULAR_SEASON'
     notes: str | None = None
     status: str = 'draft'
 
@@ -346,6 +347,7 @@ class SavedAvailabilityResponse(BaseModel):
 class GeneratedSlotRead(BaseModel):
     id: uuid.UUID
     available_date: date
+    date_type: str | None = None
     host_location_name: str
     field_instance_name: str
     field_type: str
@@ -444,6 +446,8 @@ class ScheduleReadinessHostSiteRow(BaseModel):
 
 class ScheduleReadinessHostDateRow(BaseModel):
     host_date: date
+    date_type: str | None = None
+    label: str | None = None
     community_id: uuid.UUID | None = None
     community_name: str | None = None
     selected_host_locations: list[str] = []
@@ -636,6 +640,8 @@ class PublicGameRead(BaseModel):
     division_name: str
     week_id: uuid.UUID | None
     week_number: int | None
+    week_label: str | None = None
+    date_type: str | None = None
     home_team_id: uuid.UUID
     home_team_name: str
     away_team_id: uuid.UUID
