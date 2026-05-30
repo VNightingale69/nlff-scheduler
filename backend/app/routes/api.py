@@ -7060,6 +7060,7 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
 def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
     season_id = payload.get('season_id')
     clear_existing = bool(payload.get('clear_existing', False))
+    dry_run = bool(payload.get('dry_run', False))
     if not season_id:
         raise HTTPException(400, 'season_id is required')
     season = db.query(Season).filter(Season.id == season_id).first()
@@ -7071,7 +7072,10 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
         if game_ids_to_delete:
             db.query(GameSlot).filter(GameSlot.assigned_game_id.in_(game_ids_to_delete)).update({'assigned_game_id': None, 'status': 'OPEN'}, synchronize_session=False)
             db.query(Game).filter(Game.id.in_(game_ids_to_delete)).delete(synchronize_session=False)
-            db.commit()
+            if dry_run:
+                db.flush()
+            else:
+                db.commit()
 
     division_order = [
         ('COED', 'K/1ST'), ('GIRLS', 'K/1ST'),
@@ -7089,6 +7093,14 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
     weeks = db.query(Week).filter(Week.season_id == season_id).order_by(Week.week_number.asc(), Week.start_date.asc()).all()
 
     total_games_created = 0
+    preview_games_count = 0
+    attempted_game_groups = 0
+    valid_assignments_found = 0
+    preview_assignments_count = 0
+    committed_assignments_count = 0
+    failed_validation_count = 0
+    failed_validation_reasons: dict[str, int] = {}
+    database_commit_failed_count = 0
     warnings: list[str] = []
     validation_errors: list[str] = []
     divisions_completed: list[str] = []
@@ -7195,6 +7207,7 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
             reason = str((row or {}).get('reason') or 'unknown')
             key = _normalize_skip_reason(reason)
             skipped_attempts_by_reason[key] = skipped_attempts_by_reason.get(key, 0) + 1
+            failed_validation_reasons[key] = failed_validation_reasons.get(key, 0) + 1
             bucket = _skip_summary_bucket(reason)
             skipped_attempts_summary[bucket] = skipped_attempts_summary.get(bucket, 0) + 1
 
@@ -7299,6 +7312,12 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
             categories.add('no_required_game_groups')
         if int(diagnostics.get('host_availability_total') or 0) == 0:
             categories.add('no_host_availability')
+        placement_attempts = int(diagnostics.get('placement_attempts') or 0)
+        preview_count = int(diagnostics.get('preview_assignments_count') or 0)
+        committed_count = int(diagnostics.get('committed_assignments_count') or diagnostics.get('scheduled_games_count') or 0)
+        validation_failures = int(diagnostics.get('failed_validation_count') or 0)
+        database_failures = int(diagnostics.get('database_commit_failed_count') or 0)
+        dry_run_result = bool(diagnostics.get('dry_run'))
         missing_slot_sizes = diagnostics.get('missing_generated_slot_field_sizes') or []
         if missing_slot_sizes:
             categories.add('no_generated_slots')
@@ -7311,6 +7330,16 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
             categories.add('no_compatible_slots')
         if expected_games > 0 and scheduled_count == 0 and skipped_count > 0:
             categories.add('placement_blocked_by_constraints')
+        if placement_attempts > 0 and committed_count == 0:
+            categories.discard('unknown')
+            if dry_run_result and preview_count > 0:
+                categories.add('dry_run_prevented_commit')
+            if database_failures > 0:
+                categories.add('database_commit_failed')
+            if validation_failures > 0:
+                categories.add('placement_candidates_failed_validation')
+            if preview_count == 0 and validation_failures == 0 and database_failures == 0:
+                categories.add('no_valid_assignments')
         if not categories:
             categories.add('unknown')
         category_order = [
@@ -7323,6 +7352,10 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
             'no_generated_slots',
             'no_compatible_slots',
             'placement_blocked_by_constraints',
+            'dry_run_prevented_commit',
+            'placement_candidates_failed_validation',
+            'database_commit_failed',
+            'no_valid_assignments',
             'unknown',
         ]
         return [category for category in category_order if category in categories]
@@ -7338,6 +7371,7 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
         available_host_locations_by_week: dict[str, int] = {}
         generated_slots_by_field_size: dict[str, int] = {FIELD_SIZE_SMALL: 0, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_LARGE: 0}
         generated_slots_by_week: dict[str, dict[str, int]] = {}
+        generated_slots_by_week_host_field_size: dict[str, list[dict[str, object]]] = {}
         required_games_by_size = _active_division_week_demand_by_size(db, division_order)
         compatible_generated_slots_total = 0
         existing_scheduled_games_total = 0
@@ -7369,6 +7403,20 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
             host_availability_total += available_hosts
             slot_counts = _generated_slot_counts_for_week(week)
             generated_slots_by_week[week_key] = slot_counts
+            host_slot_rows: list[dict[str, object]] = []
+            if week.start_date:
+                for host_id, host_name, field_type, count in db.query(GameSlot.host_location_id, HostLocation.name, GameSlot.field_type, func.count(GameSlot.id)).join(HostLocation, HostLocation.id == GameSlot.host_location_id).filter(
+                    GameSlot.slot_date == week.start_date,
+                ).group_by(GameSlot.host_location_id, HostLocation.name, GameSlot.field_type).order_by(HostLocation.name, GameSlot.field_type).all():
+                    host_slot_rows.append({
+                        'week': week.week_number,
+                        'slot_date': str(week.start_date),
+                        'host_location_id': str(host_id),
+                        'host_location_name': host_name,
+                        'field_size': _normalize_field_size(field_type) or str(field_type or '').upper(),
+                        'generated_slots': int(count or 0),
+                    })
+            generated_slots_by_week_host_field_size[week_key] = host_slot_rows
             for size, count in slot_counts.items():
                 generated_slots_by_field_size[size] = generated_slots_by_field_size.get(size, 0) + int(count or 0)
                 if int(required_games_by_size.get(size, 0) or 0) > 0:
@@ -7422,7 +7470,10 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
                         'required_games': required_games,
                         'existing_scheduled_games': existing,
                         'required_field_size': required_size,
-                        'reason': 'Required division/week has no generated slots for its field size.',
+                        'week_start_date': str(week.start_date) if week.start_date else None,
+                        'slot_count_for_week_and_field_size': int(slot_counts.get(required_size, 0) or 0),
+                        'host_slot_counts_for_week': [row for row in generated_slots_by_week_host_field_size.get(week_key, []) if row.get('field_size') == required_size],
+                        'reason': 'Required division/week has no generated slots for its week/date and field size.',
                     })
         missing_generated_slot_field_sizes = [
             size for size in FIELD_SIZE_ORDER
@@ -7452,9 +7503,20 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
             'host_availability_total': host_availability_total,
             'generated_slots_by_field_size': generated_slots_by_field_size,
             'generated_slots_by_week': generated_slots_by_week,
+            'generated_slots_by_week_host_field_size': generated_slots_by_week_host_field_size,
             'missing_generated_slot_field_sizes': missing_generated_slot_field_sizes,
             'compatible_generated_slots_total': compatible_generated_slots_total,
-            'placement_attempts': sum(generated_game_groups_by_week.values()) + sum(skipped_attempts_by_reason.values()),
+            'placement_attempts': attempted_game_groups or (sum(generated_game_groups_by_week.values()) + sum(skipped_attempts_by_reason.values())),
+            'attempted_game_groups': attempted_game_groups,
+            'valid_assignments_found': valid_assignments_found,
+            'preview_assignments_count': preview_assignments_count,
+            'preview_games_count': preview_games_count,
+            'committed_assignments_count': committed_assignments_count,
+            'committed_games_count': committed_assignments_count,
+            'failed_validation_count': max(failed_validation_count, sum(failed_validation_reasons.values())),
+            'failed_validation_reasons': dict(failed_validation_reasons),
+            'database_commit_failed_count': database_commit_failed_count,
+            'dry_run': dry_run,
             'scheduled_games_count': total_games_created,
             'existing_scheduled_games_total': existing_scheduled_games_total,
             'skipped_count': sum(skipped_attempts_by_reason.values()),
@@ -7497,10 +7559,17 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
             message = 'Auto-schedule completed but no games were scheduled: all games already scheduled.'
         else:
             message = 'Auto-schedule completed but no games were scheduled: no required game groups were generated.'
-        db.commit()
+        if dry_run:
+            db.rollback()
+        else:
+            db.commit()
         return {
             'status': 'warning',
             'message': message,
+            'dry_run': dry_run,
+            'preview_games_count': 0,
+            'committed_games_count': 0,
+            'scheduled_games_count': 0,
             'total_games_created': 0,
             'root_cause_categories': preplacement_root_causes or ['unknown'],
             'auto_schedule_diagnostics': preplacement_diagnostics,
@@ -7530,10 +7599,17 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
         auto_schedule_diagnostics['root_cause_categories'] = _build_root_cause_categories(auto_schedule_diagnostics)
         _log_auto_schedule_result(auto_schedule_diagnostics, logging.WARNING)
         missing_sizes_message = ', '.join(auto_schedule_diagnostics.get('missing_generated_slot_field_sizes') or []) or 'unknown'
-        db.commit()
+        if dry_run:
+            db.rollback()
+        else:
+            db.commit()
         return {
             'status': 'warning',
             'message': f'Auto-schedule completed but no games were scheduled: no generated slots for required field sizes ({missing_sizes_message}).',
+            'dry_run': dry_run,
+            'preview_games_count': 0,
+            'committed_games_count': 0,
+            'scheduled_games_count': 0,
             'total_games_created': 0,
             'games_skipped': 0,
             'skipped_attempts_message': '0 placement attempts skipped; placement was not started because slot preflight validation failed.',
@@ -7586,6 +7662,10 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
                 preview = auto_fill_preview({'season_id': season_id, 'week_id': week.id, 'division_id': division.id}, db)
                 proposals = preview.get('proposals') or []
                 generated_game_groups = len(proposals)
+                attempted_game_groups += len(proposals)
+                valid_assignments_found += len(proposals)
+                preview_assignments_count += len(proposals)
+                preview_games_count += len(proposals)
                 preview_skipped = list(preview.get('skipped') or [])
                 _record_skipped(preview_skipped)
                 preview_validation = preview.get('final_validation') or {}
@@ -7600,30 +7680,38 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
                         preview_skipped.append({'reason': 'Missing generated game group for required division/week.'})
                         _record_skipped([preview_skipped[-1]])
                 else:
-                    try:
-                        applied = auto_fill_apply({'season_id': season_id, 'week_id': week.id, 'division_id': division.id, 'proposals': proposals}, db)
-                        created_count = int(applied.get('created_count') or 0)
-                        skipped_count = int(applied.get('skipped_count') or 0)
-                        division_created += created_count
-                        total_games_created += created_count
-                        apply_skipped = list(applied.get('skipped') or [])
-                        _record_skipped(apply_skipped)
-                        host_count = _host_count_for_week(division.id, week.id)
+                    if dry_run:
                         actual_created_games = _actual_created_game_count_for_week(division.id, week.id)
-                        if skipped_count > 0:
+                        host_count = _host_count_for_week(division.id, week.id)
+                    else:
+                        try:
+                            applied = auto_fill_apply({'season_id': season_id, 'week_id': week.id, 'division_id': division.id, 'proposals': proposals}, db)
+                            created_count = int(applied.get('created_count') or 0)
+                            skipped_count = int(applied.get('skipped_count') or 0)
+                            division_created += created_count
+                            total_games_created += created_count
+                            committed_assignments_count += created_count
+                            apply_skipped = list(applied.get('skipped') or [])
+                            failed_validation_count += skipped_count
+                            _record_skipped(apply_skipped)
+                            host_count = _host_count_for_week(division.id, week.id)
+                            actual_created_games = _actual_created_game_count_for_week(division.id, week.id)
+                            if skipped_count > 0:
+                                division_unresolved = True
+                            apply_validation = applied.get('final_validation') or {}
+                            if int(apply_validation.get('required_game_count') or 0) != required_games:
+                                required_games = int(apply_validation.get('required_game_count') or 0)
+                        except Exception as exc:
+                            db.rollback()
+                            database_commit_failed_count += 1
+                            failed_validation_count += len(proposals)
                             division_unresolved = True
-                        apply_validation = applied.get('final_validation') or {}
-                        if int(apply_validation.get('required_game_count') or 0) != required_games:
-                            required_games = int(apply_validation.get('required_game_count') or 0)
-                    except Exception as exc:
-                        db.rollback()
-                        division_unresolved = True
-                        actual_created_games = _actual_created_game_count_for_week(division.id, week.id)
-                        host_count = _host_count_for_week(division.id, week.id)
-                        apply_skipped = [{'reason': f'Placement failed but scheduling continued for later divisions: {exc}'}]
-                        _record_skipped(apply_skipped)
-                        warnings.append(f'{division_label} Week {week.week_number}: placement failed; continuing with later divisions.')
-                        logger.exception('auto_schedule_apply_failed_continuing season_id=%s week_id=%s division_id=%s', season_id, week.id, division.id)
+                            actual_created_games = _actual_created_game_count_for_week(division.id, week.id)
+                            host_count = _host_count_for_week(division.id, week.id)
+                            apply_skipped = [{'reason': f'Placement failed but scheduling continued for later divisions: {exc}'}]
+                            _record_skipped(apply_skipped)
+                            warnings.append(f'{division_label} Week {week.week_number}: placement failed; continuing with later divisions.')
+                            logger.exception('auto_schedule_apply_failed_continuing season_id=%s week_id=%s division_id=%s', season_id, week.id, division.id)
             except Exception as exc:
                 db.rollback()
                 division_unresolved = True
@@ -7871,7 +7959,7 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
 
     auto_schedule_diagnostics = _build_auto_schedule_diagnostics()
     root_cause_categories = list(auto_schedule_diagnostics.get('root_cause_categories') or ['unknown'])
-    if int(auto_schedule_diagnostics.get('expected_games_total') or 0) > 0 and total_games_created == 0:
+    if int(auto_schedule_diagnostics.get('expected_games_total') or 0) > 0 and total_games_created == 0 and not dry_run:
         warning_message = 'Auto-schedule completed but no games were scheduled.'
         if 'all_games_already_scheduled' in root_cause_categories:
             warning_message = 'Auto-schedule completed but no games were scheduled: all games already scheduled.'
@@ -7887,11 +7975,17 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
 
     # Intentionally do not run post-schedule optimization automatically.
     # Optimization is executed manually via /manual-schedule-builder/optimize-schedule.
-    db.commit()
+    if dry_run:
+        db.rollback()
+    else:
+        db.commit()
 
     final_status = 'complete' if schedule_complete else 'incomplete'
     final_message = 'Auto-schedule completed.' if schedule_complete else 'Auto-schedule completed with missing required games; review validation_errors and diagnostics.'
-    if total_games_created == 0:
+    if dry_run:
+        final_status = 'complete'
+        final_message = f'Dry run completed: {preview_games_count} games would be scheduled. No games were saved.'
+    elif total_games_created == 0:
         final_status = 'warning'
         final_message = 'Auto-schedule completed but no games were scheduled.'
         if 'all_games_already_scheduled' in root_cause_categories:
@@ -7905,6 +7999,10 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
     return {
         'status': final_status,
         'message': final_message,
+        'dry_run': dry_run,
+        'preview_games_count': preview_games_count,
+        'committed_games_count': committed_assignments_count,
+        'scheduled_games_count': committed_assignments_count,
         'total_games_created': total_games_created,
         'root_cause_categories': root_cause_categories,
         'auto_schedule_diagnostics': auto_schedule_diagnostics,
