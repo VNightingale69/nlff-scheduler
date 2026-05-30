@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { apiFetch } from '@/lib/api';
 import { getToken } from '@/lib/auth';
@@ -127,7 +128,7 @@ export default function ScheduleReadinessPage() {
   return (
     <div className='space-y-4'>
       <h1 className='text-2xl font-bold'>Schedule Readiness</h1>
-      <p className='text-sm text-slate-600'>Capacity validation report only. This page does not create matchups or auto-schedule games.</p>
+      <p className='text-sm text-slate-600'>Diagnostic capacity validation only. Use <Link className='text-blue-700 underline' href='/admin/host-availability-matrix'>Host Availability Matrix</Link> to select, exclude, or lock hosts for scheduling.</p>
       {error ? <div className='rounded border border-red-200 bg-red-50 p-2 text-sm text-red-700'>{error}</div> : null}
       {warnings.length ? <div className='rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800'><div className='font-semibold'>Validation warnings</div><ul className='list-disc pl-5'>{warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul></div> : null}
       {totals ? (
