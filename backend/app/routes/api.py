@@ -2400,8 +2400,12 @@ def _host_availability_matrix_response(db: Session, season_id: uuid.UUID) -> dic
             game_date = date_info['game_date']
             availability_list = availability_by_host_date.get((host.id, game_date), [])
             selection = selection_by_host_date.get((host.id, game_date))
-            status = selection.status if selection else ('AVAILABLE' if availability_list else 'BLANK')
-            locked = bool(selection.locked) or status == 'LOCKED'
+            if selection is None:
+                status = 'AVAILABLE' if availability_list else 'NOT_AVAILABLE'
+                locked = False
+            else:
+                status = selection.status
+                locked = bool(selection.locked) or status == 'LOCKED'
             capacity = slot_counts.get((host.id, game_date)) or _field_capacity_from_host(host)
             cells[str(game_date)] = {
                 'status': status,

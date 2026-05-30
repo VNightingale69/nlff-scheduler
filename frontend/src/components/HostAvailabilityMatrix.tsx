@@ -59,6 +59,7 @@ const HOST_PLAN_SELECTION_PERMISSION_MESSAGE = 'Only admin@example.com can modif
 const CYCLE = ['AVAILABLE', 'SELECTED', 'EXCLUDED'];
 const LABELS: Record<string, string> = {
   BLANK: '',
+  NOT_AVAILABLE: '',
   AVAILABLE: 'X',
   SELECTED: '✓',
   EXCLUDED: 'O',
@@ -71,6 +72,7 @@ const LABELS: Record<string, string> = {
 
 const CELL_CLASSES: Record<string, string> = {
   BLANK: 'bg-slate-100 text-slate-300',
+  NOT_AVAILABLE: 'bg-slate-100 text-slate-300',
   AVAILABLE: 'bg-white text-slate-800 hover:bg-slate-50',
   SELECTED: 'bg-emerald-100 text-emerald-800 ring-1 ring-emerald-300',
   EXCLUDED: 'bg-slate-200 text-slate-500',
@@ -195,7 +197,7 @@ export default function HostAvailabilityMatrix() {
 
   const cellKey = (row: MatrixRow, date: MatrixDate) => `${row.host_location_id}:${date.game_date}`;
 
-  const getCell = (row: MatrixRow, date: MatrixDate) => dirtyCells[cellKey(row, date)] || row.cells[date.game_date] || { status: 'BLANK', locked: false, reason: null, availability_id: null, has_saved_availability: false, available_slot_count: 0, capacity_by_size: {} };
+  const getCell = (row: MatrixRow, date: MatrixDate) => dirtyCells[cellKey(row, date)] || row.cells[date.game_date] || { status: 'NOT_AVAILABLE', locked: false, reason: null, availability_id: null, has_saved_availability: false, available_slot_count: 0, capacity_by_size: {} };
 
   const selectedSummaryDetails = useMemo(() => {
     if (!selectedDate) return null;
@@ -249,11 +251,11 @@ export default function HostAvailabilityMatrix() {
     setSelectedDate(date.game_date);
     const cell = getCell(row, date);
     if (event.shiftKey) {
-      if (!cell.has_saved_availability && cell.status === 'BLANK') return;
+      if (!cell.has_saved_availability && cell.status === 'NOT_AVAILABLE') return;
       updateCell(row, date, { ...cell, status: cell.status === 'LOCKED' ? 'SELECTED' : 'LOCKED', locked: cell.status !== 'LOCKED' });
       return;
     }
-    if (!cell.has_saved_availability && cell.status === 'BLANK') return;
+    if (!cell.has_saved_availability && cell.status === 'NOT_AVAILABLE') return;
     const current = cell.status === 'LOCKED' ? 'SELECTED' : cell.status;
     const next = CYCLE[(CYCLE.indexOf(current) + 1) % CYCLE.length] || 'AVAILABLE';
     updateCell(row, date, { ...cell, status: next, locked: next === 'LOCKED' ? true : cell.locked && next === 'SELECTED' });
@@ -272,7 +274,7 @@ export default function HostAvailabilityMatrix() {
     const normalized = (action || '').trim().toUpperCase();
     if (!normalized) return;
     if (normalized === 'LOCK') {
-      if (!cell.has_saved_availability && cell.status === 'BLANK') return;
+      if (!cell.has_saved_availability && cell.status === 'NOT_AVAILABLE') return;
       updateCell(row, date, { ...cell, status: 'LOCKED', locked: true });
       return;
     }
@@ -291,7 +293,7 @@ export default function HostAvailabilityMatrix() {
       return;
     }
     if (normalized === 'CLEAR') {
-      updateCell(row, date, { ...cell, status: cell.has_saved_availability ? 'AVAILABLE' : 'BLANK', locked: false, reason: null });
+      updateCell(row, date, { ...cell, status: cell.has_saved_availability ? 'AVAILABLE' : 'NOT_AVAILABLE', locked: false, reason: null });
     }
   };
 
@@ -428,7 +430,7 @@ export default function HostAvailabilityMatrix() {
                 const classes = CELL_CLASSES[status] || CELL_CLASSES.AVAILABLE;
                 return <td key={date.game_date} className='px-1 py-1 text-center'>
                   <button
-                    title={!canModifyMatrix ? HOST_PLAN_SELECTION_PERMISSION_MESSAGE : cell.has_saved_availability ? `${status}${cell.reason ? `: ${cell.reason}` : ''}` : 'No saved availability'}
+                    title={!canModifyMatrix ? HOST_PLAN_SELECTION_PERMISSION_MESSAGE : cell.has_saved_availability ? `${status}${cell.reason ? `: ${cell.reason}` : ''}` : 'Not Available'}
                     className={`h-9 w-12 rounded border text-sm font-semibold ${classes} ${selectedDate === date.game_date ? 'outline outline-2 outline-offset-1 outline-indigo-400' : ''} ${canModifyMatrix ? '' : 'cursor-not-allowed opacity-80'}`}
                     disabled={!canModifyMatrix}
                     onClick={(event) => handleCellClick(row, date, event)}
