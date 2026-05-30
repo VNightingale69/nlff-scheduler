@@ -7241,14 +7241,187 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
             total += _division_required_games(_active_team_count(division.id))
         return total
 
+    def _host_availability_count_for_week(week: Week) -> int:
+        conditions = [HostingAvailability.is_available.is_(True)]
+        if week.id:
+            conditions.append(HostingAvailability.week_id == week.id)
+        if week.start_date:
+            conditions.append(HostingAvailability.available_date == week.start_date)
+        if len(conditions) <= 1:
+            return 0
+        return db.query(func.count(func.distinct(HostingAvailability.host_location_id))).outerjoin(
+            HostingAvailability.physical_field_area
+        ).filter(or_(*conditions[1:]), HostingAvailability.is_available.is_(True)).scalar() or 0
+
+    def _generated_slot_counts_for_week(week: Week) -> dict[str, int]:
+        counts = {FIELD_SIZE_SMALL: 0, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_LARGE: 0}
+        if not week.start_date:
+            return counts
+        for field_type, count in db.query(GameSlot.field_type, func.count(GameSlot.id)).filter(
+            GameSlot.slot_date == week.start_date,
+        ).group_by(GameSlot.field_type).all():
+            size = _normalize_field_size(field_type)
+            if size in counts:
+                counts[size] += int(count or 0)
+        return counts
+
+    def _build_root_cause_categories(diagnostics: dict[str, object]) -> list[str]:
+        categories: set[str] = set()
+        expected_games = int(diagnostics.get('expected_games_total') or 0)
+        existing_scheduled = int(diagnostics.get('existing_scheduled_games_total') or 0)
+        generated_game_groups = int(diagnostics.get('generated_game_groups_total') or 0)
+        if int(diagnostics.get('active_teams_total') or 0) == 0:
+            categories.add('no_active_teams')
+        if int(diagnostics.get('weeks_evaluated') or 0) == 0:
+            categories.add('no_weeks_found')
+        if int(diagnostics.get('required_game_groups_total') or 0) == 0 or (
+            expected_games > 0
+            and generated_game_groups == 0
+            and existing_scheduled < expected_games
+        ):
+            categories.add('no_required_game_groups')
+        if int(diagnostics.get('host_availability_total') or 0) == 0:
+            categories.add('no_host_availability')
+        missing_slot_sizes = diagnostics.get('missing_generated_slot_field_sizes') or []
+        if missing_slot_sizes:
+            categories.add('no_generated_slots')
+        scheduled_count = int(diagnostics.get('scheduled_games_count') or 0)
+        compatible_slot_count = int(diagnostics.get('compatible_generated_slots_total') or 0)
+        skipped_count = int(diagnostics.get('skipped_count') or 0)
+        if expected_games > 0 and scheduled_count == 0 and existing_scheduled >= expected_games:
+            categories.add('all_games_already_scheduled')
+        if expected_games > 0 and compatible_slot_count == 0 and not missing_slot_sizes:
+            categories.add('no_compatible_slots')
+        if expected_games > 0 and scheduled_count == 0 and skipped_count > 0:
+            categories.add('placement_blocked_by_constraints')
+        if not categories:
+            categories.add('unknown')
+        category_order = [
+            'no_required_game_groups',
+            'no_active_teams',
+            'no_weeks_found',
+            'no_host_availability',
+            'no_generated_slots',
+            'no_compatible_slots',
+            'all_games_already_scheduled',
+            'placement_blocked_by_constraints',
+            'unknown',
+        ]
+        return [category for category in category_order if category in categories]
+
+    def _build_auto_schedule_diagnostics() -> dict[str, object]:
+        active_divisions: list[Division] = []
+        missing_division_weeks: list[dict[str, object]] = []
+        expected_games_by_week: dict[str, int] = {}
+        generated_game_groups_by_week: dict[str, int] = {}
+        available_host_locations_by_week: dict[str, int] = {}
+        generated_slots_by_field_size: dict[str, int] = {FIELD_SIZE_SMALL: 0, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_LARGE: 0}
+        generated_slots_by_week: dict[str, dict[str, int]] = {}
+        required_games_by_size = _active_division_week_demand_by_size(db, division_order)
+        compatible_generated_slots_total = 0
+        existing_scheduled_games_total = 0
+        active_teams_total = 0
+        required_game_groups_total = 0
+        host_availability_total = 0
+        regular_weeks = _regular_season_weeks()
+        for group, name in division_order:
+            division = divisions_by_key.get(canonical_division_id(group, name)) or divisions_by_normalized_name.get(normalize_division_name(f'{group} {name}'))
+            if division and division.is_active:
+                active_divisions.append(division)
+                active_teams_total += _active_team_count(division.id)
+        for week in regular_weeks:
+            week_key = str(week.week_number)
+            available_hosts = _host_availability_count_for_week(week)
+            available_host_locations_by_week[week_key] = available_hosts
+            host_availability_total += available_hosts
+            slot_counts = _generated_slot_counts_for_week(week)
+            generated_slots_by_week[week_key] = slot_counts
+            for size, count in slot_counts.items():
+                generated_slots_by_field_size[size] = generated_slots_by_field_size.get(size, 0) + int(count or 0)
+                if int(required_games_by_size.get(size, 0) or 0) > 0:
+                    compatible_generated_slots_total += int(count or 0)
+            for division in active_divisions:
+                required_games = _division_required_games(_active_team_count(division.id))
+                expected_games_by_week[week_key] = expected_games_by_week.get(week_key, 0) + required_games
+                required_game_groups_total += required_games
+                existing = _actual_created_game_count_for_week(division.id, week.id)
+                existing_scheduled_games_total += existing
+                required_size = _required_field_type_for_division(division)
+                if required_games > 0 and existing < required_games and int(slot_counts.get(required_size, 0) or 0) <= 0:
+                    missing_division_weeks.append({
+                        'week': week.week_number,
+                        'division_name': f'{division.division_group or ""} {division.name or ""}'.strip(),
+                        'required_games': required_games,
+                        'existing_scheduled_games': existing,
+                        'required_field_size': required_size,
+                        'reason': 'Required division/week has no generated slots for its field size.',
+                    })
+        for row in division_week_diagnostics:
+            week_key = str(row.get('week'))
+            generated_game_groups_by_week[week_key] = generated_game_groups_by_week.get(week_key, 0) + int(row.get('generated_game_groups') or 0)
+        missing_generated_slot_field_sizes = [
+            size for size in FIELD_SIZE_ORDER
+            if int(required_games_by_size.get(size, 0) or 0) > 0 and int(generated_slots_by_field_size.get(size, 0) or 0) == 0
+        ]
+        diagnostics = {
+            'season_id': str(season_id),
+            'weeks_evaluated': len(regular_weeks),
+            'division_order_evaluated': [f'{group} {name}' for group, name in division_order],
+            'divisions_evaluated': len(active_divisions),
+            'active_teams_total': active_teams_total,
+            'expected_games_by_week': expected_games_by_week,
+            'expected_games_total': sum(expected_games_by_week.values()),
+            'required_game_groups_total': required_game_groups_total,
+            'missing_division_week_generation': missing_division_weeks,
+            'generated_game_groups_by_week': generated_game_groups_by_week,
+            'generated_game_groups_total': sum(generated_game_groups_by_week.values()),
+            'available_host_locations_by_week': available_host_locations_by_week,
+            'host_availability_total': host_availability_total,
+            'generated_slots_by_field_size': generated_slots_by_field_size,
+            'generated_slots_by_week': generated_slots_by_week,
+            'missing_generated_slot_field_sizes': missing_generated_slot_field_sizes,
+            'compatible_generated_slots_total': compatible_generated_slots_total,
+            'placement_attempts': sum(generated_game_groups_by_week.values()) + sum(skipped_attempts_by_reason.values()),
+            'scheduled_games_count': total_games_created,
+            'existing_scheduled_games_total': existing_scheduled_games_total,
+            'skipped_count': sum(skipped_attempts_by_reason.values()),
+            'skipped_reasons': dict(skipped_attempts_by_reason),
+        }
+        diagnostics['root_cause_categories'] = _build_root_cause_categories(diagnostics)
+        return diagnostics
+
+    def _log_auto_schedule_result(diagnostics: dict[str, object], level: int = logging.INFO) -> None:
+        logger.log(
+            level,
+            'auto_schedule_result season_id=%s weeks_evaluated=%s divisions_evaluated=%s expected_games_by_week=%s generated_game_groups_by_week=%s available_host_locations_by_week=%s generated_slots_by_field_size=%s placement_attempts=%s scheduled_games_count=%s skipped_count=%s skipped_reasons=%s root_cause_categories=%s missing_generated_slot_field_sizes=%s missing_division_week_generation=%s',
+            diagnostics.get('season_id'),
+            diagnostics.get('weeks_evaluated'),
+            diagnostics.get('divisions_evaluated'),
+            diagnostics.get('expected_games_by_week'),
+            diagnostics.get('generated_game_groups_by_week'),
+            diagnostics.get('available_host_locations_by_week'),
+            diagnostics.get('generated_slots_by_field_size'),
+            diagnostics.get('placement_attempts'),
+            diagnostics.get('scheduled_games_count'),
+            diagnostics.get('skipped_count'),
+            diagnostics.get('skipped_reasons'),
+            diagnostics.get('root_cause_categories'),
+            diagnostics.get('missing_generated_slot_field_sizes'),
+            diagnostics.get('missing_division_week_generation'),
+        )
+
     slot_preflight = _regenerate_and_validate_slots_for_weeks(db, weeks, division_order)
     slot_preflight_errors = list(slot_preflight.get('validation_errors') or [])
     if slot_preflight_errors:
         validation_errors.extend(slot_preflight_errors)
+        auto_schedule_diagnostics = _build_auto_schedule_diagnostics()
+        auto_schedule_diagnostics['root_cause_categories'] = _build_root_cause_categories(auto_schedule_diagnostics)
+        _log_auto_schedule_result(auto_schedule_diagnostics, logging.WARNING)
+        missing_sizes_message = ', '.join(auto_schedule_diagnostics.get('missing_generated_slot_field_sizes') or []) or 'unknown'
         db.commit()
         return {
-            'status': 'incomplete',
-            'message': 'Auto-schedule stopped before placement because generated slot capacity is missing for required field sizes.',
+            'status': 'warning',
+            'message': f'Auto-schedule completed but no games were scheduled: no generated slots for required field sizes ({missing_sizes_message}).',
             'total_games_created': 0,
             'games_skipped': 0,
             'skipped_attempts_message': '0 placement attempts skipped; placement was not started because slot preflight validation failed.',
@@ -7258,6 +7431,8 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
             'warnings': warnings,
             'validation_errors': validation_errors,
             'validation_warnings': validation_warnings,
+            'root_cause_categories': auto_schedule_diagnostics.get('root_cause_categories', ['unknown']),
+            'auto_schedule_diagnostics': auto_schedule_diagnostics,
             'slot_capacity_validation': slot_preflight,
             'weekly_schedule_diagnostics': [],
             'division_week_schedule_diagnostics': [],
@@ -7581,14 +7756,45 @@ def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
         f"- Missing generated game group: {skipped_attempts_summary.get('Missing generated game group', 0)}"
     )
 
+    auto_schedule_diagnostics = _build_auto_schedule_diagnostics()
+    root_cause_categories = list(auto_schedule_diagnostics.get('root_cause_categories') or ['unknown'])
+    if int(auto_schedule_diagnostics.get('expected_games_total') or 0) > 0 and total_games_created == 0:
+        warning_message = 'Auto-schedule completed but no games were scheduled.'
+        if 'all_games_already_scheduled' in root_cause_categories:
+            warning_message = 'Auto-schedule completed but no games were scheduled: all games already scheduled.'
+        elif 'no_generated_slots' in root_cause_categories:
+            missing_sizes = ', '.join(auto_schedule_diagnostics.get('missing_generated_slot_field_sizes') or [])
+            warning_message = f'Auto-schedule completed but no games were scheduled: no generated slots for required field sizes ({missing_sizes or "unknown"}).'
+        elif 'no_required_game_groups' in root_cause_categories:
+            warning_message = 'Auto-schedule completed but no games were scheduled: no required game groups were generated.'
+        warnings.append(warning_message)
+        validation_errors.append('Auto-schedule placed 0 games even though expected_games > 0; review auto_schedule_diagnostics.root_cause_categories.')
+        schedule_complete = False
+    _log_auto_schedule_result(auto_schedule_diagnostics, logging.WARNING if total_games_created == 0 else logging.INFO)
+
     # Intentionally do not run post-schedule optimization automatically.
     # Optimization is executed manually via /manual-schedule-builder/optimize-schedule.
     db.commit()
 
+    final_status = 'complete' if schedule_complete else 'incomplete'
+    final_message = 'Auto-schedule completed.' if schedule_complete else 'Auto-schedule completed with missing required games; review validation_errors and diagnostics.'
+    if total_games_created == 0:
+        final_status = 'warning'
+        final_message = 'Auto-schedule completed but no games were scheduled.'
+        if 'all_games_already_scheduled' in root_cause_categories:
+            final_message = 'Auto-schedule completed but no games were scheduled: all games already scheduled.'
+        elif 'no_generated_slots' in root_cause_categories:
+            missing_sizes_message = ', '.join(auto_schedule_diagnostics.get('missing_generated_slot_field_sizes') or []) or 'unknown'
+            final_message = f'Auto-schedule completed but no games were scheduled: no generated slots for required field sizes ({missing_sizes_message}).'
+        elif 'no_required_game_groups' in root_cause_categories:
+            final_message = 'Auto-schedule completed but no games were scheduled: no required game groups were generated.'
+
     return {
-        'status': 'complete' if schedule_complete else 'incomplete',
-        'message': 'Auto-schedule completed.' if schedule_complete else 'Auto-schedule completed with missing required games; review validation_errors and diagnostics.',
+        'status': final_status,
+        'message': final_message,
         'total_games_created': total_games_created,
+        'root_cause_categories': root_cause_categories,
+        'auto_schedule_diagnostics': auto_schedule_diagnostics,
         'slot_capacity_validation': slot_preflight,
         'season_date_diagnostics': {
             'target_date_checked': f"{season.start_date.year}-09-13" if season.start_date else None,

@@ -471,9 +471,15 @@ export default function ManualScheduleBuilderPage() {
                   setAutoScheduleDiagnostics(res);
                   const missing = (res.required_games_still_missing || []).length;
                   const warningCount = (res.warnings || []).length + (res.validation_errors || []).length;
-                  setSuccess(`Auto-schedule completed: ${Number(res.total_games_created || 0)} games scheduled, ${Number(res.games_skipped || 0)} placement attempts skipped, ${missing} required game groups still missing, ${warningCount} warnings/errors.`);
+                  const rootCauses = (res.root_cause_categories || res.auto_schedule_diagnostics?.root_cause_categories || []).join(', ');
+                  const baseMessage = res.message || 'Auto-schedule completed.';
+                  if (res.status === 'warning' || Number(res.total_games_created || 0) === 0) {
+                    setError(`${baseMessage}${rootCauses ? ` Root causes: ${rootCauses}.` : ''}`);
+                  } else {
+                    setSuccess(`${baseMessage} ${Number(res.total_games_created || 0)} games scheduled, ${Number(res.games_skipped || 0)} placement attempts skipped, ${missing} required game groups still missing, ${warningCount} warnings/errors.`);
+                  }
                 } catch (e: unknown) {
-                  setError(`Schedule optimization failed: ${extractError(e)}`);
+                  setError(`Auto-schedule failed: ${extractError(e)}`);
                 } finally {
                   setAutoScheduleSeasonLoading(false);
                 }
@@ -487,6 +493,8 @@ export default function ManualScheduleBuilderPage() {
       {autoScheduleDiagnostics ? <details className='rounded border border-slate-300 bg-slate-50 p-3'>
         <summary className='cursor-pointer font-semibold text-slate-800'>Scheduling Diagnostics</summary>
         <div className='mt-3 space-y-3 text-sm'>
+          <div><span className='font-semibold'>Status:</span> {autoScheduleDiagnostics.status || 'unknown'} — {autoScheduleDiagnostics.message || 'No message returned.'}</div>
+          <div><span className='font-semibold'>Root causes:</span> {(autoScheduleDiagnostics.root_cause_categories || autoScheduleDiagnostics.auto_schedule_diagnostics?.root_cause_categories || ['unknown']).join(', ')}</div>
           <div><span className='font-semibold'>1. Games successfully scheduled:</span> {Number(autoScheduleDiagnostics.total_games_created || 0)}</div>
           <div>
             <div className='font-semibold'>2. Placement attempts skipped: {Number(autoScheduleDiagnostics.games_skipped || 0)}</div>
@@ -506,8 +514,20 @@ export default function ManualScheduleBuilderPage() {
             <div className='font-semibold'>5. Validation failures</div>
             <ul className='list-inside list-disc'>{(autoScheduleDiagnostics.validation_errors || []).map((w: string, i: number) => <li key={i}>{w}</li>)}</ul>
           </div>
+          {autoScheduleDiagnostics.auto_schedule_diagnostics ? <div>
+            <div className='font-semibold'>6. Zero-game diagnostics</div>
+            <div>Weeks evaluated: {autoScheduleDiagnostics.auto_schedule_diagnostics.weeks_evaluated ?? 0}</div>
+            <div>Divisions evaluated: {autoScheduleDiagnostics.auto_schedule_diagnostics.divisions_evaluated ?? 0}</div>
+            <div>Active teams: {autoScheduleDiagnostics.auto_schedule_diagnostics.active_teams_total ?? 0}</div>
+            <div>Expected games: {autoScheduleDiagnostics.auto_schedule_diagnostics.expected_games_total ?? 0}</div>
+            <div>Generated game groups: {autoScheduleDiagnostics.auto_schedule_diagnostics.generated_game_groups_total ?? 0}</div>
+            <div>Host availability count: {autoScheduleDiagnostics.auto_schedule_diagnostics.host_availability_total ?? 0}</div>
+            <div>Generated slots by size: Small {autoScheduleDiagnostics.auto_schedule_diagnostics.generated_slots_by_field_size?.SMALL ?? 0}, Medium {autoScheduleDiagnostics.auto_schedule_diagnostics.generated_slots_by_field_size?.MEDIUM ?? 0}, Large {autoScheduleDiagnostics.auto_schedule_diagnostics.generated_slots_by_field_size?.LARGE ?? 0}</div>
+            {autoScheduleDiagnostics.auto_schedule_diagnostics.missing_generated_slot_field_sizes?.length ? <div className='font-semibold text-rose-700'>Missing generated slot sizes: {autoScheduleDiagnostics.auto_schedule_diagnostics.missing_generated_slot_field_sizes.join(', ')}</div> : null}
+            {autoScheduleDiagnostics.auto_schedule_diagnostics.missing_division_week_generation?.length ? <div className='mt-1'>Missing division/week generation: {autoScheduleDiagnostics.auto_schedule_diagnostics.missing_division_week_generation.map((row: any) => `${row.division_name} Week ${row.week} (${row.reason})`).join('; ')}</div> : null}
+          </div> : null}
           {autoScheduleDiagnostics.slot_capacity_validation ? <div>
-            <div className='font-semibold'>6. Generated slot capacity preflight</div>
+            <div className='font-semibold'>7. Generated slot capacity preflight</div>
             <div className='mt-1 text-slate-700'>Hosts evaluated and field-size slot counts before placement.</div>
             <div className='mt-2 space-y-2'>
               {(autoScheduleDiagnostics.slot_capacity_validation.validation_rows || []).map((row: any, idx: number) => <div key={`${row.week_start_date}-${idx}`} className='rounded border border-slate-200 bg-white p-2'>
