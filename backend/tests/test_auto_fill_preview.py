@@ -743,6 +743,15 @@ class AutoFillPreviewTest(unittest.TestCase):
         self.assertEqual(capacity_row['community'], 'Westosha')
         self.assertEqual(capacity_row['combined_capacity'], 4)
         self.assertEqual(capacity_row['combined_capacity_by_size']['SMALL'], 4)
+        equity_row = next(row for row in preview['audit']['community_hosting_equity_summary'] if row['community'] == 'Westosha')
+        self.assertEqual(equity_row['diagnostic_label'], 'Community Hosting Equity Summary')
+        self.assertEqual({host['host_location'] for host in equity_row['host_locations']}, {'Westosha Park', 'Westosha Grass Fields'})
+        self.assertEqual(equity_row['selected_weeks'], ['Week 2'])
+        weekly_plan = preview['audit']['weekly_community_host_plan']
+        self.assertEqual(weekly_plan['diagnostic_label'], 'Weekly Community Host Plan')
+        self.assertEqual(weekly_plan['selected_community_or_communities'], ['Westosha'])
+        self.assertEqual(weekly_plan['community_capacity_by_field_size']['Westosha']['SMALL'], 4)
+        self.assertIsNone(weekly_plan['reason_additional_community_was_needed'])
 
 
     def test_rotation_adds_next_community_before_higher_capacity_later_community(self):

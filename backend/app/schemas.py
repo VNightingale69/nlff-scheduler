@@ -413,30 +413,42 @@ class ScheduleReadinessHostDateRow(BaseModel):
 
 
 class HostingBalanceRow(BaseModel):
+    diagnostic_label: str | None = None
     community_id: uuid.UUID | None = None
     community: str
+    host_locations: list[dict] = []
     available_host_dates: int
     available_host_weeks: int = 0
+    available_weeks: list[str] = []
+    selected_weeks: list[str] = []
     host_weeks_used: int = 0
     games_hosted_this_week: int
     games_hosted_season_to_date: int
     games_hosted: int = 0
+    average_games_per_host_week: float = 0
     expected_host_share: float
     expected_games_hosted: float = 0
     hosting_delta: float
     last_hosted_week: str | None = None
     consecutive_host_count: int = 0
+    rotation_rank: int | None = None
     status: str
 
 
 class HostingRotationRow(BaseModel):
+    diagnostic_label: str | None = None
     week: str
+    host_date: str | None = None
     available_communities: list[str] = []
     selected_host_communities: list[str] = []
+    selected_community_or_communities: list[str] = []
     selected_host_locations_by_community: list[dict] = []
+    community_capacity_by_field_size: dict[str, dict] = {}
+    locations_used_under_each_community: list[dict] = []
     combined_community_capacity: int = 0
     selected_community_could_host_all_games: bool = False
     additional_communities_needed: bool = False
+    reason_additional_community_needed: str | None = None
     skipped_communities: list[dict] = []
     rotation_ranking: list[dict] = []
     reason_selected: list[str] = []

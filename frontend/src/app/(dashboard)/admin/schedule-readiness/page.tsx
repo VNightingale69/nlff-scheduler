@@ -145,25 +145,28 @@ export default function ScheduleReadinessPage() {
 
 
       <section className='rounded border bg-white p-3'>
-        <h2 className='mb-2 font-semibold'>Hosting Balance</h2>
+        <h2 className='mb-2 font-semibold'>Community Hosting Equity Summary</h2>
         {!hostingBalance.length ? <p className='text-sm text-slate-500'>No active host availability found yet.</p> : (
           <div className='overflow-auto'>
             <table className='min-w-full text-sm'>
-              <thead><tr className='border-b text-left'><th className='p-2'>Community</th><th className='p-2'>Available host weeks</th><th className='p-2'>Host weeks used</th><th className='p-2'>Games hosted</th><th className='p-2'>Expected games hosted</th><th className='p-2'>Hosting delta</th><th className='p-2'>Last hosted week</th><th className='p-2'>Consecutive host count</th><th className='p-2'>Status</th></tr></thead>
-              <tbody>{hostingBalance.map((row) => <tr key={row.community_id || row.community} className='border-b'><td className='p-2'>{row.community}</td><td className='p-2'>{row.available_host_weeks ?? row.available_host_dates}</td><td className='p-2'>{row.host_weeks_used}</td><td className='p-2'>{row.games_hosted ?? row.games_hosted_season_to_date}</td><td className='p-2'>{row.expected_games_hosted ?? row.expected_host_share}</td><td className='p-2'>{row.hosting_delta}</td><td className='p-2'>{row.last_hosted_week || '—'}</td><td className='p-2'>{row.consecutive_host_count}</td><td className='p-2'>{row.status}</td></tr>)}</tbody>
+              <thead><tr className='border-b text-left'><th className='p-2'>Community</th><th className='p-2'>Host locations</th><th className='p-2'>Host weeks used</th><th className='p-2'>Games hosted</th><th className='p-2'>Avg games / host week</th><th className='p-2'>Last hosted week</th><th className='p-2'>Available weeks</th><th className='p-2'>Selected weeks</th><th className='p-2'>Hosting delta</th><th className='p-2'>Rotation rank</th><th className='p-2'>Status</th></tr></thead>
+              <tbody>{hostingBalance.map((row) => <tr key={row.community_id || row.community} className='border-b'><td className='p-2'>{row.community}</td><td className='p-2'>{row.host_locations?.length ? row.host_locations.map((host: any) => host.host_location).join(', ') : '—'}</td><td className='p-2'>{row.host_weeks_used}</td><td className='p-2'>{row.games_hosted ?? row.games_hosted_season_to_date}</td><td className='p-2'>{row.average_games_per_host_week ?? 0}</td><td className='p-2'>{row.last_hosted_week || '—'}</td><td className='p-2'>{row.available_weeks?.length ? row.available_weeks.join(', ') : (row.available_host_weeks ?? row.available_host_dates)}</td><td className='p-2'>{row.selected_weeks?.length ? row.selected_weeks.join(', ') : '—'}</td><td className='p-2'>{row.hosting_delta}</td><td className='p-2'>{row.rotation_rank ?? '—'}</td><td className='p-2'>{row.status}</td></tr>)}</tbody>
             </table>
           </div>
         )}
       </section>
 
       <section className='rounded border bg-white p-3'>
-        <h2 className='mb-2 font-semibold'>Hosting Rotation Summary</h2>
+        <h2 className='mb-2 font-semibold'>Weekly Community Host Plan</h2>
         {!hostingRotation.length ? <p className='text-sm text-slate-500'>No host rotation data found yet.</p> : (
           <div className='space-y-2'>
             {hostingRotation.map((row) => <div key={row.week} className='rounded border bg-slate-50 p-3 text-sm'>
               <div className='font-medium'>{row.week}</div>
               <div>Available communities: {row.available_communities?.length ? row.available_communities.join(', ') : '—'}</div>
-              <div>Selected host communities: {row.selected_host_communities?.length ? row.selected_host_communities.join(', ') : '—'}</div>
+              <div>Selected community or communities: {(row.selected_community_or_communities || row.selected_host_communities)?.length ? (row.selected_community_or_communities || row.selected_host_communities).join(', ') : '—'}</div>
+              <div>Community capacity by field size: {row.community_capacity_by_field_size ? Object.entries(row.community_capacity_by_field_size).map(([community, capacity]: any) => `${community}: ${capacity.SMALL || 0} Small / ${capacity.MEDIUM || 0} Medium / ${capacity.LARGE || 0} Large`).join(' • ') : '—'}</div>
+              <div>Locations used: {(row.locations_used_under_each_community || row.selected_host_locations_by_community || []).map((community: any) => `${community.community}: ${(community.locations || community.host_locations || []).map((host: any) => `${host.host_location} (${host.games_assigned || 0})`).join(', ')}`).join(' • ') || '—'}</div>
+              {row.reason_additional_community_needed ? <div className='text-amber-800'>Additional community needed: {row.reason_additional_community_needed}</div> : null}
               <div className='mt-1 text-slate-600'>Rotation ranking: {(row.rotation_ranking || []).map((rank: any, index: number) => `${index + 1}. ${rank.community} (weeks ${rank.host_weeks_used}, last ${rank.last_hosted_week_number ? `W${rank.last_hosted_week_number}` : '—'}, games ${rank.games_hosted_season_to_date ?? rank.games_hosted}, expected ${rank.expected_games_hosted}, delta ${rank.hosting_delta}, capacity ${rank.capacity_score}, fit ${rank.capacity_fit_result})`).join(' • ') || '—'}</div>
               {row.reason_selected?.length ? <ul className='mt-2 list-disc pl-5 text-green-800'>{row.reason_selected.map((reason: string) => <li key={reason}>{reason}</li>)}</ul> : null}
               {row.reason_skipped?.length ? <ul className='mt-2 list-disc pl-5 text-amber-800'>{row.reason_skipped.map((reason: string) => <li key={reason}>{reason}</li>)}</ul> : null}
