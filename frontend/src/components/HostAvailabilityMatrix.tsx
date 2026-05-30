@@ -138,9 +138,15 @@ export default function HostAvailabilityMatrix() {
       setMatrix(res);
       const params = new URLSearchParams(window.location.search);
       const requestedDate = params.get('game_date') || params.get('start_date');
-      if (requestedDate && res.dates.some((date) => date.game_date === requestedDate)) setWeekFilterDate(requestedDate);
+      const hasRequestedDate = Boolean(requestedDate && res.dates.some((date) => date.game_date === requestedDate));
+
+      // The matrix should always open in the league-wide season view. Query-string
+      // dates may focus the weekly summary, but filters remain opt-in controls.
+      setWeekFilterDate('');
+      setCommunityFilter('');
+      setLocationFilter('');
       setSelectedDate((current) => {
-        if (requestedDate && res.dates.some((date) => date.game_date === requestedDate)) return requestedDate;
+        if (hasRequestedDate) return requestedDate as string;
         if (current && res.dates.some((date) => date.game_date === current)) return current;
         return res.dates[0]?.game_date || '';
       });
