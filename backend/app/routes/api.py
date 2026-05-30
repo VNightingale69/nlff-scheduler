@@ -69,11 +69,19 @@ def _canonical_division_suffix(name: str | None) -> str:
     normalized = ''.join(ch for ch in (name or '').upper() if ch.isalnum())
     suffix_map = {
         'K1ST': 'K_1',
+        'K1': 'K_1',
+        'K2': 'K_2',
         '2ND3RD': '2_3',
+        '23': '2_3',
+        '35': '3_5',
         '4TH5TH': '4_5',
+        '45': '4_5',
         '6TH7TH': '6_7',
+        '67': '6_7',
         '8TH': '8',
+        '8': '8',
         '6TH7TH8TH': '6_7_8',
+        '68': '6_8',
     }
     return suffix_map.get(normalized, normalized)
 
@@ -444,6 +452,7 @@ def _grass_demand_counts_for_date(db: Session, host: HostLocation, available_dat
         .filter(
             Game.game_date == available_date,
             Team.organization_id == host.organization_id,
+            Division.is_active.is_(True),
         )
         .all()
     )
@@ -463,6 +472,7 @@ def _grass_demand_counts_for_date(db: Session, host: HostLocation, available_dat
                 OrganizationDivisionParticipation.organization_id == host.organization_id,
                 OrganizationDivisionParticipation.is_active.is_(True),
                 OrganizationDivisionParticipation.is_participating.is_(True),
+                Division.is_active.is_(True),
             )
             .all()
         )
@@ -1326,20 +1336,43 @@ def debug_organization_dependencies(org_id: uuid.UUID, db: Session = Depends(get
 
 
 LEAGUE_DIVISION_SEED = [
-    {'name': 'K/1st', 'division_group': 'COED', 'sort_order': 1, 'required_field_layout_type': 'THIRTY_YARD_WIDTH', 'is_active': True},
-    {'name': '2nd/3rd', 'division_group': 'COED', 'sort_order': 2, 'required_field_layout_type': 'THIRTY_YARD_WIDTH', 'is_active': True},
-    {'name': '4th/5th', 'division_group': 'COED', 'sort_order': 3, 'required_field_layout_type': 'MEDIUM', 'is_active': True},
-    {'name': '6th/7th', 'division_group': 'COED', 'sort_order': 4, 'required_field_layout_type': 'FIFTY_THREE_YARD_WIDTH', 'is_active': True},
-    {'name': '8th', 'division_group': 'COED', 'sort_order': 5, 'required_field_layout_type': 'FIFTY_THREE_YARD_WIDTH', 'is_active': True},
-    {'name': 'K/1st', 'division_group': 'GIRLS', 'sort_order': 1, 'required_field_layout_type': 'THIRTY_YARD_WIDTH', 'is_active': True},
-    {'name': '2nd/3rd', 'division_group': 'GIRLS', 'sort_order': 2, 'required_field_layout_type': 'THIRTY_YARD_WIDTH', 'is_active': True},
-    {'name': '4th/5th', 'division_group': 'GIRLS', 'sort_order': 3, 'required_field_layout_type': 'MEDIUM', 'is_active': True},
-    {'name': '6th/7th/8th', 'division_group': 'GIRLS', 'sort_order': 4, 'required_field_layout_type': 'FIFTY_THREE_YARD_WIDTH', 'is_active': True},
+    {'name': 'K-1', 'division_group': 'COED', 'sort_order': 1, 'required_field_layout_type': FIELD_SIZE_SMALL, 'is_active': True},
+    {'name': '2-3', 'division_group': 'COED', 'sort_order': 2, 'required_field_layout_type': FIELD_SIZE_SMALL, 'is_active': True},
+    {'name': '4-5', 'division_group': 'COED', 'sort_order': 3, 'required_field_layout_type': FIELD_SIZE_MEDIUM, 'is_active': True},
+    {'name': '6-7', 'division_group': 'COED', 'sort_order': 4, 'required_field_layout_type': FIELD_SIZE_LARGE, 'is_active': True},
+    {'name': '8', 'division_group': 'COED', 'sort_order': 5, 'required_field_layout_type': FIELD_SIZE_LARGE, 'is_active': True},
+    {'name': 'K-2', 'division_group': 'GIRLS', 'sort_order': 6, 'required_field_layout_type': FIELD_SIZE_SMALL, 'is_active': True},
+    {'name': '3-5', 'division_group': 'GIRLS', 'sort_order': 7, 'required_field_layout_type': FIELD_SIZE_MEDIUM, 'is_active': True},
+    {'name': '6-8', 'division_group': 'GIRLS', 'sort_order': 8, 'required_field_layout_type': FIELD_SIZE_LARGE, 'is_active': True},
 ]
+
+COED_DIVISION_RENAMES = {
+    'K/1st': 'K-1',
+    '2nd/3rd': '2-3',
+    '4th/5th': '4-5',
+    '6th/7th': '6-7',
+    '8th': '8',
+}
+
+OLD_GIRLS_DIVISION_NAMES = {'K/1st', '2nd/3rd', '4th/5th', '6th/7th/8th'}
 
 
 def ensure_league_defined_divisions(db: Session) -> None:
     changed = False
+
+    for old_name, new_name in COED_DIVISION_RENAMES.items():
+        existing_old = db.query(Division).filter(Division.division_group == 'COED', Division.name == old_name).first()
+        existing_new = db.query(Division).filter(Division.division_group == 'COED', Division.name == new_name).first()
+        if existing_old and not existing_new:
+            existing_old.name = new_name
+            changed = True
+
+    for old_name in OLD_GIRLS_DIVISION_NAMES:
+        old_girls = db.query(Division).filter(Division.division_group == 'GIRLS', Division.name == old_name).first()
+        if old_girls and old_girls.is_active:
+            old_girls.is_active = False
+            changed = True
+
     for item in LEAGUE_DIVISION_SEED:
         existing = db.query(Division).filter(
             Division.division_group == item['division_group'],
@@ -2182,9 +2215,11 @@ def get_schedule_readiness(current_user: User = Depends(get_current_user), db: S
             Team.organization_id == OrganizationDivisionParticipation.organization_id,
             Team.is_active.is_(True),
         ),
+    ).filter(
+        Division.is_active.is_(True),
     ).group_by(
         Division.id, Division.division_group, Division.name, Division.sort_order, Division.required_field_layout_type
-    ).order_by(Division.division_group, Division.sort_order, Division.name).all()
+    ).order_by(Division.sort_order, Division.division_group, Division.name).all()
 
     open_slot_counts = dict(
         db.query(GameSlot.field_type, func.count(GameSlot.id))
@@ -3883,6 +3918,9 @@ def regenerate_generated_game_slots(current_user: User = Depends(get_current_use
 @router.post('/teams', response_model=TeamRead, dependencies=[Depends(get_current_user)])
 def create_team(payload: TeamCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     enforce_organization_scope(payload.organization_id, current_user)
+    division = db.query(Division).filter(Division.id == payload.division_id, Division.is_active.is_(True)).first()
+    if not division:
+        raise HTTPException(400, 'Division is inactive or does not exist')
     participation = db.query(OrganizationDivisionParticipation).filter(
         OrganizationDivisionParticipation.organization_id == payload.organization_id,
         OrganizationDivisionParticipation.division_id == payload.division_id,
@@ -3900,8 +3938,10 @@ def create_team(payload: TeamCreate, current_user: User = Depends(get_current_us
     x = Team(**payload.model_dump()); db.add(x); db.commit(); db.refresh(x); return x
 
 @router.get('/teams', response_model=PagedResponse[TeamRead], dependencies=[Depends(get_current_user)])
-def list_teams(search: str | None = None, organization_id: uuid.UUID | None = None, division_id: uuid.UUID | None = None, page: int = 1, page_size: int = 20, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def list_teams(search: str | None = None, organization_id: uuid.UUID | None = None, division_id: uuid.UUID | None = None, active_divisions_only: bool = True, page: int = 1, page_size: int = 20, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     q = db.query(Team)
+    if active_divisions_only:
+        q = q.join(Team.division).filter(Division.is_active.is_(True))
     if current_user.role.name == ROLE_COMMUNITY_SCHEDULER: q = q.filter(Team.organization_id == current_user.organization_id)
     elif organization_id: q = q.filter(Team.organization_id == organization_id)
     if division_id: q = q.filter(Team.division_id == division_id)
@@ -3913,6 +3953,9 @@ def upd_team(item_id: uuid.UUID, payload: TeamCreate, current_user: User = Depen
     x = db.query(Team).filter(Team.id == item_id).first()
     if not x: raise HTTPException(404, 'Team not found')
     enforce_organization_scope(payload.organization_id, current_user)
+    division = db.query(Division).filter(Division.id == payload.division_id, Division.is_active.is_(True)).first()
+    if not division:
+        raise HTTPException(400, 'Division is inactive or does not exist')
     participation = db.query(OrganizationDivisionParticipation).filter(
         OrganizationDivisionParticipation.organization_id == payload.organization_id,
         OrganizationDivisionParticipation.division_id == payload.division_id,
@@ -4371,7 +4414,7 @@ def list_games(division_id:uuid.UUID|None=None, week_id:uuid.UUID|None=None, tea
 @router.get('/manual-schedule-builder/options', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def manual_schedule_builder_options(db: Session = Depends(get_db)):
     divisions = db.query(Division).filter(Division.is_active.is_(True)).order_by(Division.sort_order, Division.name).all()
-    teams = db.query(Team).filter(Team.is_active.is_(True)).order_by(Team.name).all()
+    teams = db.query(Team).join(Team.division).filter(Team.is_active.is_(True), Division.is_active.is_(True)).order_by(Team.name).all()
     eligible_host_ids = _eligible_host_location_ids(db)
     host_locations = db.query(HostLocation).filter(HostLocation.id.in_(eligible_host_ids)).order_by(HostLocation.name).all()
     seasons = db.query(Season).filter(Season.is_active.is_(True)).order_by(Season.start_date.desc()).all()
@@ -4404,7 +4447,7 @@ def manual_schedule_builder_recommendations(payload: dict, db: Session = Depends
     expected_field_type = _required_field_type_for_division(division)
     division_key = canonical_division_id_from_division(division)
 
-    teams_q = db.query(Team).filter(Team.is_active.is_(True))
+    teams_q = db.query(Team).join(Team.division).filter(Team.is_active.is_(True), Division.is_active.is_(True))
     if division_id:
         teams_q = teams_q.filter(Team.division_id == division_id)
     teams = teams_q.order_by(Team.name).all()
@@ -4807,10 +4850,9 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     selected_division_normalized = normalized_division_key(division.division_group, division.name)
     full_division_label = f"{division.division_group} {division.name}".strip() if division.division_group else (division.name or '')
     supported_girls_division_keys = {
-        'GIRLS_K_1',
-        'GIRLS_2_3',
-        'GIRLS_4_5',
-        'GIRLS_6_7_8',
+        'GIRLS_K_2',
+        'GIRLS_3_5',
+        'GIRLS_6_8',
     }
     required_field_type = _required_field_type_for_division(division)
     teams = db.query(Team).filter(Team.division_id == division_id, Team.is_active.is_(True)).order_by(Team.name).all()
@@ -5337,7 +5379,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     weekly_division_rows = (
         db.query(Division.id, Division.required_field_layout_type, func.count(Team.id))
         .join(Team, Team.division_id == Division.id)
-        .filter(Team.is_active.is_(True))
+        .filter(Team.is_active.is_(True), Division.is_active.is_(True))
         .group_by(Division.id, Division.required_field_layout_type)
         .all()
     )
@@ -8493,11 +8535,14 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
                 db.commit()
 
     division_order = [
-        ('COED', 'K/1ST'), ('GIRLS', 'K/1ST'),
-        ('COED', '2ND/3RD'), ('GIRLS', '2ND/3RD'),
-        ('COED', '4TH/5TH'), ('GIRLS', '4TH/5TH'),
-        ('COED', '6TH/7TH'), ('COED', '8TH'),
-        ('GIRLS', '6TH/7TH/8TH'),
+        ('COED', 'K-1'),
+        ('COED', '2-3'),
+        ('COED', '4-5'),
+        ('COED', '6-7'),
+        ('COED', '8'),
+        ('GIRLS', 'K-2'),
+        ('GIRLS', '3-5'),
+        ('GIRLS', '6-8'),
     ]
     all_divisions = db.query(Division).all()
     divisions_by_key = {canonical_division_id_from_division(d): d for d in all_divisions}
@@ -8677,7 +8722,7 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         total = 0
         for group, name in division_order:
             division = divisions_by_key.get(canonical_division_id(group, name)) or divisions_by_normalized_name.get(normalize_division_name(f'{group} {name}'))
-            if not division:
+            if not division or not division.is_active:
                 continue
             total += _division_required_games(_active_team_count(division.id))
         return total
@@ -9596,7 +9641,10 @@ def list_public_games(season_id: uuid.UUID | None = None, host_location_id: uuid
             message='No published schedule is currently available.',
         )
 
-    rows = get_scheduled_games_for_season(db, season.id, filters, organization_filter_any_team=True)
+    rows = [
+        row for row in get_scheduled_games_for_season(db, season.id, filters, organization_filter_any_team=True)
+        if row[6] and row[6].is_active
+    ]
     total = len(rows)
     start = max(page - 1, 0) * page_size
     items = rows[start:start + page_size]
@@ -9640,7 +9688,10 @@ def public_schedule_debug(season_id: uuid.UUID | None = None, host_location_id: 
 @router.get('/public/schedule-filters')
 def list_public_schedule_filters(season_id: uuid.UUID | None = None, db: Session = Depends(get_db)):
     season = _get_schedule_scope_season(db, season_id)
-    rows = get_scheduled_games_for_season(db, season.id, _scheduled_games_filters(season.id)) if season and _season_schedule_is_published(season) else []
+    rows = [
+        row for row in get_scheduled_games_for_season(db, season.id, _scheduled_games_filters(season.id))
+        if row[6] and row[6].is_active
+    ] if season and _season_schedule_is_published(season) else []
 
     if rows:
         host_locations_by_id = {host.id: host for _, _, _, host, _, _, _, _, _ in rows if host}
@@ -9695,9 +9746,9 @@ def _required_field_type_for_division(division: Division | None) -> str:
     if not division:
         return FIELD_SIZE_SMALL
     division_label = normalized_division_key(getattr(division, 'division_group', None), getattr(division, 'name', None))
-    small_divisions = {'coed_k_1st', 'girls_k_1st', 'coed_k1st', 'girls_k1st', 'coed_2nd_3rd', 'girls_2nd_3rd'}
-    medium_divisions = {'coed_4th_5th', 'girls_4th_5th'}
-    large_divisions = {'coed_6th_7th', 'girls_6th_7th', 'girls_6th_7th_8th', 'coed_8th', 'girls_8th'}
+    small_divisions = {'coed_k_1st', 'girls_k_1st', 'coed_k1st', 'girls_k1st', 'coed_k_1', 'girls_k_2', 'coed_2nd_3rd', 'girls_2nd_3rd', 'coed_2_3'}
+    medium_divisions = {'coed_4th_5th', 'girls_4th_5th', 'coed_4_5', 'girls_3_5'}
+    large_divisions = {'coed_6th_7th', 'girls_6th_7th', 'girls_6th_7th_8th', 'coed_6_7', 'girls_6_8', 'coed_8th', 'girls_8th', 'coed_8'}
     if division_label in small_divisions:
         return FIELD_SIZE_SMALL
     if division_label in medium_divisions:

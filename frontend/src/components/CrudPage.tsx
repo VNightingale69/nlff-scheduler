@@ -60,13 +60,13 @@ export default function CrudPage({ title, path, fields }: { title: string; path:
 
       setRefOptions({
         organization_id: (orgs.items || []).map((o: any) => ({ value: o.id, label: o.name })),
-        division_id: (divs.items || []).map((o: any) => ({ value: o.id, label: getDivisionLabel(o) })),
+        division_id: (divs.items || []).filter((o: any) => o.is_active).map((o: any) => ({ value: o.id, label: getDivisionLabel(o) })),
         host_location_id: (hosts.items || []).map((host: any) => ({
           value: host.id,
           label: host.organization_id && orgsById[host.organization_id] ? `${host.name} (${orgsById[host.organization_id]})` : host.name,
         })),
         field_id: (fieldsResp.items || []).map((f: any) => ({ value: f.id, label: `${hostsById[f.host_location_id] || 'Unknown host'} / ${f.name}` })),
-        required_field_layout_type: [{ value: 'THIRTY_YARD_WIDTH', label: 'THIRTY_YARD_WIDTH' }, { value: 'FIFTY_THREE_YARD_WIDTH', label: 'FIFTY_THREE_YARD_WIDTH' }],
+        required_field_layout_type: [{ value: 'SMALL', label: 'SMALL' }, { value: 'MEDIUM', label: 'MEDIUM' }, { value: 'LARGE', label: 'LARGE' }],
         layout_type: [{ value: 'THIRTY_YARD_WIDTH', label: 'THIRTY_YARD_WIDTH' }, { value: 'FIFTY_THREE_YARD_WIDTH', label: 'FIFTY_THREE_YARD_WIDTH' }],
         date_type: [{ value: 'REGULAR_SEASON', label: 'REGULAR_SEASON' }, { value: 'BLACKOUT', label: 'BLACKOUT' }, { value: 'PLAYOFF', label: 'PLAYOFF' }],
       });
