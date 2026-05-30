@@ -798,6 +798,59 @@ class AutoFillPreviewTest(unittest.TestCase):
         self.assertFalse(assessment['can_host_entire_week'])
         self.assertEqual([row['community'] for row in assessment['additional_communities_added']], ['Antioch'])
 
+
+    def test_selected_underused_community_gets_more_games_when_capacity_allows(self):
+        antioch_host = HostLocation(id=uuid.uuid4(), organization_id=self.org_a.id, name='Antioch Equity Park', is_active=True)
+        extra_rows = [antioch_host]
+        extra_teams = [
+            Team(id=uuid.uuid4(), organization_id=self.org_w.id, division_id=self.division.id, name='Westosha White', is_active=True),
+            Team(id=uuid.uuid4(), organization_id=self.org_w.id, division_id=self.division.id, name='Westosha Black', is_active=True),
+            Team(id=uuid.uuid4(), organization_id=self.org_a.id, division_id=self.division.id, name='Antioch Red', is_active=True),
+            Team(id=uuid.uuid4(), organization_id=self.org_a.id, division_id=self.division.id, name='Antioch Blue', is_active=True),
+        ]
+        extra_rows.extend(extra_teams)
+        for idx, hour in enumerate((10, 11)):
+            fi = FieldInstance(id=uuid.uuid4(), host_location_id=self.host.id, hosting_availability_id=uuid.uuid4(), instance_date=self.week2.start_date, field_name=f'Westosha Equity {idx}', field_type='SMALL', is_active=True)
+            slot = GameSlot(id=uuid.uuid4(), field_instance_id=fi.id, host_location_id=self.host.id, slot_date=self.week2.start_date, start_time=time(hour, 0), end_time=time(hour + 1, 0), field_type='SMALL', status='OPEN')
+            extra_rows.extend([fi, slot])
+        for idx, hour in enumerate((9, 10, 11)):
+            fi = FieldInstance(id=uuid.uuid4(), host_location_id=antioch_host.id, hosting_availability_id=uuid.uuid4(), instance_date=self.week2.start_date, field_name=f'Antioch Equity {idx}', field_type='SMALL', is_active=True)
+            slot = GameSlot(id=uuid.uuid4(), field_instance_id=fi.id, host_location_id=antioch_host.id, slot_date=self.week2.start_date, start_time=time(hour, 0), end_time=time(hour + 1, 0), field_type='SMALL', status='OPEN')
+            extra_rows.extend([fi, slot])
+
+        prior_weeks = [
+            Week(id=uuid.uuid4(), season_id=self.season.id, week_number=0, start_date=date(2026, 4, 24), end_date=date(2026, 4, 30)),
+            Week(id=uuid.uuid4(), season_id=self.season.id, week_number=-1, start_date=date(2026, 4, 17), end_date=date(2026, 4, 23)),
+        ]
+        extra_rows.extend(prior_weeks)
+        all_team_ids = [self.wm.id, self.wg.id, self.ab.id, self.as_.id] + [team.id for team in extra_teams]
+
+        def add_prior_hosted_game(host, week, idx):
+            game = Game(id=uuid.uuid4(), season_id=self.season.id, week_id=week.id, home_team_id=all_team_ids[idx % len(all_team_ids)], away_team_id=all_team_ids[(idx + 1) % len(all_team_ids)], game_status_id=self.status.id, game_date=week.start_date, kickoff_time=time(8 + (idx % 8), 0))
+            fi = FieldInstance(id=uuid.uuid4(), host_location_id=host.id, hosting_availability_id=uuid.uuid4(), instance_date=week.start_date, field_name=f'Prior Equity {host.name} {idx}', field_type='SMALL', is_active=True)
+            slot = GameSlot(id=uuid.uuid4(), field_instance_id=fi.id, host_location_id=host.id, slot_date=week.start_date, start_time=game.kickoff_time, end_time=time(9 + (idx % 8), 0), field_type='SMALL', status='OPEN', assigned_game_id=game.id)
+            extra_rows.extend([game, fi, slot])
+
+        for idx in range(5):
+            add_prior_hosted_game(self.host, prior_weeks[0], idx)
+        add_prior_hosted_game(antioch_host, prior_weeks[0], 5)
+        add_prior_hosted_game(antioch_host, prior_weeks[1], 6)
+
+        self.db.add_all(extra_rows)
+        self.db.commit()
+
+        preview = auto_fill_preview({'season_id': self.season.id, 'week_id': self.week2.id, 'division_id': self.division.id}, db=self.db)
+
+        self.assertEqual(preview['proposed_game_count'], 4)
+        self.assertEqual([row['community'] for row in preview['audit']['selected_host_communities']], ['Westosha', 'Antioch'])
+        games_by_community = {row['community']: row['games_assigned'] for row in preview['audit']['weekly_community_host_plan']['locations_used_under_each_community']}
+        self.assertGreater(games_by_community['Antioch'], games_by_community['Westosha'])
+        antioch_equity = next(row for row in preview['audit']['community_hosting_equity_summary'] if row['community'] == 'Antioch')
+        self.assertIn('season_target_games', antioch_equity)
+        self.assertIn('compatible_unused_capacity', antioch_equity)
+        self.assertIn('reason_if_overused_or_underused', antioch_equity)
+        self.assertTrue(any('selected community has the fewest hosted games (+5000)' in proposal['reason'] for proposal in preview['proposals'] if proposal['host_location'] == 'Antioch Equity Park'))
+
     def test_host_rotation_audit_tracks_occurrences(self):
         preview = auto_fill_preview({'season_id': self.season.id, 'week_id': self.week2.id, 'division_id': self.division.id}, db=self.db)
         self.assertIn('total_host_occurrences_by_community', preview['audit'])
