@@ -115,7 +115,9 @@ export default function HostAvailabilityMatrix() {
     apiFetch('/seasons?page_size=100', {}, token).then((res: any) => {
       const items = res.items || [];
       setSeasons(items);
-      const active = items.find((season: any) => season.is_active) || items[0];
+      const params = new URLSearchParams(window.location.search);
+      const requestedSeasonId = params.get('season_id');
+      const active = items.find((season: any) => season.id === requestedSeasonId) || items.find((season: any) => season.is_active) || items[0];
       if (active) setSeasonId(active.id);
     }).catch((err: unknown) => setError(extractError(err)));
   }, [token]);
@@ -127,7 +129,13 @@ export default function HostAvailabilityMatrix() {
     try {
       const res = await apiFetch(`/host-availability-matrix?season_id=${seasonId}`, {}, token) as MatrixResponse;
       setMatrix(res);
-      setSelectedDate((current) => current || res.dates[0]?.game_date || '');
+      const params = new URLSearchParams(window.location.search);
+      const requestedDate = params.get('game_date') || params.get('start_date');
+      setSelectedDate((current) => {
+        if (requestedDate && res.dates.some((date) => date.game_date === requestedDate)) return requestedDate;
+        if (current && res.dates.some((date) => date.game_date === current)) return current;
+        return res.dates[0]?.game_date || '';
+      });
       setDirtyCells({});
     } catch (err) {
       setError(extractError(err));
@@ -286,7 +294,7 @@ export default function HostAvailabilityMatrix() {
         <div>
           <p className='text-sm font-semibold uppercase tracking-wide text-slate-500'>Admin → Scheduling → Host Availability Matrix</p>
           <h1 className='text-2xl font-bold text-slate-900'>Host Availability Matrix</h1>
-          <p className='text-sm text-slate-600'>Select or exclude available host fields for auto-scheduling without deleting community availability.</p>
+          <p className='text-sm text-slate-600'>Season-wide scheduler planning tool for communities, host locations, and game dates. Select fields for auto-schedule, exclude available fields, and lock weekly host plans without deleting community availability.</p>
         </div>
         <select className='rounded border p-2' value={seasonId} onChange={(e) => setSeasonId(e.target.value)}>
           {seasons.map((season) => <option key={season.id} value={season.id}>{season.name}</option>)}
@@ -314,7 +322,7 @@ export default function HostAvailabilityMatrix() {
           <thead className='sticky top-0 z-10 bg-slate-100'>
             <tr>
               <th className='sticky left-0 z-20 border-b bg-slate-100 px-3 py-2 text-left'>Community</th>
-              <th className='sticky left-36 z-20 border-b bg-slate-100 px-3 py-2 text-left'>Field / Host Location</th>
+              <th className='sticky left-36 z-20 border-b bg-slate-100 px-3 py-2 text-left'>Host Location</th>
               {matrix.dates.map((date) => <th key={date.game_date} className={`border-b px-2 py-2 text-center ${date.is_postseason ? 'bg-amber-100 font-bold text-amber-900' : ''}`}>
                 <button className='min-w-16' onClick={() => setSelectedDate(date.game_date)}>{date.is_postseason ? 'P ' : ''}{formatDate(date.game_date)}</button>
               </th>)}
