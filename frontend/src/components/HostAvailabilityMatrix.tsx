@@ -11,6 +11,7 @@ type MatrixDate = {
   label: string;
   is_postseason: boolean;
   status: string | null;
+  date_type?: string | null;
 };
 
 type MatrixCell = {
@@ -380,7 +381,7 @@ export default function HostAvailabilityMatrix() {
         <label className='text-sm font-medium text-slate-700'>Weekly filter
           <select className='mt-1 w-full rounded border p-2 font-normal' value={weekFilterDate} onChange={(e) => { setWeekFilterDate(e.target.value); if (e.target.value) setSelectedDate(e.target.value); }}>
             <option value=''>All season dates</option>
-            {matrix.dates.map((date) => <option key={date.game_date} value={date.game_date}>Week {date.week_number ?? '—'} · {formatDate(date.game_date)}</option>)}
+            {matrix.dates.map((date) => <option key={date.game_date} value={date.game_date}>{date.label || `Week ${date.week_number ?? '—'}`} · {formatDate(date.game_date)} · {(date.date_type || 'REGULAR_SEASON').replace('_', ' ')}</option>)}
           </select>
         </label>
         <label className='text-sm font-medium text-slate-700'>Filter by community
@@ -416,7 +417,7 @@ export default function HostAvailabilityMatrix() {
               <th className='sticky left-0 z-20 border-b bg-slate-100 px-3 py-2 text-left'>Community</th>
               <th className='sticky left-36 z-20 border-b bg-slate-100 px-3 py-2 text-left'>Host Location</th>
               {filteredDates.map((date) => <th key={date.game_date} className={`border-b px-2 py-2 text-center ${date.is_postseason ? 'bg-amber-100 font-bold text-amber-900' : ''}`}>
-                <button className='min-w-16' onClick={() => setSelectedDate(date.game_date)}>{date.is_postseason ? 'P ' : ''}{formatDate(date.game_date)}</button>
+                <button className='min-w-16' onClick={() => setSelectedDate(date.game_date)}>{date.date_type === 'BLACKOUT' ? 'B ' : date.is_postseason ? 'P ' : ''}{formatDate(date.game_date)}</button>
               </th>)}
             </tr>
           </thead>
@@ -449,7 +450,7 @@ export default function HostAvailabilityMatrix() {
         {selectedSummary ? <div className='mt-2 space-y-4 text-sm'>
           <div>
             <div className='font-semibold'>Week {selectedSummary.week_number ?? '—'}, {formatDate(selectedSummary.game_date)}</div>
-            <div className='text-slate-500'>{selectedSummary.label}{selectedSummary.is_postseason ? ' • Playoff/Championship' : ''}</div>
+            <div className='text-slate-500'>{selectedSummary.label} • {(selectedSummary.date_type || 'REGULAR_SEASON').replace('_', ' ')}{selectedSummary.is_postseason ? ' • Playoff/Championship' : ''}</div>
           </div>
           <div className='grid grid-cols-2 gap-2'>
             <div className='rounded bg-slate-50 p-2'><div className='text-xs text-slate-500'>Available communities</div><div className='text-lg font-bold'>{selectedSummaryDetails?.availableCommunities.length ?? selectedSummary.available_communities?.length ?? 0}</div></div>

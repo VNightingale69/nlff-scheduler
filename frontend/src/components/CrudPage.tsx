@@ -68,6 +68,7 @@ export default function CrudPage({ title, path, fields }: { title: string; path:
         field_id: (fieldsResp.items || []).map((f: any) => ({ value: f.id, label: `${hostsById[f.host_location_id] || 'Unknown host'} / ${f.name}` })),
         required_field_layout_type: [{ value: 'THIRTY_YARD_WIDTH', label: 'THIRTY_YARD_WIDTH' }, { value: 'FIFTY_THREE_YARD_WIDTH', label: 'FIFTY_THREE_YARD_WIDTH' }],
         layout_type: [{ value: 'THIRTY_YARD_WIDTH', label: 'THIRTY_YARD_WIDTH' }, { value: 'FIFTY_THREE_YARD_WIDTH', label: 'FIFTY_THREE_YARD_WIDTH' }],
+        date_type: [{ value: 'REGULAR_SEASON', label: 'REGULAR_SEASON' }, { value: 'BLACKOUT', label: 'BLACKOUT' }, { value: 'PLAYOFF', label: 'PLAYOFF' }],
       });
     })();
   }, []);

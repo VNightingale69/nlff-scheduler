@@ -185,6 +185,7 @@ class Week(Base, TimestampMixin):
     start_date: Mapped[Date] = mapped_column(Date, nullable=False)
     end_date: Mapped[Date] = mapped_column(Date, nullable=False)
     primary_game_date: Mapped[Date | None] = mapped_column(Date, nullable=True)
+    date_type: Mapped[str] = mapped_column(String(30), nullable=False, default='REGULAR_SEASON')
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default='draft')
     season = relationship('Season')

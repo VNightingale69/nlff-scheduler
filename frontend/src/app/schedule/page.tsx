@@ -16,6 +16,8 @@ type Game = {
   home_team_name: string;
   away_team_name: string;
   game_status_label: string;
+  week_label?: string | null;
+  date_type?: string | null;
 };
 
 type PublicScheduleFilters = {
@@ -52,9 +54,10 @@ const emptyOptions: PublicScheduleOptions = {
 
 const getWeekOptionLabel = (week: any) => {
   const baseLabel = week.label || `Week ${week.week_number}`;
-  if (!week.start_date) return baseLabel;
+  const dateTypeLabel = week.date_type && week.date_type !== 'REGULAR_SEASON' ? ` (${week.date_type.replace('_', ' ')})` : '';
+  if (!week.start_date) return `${baseLabel}${dateTypeLabel}`;
   const formattedDate = formatDisplayDate(week.start_date);
-  return `${baseLabel} — ${formattedDate}`;
+  return `${baseLabel}${dateTypeLabel} — ${formattedDate}`;
 };
 
 const buildScheduleQuery = (activeFilters: PublicScheduleFilters) => {
@@ -144,6 +147,7 @@ export default function PublicSchedulePage() {
                 <th className='p-2'>Division</th>
                 <th className='p-2'>Home team</th>
                 <th className='p-2'>Away team</th>
+                <th className='p-2'>Game type</th>
                 <th className='p-2'>Game status</th>
               </tr>
             </thead>
@@ -157,6 +161,7 @@ export default function PublicSchedulePage() {
                   <td className='p-2'>{g.division_name}</td>
                   <td className='p-2'>{g.home_team_name}</td>
                   <td className='p-2'>{g.away_team_name}</td>
+                  <td className='p-2'>{g.date_type === 'PLAYOFF' ? 'PLAYOFF' : g.week_label || 'Regular Season'}</td>
                   <td className='p-2'>{g.game_status_label}</td>
                 </tr>
               ))}
