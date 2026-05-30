@@ -18,7 +18,7 @@ from app.models import Division, Field, FieldConfigurationOption, FieldInstance,
 from app.schemas import (
     DivisionCreate, DivisionRead, FieldConfigurationOptionCreate, FieldConfigurationOptionRead, FieldCreate, FieldRead, GameCreate, GameRead, GameSaveResponse,
     OrganizationDivisionParticipationBulkUpsertRequest, OrganizationDivisionParticipationRead,
-    GeneratedSlotRead, HostLocationCreate, HostLocationRead, HostLocationConfigurationCreate, HostLocationConfigurationRead, HostingAvailabilityCreate, HostingAvailabilityRead, HostingAvailabilityBulkUpsertRequest, HostingAvailabilityBulkUpsertResponse, HostingGenerationRunResult, HostingGenerationLocationResult, PhysicalFieldAreaCreate, PhysicalFieldAreaRead, SavedAvailabilityResponse,
+    GeneratedSlotRead, GeneratedSlotsClearResponse, HostLocationCreate, HostLocationRead, HostLocationConfigurationCreate, HostLocationConfigurationRead, HostingAvailabilityCreate, HostingAvailabilityRead, HostingAvailabilityBulkUpsertRequest, HostingAvailabilityBulkUpsertResponse, HostingGenerationRunResult, HostingGenerationLocationResult, PhysicalFieldAreaCreate, PhysicalFieldAreaRead, SavedAvailabilityResponse,
     LoginRequest, OrganizationCreate, OrganizationRead, PagedResponse, PublicGameRead, RefreshRequest,
     TeamCreate, TeamRead, TeamUpdate, TokenResponse, UserCreate, UserRead,
     ScheduleReadinessDivisionRow, ScheduleReadinessHostDateRow, ScheduleReadinessHostSiteRow, ScheduleReadinessResponse, ScheduleReadinessTotals, ScheduleReadinessTurfWaveRow, ScheduleReadinessTurfWaveSlotRow
@@ -3256,6 +3256,87 @@ def list_generated_game_slots(host_location_id: uuid.UUID | None = None, availab
         q = q.filter(GameSlot.field_type == field_type)
     rows = q.order_by(GameSlot.slot_date, GameSlot.start_time, FieldInstance.field_name).all()
     return [{'id': row.GameSlot.id, 'available_date': row.GameSlot.slot_date, 'host_location_name': row.host_location_name, 'field_instance_name': row.field_name, 'field_type': row.GameSlot.field_type, 'start_time': row.GameSlot.start_time, 'end_time': row.GameSlot.end_time, 'status': row.GameSlot.status, 'is_locked': row.GameSlot.assigned_game_id is not None} for row in rows]
+
+
+GENERATED_SLOTS_CLEAR_WARNING = 'Some field instances were preserved because scheduled games reference them.'
+
+
+@router.delete('/generated-game-slots', response_model=GeneratedSlotsClearResponse, dependencies=[Depends(get_current_user)])
+def clear_generated_game_slots(host_location_id: uuid.UUID = Query(...), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    host = db.query(HostLocation).filter(HostLocation.id == host_location_id).first()
+    if not host:
+        raise HTTPException(404, 'Host location not found')
+    enforce_organization_scope(host.organization_id, current_user)
+
+    field_instance_ids = [
+        row[0]
+        for row in db.query(FieldInstance.id)
+        .filter(FieldInstance.host_location_id == host_location_id)
+        .all()
+    ]
+
+    assigned_game_ids = {
+        row[0]
+        for row in db.query(GameSlot.assigned_game_id)
+        .filter(
+            GameSlot.host_location_id == host_location_id,
+            GameSlot.assigned_game_id.isnot(None),
+        )
+        .all()
+        if row[0] is not None
+    }
+
+    game_field_rows = []
+    if field_instance_ids:
+        game_field_rows = (
+            db.query(Game.id, Game.field_instance_id)
+            .filter(Game.field_instance_id.in_(field_instance_ids))
+            .all()
+        )
+    referenced_field_instance_ids = {row.field_instance_id for row in game_field_rows if row.field_instance_id is not None}
+    preserved_game_ids = assigned_game_ids | {row.id for row in game_field_rows}
+
+    slots_deleted = db.query(GameSlot).filter(
+        GameSlot.host_location_id == host_location_id,
+        GameSlot.assigned_game_id.is_(None),
+    ).delete(synchronize_session=False)
+
+    remaining_slot_field_instance_ids = set()
+    if field_instance_ids:
+        remaining_slot_field_instance_ids = {
+            row[0]
+            for row in db.query(GameSlot.field_instance_id)
+            .filter(
+                GameSlot.host_location_id == host_location_id,
+                GameSlot.field_instance_id.in_(field_instance_ids),
+            )
+            .distinct()
+            .all()
+        }
+
+    preserved_field_instance_ids = referenced_field_instance_ids | remaining_slot_field_instance_ids
+    field_instance_ids_to_delete = [field_id for field_id in field_instance_ids if field_id not in preserved_field_instance_ids]
+    field_instances_deleted = 0
+    if field_instance_ids_to_delete:
+        field_instances_deleted = db.query(FieldInstance).filter(
+            FieldInstance.id.in_(field_instance_ids_to_delete),
+        ).delete(synchronize_session=False)
+
+    if preserved_field_instance_ids:
+        db.query(FieldInstance).filter(FieldInstance.id.in_(preserved_field_instance_ids)).update(
+            {FieldInstance.is_active: False},
+            synchronize_session=False,
+        )
+
+    db.commit()
+
+    return GeneratedSlotsClearResponse(
+        slots_deleted=slots_deleted or 0,
+        field_instances_deleted=field_instances_deleted or 0,
+        field_instances_preserved=len(preserved_field_instance_ids),
+        games_preserved=len(preserved_game_ids),
+        warning=GENERATED_SLOTS_CLEAR_WARNING if preserved_game_ids else None,
+    )
 
 
 @router.post('/generated-game-slots/regenerate', response_model=HostingGenerationRunResult, dependencies=[Depends(get_current_user)])

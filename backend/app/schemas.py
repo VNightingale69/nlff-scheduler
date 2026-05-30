@@ -317,6 +317,14 @@ class GeneratedSlotRead(BaseModel):
     is_locked: bool = False
 
 
+class GeneratedSlotsClearResponse(BaseModel):
+    slots_deleted: int = 0
+    field_instances_deleted: int = 0
+    field_instances_preserved: int = 0
+    games_preserved: int = 0
+    warning: str | None = None
+
+
 class ScheduleReadinessDivisionRow(BaseModel):
     division_id: uuid.UUID
     division_label: str
