@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { apiFetch } from '@/lib/api';
-import { getToken } from '@/lib/auth';
+import { type AuthUser, getAuthUser, getToken } from '@/lib/auth';
 
 type MatrixDate = {
   game_date: string;
@@ -51,6 +51,8 @@ type MatrixResponse = {
   summaries: WeeklySummary[];
 };
 
+const HOST_PLAN_SELECTION_ADMIN_EMAIL = 'admin@example.com';
+const HOST_PLAN_SELECTION_PERMISSION_MESSAGE = 'Only admin@example.com can modify host plan selections.';
 const CYCLE = ['AVAILABLE', 'SELECTED', 'EXCLUDED'];
 const LABELS: Record<string, string> = {
   BLANK: '',
@@ -92,6 +94,7 @@ function extractError(error: unknown) {
 
 export default function HostAvailabilityMatrix() {
   const token = getToken();
+  const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
   const [seasons, setSeasons] = useState<Array<{ id: string; name: string }>>([]);
   const [seasonId, setSeasonId] = useState('');
   const [matrix, setMatrix] = useState<MatrixResponse>(emptyMatrix());
@@ -101,6 +104,12 @@ export default function HostAvailabilityMatrix() {
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
+
+  useEffect(() => {
+    setCurrentUser(getAuthUser());
+  }, []);
+
+  const canModifyMatrix = currentUser?.email?.trim().toLowerCase() === HOST_PLAN_SELECTION_ADMIN_EMAIL;
 
   useEffect(() => {
     apiFetch('/seasons?page_size=100', {}, token).then((res: any) => {
@@ -156,6 +165,10 @@ export default function HostAvailabilityMatrix() {
   };
 
   const handleCellClick = (row: MatrixRow, date: MatrixDate, event: React.MouseEvent<HTMLButtonElement>) => {
+    if (!canModifyMatrix) {
+      setMessage(HOST_PLAN_SELECTION_PERMISSION_MESSAGE);
+      return;
+    }
     setSelectedDate(date.game_date);
     const cell = getCell(row, date);
     if (event.shiftKey) {
@@ -172,6 +185,10 @@ export default function HostAvailabilityMatrix() {
 
   const handleCellMenu = (row: MatrixRow, date: MatrixDate, event: React.MouseEvent<HTMLButtonElement>) => {
     event.preventDefault();
+    if (!canModifyMatrix) {
+      setMessage(HOST_PLAN_SELECTION_PERMISSION_MESSAGE);
+      return;
+    }
     setSelectedDate(date.game_date);
     const cell = getCell(row, date);
     const action = window.prompt('Cell menu: type LOCK, OVERFLOW, NOTE, or CLEAR', cell.status === 'OVERFLOW' ? 'CLEAR' : 'OVERFLOW');
@@ -198,6 +215,10 @@ export default function HostAvailabilityMatrix() {
   };
 
   const saveChanges = async () => {
+    if (!canModifyMatrix) {
+      setMessage(HOST_PLAN_SELECTION_PERMISSION_MESSAGE);
+      return;
+    }
     const selections = Object.entries(dirtyCells).map(([key, cell]) => {
       const [hostLocationId, gameDate] = key.split(':');
       const row = matrix.rows.find((item) => item.host_location_id === hostLocationId);
@@ -232,6 +253,10 @@ export default function HostAvailabilityMatrix() {
   };
 
   const runAction = async (action: 'generate' | 'lock' | 'unlock' | 'clear' | 'auto') => {
+    if (!canModifyMatrix) {
+      setMessage(HOST_PLAN_SELECTION_PERMISSION_MESSAGE);
+      return;
+    }
     if (!seasonId || !selectedDate) return;
     setError('');
     setMessage('');
@@ -259,7 +284,7 @@ export default function HostAvailabilityMatrix() {
     <div className='rounded border bg-white p-4 shadow-sm'>
       <div className='flex flex-wrap items-center justify-between gap-3'>
         <div>
-          <p className='text-sm font-semibold uppercase tracking-wide text-slate-500'>Admin → Scheduling</p>
+          <p className='text-sm font-semibold uppercase tracking-wide text-slate-500'>Admin → Scheduling → Host Availability Matrix</p>
           <h1 className='text-2xl font-bold text-slate-900'>Host Availability Matrix</h1>
           <p className='text-sm text-slate-600'>Select or exclude available host fields for auto-scheduling without deleting community availability.</p>
         </div>
@@ -267,16 +292,17 @@ export default function HostAvailabilityMatrix() {
           {seasons.map((season) => <option key={season.id} value={season.id}>{season.name}</option>)}
         </select>
       </div>
+      {!canModifyMatrix ? <div className='mt-4 rounded bg-amber-50 p-3 text-sm font-medium text-amber-900'>{HOST_PLAN_SELECTION_PERMISSION_MESSAGE}</div> : null}
       <div className='mt-4 flex flex-wrap gap-2'>
-        <button className='rounded bg-indigo-600 px-3 py-2 text-sm font-semibold text-white disabled:bg-slate-300' disabled={!selectedDate} onClick={() => runAction('generate')}>Generate Suggested Host Plan</button>
-        <button className='rounded bg-emerald-700 px-3 py-2 text-sm font-semibold text-white disabled:bg-slate-300' disabled={saving || !Object.keys(dirtyCells).length} onClick={saveChanges}>Save Matrix Changes</button>
-        <button className='rounded bg-blue-700 px-3 py-2 text-sm font-semibold text-white disabled:bg-slate-300' disabled={!selectedDate} onClick={() => runAction('lock')}>Lock Selected Week</button>
-        <button className='rounded border border-blue-300 px-3 py-2 text-sm font-semibold text-blue-700 disabled:text-slate-300' disabled={!selectedDate} onClick={() => runAction('unlock')}>Unlock Selected Week</button>
-        <button className='rounded border border-rose-300 px-3 py-2 text-sm font-semibold text-rose-700 disabled:text-slate-300' disabled={!selectedDate} onClick={() => runAction('clear')}>Clear Host Plan Selections</button>
-        <button className='rounded bg-slate-900 px-3 py-2 text-sm font-semibold text-white disabled:bg-slate-300' disabled={!seasonId} onClick={() => runAction('auto')}>Run Auto-Schedule Using Selected Fields</button>
+        <button className='rounded bg-indigo-600 px-3 py-2 text-sm font-semibold text-white disabled:bg-slate-300' disabled={!canModifyMatrix || !selectedDate} onClick={() => runAction('generate')}>Generate Suggested Host Plan</button>
+        <button className='rounded bg-emerald-700 px-3 py-2 text-sm font-semibold text-white disabled:bg-slate-300' disabled={!canModifyMatrix || saving || !Object.keys(dirtyCells).length} onClick={saveChanges}>Save Matrix Changes</button>
+        <button className='rounded bg-blue-700 px-3 py-2 text-sm font-semibold text-white disabled:bg-slate-300' disabled={!canModifyMatrix || !selectedDate} onClick={() => runAction('lock')}>Lock Selected Week</button>
+        <button className='rounded border border-blue-300 px-3 py-2 text-sm font-semibold text-blue-700 disabled:text-slate-300' disabled={!canModifyMatrix || !selectedDate} onClick={() => runAction('unlock')}>Unlock Selected Week</button>
+        <button className='rounded border border-rose-300 px-3 py-2 text-sm font-semibold text-rose-700 disabled:text-slate-300' disabled={!canModifyMatrix || !selectedDate} onClick={() => runAction('clear')}>Clear Host Plan Selections</button>
+        <button className='rounded bg-slate-900 px-3 py-2 text-sm font-semibold text-white disabled:bg-slate-300' disabled={!canModifyMatrix || !seasonId} onClick={() => runAction('auto')}>Run Auto-Schedule Using Selected Fields</button>
       </div>
       <div className='mt-3 flex flex-wrap gap-3 text-xs text-slate-600'>
-        <span><b>Blank</b> = not available</span><span><b>X</b> = available</span><span><b>✓</b> = selected</span><span><b>O</b> = excluded</span><span><b>P</b> = playoff/championship date</span><span><b>L</b> = locked</span><span><b>Shift-click</b> = lock/unlock</span><span><b>Right-click</b> = overflow/note menu</span>
+        <span><b>Blank</b> = not available</span><span><b>X</b> = available</span><span><b>✓</b> = selected</span><span><b>O</b> = excluded</span><span><b>P</b> = playoff/championship date</span><span><b>L</b> = locked</span>{canModifyMatrix ? <><span><b>Shift-click</b> = lock/unlock</span><span><b>Right-click</b> = overflow/note menu</span></> : <span><b>Read-only</b> = editing disabled</span>}
       </div>
       {message ? <div className='mt-3 rounded bg-emerald-50 p-2 text-sm text-emerald-800'>{message}</div> : null}
       {error ? <div className='mt-3 rounded bg-rose-50 p-2 text-sm text-rose-800'>{error}</div> : null}
@@ -304,8 +330,9 @@ export default function HostAvailabilityMatrix() {
                 const classes = CELL_CLASSES[status] || CELL_CLASSES.AVAILABLE;
                 return <td key={date.game_date} className='px-1 py-1 text-center'>
                   <button
-                    title={cell.has_saved_availability ? `${status}${cell.reason ? `: ${cell.reason}` : ''}` : 'No saved availability'}
-                    className={`h-9 w-12 rounded border text-sm font-semibold ${classes} ${selectedDate === date.game_date ? 'outline outline-2 outline-offset-1 outline-indigo-400' : ''}`}
+                    title={!canModifyMatrix ? HOST_PLAN_SELECTION_PERMISSION_MESSAGE : cell.has_saved_availability ? `${status}${cell.reason ? `: ${cell.reason}` : ''}` : 'No saved availability'}
+                    className={`h-9 w-12 rounded border text-sm font-semibold ${classes} ${selectedDate === date.game_date ? 'outline outline-2 outline-offset-1 outline-indigo-400' : ''} ${canModifyMatrix ? '' : 'cursor-not-allowed opacity-80'}`}
+                    disabled={!canModifyMatrix}
                     onClick={(event) => handleCellClick(row, date, event)}
                     onContextMenu={(event) => handleCellMenu(row, date, event)}
                   >{LABELS[status] ?? status.slice(0, 1)}</button>

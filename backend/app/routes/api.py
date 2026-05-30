@@ -30,6 +30,15 @@ from app.services.scheduling_validation import validate_game
 
 router = APIRouter(prefix='/api')
 logger = logging.getLogger(__name__)
+HOST_PLAN_SELECTION_ADMIN_EMAIL = 'admin@example.com'
+HOST_PLAN_SELECTION_PERMISSION_MESSAGE = 'Only admin@example.com can modify host plan selections.'
+
+
+def _enforce_host_plan_selection_admin(current_user: User) -> None:
+    if (current_user.email or '').strip().lower() != HOST_PLAN_SELECTION_ADMIN_EMAIL:
+        raise HTTPException(status_code=403, detail=HOST_PLAN_SELECTION_PERMISSION_MESSAGE)
+
+
 ALLOWED_FIELD_SPACE_TYPES = {
     'STADIUM_SITE',
     'GRASS_PARK_SITE',
@@ -2458,8 +2467,9 @@ def get_host_availability_matrix(season_id: uuid.UUID, db: Session = Depends(get
     return _host_availability_matrix_response(db, season_id)
 
 
-@router.post('/host-availability-matrix/save', response_model=HostAvailabilityMatrixSaveResponse, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
-def save_host_availability_matrix(payload: HostAvailabilityMatrixSaveRequest, db: Session = Depends(get_db)):
+@router.post('/host-availability-matrix/save', response_model=HostAvailabilityMatrixSaveResponse)
+def save_host_availability_matrix(payload: HostAvailabilityMatrixSaveRequest, current_user: User = Depends(require_roles(ROLE_LEAGUE_ADMIN)), db: Session = Depends(get_db)):
+    _enforce_host_plan_selection_admin(current_user)
     saved_rows: list[HostPlanSelection] = []
     for item in payload.selections:
         status = item.status.upper()
@@ -2495,8 +2505,9 @@ def save_host_availability_matrix(payload: HostAvailabilityMatrixSaveRequest, db
     return {'saved': len(saved_rows), 'selections': saved_rows}
 
 
-@router.post('/host-availability-matrix/generate-suggested-plan', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
-def generate_suggested_host_plan(payload: dict, db: Session = Depends(get_db)):
+@router.post('/host-availability-matrix/generate-suggested-plan')
+def generate_suggested_host_plan(payload: dict, current_user: User = Depends(require_roles(ROLE_LEAGUE_ADMIN)), db: Session = Depends(get_db)):
+    _enforce_host_plan_selection_admin(current_user)
     season_id = payload.get('season_id')
     game_date_value = payload.get('game_date')
     if not season_id or not game_date_value:
@@ -2541,8 +2552,9 @@ def generate_suggested_host_plan(payload: dict, db: Session = Depends(get_db)):
     return {**_host_availability_matrix_response(db, uuid.UUID(str(season_id))), 'generated_selected_count': selected}
 
 
-@router.post('/host-availability-matrix/week-lock', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
-def set_host_plan_week_lock(payload: dict, db: Session = Depends(get_db)):
+@router.post('/host-availability-matrix/week-lock')
+def set_host_plan_week_lock(payload: dict, current_user: User = Depends(require_roles(ROLE_LEAGUE_ADMIN)), db: Session = Depends(get_db)):
+    _enforce_host_plan_selection_admin(current_user)
     season_id = payload.get('season_id')
     game_date_value = payload.get('game_date')
     locked = bool(payload.get('locked', True))
@@ -2554,8 +2566,9 @@ def set_host_plan_week_lock(payload: dict, db: Session = Depends(get_db)):
     return {'updated': count, 'locked': locked}
 
 
-@router.delete('/host-availability-matrix/selections', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
-def clear_host_plan_selections(season_id: uuid.UUID, game_date: str | None = None, db: Session = Depends(get_db)):
+@router.delete('/host-availability-matrix/selections')
+def clear_host_plan_selections(season_id: uuid.UUID, game_date: str | None = None, current_user: User = Depends(require_roles(ROLE_LEAGUE_ADMIN)), db: Session = Depends(get_db)):
+    _enforce_host_plan_selection_admin(current_user)
     query = db.query(HostPlanSelection).filter(HostPlanSelection.season_id == season_id)
     if game_date:
         query = query.filter(HostPlanSelection.game_date == date.fromisoformat(game_date))
@@ -8375,8 +8388,10 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
     }
 
 
-@router.post('/manual-schedule-builder/auto-schedule-season', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
-def auto_schedule_entire_season(payload: dict, db: Session = Depends(get_db)):
+@router.post('/manual-schedule-builder/auto-schedule-season')
+def auto_schedule_entire_season(payload: dict, current_user: User = Depends(require_roles(ROLE_LEAGUE_ADMIN)), db: Session = Depends(get_db)):
+    if bool(payload.get('use_host_plan_selections', False)):
+        _enforce_host_plan_selection_admin(current_user)
     season_id = payload.get('season_id')
     clear_existing = bool(payload.get('clear_existing', False))
     dry_run = bool(payload.get('dry_run', False))
