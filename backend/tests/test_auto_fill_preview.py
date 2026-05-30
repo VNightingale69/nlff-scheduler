@@ -994,6 +994,68 @@ class AutoFillPreviewTest(unittest.TestCase):
         }, db=self.db)
         self.assertTrue(preview['audit']['postseason_host_limit_exempt'])
 
+    def test_week8_coed_6_7_odd_division_generates_and_places_doubleheader_matchups(self):
+        week8 = Week(id=uuid.uuid4(), season_id=self.season.id, week_number=8, start_date=date(2026, 6, 19), end_date=date(2026, 6, 25))
+        division = Division(id=uuid.uuid4(), division_group='COED', name='6th/7th', required_field_layout_type='FIFTY_THREE_YARD_WIDTH', is_active=True)
+        antioch = Organization(id=uuid.uuid4(), name='Antioch', is_active=True)
+        jburg = Organization(id=uuid.uuid4(), name="J'Burg", is_active=True)
+        lake = Organization(id=uuid.uuid4(), name='Lake County Stallions', is_active=True)
+        westosha = Organization(id=uuid.uuid4(), name='Westosha', is_active=True)
+        host = HostLocation(id=uuid.uuid4(), organization_id=westosha.id, name='Westosha Large Complex', is_active=True)
+        teams = [
+            Team(id=uuid.uuid4(), organization_id=antioch.id, division_id=division.id, name='Antioch 6th/7th Gold', is_active=True),
+            Team(id=uuid.uuid4(), organization_id=jburg.id, division_id=division.id, name="J'Burg 6th/7th Blue", is_active=True),
+            Team(id=uuid.uuid4(), organization_id=lake.id, division_id=division.id, name='Lake County Stallions 6th/7th Black', is_active=True),
+            Team(id=uuid.uuid4(), organization_id=lake.id, division_id=division.id, name='Lake County Stallions 6th/7th Red', is_active=True),
+            Team(id=uuid.uuid4(), organization_id=westosha.id, division_id=division.id, name='Westosha 6th/7th Maroon', is_active=True),
+        ]
+        slots = []
+        for idx, hour in enumerate([9, 10, 11]):
+            field = FieldInstance(
+                id=uuid.uuid4(),
+                host_location_id=host.id,
+                hosting_availability_id=uuid.uuid4(),
+                instance_date=week8.start_date,
+                field_name=f'Large Field {idx + 1}',
+                field_type='LARGE',
+                is_active=True,
+            )
+            slot = GameSlot(
+                id=uuid.uuid4(),
+                field_instance_id=field.id,
+                host_location_id=host.id,
+                slot_date=week8.start_date,
+                start_time=time(hour, 0),
+                end_time=time(hour + 1, 0),
+                field_type='LARGE',
+                status='OPEN',
+            )
+            slots.extend([field, slot])
+        self.db.add_all([week8, division, antioch, jburg, lake, westosha, host, *teams, *slots])
+        self.db.commit()
+
+        preview = auto_fill_preview({'season_id': self.season.id, 'week_id': week8.id, 'division_id': division.id}, db=self.db)
+
+        placement = preview['diagnostics']['division_week_placement']
+        self.assertEqual(placement['generated_game_groups'], 3)
+        self.assertEqual(len(placement['required_matchups_generated']), 3)
+        self.assertGreaterEqual(placement['placement_attempts'], 3)
+        self.assertEqual(preview['proposed_game_count'], 3)
+        self.assertEqual(placement['scheduled_games'], 3)
+        self.assertNotIn('No eligible matchups available for this division/week.', placement['skipped_placement_reasons'])
+
+        team_counts = {str(team.id): 0 for team in teams}
+        for proposal in preview['proposals']:
+            team_counts[proposal['home_team_id']] += 1
+            team_counts[proposal['away_team_id']] += 1
+        self.assertEqual(sorted(team_counts.values()), [1, 1, 1, 1, 2])
+        doubleheader_team_id = next(team_id for team_id, count in team_counts.items() if count == 2)
+        doubleheader_games = [proposal for proposal in preview['proposals'] if doubleheader_team_id in {proposal['home_team_id'], proposal['away_team_id']}]
+        self.assertEqual(len(doubleheader_games), 2)
+        self.assertEqual(doubleheader_games[0]['host_location_id'], doubleheader_games[1]['host_location_id'])
+        starts = sorted(int(str(game['proposed_start_time']).split(':')[0]) for game in doubleheader_games)
+        self.assertEqual(starts[1] - starts[0], 1)
+
 if __name__ == '__main__':
     unittest.main()
 
