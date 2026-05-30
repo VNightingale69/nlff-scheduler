@@ -2,7 +2,7 @@ import unittest
 import uuid
 from datetime import date, time
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, func
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import Base
@@ -471,3 +471,100 @@ class TurfMixedLayoutPlanningTest(unittest.TestCase):
         slots = self.db.query(GameSlot).join(GameSlot.field_instance).filter(GameSlot.host_location_id == host.id).all()
         self.assertEqual({slot.field_type for slot in slots}, {'SMALL'})
         self.assertTrue(all(not slot.field_instance.field_name.startswith('Wave 1 ONE_MEDIUM_TWO_SMALL') for slot in slots))
+
+
+class WeekEightCommunityCapacityGenerationTest(unittest.TestCase):
+    def setUp(self):
+        engine = create_engine('sqlite+pysqlite:///:memory:', future=True)
+        Base.metadata.create_all(engine)
+        self.db: Session = sessionmaker(bind=engine)()
+        self.season = Season(id=uuid.uuid4(), name='Fall', start_date=date(2026, 8, 1), end_date=date(2026, 11, 1), is_active=True)
+        self.week8 = Week(id=uuid.uuid4(), season_id=self.season.id, week_number=8, start_date=date(2026, 10, 3), end_date=date(2026, 10, 9))
+        self.antioch = Organization(id=uuid.uuid4(), name='Antioch', is_active=True)
+        self.johnsburg = Organization(id=uuid.uuid4(), name='Johnsburg', is_active=True)
+        self.db.add_all([self.season, self.week8, self.antioch, self.johnsburg])
+        self.db.commit()
+
+    def tearDown(self):
+        self.db.close()
+
+    def _division_with_teams(self, group: str, name: str, team_count: int) -> Division:
+        division = Division(id=uuid.uuid4(), division_group=group, name=name, sort_order=team_count, is_active=True)
+        orgs = [self.antioch, self.johnsburg]
+        teams = [
+            Team(
+                id=uuid.uuid4(),
+                organization_id=orgs[index % len(orgs)].id,
+                division_id=division.id,
+                name=f'{group} {name} Team {index + 1}',
+                is_active=True,
+            )
+            for index in range(team_count)
+        ]
+        self.db.add_all([division, *teams])
+        self.db.commit()
+        return division
+
+    def test_week8_demand_and_johnsburg_locations_are_aggregated(self):
+        from app.models import GameSlot, HostLocation, HostingAvailability
+        from app.routes.api import _regenerate_and_validate_slots_for_weeks
+
+        division_order = [
+            ('COED', 'K/1st'),
+            ('COED', '2nd/3rd'),
+            ('COED', '4th/5th'),
+            ('COED', '6th/7th'),
+            ('COED', '8th'),
+            ('GIRLS', '6th/7th/8th'),
+        ]
+        self._division_with_teams('COED', 'K/1st', 8)
+        self._division_with_teams('COED', '2nd/3rd', 12)
+        self._division_with_teams('COED', '4th/5th', 10)
+        self._division_with_teams('COED', '6th/7th', 6)
+        self._division_with_teams('COED', '8th', 4)
+        self._division_with_teams('GIRLS', '6th/7th/8th', 4)
+
+        antioch_host = HostLocation(
+            id=uuid.uuid4(), organization_id=self.antioch.id, name='Tim Osmond Sports Complex',
+            surface_type='GRASS_FIELD', max_small_fields=3, max_medium_fields=2, max_large_fields=1, max_total_fields=6, is_active=True,
+        )
+        johnsburg_stadium = HostLocation(
+            id=uuid.uuid4(), organization_id=self.johnsburg.id, name='Johnsburg Stadium',
+            surface_type='TURF_STADIUM', is_active=True,
+        )
+        hiller = HostLocation(
+            id=uuid.uuid4(), organization_id=self.johnsburg.id, name='Hiller Park',
+            surface_type='GRASS_FIELD', max_large_fields=1, max_total_fields=1, is_active=True,
+        )
+        availability_rows = [
+            HostingAvailability(id=uuid.uuid4(), organization_id=self.antioch.id, host_location_id=antioch_host.id, available_date=self.week8.start_date, start_time=time(9, 0), end_time=time(14, 0), is_available=True),
+            HostingAvailability(id=uuid.uuid4(), organization_id=self.johnsburg.id, host_location_id=johnsburg_stadium.id, available_date=self.week8.start_date, start_time=time(9, 0), end_time=time(14, 0), is_available=True, auto_select_turf_layout=True),
+            HostingAvailability(id=uuid.uuid4(), organization_id=self.johnsburg.id, host_location_id=hiller.id, available_date=self.week8.start_date, start_time=time(9, 0), end_time=time(14, 0), is_available=True),
+        ]
+        self.db.add_all([antioch_host, johnsburg_stadium, hiller, *availability_rows])
+        self.db.commit()
+
+        result = _regenerate_and_validate_slots_for_weeks(self.db, [self.week8], division_order)
+        self.db.commit()
+
+        validation = result['validation_rows'][0]
+        self.assertEqual(validation['required_games_by_size'], {'SMALL': 10, 'MEDIUM': 5, 'LARGE': 7})
+        self.assertGreaterEqual(validation['community_capacity_by_field_size']['Johnsburg']['LARGE'], 3)
+        johnsburg_locations = {
+            row['host_location']: row['capacity_by_size']
+            for row in validation['host_location_capacity_by_community']['Johnsburg']
+        }
+        self.assertIn('Johnsburg Stadium', johnsburg_locations)
+        self.assertIn('Hiller Park', johnsburg_locations)
+        self.assertGreater(johnsburg_locations['Johnsburg Stadium']['LARGE'], 0)
+        self.assertGreater(johnsburg_locations['Hiller Park']['LARGE'], 0)
+        self.assertGreaterEqual(
+            self.db.query(GameSlot).filter(GameSlot.slot_date == self.week8.start_date, GameSlot.field_type == 'LARGE').count(),
+            7,
+        )
+        duplicate_field_times = self.db.query(
+            GameSlot.slot_date, GameSlot.start_time, GameSlot.host_location_id, GameSlot.field_instance_id, func.count(GameSlot.id)
+        ).filter(GameSlot.slot_date == self.week8.start_date).group_by(
+            GameSlot.slot_date, GameSlot.start_time, GameSlot.host_location_id, GameSlot.field_instance_id
+        ).having(func.count(GameSlot.id) > 1).all()
+        self.assertEqual(duplicate_field_times, [])
