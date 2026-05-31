@@ -26,6 +26,7 @@ type MatrixCell = {
   has_saved_availability: boolean;
   available_slot_count: number;
   capacity_by_size: Record<string, number>;
+  capacity_source?: string;
 };
 
 type MatrixRow = {
@@ -36,6 +37,21 @@ type MatrixRow = {
   surface_type: string;
   capacity_by_size: Record<string, number>;
   cells: Record<string, MatrixCell>;
+};
+
+type SelectedCapacitySourceSummary = {
+  community: string;
+  host_location: string;
+  availability_id: string | null;
+  date: string | null;
+  surface_type: string | null;
+  time_window: string | null;
+  capacity_source: string;
+  small_capacity: number;
+  medium_capacity: number;
+  large_capacity: number;
+  calculated_total_capacity: number;
+  zero_capacity_reason?: string | null;
 };
 
 type WeeklyHostPlanDecisionSummary = {
@@ -51,6 +67,7 @@ type WeeklyHostPlanDecisionSummary = {
   home_field_requirement_satisfied: boolean;
   additional_host_needed: boolean;
   reason_additional_host_was_added: string | null;
+  selected_capacity_source_summary?: SelectedCapacitySourceSummary[];
 };
 
 type WeeklySummary = MatrixDate & {
@@ -518,6 +535,41 @@ export default function HostAvailabilityMatrix() {
               <div><dt className='inline font-medium'>Additional host needed:</dt> <dd className='inline'>{selectedSummary.weekly_host_plan_decision_summary.additional_host_needed ? 'yes' : 'no'}</dd></div>
               <div><dt className='inline font-medium'>Reason additional host was added:</dt> <dd className='inline'>{selectedSummary.weekly_host_plan_decision_summary.reason_additional_host_was_added || '—'}</dd></div>
             </dl>
+            <div className='mt-3'>
+              <h4 className='text-sm font-semibold text-slate-800'>Selected Capacity Source Summary</h4>
+              {selectedSummary.weekly_host_plan_decision_summary.selected_capacity_source_summary?.length ? <div className='mt-2 overflow-x-auto'>
+                <table className='min-w-full text-left text-xs'>
+                  <thead className='text-slate-500'>
+                    <tr>
+                      <th className='pr-3'>Community</th>
+                      <th className='pr-3'>Host location</th>
+                      <th className='pr-3'>Availability</th>
+                      <th className='pr-3'>Date</th>
+                      <th className='pr-3'>Surface</th>
+                      <th className='pr-3'>Time</th>
+                      <th className='pr-3'>Source</th>
+                      <th className='pr-3'>S/M/L</th>
+                      <th className='pr-3'>Total</th>
+                      <th>Reason if zero</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {selectedSummary.weekly_host_plan_decision_summary.selected_capacity_source_summary.map((row, index) => <tr key={`${row.host_location}-${row.availability_id || index}`} className='border-t border-slate-100'>
+                      <td className='pr-3 py-1'>{row.community}</td>
+                      <td className='pr-3 py-1'>{row.host_location}</td>
+                      <td className='pr-3 py-1 font-mono'>{row.availability_id || '—'}</td>
+                      <td className='pr-3 py-1'>{row.date || '—'}</td>
+                      <td className='pr-3 py-1'>{row.surface_type || '—'}</td>
+                      <td className='pr-3 py-1'>{row.time_window || '—'}</td>
+                      <td className='pr-3 py-1'>{row.capacity_source}</td>
+                      <td className='pr-3 py-1'>{row.small_capacity} / {row.medium_capacity} / {row.large_capacity}</td>
+                      <td className='pr-3 py-1'>{row.calculated_total_capacity}</td>
+                      <td className='py-1 text-rose-700'>{row.zero_capacity_reason || '—'}</td>
+                    </tr>)}
+                  </tbody>
+                </table>
+              </div> : <p className='mt-1 text-xs text-slate-500'>No selected locations for this week.</p>}
+            </div>
           </section> : null}
           <section>
             <h3 className='font-semibold'>Validation</h3>
