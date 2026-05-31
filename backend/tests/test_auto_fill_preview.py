@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import Base
 from app.models import Division, FieldInstance, Game, GameSlot, GameStatus, HostLocation, HostPlanSelection, HostingAvailability, Organization, Season, Team, Week
-from app.routes.api import auto_fill_apply, auto_fill_preview, auto_schedule_entire_season, generate_suggested_host_plan
+from app.routes.api import _host_availability_matrix_response, auto_fill_apply, auto_fill_preview, auto_schedule_entire_season, generate_suggested_host_plan
 
 
 class AutoFillPreviewTest(unittest.TestCase):
@@ -53,11 +53,68 @@ class AutoFillPreviewTest(unittest.TestCase):
 
 
 
+
+    def test_selected_capacity_uses_hosting_availability_before_generated_slots(self):
+        self.week2.primary_game_date = self.week2.start_date
+        antioch_host = HostLocation(
+            id=uuid.uuid4(),
+            organization_id=self.org_a.id,
+            name='Tim Osmond Sports Complex',
+            max_small_fields=1,
+            is_active=True,
+        )
+        antioch_availability = HostingAvailability(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week2.id,
+            organization_id=self.org_a.id,
+            host_location_id=antioch_host.id,
+            available_date=self.week2.start_date,
+            start_time=time(9, 0),
+            end_time=time(12, 0),
+            is_available=True,
+            active=True,
+        )
+        manual_selection = HostPlanSelection(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week2.id,
+            game_date=self.week2.start_date,
+            community_id=self.org_a.id,
+            host_location_id=antioch_host.id,
+            availability_id=antioch_availability.id,
+            status='SELECTED',
+            locked=False,
+        )
+        self.db.add_all([antioch_host, antioch_availability, manual_selection])
+        self.db.commit()
+
+        result = generate_suggested_host_plan({'season_id': self.season.id, 'game_date': str(self.week2.start_date)}, current_user=SimpleNamespace(email='admin@example.com'), db=self.db)
+
+        decision_summary = result['weekly_host_plan_decision_summary']
+        self.assertFalse(decision_summary['additional_host_needed'])
+        self.assertEqual(decision_summary['selected_total_capacity'], 3)
+        self.assertEqual(decision_summary['selected_small_capacity'], 3)
+        self.assertEqual(decision_summary['selected_medium_capacity'], 0)
+        self.assertEqual(decision_summary['selected_large_capacity'], 0)
+        source_summary = decision_summary['selected_capacity_source_summary']
+        self.assertEqual(source_summary[0]['host_location'], 'Tim Osmond Sports Complex')
+        self.assertEqual(source_summary[0]['capacity_source'], 'Hosting Availability records')
+        self.assertEqual(source_summary[0]['calculated_total_capacity'], 3)
+
+        matrix = _host_availability_matrix_response(self.db, self.season.id)
+        week_summary = next(summary for summary in matrix['summaries'] if summary['game_date'] == str(self.week2.start_date))
+        matrix_decision_summary = week_summary['weekly_host_plan_decision_summary']
+        self.assertEqual(matrix_decision_summary['selected_total_capacity'], 3)
+        self.assertEqual(matrix_decision_summary['selected_small_capacity'], 3)
+        self.assertEqual(matrix_decision_summary['selected_capacity_source_summary'][0]['capacity_source'], 'Hosting Availability records')
+        self.assertNotIn('Selected location has availability but capacity could not be calculated.', week_summary['validation_warnings'])
+
     def test_generate_suggested_host_plan_does_not_add_excluded_host_when_selected_capacity_is_sufficient(self):
         self.week2.primary_game_date = self.week2.start_date
         lake_county = Organization(id=uuid.uuid4(), name='Lake County', is_active=True)
-        antioch_host = HostLocation(id=uuid.uuid4(), organization_id=self.org_a.id, name='Tim Osmond Sports Complex', is_active=True)
-        lake_host = HostLocation(id=uuid.uuid4(), organization_id=lake_county.id, name='Behm Park', is_active=True)
+        antioch_host = HostLocation(id=uuid.uuid4(), organization_id=self.org_a.id, name='Tim Osmond Sports Complex', max_small_fields=1, is_active=True)
+        lake_host = HostLocation(id=uuid.uuid4(), organization_id=lake_county.id, name='Behm Park', max_small_fields=1, is_active=True)
         westosha_availability = HostingAvailability(id=uuid.uuid4(), season_id=self.season.id, week_id=self.week2.id, organization_id=self.org_w.id, host_location_id=self.host.id, available_date=self.week2.start_date, start_time=time(9, 0), end_time=time(12, 0), is_available=True, active=True)
         antioch_availability = HostingAvailability(id=uuid.uuid4(), season_id=self.season.id, week_id=self.week2.id, organization_id=self.org_a.id, host_location_id=antioch_host.id, available_date=self.week2.start_date, start_time=time(9, 0), end_time=time(12, 0), is_available=True, active=True)
         lake_availability = HostingAvailability(id=uuid.uuid4(), season_id=self.season.id, week_id=self.week2.id, organization_id=lake_county.id, host_location_id=lake_host.id, available_date=self.week2.start_date, start_time=time(9, 0), end_time=time(12, 0), is_available=True, active=True)
@@ -87,7 +144,7 @@ class AutoFillPreviewTest(unittest.TestCase):
         self.assertEqual(selected_names, {'Tim Osmond Sports Complex', 'Behm Park'})
         decision_summary = result['weekly_host_plan_decision_summary']
         self.assertFalse(decision_summary['additional_host_needed'])
-        self.assertEqual(decision_summary['selected_total_capacity'], 2)
+        self.assertEqual(decision_summary['selected_total_capacity'], 6)
 
     def test_weekly_host_plan_ignores_unused_available_locations(self):
         antioch_host = HostLocation(id=uuid.uuid4(), organization_id=self.org_a.id, name='Antioch Complex', is_active=True)
