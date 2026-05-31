@@ -10260,24 +10260,77 @@ def _required_field_type_for_division(division: Division | None) -> str:
     return normalized_size or FIELD_SIZE_SMALL
 
 
-def _active_division_week_demand_by_size(db: Session, division_order: list[tuple[str, str]]) -> dict[str, int]:
-    demand = {FIELD_SIZE_SMALL: 0, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_LARGE: 0}
+LEAGUE_DEMAND_DIVISION_KEYS_BY_SIZE = {
+    FIELD_SIZE_SMALL: {'COED_K_1', 'COED_2_3', 'GIRLS_K_2'},
+    FIELD_SIZE_MEDIUM: {'COED_4_5', 'GIRLS_3_5'},
+    FIELD_SIZE_LARGE: {'COED_6_7', 'COED_8', 'GIRLS_6_8', 'GIRLS_6_7_8'},
+}
+LEAGUE_DEMAND_DIVISION_KEYS = {
+    key
+    for keys in LEAGUE_DEMAND_DIVISION_KEYS_BY_SIZE.values()
+    for key in keys
+}
+
+
+def _league_week_demand_summary(db: Session, division_order: list[tuple[str, str]]) -> dict[str, object]:
+    """Build one league-wide weekly demand model before host/location slot generation.
+
+    Demand intentionally counts all active teams in each active league division and
+    does not filter by selected host, host community, or location. The odd-team
+    doubleheader case is included by rounding up team pairs into expected games.
+    """
+    demand = _empty_field_size_counts()
     all_divisions = db.query(Division).all()
     divisions_by_key = {canonical_division_id_from_division(d): d for d in all_divisions}
     divisions_by_normalized_name = {
         normalize_division_name(f'{d.division_group or ""} {d.name or ""}'): d
         for d in all_divisions
     }
+    ordered_divisions: list[Division] = []
+    seen_division_ids: set[uuid.UUID] = set()
+
     for group, name in division_order:
         division = divisions_by_key.get(canonical_division_id(group, name)) or divisions_by_normalized_name.get(normalize_division_name(f'{group} {name}'))
-        if not division or not division.is_active:
+        if division and division.id not in seen_division_ids:
+            ordered_divisions.append(division)
+            seen_division_ids.add(division.id)
+
+    for division in sorted(all_divisions, key=lambda d: (str(d.division_group or ''), str(d.name or ''), str(d.id))):
+        if division.id in seen_division_ids:
+            continue
+        if canonical_division_id_from_division(division) in LEAGUE_DEMAND_DIVISION_KEYS:
+            ordered_divisions.append(division)
+            seen_division_ids.add(division.id)
+
+    division_rows: list[dict[str, object]] = []
+    for division in ordered_divisions:
+        division_key = canonical_division_id_from_division(division)
+        if not division.is_active or division_key not in LEAGUE_DEMAND_DIVISION_KEYS:
             continue
         active_team_count = db.query(Team.id).filter(Team.division_id == division.id, Team.is_active.is_(True)).count()
-        required_games = _estimated_games_from_team_count(active_team_count)
+        expected_games = _estimated_games_from_team_count(active_team_count)
         required_size = _required_field_type_for_division(division)
-        if required_size in demand:
-            demand[required_size] += required_games
-    return demand
+        if required_size not in demand:
+            continue
+        demand[required_size] += expected_games
+        division_rows.append({
+            'division_id': str(division.id),
+            'division_key': division_key,
+            'division_name': f'{division.division_group or ""} {division.name or ""}'.strip() or str(division.id),
+            'team_count': active_team_count,
+            'expected_games': expected_games,
+            'field_size': required_size,
+            'includes_odd_team_doubleheader': active_team_count % 2 == 1 and active_team_count > 1,
+        })
+
+    return {
+        'active_divisions_included': division_rows,
+        'league_wide_demand_by_size': demand,
+    }
+
+
+def _active_division_week_demand_by_size(db: Session, division_order: list[tuple[str, str]]) -> dict[str, int]:
+    return dict(_league_week_demand_summary(db, division_order)['league_wide_demand_by_size'])
 
 
 def _availability_generation_reason(
@@ -10331,7 +10384,16 @@ def _regenerate_and_validate_slots_for_weeks(
     generation_results: list[dict[str, object]] = []
     evaluated_hosts_by_date: dict[date, list[str]] = {week_date: [] for week_date in week_dates}
     generation_reasons_by_date: dict[date, list[str]] = {week_date: [] for week_date in week_dates}
-    required_games_by_size = _active_division_week_demand_by_size(db, division_order)
+    league_demand_summary = _league_week_demand_summary(db, division_order)
+    required_games_by_size = dict(league_demand_summary['league_wide_demand_by_size'])
+    active_division_demand_rows = list(league_demand_summary['active_divisions_included'])
+    demand_summary_by_date: dict[date, dict[str, object]] = {
+        week_date: {
+            'active_divisions_included': active_division_demand_rows,
+            'league_wide_demand_by_size': dict(required_games_by_size),
+        }
+        for week_date in week_dates
+    }
     availabilities_by_host_id: dict[uuid.UUID, list[HostingAvailability]] = {}
     available_hosts_by_date: dict[date, list[HostLocation]] = {week_date: [] for week_date in week_dates}
 
@@ -10390,37 +10452,61 @@ def _regenerate_and_validate_slots_for_weeks(
         availability.available_date = game_date
         availability.primary_game_date = game_date
         availability.week_id = week.id
+        availability.season_id = week.season_id
         availabilities_by_host_id.setdefault(host.id, [])
         if availability.id not in {row.id for row in availabilities_by_host_id[host.id]}:
             availabilities_by_host_id[host.id].append(availability)
             available_hosts_by_date.setdefault(game_date, []).append(host)
 
-    community_index_by_date: dict[date, dict[uuid.UUID, int]] = {}
-    hosts_by_date_community: dict[tuple[date, uuid.UUID], list[HostLocation]] = {}
-    for available_date, date_hosts in available_hosts_by_date.items():
-        org_ids = sorted({host.organization_id for host in date_hosts if host.organization_id}, key=lambda oid: str(oid))
-        community_index_by_date[available_date] = {org_id: index for index, org_id in enumerate(org_ids)}
-        for host in date_hosts:
-            if host.organization_id:
-                hosts_by_date_community.setdefault((available_date, host.organization_id), [])
-                if host.id not in {existing.id for existing in hosts_by_date_community[(available_date, host.organization_id)]}:
-                    hosts_by_date_community[(available_date, host.organization_id)].append(host)
+    # Backward-compatible fallback: older setups may have saved HostingAvailability
+    # without HostPlanSelection rows. Use those rows only when no selected/locked/
+    # overflow host exists for that regular-season date.
+    for week in regular_weeks:
+        game_date = _week_game_date(week)
+        if not game_date or available_hosts_by_date.get(game_date):
+            continue
+        fallback_rows = db.query(HostingAvailability, HostLocation).join(
+            HostLocation, HostingAvailability.host_location_id == HostLocation.id
+        ).filter(
+            HostLocation.is_active.is_(True),
+            HostLocation.organization_id.is_not(None),
+            HostingAvailability.is_available.is_(True),
+            or_(
+                and_(
+                    HostingAvailability.season_id == week.season_id,
+                    HostingAvailability.week_id == week.id,
+                    HostingAvailability.primary_game_date == game_date,
+                ),
+                and_(
+                    HostingAvailability.available_date == game_date,
+                    or_(HostingAvailability.season_id.is_(None), HostingAvailability.season_id == week.season_id),
+                ),
+            ),
+        ).order_by(HostLocation.name, HostingAvailability.start_time).all()
+        for availability, host in fallback_rows:
+            if not _availability_allows_generated_slots(db, availability):
+                continue
+            availability.available_date = game_date
+            availability.primary_game_date = game_date
+            availability.week_id = week.id
+            availability.season_id = week.season_id
+            availabilities_by_host_id.setdefault(host.id, [])
+            if availability.id not in {row.id for row in availabilities_by_host_id[host.id]}:
+                availabilities_by_host_id[host.id].append(availability)
+                available_hosts_by_date.setdefault(game_date, []).append(host)
 
     demand_by_availability_id_by_host: dict[uuid.UUID, dict[uuid.UUID, dict[str, int]]] = {}
-    for (available_date, org_id), community_hosts in hosts_by_date_community.items():
-        community_demand = _allocate_demand_to_location(
-            required_games_by_size,
-            community_index_by_date.get(available_date, {}).get(org_id, 0),
-            len(community_index_by_date.get(available_date, {})),
-        )
-        hosts_and_availabilities: list[tuple[HostLocation, HostingAvailability]] = []
-        for community_host in sorted(community_hosts, key=lambda h: ((h.name or '').lower(), str(h.id))):
-            for availability in availabilities_by_host_id.get(community_host.id, []):
+    for available_date, date_hosts in available_hosts_by_date.items():
+        selected_hosts = sorted(date_hosts, key=lambda h: ((h.name or '').lower(), str(h.id)))
+        if available_date in demand_summary_by_date:
+            demand_summary_by_date[available_date]['selected_hosts'] = [host.name for host in selected_hosts]
+        for host in selected_hosts:
+            for availability in availabilities_by_host_id.get(host.id, []):
                 if (availability.primary_game_date or availability.available_date) == available_date:
-                    hosts_and_availabilities.append((community_host, availability))
-        location_allocations = _allocate_community_demand_to_host_locations(db, community_demand, hosts_and_availabilities)
-        for community_host, availability in hosts_and_availabilities:
-            demand_by_availability_id_by_host.setdefault(community_host.id, {})[availability.id] = location_allocations.get(availability.id, _empty_field_size_counts())
+                    # Forecast each selected host/location from the full league-wide demand.
+                    # Host capacity may cap what is generated, but host/community-local demand
+                    # must not erase required field sizes before grass or turf planning runs.
+                    demand_by_availability_id_by_host.setdefault(host.id, {})[availability.id] = dict(required_games_by_size)
 
 
     for host in hosts:
@@ -10499,16 +10585,38 @@ def _regenerate_and_validate_slots_for_weeks(
                 location_rows.append(location_row)
             if size in location_row['capacity_by_size']:
                 location_row['capacity_by_size'][size] += int(count or 0)
+        selected_hosts_for_date = sorted(set(evaluated_hosts_by_date.get(game_date, [])))
+        zero_slot_reason = None
+        if sum(int(slot_counts.get(size, 0) or 0) for size in FIELD_SIZE_ORDER) == 0:
+            zero_slot_reason = 'No selected host availability was evaluated for this regular-season week.'
+            if selected_hosts_for_date:
+                zero_slot_reason = 'Selected hosts were evaluated but generated zero slots; review generation_reasons for capacity/layout details.'
+        demand_summary = dict(demand_summary_by_date.get(game_date, {}))
+        demand_summary.setdefault('active_divisions_included', active_division_demand_rows)
+        demand_summary.setdefault('league_wide_demand_by_size', dict(required_games_by_size))
+        demand_summary['week'] = week.week_number
+        demand_summary['date'] = str(game_date)
+        demand_summary['status'] = _week_date_type(week)
+        demand_summary['selected_hosts'] = selected_hosts_for_date
+        demand_summary['generated_slots_by_size'] = dict(slot_counts)
+        demand_summary['zero_slot_reason'] = zero_slot_reason
         row = {
             'week': week.week_number,
             'week_start_date': str(game_date),
+            'date': str(game_date),
+            'status': _week_date_type(week),
             'required_games_by_size': dict(required_games_by_size),
+            'league_wide_demand_by_size': dict(required_games_by_size),
+            'active_divisions_included': active_division_demand_rows,
             'generated_slots_by_size': dict(slot_counts),
             'community_capacity_by_field_size': community_capacity_by_size,
             'host_location_capacity_by_community': location_capacity_by_community,
             'missing_field_sizes': missing_sizes,
-            'host_locations_evaluated': sorted(set(evaluated_hosts_by_date.get(game_date, []))),
+            'selected_hosts': selected_hosts_for_date,
+            'host_locations_evaluated': selected_hosts_for_date,
             'generation_reasons': generation_reasons_by_date.get(game_date, []),
+            'zero_slot_reason': zero_slot_reason,
+            'generated_slots_demand_summary': demand_summary,
         }
         validation_rows.append(row)
         for size in missing_sizes:
