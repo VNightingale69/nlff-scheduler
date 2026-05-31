@@ -12,6 +12,8 @@ export default function GeneratedSlotsPage() {
   const startDate = searchParams.get('start_date') || '';
   const endDate = searchParams.get('end_date') || '';
   const [hosts, setHosts] = useState<any[]>([]);
+  const [seasons, setSeasons] = useState<any[]>([]);
+  const [seasonId, setSeasonId] = useState('');
   const [hostId, setHostId] = useState('');
   const [slots, setSlots] = useState<any[]>([]);
   const [fieldInstances, setFieldInstances] = useState<any[]>([]);
@@ -34,9 +36,15 @@ export default function GeneratedSlotsPage() {
 
   useEffect(() => {
     (async () => {
-      const data: any = await apiFetch('/host-locations?page_size=500&is_active=true', {}, token);
-      setHosts(data.items || []);
-      if (data.items?.length) setHostId(data.items[0].id);
+      const [hostData, optionData]: any = await Promise.all([
+        apiFetch('/host-locations?page_size=500&is_active=true', {}, token),
+        apiFetch('/manual-schedule-builder/options', {}, token),
+      ]);
+      setHosts(hostData.items || []);
+      if (hostData.items?.length) setHostId(hostData.items[0].id);
+      setSeasons(optionData.seasons || []);
+      const activeSeason = optionData.seasons?.find((season: any) => season.is_active) || optionData.seasons?.[0];
+      if (activeSeason?.id) setSeasonId(activeSeason.id);
     })();
   }, []);
 
@@ -54,7 +62,7 @@ export default function GeneratedSlotsPage() {
     setMessage('Generating...');
     setError('');
     try {
-      const response: any = await apiFetch('/generated-game-slots/regenerate', { method: 'POST' }, token);
+      const response: any = await apiFetch('/generated-game-slots/regenerate', { method: 'POST', body: JSON.stringify({ season_id: seasonId || null }) }, token);
       const lockedSkipped = Number(response?.total_locked_slots_skipped || 0);
       setMessage(
         lockedSkipped > 0
@@ -106,12 +114,23 @@ export default function GeneratedSlotsPage() {
   return (
     <div className='space-y-4'>
       <h1 className='text-2xl font-bold'>Generated Slots</h1>
-      <select value={hostId} onChange={(e) => setHostId(e.target.value)} className='w-full rounded border p-2 md:w-1/2'>
-        {hosts.map((h) => <option key={h.id} value={h.id}>{h.name}</option>)}
-      </select>
+      <div className='grid gap-3 md:grid-cols-2'>
+        <label className='text-sm font-medium'>
+          Host preview
+          <select value={hostId} onChange={(e) => setHostId(e.target.value)} className='mt-1 w-full rounded border p-2'>
+            {hosts.map((h) => <option key={h.id} value={h.id}>{h.name}</option>)}
+          </select>
+        </label>
+        <label className='text-sm font-medium'>
+          Season for league-wide regeneration
+          <select value={seasonId} onChange={(e) => setSeasonId(e.target.value)} className='mt-1 w-full rounded border p-2'>
+            {seasons.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+        </label>
+      </div>
       <div className='flex items-center gap-3'>
-        <button onClick={onGenerate} disabled={isGenerating || isClearing} className='rounded bg-blue-600 px-4 py-2 text-white disabled:opacity-60'>
-          {isGenerating ? 'Generating...' : 'Generate Slots'}
+        <button onClick={onGenerate} disabled={isGenerating || isClearing || !seasonId} className='rounded bg-blue-600 px-4 py-2 text-white disabled:opacity-60'>
+          {isGenerating ? 'Generating...' : 'League-wide Regenerate Slots'}
         </button>
         <button onClick={onClear} disabled={!hostId || isGenerating || isClearing} className='rounded bg-red-600 px-4 py-2 text-white disabled:opacity-60'>
           {isClearing ? 'Clearing...' : 'Clear Slots'}
