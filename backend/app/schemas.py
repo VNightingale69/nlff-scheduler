@@ -238,6 +238,7 @@ class HostingAvailabilityRead(BaseSchema, HostingAvailabilityCreate):
 
 HOST_PLAN_SELECTION_STATUSES = {
     'AVAILABLE',
+    'NOT_AVAILABLE',
     'SELECTED',
     'EXCLUDED',
     'LOCKED',

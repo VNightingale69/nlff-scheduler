@@ -68,6 +68,28 @@ class HostAvailabilityMatrixResponseTest(unittest.TestCase):
         self.assertFalse(unavailable_cell['locked'])
         self.assertFalse(unavailable_cell['has_saved_availability'])
 
+    def test_selected_host_without_matching_availability_renders_not_available(self):
+        self.db.add(HostPlanSelection(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week.id,
+            game_date=date(2026, 6, 6),
+            community_id=self.unavailable_org.id,
+            host_location_id=self.unavailable_host.id,
+            status='SELECTED',
+        ))
+        self.db.commit()
+
+        response = _host_availability_matrix_response(self.db, self.season.id)
+
+        rows_by_host = {row['host_location_name']: row for row in response['rows']}
+        cell = rows_by_host['Unavailable Field']['cells']['2026-06-06']
+        self.assertEqual('NOT_AVAILABLE', cell['status'])
+        self.assertFalse(cell['locked'])
+        self.assertFalse(cell['has_saved_availability'])
+        self.assertEqual('This host location has not submitted hosting availability for this date.', cell['reason'])
+        self.assertEqual([], response['summaries'][0]['selected_fields'])
+
     def test_selected_host_uses_lookup_for_capacity_summary(self):
         self.db.add(HostPlanSelection(
             id=uuid.uuid4(),
