@@ -149,6 +149,10 @@ def _week_game_date(week: Week | None) -> date | None:
         return None
     return week.primary_game_date
 
+
+def _date_only_iso(value: date | None) -> str | None:
+    return value.isoformat() if value else None
+
 TURF_STADIUM_CONFIGURATIONS = {
     'TWO_LARGE': {
         'configuration_name': '2 Large',
@@ -2458,13 +2462,18 @@ def _host_availability_matrix_response(db: Session, season_id: uuid.UUID) -> dic
     weeks = db.query(Week).filter(Week.season_id == season_id).order_by(Week.primary_game_date, Week.week_number).all()
     dates_by_value: dict[date, dict] = {}
     for week in weeks:
-        game_date = _week_game_date(week)
+        game_date = week.primary_game_date
         if game_date:
+            week_label = week.label or f'Week {week.week_number}'
             dates_by_value[game_date] = {
-                'game_date': game_date,
+                'game_date': _date_only_iso(game_date),
+                'primary_game_date': _date_only_iso(week.primary_game_date),
+                'start_date': _date_only_iso(week.start_date),
+                'end_date': _date_only_iso(week.end_date),
                 'week_id': week.id,
                 'week_number': week.week_number,
-                'label': week.label or f'Week {week.week_number}',
+                'label': week_label,
+                'week_label': week_label,
                 'date_type': _week_date_type(week),
                 'is_postseason': _is_playoff_or_championship_week(week),
                 'status': week.status,
@@ -2495,7 +2504,7 @@ def _host_availability_matrix_response(db: Session, season_id: uuid.UUID) -> dic
     for host, org in hosts:
         cells = {}
         for date_info in dates:
-            game_date = date_info['game_date']
+            game_date = date.fromisoformat(date_info['game_date'])
             availability_list = availability_by_host_date.get((host.id, game_date), [])
             selection = selection_by_host_date.get((host.id, game_date))
             if selection is None:
@@ -2528,7 +2537,7 @@ def _host_availability_matrix_response(db: Session, season_id: uuid.UUID) -> dic
     empty_required_by_size = {FIELD_SIZE_SMALL: 0, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_LARGE: 0}
     summaries = []
     for date_info in dates:
-        game_date = date_info['game_date']
+        game_date = date.fromisoformat(date_info['game_date'])
         required_by_size = regular_required_by_size if date_info.get('date_type') == REGULAR_SEASON_DATE_TYPE else empty_required_by_size
         selected_rows = []
         excluded_rows = []
@@ -4138,9 +4147,10 @@ def _week_to_dict(week: Week, counts: dict[str, dict[uuid.UUID, int]] | None = N
         'season_id': week.season_id,
         'week_number': week.week_number,
         'label': week.label,
-        'start_date': week.start_date,
-        'end_date': week.end_date,
-        'primary_game_date': week.primary_game_date,
+        'week_label': week.label or f'Week {week.week_number}',
+        'start_date': _date_only_iso(week.start_date),
+        'end_date': _date_only_iso(week.end_date),
+        'primary_game_date': _date_only_iso(week.primary_game_date),
         'date_type': _week_date_type(week),
         'notes': week.notes,
         'status': week.status or 'draft',

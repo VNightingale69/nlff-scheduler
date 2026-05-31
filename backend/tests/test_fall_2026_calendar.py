@@ -71,22 +71,26 @@ def test_fall_2026_calendar_has_eight_regular_dates_and_visible_special_dates():
         matrix = _host_availability_matrix_response(db, season.id)
 
         assert [row['game_date'] for row in matrix['dates']] == [
-            date(2026, 8, 9),
-            date(2026, 8, 16),
-            date(2026, 8, 23),
-            date(2026, 8, 30),
-            date(2026, 9, 6),
-            date(2026, 9, 13),
-            date(2026, 9, 20),
-            date(2026, 9, 27),
-            date(2026, 10, 4),
-            date(2026, 10, 10),
-            date(2026, 10, 11),
+            '2026-08-09',
+            '2026-08-16',
+            '2026-08-23',
+            '2026-08-30',
+            '2026-09-06',
+            '2026-09-13',
+            '2026-09-20',
+            '2026-09-27',
+            '2026-10-04',
+            '2026-10-10',
+            '2026-10-11',
         ]
+        assert [row['primary_game_date'] for row in matrix['dates']] == [row['game_date'] for row in matrix['dates']]
+        assert matrix['dates'][0]['start_date'] == '2026-08-08'
+        assert matrix['dates'][0]['end_date'] == '2026-08-09'
+        assert matrix['dates'][0]['week_label'] == 'Week 1'
         assert sum(1 for row in matrix['dates'] if row['date_type'] == 'REGULAR_SEASON') == 8
-        assert next(row for row in matrix['dates'] if row['game_date'] == date(2026, 9, 6))['date_type'] == 'BLACKOUT'
-        assert next(row for row in matrix['dates'] if row['game_date'] == date(2026, 10, 10))['date_type'] == 'PLAYOFF'
-        assert next(row for row in matrix['dates'] if row['game_date'] == date(2026, 10, 11))['date_type'] == 'PLAYOFF'
+        assert next(row for row in matrix['dates'] if row['game_date'] == '2026-09-06')['date_type'] == 'BLACKOUT'
+        assert next(row for row in matrix['dates'] if row['game_date'] == '2026-10-10')['date_type'] == 'PLAYOFF'
+        assert next(row for row in matrix['dates'] if row['game_date'] == '2026-10-11')['date_type'] == 'PLAYOFF'
     finally:
         db.close()
 
