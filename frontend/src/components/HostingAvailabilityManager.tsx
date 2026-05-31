@@ -68,6 +68,7 @@ type SeasonWeek = {
   end_date: string;
   primary_game_date?: string | null;
   status: string;
+  date_type?: string | null;
 };
 
 const VISIBLE_WEEK_STATUSES = new Set(['draft', 'active', 'locked']);
@@ -80,6 +81,7 @@ export default function HostingAvailabilityManager() {
   const [seasonId, setSeasonId] = useState('');
   const [weeks, setWeeks] = useState<SeasonWeek[]>([]);
   const [showCancelledWeeks, setShowCancelledWeeks] = useState(false);
+  const [adminOverrideBlackout, setAdminOverrideBlackout] = useState(false);
   const [orgs, setOrgs] = useState<any[]>([]);
   const [hosts, setHosts] = useState<any[]>([]);
   const [areas, setAreas] = useState<any[]>([]);
@@ -176,7 +178,10 @@ export default function HostingAvailabilityManager() {
     () => weeks.filter((week) => VISIBLE_WEEK_STATUSES.has(String(week.status || '').toLowerCase()) || (showCancelledWeeks && String(week.status || '').toLowerCase() === 'cancelled')),
     [weeks, showCancelledWeeks],
   );
-  const selectedWeeks = useMemo(() => selectedWeekIds.map((weekId) => weeks.find((week) => week.id === weekId)).filter(Boolean) as SeasonWeek[], [selectedWeekIds, weeks]);
+  const isBlackoutWeek = (week: SeasonWeek) => String(week.date_type || '').toUpperCase() === 'BLACKOUT';
+  const isPlayoffWeek = (week: SeasonWeek) => String(week.date_type || '').toUpperCase() === 'PLAYOFF';
+  const canSelectWeek = (week: SeasonWeek) => Boolean(week.primary_game_date) && (!isBlackoutWeek(week) || adminOverrideBlackout);
+  const selectedWeeks = useMemo(() => selectedWeekIds.map((weekId) => weeks.find((week) => week.id === weekId)).filter(Boolean).filter((week) => canSelectWeek(week as SeasonWeek)) as SeasonWeek[], [adminOverrideBlackout, selectedWeekIds, weeks]);
   const selectedDates = useMemo(() => selectedWeeks.map((week) => week.primary_game_date).filter(Boolean) as string[], [selectedWeeks]);
   const weekByDate = useMemo(() => new Map(weeks.filter((week) => week.primary_game_date).map((week) => [week.primary_game_date as string, week])), [weeks]);
   const weekById = useMemo(() => new Map(weeks.map((week) => [week.id, week])), [weeks]);
@@ -185,8 +190,9 @@ export default function HostingAvailabilityManager() {
     const week = weekByDate.get(date);
     return week ? `Week ${week.week_number}${week.label ? ` — ${week.label}` : ''}` : formatDateLabel(date);
   };
+
   const toggleWeek = (week: SeasonWeek) => {
-    if (!week.primary_game_date) return;
+    if (!canSelectWeek(week)) return;
     setSelectedWeekIds((prev) => (prev.includes(week.id) ? prev.filter((weekId) => weekId !== week.id) : [...prev, week.id]));
   };
 
@@ -327,6 +333,7 @@ export default function HostingAvailabilityManager() {
               start_time: `${String(range.start).padStart(2, '0')}:00:00`,
               end_time: `${String(range.end).padStart(2, '0')}:00:00`,
               is_available: true,
+              admin_override_incompatible_field_size: isBlackoutWeek(week) && adminOverrideBlackout,
             });
           }
         }
@@ -350,6 +357,7 @@ export default function HostingAvailabilityManager() {
                 start_time: `${String(h).padStart(2, '0')}:00:00`,
                 end_time: `${String(h + 1).padStart(2, '0')}:00:00`,
                 is_available: true,
+                admin_override_incompatible_field_size: isBlackoutWeek(week) && adminOverrideBlackout,
               });
             }
           }
@@ -635,17 +643,26 @@ export default function HostingAvailabilityManager() {
             <input type='checkbox' checked={showCancelledWeeks} onChange={(e) => setShowCancelledWeeks(e.target.checked)} />
             Show Cancelled Weeks
           </label>
+          <label className='inline-flex items-center gap-2 text-sm text-amber-800'>
+            <input type='checkbox' checked={adminOverrideBlackout} onChange={(e) => setAdminOverrideBlackout(e.target.checked)} />
+            Admin override: allow Blackout availability
+          </label>
         </div>
         {!seasonId ? <p className='text-slate-500'>Select a season to load week records.</p> : !visibleWeeks.length ? <p className='text-slate-500'>No selectable weeks found for this season.</p> : (
           <div className='grid gap-2 md:grid-cols-2 lg:grid-cols-4'>
             {visibleWeeks.map((week) => {
               const hasPrimaryDate = Boolean(week.primary_game_date);
-              const selected = selectedWeekIds.includes(week.id);
+              const blackout = isBlackoutWeek(week);
+              const playoff = isPlayoffWeek(week);
+              const selectable = canSelectWeek(week);
+              const selected = selectedWeekIds.includes(week.id) && selectable;
+              const disabledReason = !hasPrimaryDate ? 'Missing Primary Game Date' : blackout && !adminOverrideBlackout ? 'Blackout — disabled' : '';
               return (
-                <button key={week.id} disabled={!hasPrimaryDate} onClick={() => toggleWeek(week)} className={`rounded border p-3 text-left transition ${selected ? 'border-emerald-600 bg-emerald-50' : 'bg-white'} ${!hasPrimaryDate ? 'cursor-not-allowed border-amber-300 bg-amber-50 opacity-80' : 'hover:border-emerald-500'}`}>
-                  <div className='font-semibold'>Week {week.week_number}</div>
+                <button key={week.id} disabled={!selectable} onClick={() => toggleWeek(week)} className={`rounded border p-3 text-left transition ${selected ? 'border-emerald-600 bg-emerald-50' : 'bg-white'} ${!selectable ? 'cursor-not-allowed border-amber-300 bg-amber-50 opacity-80' : 'hover:border-emerald-500'} ${playoff ? 'border-indigo-300 bg-indigo-50' : ''}`}>
+                  <div className='font-semibold'>{week.label || `Week ${week.week_number}`}</div>
                   <div className={hasPrimaryDate ? 'text-lg font-medium' : 'font-medium text-amber-700'}>{hasPrimaryDate ? formatDateLabel(week.primary_game_date as string) : 'Missing Primary Game Date'}</div>
-                  <div className='text-sm text-slate-700'>{week.label || `Week ${week.week_number}`}</div>
+                  <div className='text-sm text-slate-700'>{playoff ? 'Playoff' : blackout ? 'Blackout' : 'Regular Season'}</div>
+                  {disabledReason ? <div className='mt-1 text-xs font-semibold text-amber-700'>{disabledReason}</div> : null}
                   <div className='mt-2 inline-flex rounded bg-slate-100 px-2 py-1 text-xs font-medium text-slate-700'>{titleCase(week.status || 'draft')}</div>
                 </button>
               );
