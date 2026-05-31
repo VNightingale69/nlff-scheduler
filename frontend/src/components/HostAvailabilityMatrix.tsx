@@ -94,6 +94,7 @@ type MatrixResponse = {
 
 const HOST_PLAN_SELECTION_ADMIN_EMAIL = 'admin@example.com';
 const HOST_PLAN_SELECTION_PERMISSION_MESSAGE = 'Only admin@example.com can modify host plan selections.';
+const HOST_PLAN_MISSING_AVAILABILITY_MESSAGE = 'This host location has not submitted hosting availability for this date.';
 const CYCLE = ['AVAILABLE', 'SELECTED', 'EXCLUDED'];
 const LABELS: Record<string, string> = {
   BLANK: '',
@@ -294,11 +295,11 @@ export default function HostAvailabilityMatrix() {
     setSelectedDate(date.game_date);
     const cell = getCell(row, date);
     if (event.shiftKey) {
-      if (!cell.has_saved_availability && cell.status === 'NOT_AVAILABLE') return;
+      if (!cell.has_saved_availability) { setMessage(HOST_PLAN_MISSING_AVAILABILITY_MESSAGE); return; }
       updateCell(row, date, { ...cell, status: cell.status === 'LOCKED' ? 'SELECTED' : 'LOCKED', locked: cell.status !== 'LOCKED' });
       return;
     }
-    if (!cell.has_saved_availability && cell.status === 'NOT_AVAILABLE') return;
+    if (!cell.has_saved_availability) { setMessage(HOST_PLAN_MISSING_AVAILABILITY_MESSAGE); return; }
     const current = cell.status === 'LOCKED' ? 'SELECTED' : cell.status;
     const next = CYCLE[(CYCLE.indexOf(current) + 1) % CYCLE.length] || 'AVAILABLE';
     updateCell(row, date, { ...cell, status: next, locked: next === 'LOCKED' ? true : cell.locked && next === 'SELECTED' });
@@ -317,7 +318,7 @@ export default function HostAvailabilityMatrix() {
     const normalized = (action || '').trim().toUpperCase();
     if (!normalized) return;
     if (normalized === 'LOCK') {
-      if (!cell.has_saved_availability && cell.status === 'NOT_AVAILABLE') return;
+      if (!cell.has_saved_availability) { setMessage(HOST_PLAN_MISSING_AVAILABILITY_MESSAGE); return; }
       updateCell(row, date, { ...cell, status: 'LOCKED', locked: true });
       return;
     }
@@ -326,6 +327,7 @@ export default function HostAvailabilityMatrix() {
       return;
     }
     if (normalized === 'OVERFLOW') {
+      if (!cell.has_saved_availability) { setMessage(HOST_PLAN_MISSING_AVAILABILITY_MESSAGE); return; }
       const reason = window.prompt('Overflow reason/note', cell.reason || 'Added as overflow by scheduler');
       updateCell(row, date, { ...cell, status: 'OVERFLOW', locked: false, reason: reason || cell.reason || 'Added as overflow by scheduler' });
       return;
@@ -378,12 +380,12 @@ export default function HostAvailabilityMatrix() {
     }
   };
 
-  const runAction = async (action: 'generate' | 'lock' | 'unlock' | 'clear' | 'auto') => {
+  const runAction = async (action: 'generate' | 'lock' | 'unlock' | 'clear' | 'auto' | 'repair') => {
     if (!canModifyMatrix) {
       setMessage(HOST_PLAN_SELECTION_PERMISSION_MESSAGE);
       return;
     }
-    if (!seasonId || !selectedDate) return;
+    if (!seasonId || (!selectedDate && action !== 'repair')) return;
     setError('');
     setMessage('');
     try {
@@ -396,6 +398,9 @@ export default function HostAvailabilityMatrix() {
       } else if (action === 'clear') {
         await apiFetch(`/host-availability-matrix/selections?season_id=${seasonId}&game_date=${selectedDate}`, { method: 'DELETE' }, token);
         setMessage('Cleared host plan selections for the selected week. Availability records were not deleted.');
+      } else if (action === 'repair') {
+        const result: any = await apiFetch('/host-availability-matrix/repair-selections', { method: 'POST', body: JSON.stringify({ season_id: seasonId, game_date: selectedDate || undefined }) }, token);
+        setMessage(`Repair Host Plan Selections completed: ${result.repaired || 0} corrected, ${result.unchanged || 0} unchanged.`);
       } else {
         await apiFetch('/manual-schedule-builder/auto-schedule-season', { method: 'POST', body: JSON.stringify({ season_id: seasonId, use_host_plan_selections: true }) }, token);
         setMessage('Auto-schedule started using selected, locked, and overflow fields only.');
@@ -442,6 +447,7 @@ export default function HostAvailabilityMatrix() {
         <button className='rounded bg-blue-700 px-3 py-2 text-sm font-semibold text-white disabled:bg-slate-300' disabled={!canModifyMatrix || !selectedDate} onClick={() => runAction('lock')}>Lock Selected Week</button>
         <button className='rounded border border-blue-300 px-3 py-2 text-sm font-semibold text-blue-700 disabled:text-slate-300' disabled={!canModifyMatrix || !selectedDate} onClick={() => runAction('unlock')}>Unlock Selected Week</button>
         <button className='rounded border border-rose-300 px-3 py-2 text-sm font-semibold text-rose-700 disabled:text-slate-300' disabled={!canModifyMatrix || !selectedDate} onClick={() => runAction('clear')}>Clear Host Plan Selections</button>
+        <button className='rounded border border-amber-300 px-3 py-2 text-sm font-semibold text-amber-800 disabled:text-slate-300' disabled={!canModifyMatrix || !seasonId} onClick={() => runAction('repair')}>Repair Host Plan Selections</button>
         <button className='rounded bg-slate-900 px-3 py-2 text-sm font-semibold text-white disabled:bg-slate-300' disabled={!canModifyMatrix || !seasonId} onClick={() => runAction('auto')}>Run Auto-Schedule Using Selected Fields</button>
       </div>
       <div className='mt-3 flex flex-wrap gap-3 text-xs text-slate-600'>
@@ -473,7 +479,7 @@ export default function HostAvailabilityMatrix() {
                 const classes = CELL_CLASSES[status] || CELL_CLASSES.AVAILABLE;
                 return <td key={date.game_date} className='px-1 py-1 text-center'>
                   <button
-                    title={!canModifyMatrix ? HOST_PLAN_SELECTION_PERMISSION_MESSAGE : cell.has_saved_availability ? `${status}${cell.reason ? `: ${cell.reason}` : ''}` : 'Not Available'}
+                    title={!canModifyMatrix ? HOST_PLAN_SELECTION_PERMISSION_MESSAGE : cell.has_saved_availability ? `${status}${cell.reason ? `: ${cell.reason}` : ''}` : HOST_PLAN_MISSING_AVAILABILITY_MESSAGE}
                     className={`h-9 w-12 rounded border text-sm font-semibold ${classes} ${selectedDate === date.game_date ? 'outline outline-2 outline-offset-1 outline-indigo-400' : ''} ${canModifyMatrix ? '' : 'cursor-not-allowed opacity-80'}`}
                     disabled={!canModifyMatrix}
                     onClick={(event) => handleCellClick(row, date, event)}
