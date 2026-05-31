@@ -143,6 +143,12 @@ def _week_label(week: Week | None) -> str | None:
         return None
     return week.label or f'Week {week.week_number}'
 
+
+def _week_game_date(week: Week | None) -> date | None:
+    if not week:
+        return None
+    return week.primary_game_date
+
 TURF_STADIUM_CONFIGURATIONS = {
     'TWO_LARGE': {
         'configuration_name': '2 Large',
@@ -1608,7 +1614,7 @@ def _build_turf_wave_plan_for_site(db: Session, host: HostLocation, host_date: d
 
 
 def _build_host_date_readiness(db: Session) -> list[ScheduleReadinessHostDateRow]:
-    week_by_date = {((week.primary_game_date or week.start_date)): week for week in db.query(Week).all() if (week.primary_game_date or week.start_date)}
+    week_by_date = {_week_game_date(week): week for week in db.query(Week).all() if _week_game_date(week)}
     slot_rows = (
         db.query(GameSlot, FieldInstance, HostLocation, HostingAvailability)
         .join(GameSlot.field_instance)
@@ -1775,7 +1781,7 @@ def _build_hosting_balance_readiness(db: Session) -> list[dict[str, object]]:
         return []
     hosted_to_date = _scheduled_game_counts_by_host_community(db)
     host_weeks_by_org = _scheduled_host_weeks_by_community(db)
-    weeks_by_date = {week.start_date: week.week_number for week in db.query(Week).all() if week.start_date}
+    weeks_by_date = {_week_game_date(week): week.week_number for week in db.query(Week).all() if _week_game_date(week)}
     host_locations_by_org: dict[uuid.UUID, list[dict[str, str]]] = {}
     for host_id, org_id, host_name in db.query(HostLocation.id, HostLocation.organization_id, HostLocation.name).filter(
         HostLocation.organization_id.in_(list(available_dates_by_org.keys())),
@@ -1929,7 +1935,7 @@ def _build_hosting_rotation_readiness(db: Session) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     cumulative_games = {org_id: 0 for org_id in org_names}
     cumulative_host_weeks: dict[uuid.UUID, set[date]] = {org_id: set() for org_id in org_names}
-    weeks_by_date = {week.start_date: week.week_number for week in db.query(Week).all() if week.start_date}
+    weeks_by_date = {_week_game_date(week): week.week_number for week in db.query(Week).all() if _week_game_date(week)}
     for host_date in sorted(available_orgs_by_date):
         available_orgs = available_orgs_by_date[host_date]
         expected = (sum(cumulative_games.values()) / max(len(available_orgs), 1)) if available_orgs else 0.0
@@ -2125,7 +2131,7 @@ def _build_field_configuration_efficiency_readiness(db: Session) -> list[dict[st
 
 def _build_weekly_field_demand_readiness(db: Session) -> list[dict[str, object]]:
     demand_by_date: dict[date, dict[str, int]] = {}
-    regular_game_dates = {week.primary_game_date or week.start_date for week in db.query(Week).all() if _is_regular_season_week(week) and (week.primary_game_date or week.start_date)}
+    regular_game_dates = {_week_game_date(week) for week in db.query(Week).all() if _is_regular_season_week(week) and _week_game_date(week)}
     for game_date in regular_game_dates:
         demand_by_date.setdefault(game_date, {FIELD_SIZE_SMALL: 0, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_LARGE: 0})
     demand_query = db.query(Game.game_date, Division.required_field_layout_type, func.count(Game.id)).select_from(Game).join(
@@ -2417,8 +2423,8 @@ def _availability_date_type(db: Session, availability: HostingAvailability) -> s
     if not week and availability.season_id and availability.available_date:
         week = db.query(Week).filter(
             Week.season_id == availability.season_id,
-            or_(Week.primary_game_date == availability.available_date, Week.start_date == availability.available_date),
-        ).order_by(Week.start_date, Week.week_number).first()
+            Week.primary_game_date == availability.available_date,
+        ).order_by(Week.primary_game_date, Week.week_number).first()
     return _week_date_type(week)
 
 
@@ -2449,10 +2455,10 @@ def _host_availability_matrix_response(db: Session, season_id: uuid.UUID) -> dic
     season = db.query(Season).filter(Season.id == season_id).first()
     if not season:
         raise HTTPException(404, 'Season not found')
-    weeks = db.query(Week).filter(Week.season_id == season_id).order_by(Week.start_date, Week.week_number).all()
+    weeks = db.query(Week).filter(Week.season_id == season_id).order_by(Week.primary_game_date, Week.week_number).all()
     dates_by_value: dict[date, dict] = {}
     for week in weeks:
-        game_date = week.primary_game_date or week.start_date
+        game_date = _week_game_date(week)
         if game_date:
             dates_by_value[game_date] = {
                 'game_date': game_date,
@@ -2463,10 +2469,6 @@ def _host_availability_matrix_response(db: Session, season_id: uuid.UUID) -> dic
                 'is_postseason': _is_playoff_or_championship_week(week),
                 'status': week.status,
             }
-    if not dates_by_value:
-        availability_dates = db.query(HostingAvailability.available_date).filter(HostingAvailability.season_id == season_id).distinct().all()
-        for (game_date,) in availability_dates:
-            dates_by_value[game_date] = {'game_date': game_date, 'week_id': None, 'week_number': None, 'label': str(game_date), 'date_type': REGULAR_SEASON_DATE_TYPE, 'is_postseason': False, 'status': None}
     dates = [dates_by_value[key] for key in sorted(dates_by_value)]
 
     hosts = db.query(HostLocation, Organization).join(Organization, Organization.id == HostLocation.organization_id).filter(HostLocation.is_active.is_(True), Organization.is_active.is_(True)).order_by(Organization.name, HostLocation.name).all()
@@ -2585,6 +2587,9 @@ def save_host_availability_matrix(payload: HostAvailabilityMatrixSaveRequest, cu
         status = item.status.upper()
         if status not in HOST_PLAN_SELECTION_STATUSES:
             raise HTTPException(400, f'Invalid host plan status: {item.status}')
+        week = db.query(Week).filter(Week.id == item.week_id, Week.season_id == item.season_id).first() if item.week_id else db.query(Week).filter(Week.season_id == item.season_id, Week.primary_game_date == item.game_date).first()
+        if not week or _week_game_date(week) != item.game_date:
+            raise HTTPException(400, 'Host plan selection date must match a Season Week Primary Game Date.')
         availability = db.query(HostingAvailability).filter(
             HostingAvailability.season_id == item.season_id,
             HostingAvailability.host_location_id == item.host_location_id,
@@ -2602,7 +2607,7 @@ def save_host_availability_matrix(payload: HostAvailabilityMatrixSaveRequest, cu
         if not row:
             row = HostPlanSelection(season_id=item.season_id, game_date=item.game_date, host_location_id=item.host_location_id, community_id=item.community_id)
             db.add(row)
-        row.week_id = item.week_id
+        row.week_id = week.id
         row.community_id = item.community_id
         row.availability_id = item.availability_id or (availability.id if availability else None)
         row.status = status
@@ -2623,7 +2628,11 @@ def generate_suggested_host_plan(payload: dict, current_user: User = Depends(req
     if not season_id or not game_date_value:
         raise HTTPException(400, 'season_id and game_date are required')
     game_date = date.fromisoformat(str(game_date_value))
-    week = db.query(Week).filter(Week.season_id == season_id, or_(Week.primary_game_date == game_date, Week.start_date == game_date)).first()
+    week = db.query(Week).filter(Week.season_id == season_id, Week.primary_game_date == game_date).first()
+    if not week:
+        raise HTTPException(400, 'game_date must match a Season Week Primary Game Date')
+    if _week_date_type(week) == BLACKOUT_DATE_TYPE:
+        raise HTTPException(400, 'Blackout dates are visible but excluded from scheduling plans')
     required = _weekly_required_games_by_size(db, season_id)
     remaining = dict(required)
     availability_rows = db.query(HostingAvailability, HostLocation).join(HostLocation, HostLocation.id == HostingAvailability.host_location_id).filter(
@@ -3303,9 +3312,16 @@ def _availability_week_fields(row: HostingAvailability) -> dict:
 
 @router.get('/hosting-availabilities/saved', response_model=SavedAvailabilityResponse, dependencies=[Depends(get_current_user)])
 def list_saved_hosting_availability(season_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, host_location_id: uuid.UUID | None = None, site_type: str | None = None, layout: str | None = None, available_date: str | None = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    season_game_dates = {
+        _week_game_date(week)
+        for week in db.query(Week).filter(Week.season_id == season_id).all()
+        if _week_game_date(week)
+    } if season_id else set()
     q = db.query(HostingAvailability).join(HostingAvailability.physical_field_area).join(PhysicalFieldArea.host_location).outerjoin(HostingAvailability.field_configuration_option).filter(HostingAvailability.is_available.is_(True))
     if season_id:
         q = q.filter(HostingAvailability.season_id == season_id)
+        if season_game_dates:
+            q = q.filter(HostingAvailability.available_date.in_(list(season_game_dates)))
     if current_user.role.name == ROLE_COMMUNITY_SCHEDULER:
         q = q.filter(HostLocation.organization_id == current_user.organization_id)
     elif organization_id:
@@ -3420,6 +3436,8 @@ def list_saved_hosting_availability(season_id: uuid.UUID | None = None, organiza
     )
     if season_id:
         direct_q = direct_q.filter(HostingAvailability.season_id == season_id)
+        if season_game_dates:
+            direct_q = direct_q.filter(HostingAvailability.available_date.in_(list(season_game_dates)))
     if current_user.role.name == ROLE_COMMUNITY_SCHEDULER:
         direct_q = direct_q.filter(HostLocation.organization_id == current_user.organization_id)
     elif organization_id:
@@ -3485,6 +3503,8 @@ def list_saved_hosting_availability(season_id: uuid.UUID | None = None, organiza
     )
     if season_id:
         field_q = field_q.filter(HostingAvailability.season_id == season_id)
+        if season_game_dates:
+            field_q = field_q.filter(HostingAvailability.available_date.in_(list(season_game_dates)))
     if current_user.role.name == ROLE_COMMUNITY_SCHEDULER:
         field_q = field_q.filter(HostLocation.organization_id == current_user.organization_id)
     elif organization_id:
@@ -3734,8 +3754,10 @@ def list_generated_slots(host_location_id: uuid.UUID, available_date: str | None
     q = db.query(GameSlot, FieldInstance.field_name, HostLocation.name.label('host_location_name')).join(GameSlot.field_instance).join(GameSlot.host_location).filter(GameSlot.host_location_id == host_location_id)
     if available_date:
         q = q.filter(func.cast(GameSlot.slot_date, str) == available_date)
+    weeks_by_date = {_week_game_date(week): week for week in db.query(Week).all() if _week_game_date(week)}
+    if weeks_by_date:
+        q = q.filter(GameSlot.slot_date.in_(list(weeks_by_date)))
     rows = q.order_by(GameSlot.slot_date, GameSlot.start_time, FieldInstance.field_name).all()
-    weeks_by_date = {week.primary_game_date or week.start_date: week for week in db.query(Week).all() if (week.primary_game_date or week.start_date)}
     return [{'id': row.GameSlot.id, 'available_date': row.GameSlot.slot_date, 'date_type': _week_date_type(weeks_by_date.get(row.GameSlot.slot_date)), 'host_location_name': row.host_location_name, 'field_instance_name': row.field_name, 'field_type': row.GameSlot.field_type, 'start_time': row.GameSlot.start_time, 'end_time': row.GameSlot.end_time, 'status': row.GameSlot.status, 'is_locked': row.GameSlot.assigned_game_id is not None} for row in rows]
 
 
@@ -3765,8 +3787,10 @@ def list_generated_game_slots(host_location_id: uuid.UUID | None = None, availab
         q = q.filter(GameSlot.status == status)
     if field_type:
         q = q.filter(GameSlot.field_type == field_type)
+    weeks_by_date = {_week_game_date(week): week for week in db.query(Week).all() if _week_game_date(week)}
+    if weeks_by_date:
+        q = q.filter(GameSlot.slot_date.in_(list(weeks_by_date)))
     rows = q.order_by(GameSlot.slot_date, GameSlot.start_time, FieldInstance.field_name).all()
-    weeks_by_date = {week.primary_game_date or week.start_date: week for week in db.query(Week).all() if (week.primary_game_date or week.start_date)}
     return [{'id': row.GameSlot.id, 'available_date': row.GameSlot.slot_date, 'date_type': _week_date_type(weeks_by_date.get(row.GameSlot.slot_date)), 'host_location_name': row.host_location_name, 'field_instance_name': row.field_name, 'field_type': row.GameSlot.field_type, 'start_time': row.GameSlot.start_time, 'end_time': row.GameSlot.end_time, 'status': row.GameSlot.status, 'is_locked': row.GameSlot.assigned_game_id is not None} for row in rows]
 
 
@@ -4135,13 +4159,13 @@ def list_weeks(season_id:uuid.UUID|None=None, status:str|None=None, start_date:d
     if end_date: q=q.filter(Week.start_date<=end_date)
     if search:
         q=q.filter(or_(Week.label.ilike(f'%{search}%'), func.cast(Week.week_number, String).ilike(f'%{search}%')))
-    q=q.order_by(Week.start_date, Week.week_number)
+    q=q.order_by(Week.primary_game_date, Week.week_number)
     total=q.count()
     weeks=q.offset((page-1)*page_size).limit(page_size).all()
     counts = {'hosting_availability': {}, 'generated_slots': {}, 'scheduled_games': {}}
     for week in weeks:
         counts['hosting_availability'][week.id] = db.query(func.count(func.distinct(HostingAvailability.host_location_id))).filter(HostingAvailability.week_id == week.id, HostingAvailability.is_available.is_(True)).scalar() or 0
-        counts['generated_slots'][week.id] = db.query(func.count(GameSlot.id)).filter(GameSlot.slot_date >= week.start_date, GameSlot.slot_date <= week.end_date).scalar() or 0
+        counts['generated_slots'][week.id] = db.query(func.count(GameSlot.id)).filter(GameSlot.slot_date == week.primary_game_date).scalar() or 0
         counts['scheduled_games'][week.id] = db.query(func.count(Game.id)).filter(Game.week_id == week.id).scalar() or 0
     return PagedResponse(items=[_week_to_dict(x, counts) for x in weeks], total=total, page=page, page_size=page_size)
 
@@ -4312,7 +4336,7 @@ def update_week(week_id: uuid.UUID, payload: dict, db: Session = Depends(get_db)
         'label': payload.get('label', week.label),
         'start_date': payload.get('start_date', week.start_date),
         'end_date': payload.get('end_date', week.end_date),
-        'primary_game_date': payload.get('primary_game_date', week.primary_game_date or week.start_date),
+        'primary_game_date': payload.get('primary_game_date', week.primary_game_date),
         'date_type': payload.get('date_type', _week_date_type(week)),
         'notes': payload.get('notes', week.notes),
         'status': payload.get('status', week.status),
@@ -4820,6 +4844,9 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     week = db.query(Week).filter(Week.id == week_id, Week.season_id == season_id).first()
     if not division or not week:
         raise HTTPException(404, 'Selected season/week/division is invalid')
+    week_game_date = _week_game_date(week)
+    if not week_game_date:
+        raise HTTPException(400, 'Selected week is missing a Primary Game Date')
     season_weeks = (
         db.query(Week)
         .filter(Week.season_id == season_id)
@@ -4842,7 +4869,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         hosted_week_numbers = [
             week_numbers_by_id.get(season_week.id)
             for season_week in season_weeks
-            if _date_value(season_week.start_date) in comparable_host_dates
+            if _date_value(_week_game_date(season_week)) in comparable_host_dates
         ]
         return max([week_number for week_number in hosted_week_numbers if week_number is not None], default=None)
     division_group_key = (division.division_group or '').strip().upper()
@@ -4936,11 +4963,11 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         used_pairs.add(tuple(sorted((g.home_team_id, g.away_team_id))))
     open_slots = db.query(GameSlot).join(GameSlot.field_instance).filter(
         GameSlot.status == 'OPEN',
-        GameSlot.slot_date == week.start_date,
+        GameSlot.slot_date == week_game_date,
         GameSlot.field_type == required_field_type,
         GameSlot.assigned_game_id.is_(None),
     ).order_by(GameSlot.slot_date, GameSlot.start_time).all()
-    host_plan_allowed_ids = _host_plan_allowed_host_ids_for_week(db, season_id, week_id, week.start_date)
+    host_plan_allowed_ids = _host_plan_allowed_host_ids_for_week(db, season_id, week_id, week_game_date)
     if host_plan_allowed_ids is not None:
         open_slots = [slot for slot in open_slots if slot.host_location_id in host_plan_allowed_ids]
     compatible_slots_found = len(open_slots)
@@ -4989,7 +5016,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'diagnostics': {
                 'missing_division_week': {
                     'week': week.week_number,
-                    'date': str(week.start_date) if week.start_date else None,
+                    'date': str(week_game_date) if week_game_date else None,
                     'division': full_division_label,
                     'active_teams': team_count,
                     'active_team_names': [teams_by_id[tid].name for tid in teams_by_id],
@@ -5011,7 +5038,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             },
         }
     assigned_game_slots = db.query(Game, GameSlot).join(GameSlot, GameSlot.assigned_game_id == Game.id).filter(
-        Game.game_date == week.start_date
+        Game.game_date == week_game_date
     ).all()
     community_assigned_hosts: dict[uuid.UUID, set[uuid.UUID]] = {}
     for game, game_slot in assigned_game_slots:
@@ -5031,7 +5058,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     ).select_from(Game).join(Game.status).join(Team, Game.home_team_id == Team.id).join(Division, Team.division_id == Division.id).outerjoin(
         GameSlot, GameSlot.assigned_game_id == Game.id
     ).filter(
-        Game.game_date == week.start_date,
+        Game.game_date == week_game_date,
         GameStatus.code != 'UNSCHEDULED',
         GameStatus.is_active.is_(True),
     )
@@ -5125,9 +5152,9 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         Week.season_id == season_id,
         or_(
             Week.week_number < week.week_number,
-            and_(Week.week_number == week.week_number, Week.start_date < week.start_date),
+            and_(Week.week_number == week.week_number, Week.primary_game_date < week_game_date),
         ),
-    ).order_by(Week.week_number.desc(), Week.start_date.desc()).first()
+    ).order_by(Week.week_number.desc(), Week.primary_game_date.desc()).first()
 
     prior_week_team_pairs: set[tuple[uuid.UUID, uuid.UUID]] = set()
     prior_week_community_pairs: set[tuple[uuid.UUID, uuid.UUID]] = set()
@@ -5237,7 +5264,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     games_required = max_new_games
     all_open_slots_for_week = db.query(GameSlot).join(GameSlot.field_instance).filter(
         GameSlot.status == 'OPEN',
-        GameSlot.slot_date == week.start_date,
+        GameSlot.slot_date == week_game_date,
         GameSlot.assigned_game_id.is_(None),
     ).all()
     if host_plan_allowed_ids is not None:
@@ -5317,7 +5344,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         org.id: org.name or str(org.id)
         for org in db.query(Organization).filter(Organization.id.in_(list(available_host_community_ids))).all()
     } if available_host_community_ids else {}
-    community_games_hosted_to_date = _scheduled_game_counts_by_host_community(db, season_id, week.start_date)
+    community_games_hosted_to_date = _scheduled_game_counts_by_host_community(db, season_id, week_game_date)
     total_games_hosted_to_date = sum(community_games_hosted_to_date.values())
     expected_host_share = (total_games_hosted_to_date / max(len(available_host_community_ids), 1)) if available_host_community_ids else 0.0
     hosting_delta_by_org = {org_id: community_games_hosted_to_date.get(org_id, 0) - expected_host_share for org_id in available_host_community_ids}
@@ -5327,8 +5354,8 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     }
     community_rotation_ranking = sorted(available_host_community_ids, key=lambda org_id: (
         len(regular_season_host_occurrences_by_community.get(org_id, set())),
-        -_days_since_last_hosted(regular_season_host_occurrences_by_community.get(org_id, set()), week.start_date),
-        _consecutive_host_count_before_date(regular_season_host_occurrences_by_community.get(org_id, set()), week.start_date),
+        -_days_since_last_hosted(regular_season_host_occurrences_by_community.get(org_id, set()), week_game_date),
+        _consecutive_host_count_before_date(regular_season_host_occurrences_by_community.get(org_id, set()), week_game_date),
         community_games_hosted_to_date.get(org_id, 0),
         hosting_delta_by_org.get(org_id, 0.0),
         -capacity_score_by_org.get(org_id, 0),
@@ -7008,7 +7035,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             ],
             'division_week_placement': {
                 'week': week.week_number,
-                'week_date': str(week.start_date) if week.start_date else None,
+                'week_date': str(week_game_date) if week_game_date else None,
                 'division_name': full_division_label,
                 'required_field_size': _normalize_field_size(required_field_type) or str(required_field_type),
                 'active_team_count': team_count,
@@ -7078,22 +7105,20 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             ],
             'season_week_date_diagnostics': {
                 'week_number': week.week_number,
-                'week_start_date': str(week.start_date) if week.start_date else None,
+                'week_start_date': str(week_game_date) if week_game_date else None,
                 'week_end_date': str(week.end_date) if week.end_date else None,
                 'week_open_slot_dates': sorted({str(s.slot_date) for s in sorted_slots if s.slot_date}),
-                'is_week_start_date_active': any(s.slot_date == week.start_date for s in sorted_slots),
+                'is_week_start_date_active': any(s.slot_date == week_game_date for s in sorted_slots),
                 'contains_sept_13_slot_date': any(str(s.slot_date).endswith('-09-13') for s in sorted_slots if s.slot_date),
                 'week_range_includes_sept_13': bool(
-                    week.start_date
-                    and week.end_date
-                    and week.start_date <= date(week.start_date.year, 9, 13) <= week.end_date
+                    week_game_date
+                    and week_game_date == date(week_game_date.year, 9, 13)
                 ),
                 'sept_13_exclusion_reason': (
-                    'Week range includes September 13 but no compatible open slots exist on that date.'
+                    'Primary Game Date is September 13 but no compatible open slots exist on that date.'
                     if (
-                        week.start_date
-                        and week.end_date
-                        and week.start_date <= date(week.start_date.year, 9, 13) <= week.end_date
+                        week_game_date
+                        and week_game_date == date(week_game_date.year, 9, 13)
                         and not any(str(s.slot_date).endswith('-09-13') for s in sorted_slots if s.slot_date)
                     )
                     else None
@@ -7136,17 +7161,17 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                         {'host_location_id': str(host_id), 'host_location': host_name_by_id.get(host_id, str(host_id))}
                         for host_id in sorted(host_ids_by_org.get(org_id, set()), key=lambda hid: host_name_by_id.get(hid, ''))
                     ],
-                    'host_weeks': len(regular_season_host_occurrences_by_community.get(org_id, set())) + (1 if projected_games_by_community.get(org_id, 0) and week.start_date not in regular_season_host_occurrences_by_community.get(org_id, set()) else 0),
-                    'host_weeks_used': len(regular_season_host_occurrences_by_community.get(org_id, set())) + (1 if projected_games_by_community.get(org_id, 0) and week.start_date not in regular_season_host_occurrences_by_community.get(org_id, set()) else 0),
+                    'host_weeks': len(regular_season_host_occurrences_by_community.get(org_id, set())) + (1 if projected_games_by_community.get(org_id, 0) and week_game_date not in regular_season_host_occurrences_by_community.get(org_id, set()) else 0),
+                    'host_weeks_used': len(regular_season_host_occurrences_by_community.get(org_id, set())) + (1 if projected_games_by_community.get(org_id, 0) and week_game_date not in regular_season_host_occurrences_by_community.get(org_id, set()) else 0),
                     'games_hosted': projected_total_games_by_community.get(org_id, community_games_hosted_to_date.get(org_id, 0)),
                     'games_hosted_to_date': community_games_hosted_to_date.get(org_id, 0),
                     'projected_games_added_this_preview': projected_games_by_community.get(org_id, 0),
-                    'average_games_per_host_week': round(projected_total_games_by_community.get(org_id, 0) / max(len(regular_season_host_occurrences_by_community.get(org_id, set())) + (1 if projected_games_by_community.get(org_id, 0) and week.start_date not in regular_season_host_occurrences_by_community.get(org_id, set()) else 0), 1), 2) if (regular_season_host_occurrences_by_community.get(org_id, set()) or projected_games_by_community.get(org_id, 0)) else 0.0,
+                    'average_games_per_host_week': round(projected_total_games_by_community.get(org_id, 0) / max(len(regular_season_host_occurrences_by_community.get(org_id, set())) + (1 if projected_games_by_community.get(org_id, 0) and week_game_date not in regular_season_host_occurrences_by_community.get(org_id, set()) else 0), 1), 2) if (regular_season_host_occurrences_by_community.get(org_id, set()) or projected_games_by_community.get(org_id, 0)) else 0.0,
                     'season_target_games': round(season_target_games, 2),
                     'difference_from_target': round(projected_total_games_by_community.get(org_id, 0) - season_target_games, 2),
                     'compatible_unused_capacity': compatible_unused_capacity_by_org.get(org_id, 0),
                     'reason_if_overused_or_underused': _community_game_equity_reason(org_id),
-                    'last_hosted_week': _last_hosted_week_number(regular_season_host_occurrences_by_community.get(org_id, set()), week.start_date),
+                    'last_hosted_week': _last_hosted_week_number(regular_season_host_occurrences_by_community.get(org_id, set()), week_game_date),
                     'available_weeks': [f'Week {week.week_number}'],
                     'selected_weeks': [f'Week {week.week_number}'] if org_id in selected_rotation_orgs else [],
                     'hosting_delta': round(projected_total_games_by_community.get(org_id, 0) - season_target_games, 2),
@@ -7157,7 +7182,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'weekly_community_host_plan': {
                 'diagnostic_label': 'Weekly Host Plan Summary',
                 'week': f'Week {week.week_number}',
-                'date': str(week.start_date) if week.start_date else None,
+                'date': str(week_game_date) if week_game_date else None,
                 'total_games_required': total_weekly_games_required,
                 'field_size_demand': weekly_demand_by_size,
                 'available_communities': [org_names_by_id.get(org_id, str(org_id)) for org_id in community_rotation_ranking],
@@ -7308,10 +7333,10 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                     'community_id': str(org_id),
                     'community': org_names_by_id.get(org_id, str(org_id)),
                     'host_weeks_used': len(regular_season_host_occurrences_by_community.get(org_id, set())),
-                    'last_hosted_week_number': _last_hosted_week_number(regular_season_host_occurrences_by_community.get(org_id, set()), week.start_date),
-                    'weeks_since_last_hosted': None if _days_since_last_hosted(regular_season_host_occurrences_by_community.get(org_id, set()), week.start_date) >= 999_999 else round(_days_since_last_hosted(regular_season_host_occurrences_by_community.get(org_id, set()), week.start_date) / 7, 2),
-                    'days_since_last_hosted': _days_since_last_hosted(regular_season_host_occurrences_by_community.get(org_id, set()), week.start_date),
-                    'consecutive_host_weeks': _consecutive_host_count_before_date(regular_season_host_occurrences_by_community.get(org_id, set()), week.start_date),
+                    'last_hosted_week_number': _last_hosted_week_number(regular_season_host_occurrences_by_community.get(org_id, set()), week_game_date),
+                    'weeks_since_last_hosted': None if _days_since_last_hosted(regular_season_host_occurrences_by_community.get(org_id, set()), week_game_date) >= 999_999 else round(_days_since_last_hosted(regular_season_host_occurrences_by_community.get(org_id, set()), week_game_date) / 7, 2),
+                    'days_since_last_hosted': _days_since_last_hosted(regular_season_host_occurrences_by_community.get(org_id, set()), week_game_date),
+                    'consecutive_host_weeks': _consecutive_host_count_before_date(regular_season_host_occurrences_by_community.get(org_id, set()), week_game_date),
                     'rotation_rank': community_rotation_rank_by_org.get(org_id, 999) + 1,
                     'selected_as_host': org_id in selected_rotation_orgs,
                     'reason_selected_or_skipped': (
@@ -7427,6 +7452,9 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
     week = db.query(Week).filter(Week.id == week_id, Week.season_id == season_id).first()
     if not week:
         raise HTTPException(404, 'Selected week is invalid for this season')
+    week_game_date = _week_game_date(week)
+    if not week_game_date:
+        raise HTTPException(400, 'Selected week is missing a Primary Game Date')
     teams = db.query(Team).filter(Team.division_id == division_id, Team.is_active.is_(True)).all()
     division = db.query(Division).filter(Division.id == division_id).first()
     if not division:
@@ -7435,7 +7463,7 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         raise HTTPException(400, 'Division/week produced zero valid schedule candidates.')
     required_field_type = _required_field_type_for_division(division)
     open_slots_count = db.query(GameSlot).filter(
-        GameSlot.slot_date == week.start_date,
+        GameSlot.slot_date == week_game_date,
         GameSlot.status == 'OPEN',
         GameSlot.assigned_game_id.is_(None),
         GameSlot.field_type == required_field_type,
@@ -7444,7 +7472,7 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
     if open_slots_count <= 0:
         raise HTTPException(400, 'No valid slot combinations available.')
     host_locations_count = db.query(GameSlot.host_location_id).filter(
-        GameSlot.slot_date == week.start_date,
+        GameSlot.slot_date == week_game_date,
         GameSlot.status == 'OPEN',
         GameSlot.assigned_game_id.is_(None),
         GameSlot.field_type == required_field_type,
@@ -7454,13 +7482,13 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
     if host_locations_count <= 0:
         raise HTTPException(400, 'No compatible host locations found.')
     open_slots = db.query(GameSlot).join(GameSlot.field_instance).filter(
-        GameSlot.slot_date == week.start_date,
+        GameSlot.slot_date == week_game_date,
         GameSlot.status == 'OPEN',
         GameSlot.assigned_game_id.is_(None),
         GameSlot.field_type == required_field_type,
         GameSlot.host_location_id.in_(_eligible_host_location_ids(db)),
     ).all()
-    host_plan_allowed_ids = _host_plan_allowed_host_ids_for_week(db, season_id, week_id, week.start_date)
+    host_plan_allowed_ids = _host_plan_allowed_host_ids_for_week(db, season_id, week_id, week_game_date)
     if host_plan_allowed_ids is not None:
         open_slots = [slot for slot in open_slots if slot.host_location_id in host_plan_allowed_ids]
     sorted_slots = sorted(
@@ -7537,7 +7565,7 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
     ).select_from(Game).join(Game.status).join(Team, Game.home_team_id == Team.id).join(Division, Team.division_id == Division.id).outerjoin(
         GameSlot, GameSlot.assigned_game_id == Game.id
     ).filter(
-        Game.game_date == db.query(Week.start_date).filter(Week.id == week_id).scalar_subquery(),
+        Game.game_date == db.query(Week.primary_game_date).filter(Week.id == week_id).scalar_subquery(),
         GameStatus.code != 'UNSCHEDULED',
         GameStatus.is_active.is_(True),
     ).all()
@@ -7981,7 +8009,7 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
     def _slot_by_game_id() -> dict[str, GameSlot]:
         rows = db.query(GameSlot).filter(
             GameSlot.assigned_game_id.isnot(None),
-            GameSlot.slot_date == db.query(Week.start_date).filter(Week.id == week_id).scalar_subquery(),
+            GameSlot.slot_date == db.query(Week.primary_game_date).filter(Week.id == week_id).scalar_subquery(),
         ).all()
         return {str(row.assigned_game_id): row for row in rows if row.assigned_game_id}
 
@@ -8161,12 +8189,12 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         ).group_by(Team.id).all()
         season_team_counts = {str(team_id): int(count or 0) for team_id, count in season_team_counts_rows}
         open_slots = db.query(GameSlot).join(GameSlot.field_instance).filter(
-            GameSlot.slot_date == db.query(Week.start_date).filter(Week.id == week_id).scalar_subquery(),
+            GameSlot.slot_date == db.query(Week.primary_game_date).filter(Week.id == week_id).scalar_subquery(),
             GameSlot.status == 'OPEN',
             GameSlot.assigned_game_id.is_(None),
             GameSlot.field_type == required_field_type,
         ).order_by(GameSlot.start_time.asc()).all()
-        host_plan_allowed_ids = _host_plan_allowed_host_ids_for_week(db, season_id, week_id, db.query(Week.start_date).filter(Week.id == week_id).scalar())
+        host_plan_allowed_ids = _host_plan_allowed_host_ids_for_week(db, season_id, week_id, db.query(Week.primary_game_date).filter(Week.id == week_id).scalar())
         if host_plan_allowed_ids is not None:
             open_slots = [slot for slot in open_slots if slot.host_location_id in host_plan_allowed_ids]
         while remaining_needed > 0:
@@ -8424,7 +8452,7 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
             cross_site_double_headers += 1
 
     unused_compatible_fields_within_org = db.query(GameSlot).filter(
-        GameSlot.slot_date == db.query(Week.start_date).filter(Week.id == week_id).scalar_subquery(),
+        GameSlot.slot_date == db.query(Week.primary_game_date).filter(Week.id == week_id).scalar_subquery(),
         GameSlot.status == 'OPEN',
         GameSlot.assigned_game_id.is_(None),
         GameSlot.field_type == required_field_type,
@@ -8550,7 +8578,7 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         normalize_division_name(f'{d.division_group or ""} {d.name or ""}'): d
         for d in all_divisions
     }
-    weeks = db.query(Week).filter(Week.season_id == season_id).order_by(Week.week_number.asc(), Week.start_date.asc()).all()
+    weeks = db.query(Week).filter(Week.season_id == season_id).order_by(Week.week_number.asc(), Week.primary_game_date.asc()).all()
 
     total_games_created = 0
     preview_games_count = 0
@@ -8728,11 +8756,12 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         return total
 
     def _host_availability_count_for_week(week: Week) -> int:
+        game_date = _week_game_date(week)
         conditions = [HostingAvailability.is_available.is_(True)]
         if week.id:
             conditions.append(HostingAvailability.week_id == week.id)
-        if week.start_date:
-            conditions.append(HostingAvailability.available_date == week.start_date)
+        if game_date:
+            conditions.append(HostingAvailability.available_date == game_date)
         if len(conditions) <= 1:
             return 0
         return db.query(func.count(func.distinct(HostingAvailability.host_location_id))).outerjoin(
@@ -8741,10 +8770,11 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
 
     def _generated_slot_counts_for_week(week: Week) -> dict[str, int]:
         counts = {FIELD_SIZE_SMALL: 0, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_LARGE: 0}
-        if not week.start_date:
+        game_date = _week_game_date(week)
+        if not game_date:
             return counts
         for field_type, count in db.query(GameSlot.field_type, func.count(GameSlot.id)).filter(
-            GameSlot.slot_date == week.start_date,
+            GameSlot.slot_date == game_date,
         ).group_by(GameSlot.field_type).all():
             size = _normalize_field_size(field_type)
             if size in counts:
@@ -8864,13 +8894,14 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
             slot_counts = _generated_slot_counts_for_week(week)
             generated_slots_by_week[week_key] = slot_counts
             host_slot_rows: list[dict[str, object]] = []
-            if week.start_date:
+            game_date = _week_game_date(week)
+            if game_date:
                 for host_id, host_name, field_type, count in db.query(GameSlot.host_location_id, HostLocation.name, GameSlot.field_type, func.count(GameSlot.id)).join(HostLocation, HostLocation.id == GameSlot.host_location_id).filter(
-                    GameSlot.slot_date == week.start_date,
+                    GameSlot.slot_date == game_date,
                 ).group_by(GameSlot.host_location_id, HostLocation.name, GameSlot.field_type).order_by(HostLocation.name, GameSlot.field_type).all():
                     host_slot_rows.append({
                         'week': week.week_number,
-                        'slot_date': str(week.start_date),
+                        'slot_date': str(game_date),
                         'host_location_id': str(host_id),
                         'host_location_name': host_name,
                         'field_size': _normalize_field_size(field_type) or str(field_type or '').upper(),
@@ -8930,7 +8961,7 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
                         'required_games': required_games,
                         'existing_scheduled_games': existing,
                         'required_field_size': required_size,
-                        'week_start_date': str(week.start_date) if week.start_date else None,
+                        'week_start_date': str(game_date) if game_date else None,
                         'slot_count_for_week_and_field_size': int(slot_counts.get(required_size, 0) or 0),
                         'host_slot_counts_for_week': [row for row in generated_slots_by_week_host_field_size.get(week_key, []) if row.get('field_size') == required_size],
                         'reason': 'Required division/week has no generated slots for its week/date and field size.',
@@ -9077,6 +9108,10 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         division_created = 0
         division_unresolved = False
         for week in _regular_season_weeks():
+            week_game_date = _week_game_date(week)
+            if not week_game_date:
+                warnings.append(f'Week {week.week_number} skipped: missing Primary Game Date.')
+                continue
             proposals = []
             preview = {}
             preview_skipped: list[dict[str, object]] = []
@@ -9185,7 +9220,7 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
             division_week_diagnostic = {
                 'division_id': str(division.id),
                 'week': week.week_number,
-                'week_start_date': str(week.start_date) if week.start_date else None,
+                'week_start_date': str(week_game_date) if week_game_date else None,
                 'division_name': division_label,
                 'active_team_count': active_team_count,
                 'active_teams': active_team_names,
@@ -9199,7 +9234,7 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
                 'missing_teams': missing_team_names,
                 'skipped_placements': len(all_skips_for_division_week),
                 'skip_reasons': skip_reasons or ([] if actual_created_games >= required_games else ['unknown']),
-                'date': str(week.start_date) if week.start_date else None,
+                'date': str(week_game_date) if week_game_date else None,
                 'required_field_size': _normalize_field_size(_required_field_type_for_division(division)) or str(_required_field_type_for_division(division)),
                 'compatible_slots_found': int(preview.get('compatible_slots_found') or placement_preview_diagnostic.get('compatible_slot_count') or missing_preview_diagnostic.get('compatible_slots_found') or 0),
                 'compatible_slot_count': int(preview.get('compatible_slots_found') or placement_preview_diagnostic.get('compatible_slot_count') or missing_preview_diagnostic.get('compatible_slots_found') or 0),
@@ -9242,7 +9277,7 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
             )
             week_diagnostic = weekly_diagnostics_by_week_id.setdefault(week.id, {
                 'week': week.week_number,
-                'week_start_date': str(week.start_date) if week.start_date else None,
+                'week_start_date': str(week_game_date) if week_game_date else None,
                 'expected_games_total': 0,
                 'generated_game_groups_total': 0,
                 'scheduled_games_total': 0,
@@ -9359,6 +9394,9 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
     expected_regular_season_games = _expected_regular_season_week_total()
     hard_validation: list[dict[str, object]] = []
     for week in _regular_season_weeks():
+        week_game_date = _week_game_date(week)
+        if not week_game_date:
+            continue
         scheduled_games = _scheduled_games_for_week(week.id)
         scheduled_games_total = len(scheduled_games)
         unique_team_ids = {
@@ -9372,7 +9410,7 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         missing_total = max(0, expected_regular_season_games - scheduled_games_total)
         week_diagnostic = weekly_diagnostics_by_week_id.setdefault(week.id, {
             'week': week.week_number,
-            'week_start_date': str(week.start_date) if week.start_date else None,
+            'week_start_date': str(week_game_date) if week_game_date else None,
             'expected_games_total': expected_regular_season_games,
             'generated_game_groups_total': 0,
             'scheduled_games_total': 0,
@@ -9392,7 +9430,7 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         ]
         validation_row = {
             'week': week.week_number,
-            'week_start_date': str(week.start_date) if week.start_date else None,
+            'week_start_date': str(week_game_date) if week_game_date else None,
             'expected_games': expected_regular_season_games,
             'scheduled_games': scheduled_games_total,
             'unique_teams_playing': unique_teams_playing,
@@ -9428,7 +9466,7 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
                 'missing_divisions': missing_divisions,
                 'skipped_placement_reasons': validation_row['skipped_placement_reasons'],
             })
-        if week.start_date == date(2026, 9, 13):
+        if week_game_date == date(2026, 9, 13):
             expected_by_size = {FIELD_SIZE_SMALL: 10, FIELD_SIZE_MEDIUM: 5, FIELD_SIZE_LARGE: 7}
             missing_by_size = {
                 size: max(0, expected_count - int(field_size_counts.get(size, 0) or 0))
@@ -9727,7 +9765,7 @@ def list_public_schedule_filters(season_id: uuid.UUID | None = None, db: Session
         weeks_query = db.query(Week).join(Week.season).filter(Season.is_active.is_(True))
         if season:
             weeks_query = weeks_query.filter(Week.season_id == season.id)
-        weeks = weeks_query.order_by(Week.start_date, Week.week_number).all()
+        weeks = weeks_query.order_by(Week.primary_game_date, Week.week_number).all()
         teams = db.query(Team).filter(Team.is_active.is_(True)).order_by(Team.name).all()
         fields = db.query(FieldInstance).filter(FieldInstance.is_active.is_(True)).order_by(FieldInstance.field_name).all()
 
@@ -9819,7 +9857,7 @@ def _regenerate_and_validate_slots_for_weeks(
     weeks: list[Week],
     division_order: list[tuple[str, str]],
 ) -> dict[str, object]:
-    week_dates = {week.start_date for week in weeks if week.start_date}
+    week_dates = {_week_game_date(week) for week in weeks if _week_game_date(week)}
     hosts = db.query(HostLocation).join(HostLocation.organization).filter(
         HostLocation.is_active.is_(True),
         Organization.is_active.is_(True),
@@ -9898,11 +9936,12 @@ def _regenerate_and_validate_slots_for_weeks(
     validation_rows: list[dict[str, object]] = []
     org_names_for_capacity = {org.id: org.name or str(org.id) for org in db.query(Organization).filter(Organization.is_active.is_(True)).all()}
     for week in weeks:
-        if not week.start_date or _week_date_type(week) == BLACKOUT_DATE_TYPE:
+        game_date = _week_game_date(week)
+        if not game_date or _week_date_type(week) == BLACKOUT_DATE_TYPE:
             continue
         slot_counts = {FIELD_SIZE_SMALL: 0, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_LARGE: 0}
         for field_type, count in db.query(GameSlot.field_type, func.count(GameSlot.id)).filter(
-            GameSlot.slot_date == week.start_date,
+            GameSlot.slot_date == game_date,
         ).group_by(GameSlot.field_type).all():
             size = _normalize_field_size(field_type)
             if size in slot_counts:
@@ -9915,7 +9954,7 @@ def _regenerate_and_validate_slots_for_weeks(
         location_capacity_by_community: dict[str, list[dict[str, object]]] = {}
         capacity_rows = db.query(HostLocation.organization_id, HostLocation.name, GameSlot.field_type, func.count(GameSlot.id)).select_from(GameSlot).join(
             HostLocation, HostLocation.id == GameSlot.host_location_id
-        ).filter(GameSlot.slot_date == week.start_date).group_by(HostLocation.organization_id, HostLocation.name, GameSlot.field_type).all()
+        ).filter(GameSlot.slot_date == game_date).group_by(HostLocation.organization_id, HostLocation.name, GameSlot.field_type).all()
         for org_id, host_name, field_type, count in capacity_rows:
             community_name = org_names_for_capacity.get(org_id, str(org_id))
             size = _normalize_field_size(field_type) or str(field_type or 'UNKNOWN')
@@ -9931,19 +9970,19 @@ def _regenerate_and_validate_slots_for_weeks(
                 location_row['capacity_by_size'][size] += int(count or 0)
         row = {
             'week': week.week_number,
-            'week_start_date': str(week.start_date),
+            'week_start_date': str(game_date),
             'required_games_by_size': dict(required_games_by_size),
             'generated_slots_by_size': dict(slot_counts),
             'community_capacity_by_field_size': community_capacity_by_size,
             'host_location_capacity_by_community': location_capacity_by_community,
             'missing_field_sizes': missing_sizes,
-            'host_locations_evaluated': sorted(set(evaluated_hosts_by_date.get(week.start_date, []))),
-            'generation_reasons': generation_reasons_by_date.get(week.start_date, []),
+            'host_locations_evaluated': sorted(set(evaluated_hosts_by_date.get(game_date, []))),
+            'generation_reasons': generation_reasons_by_date.get(game_date, []),
         }
         validation_rows.append(row)
         for size in missing_sizes:
             validation_errors.append(
-                f'Week {week.week_number} ({week.start_date}) requires {required_games_by_size[size]} {size} game(s) but generated 0 {size} slot(s). '
+                f'Week {week.week_number} ({game_date}) requires {required_games_by_size[size]} {size} game(s) but generated 0 {size} slot(s). '
                 f'Host locations evaluated: {", ".join(row["host_locations_evaluated"]) or "none"}. '
                 f'Reasons: {" | ".join(row["generation_reasons"]) or "No hosting availability was evaluated for this week."}'
             )
@@ -10943,10 +10982,10 @@ def export_schedule_management_csv(date: date | None = None, division_id: uuid.U
 
     validation_week_query = db.query(Week)
     if date:
-        validation_week_query = validation_week_query.filter(Week.start_date == date)
+        validation_week_query = validation_week_query.filter(Week.primary_game_date == date)
     elif exported_dates:
-        validation_week_query = validation_week_query.filter(Week.start_date.in_(exported_dates))
-    validation_weeks = validation_week_query.order_by(Week.start_date.asc(), Week.week_number.asc()).all()
+        validation_week_query = validation_week_query.filter(Week.primary_game_date.in_(exported_dates))
+    validation_weeks = validation_week_query.order_by(Week.primary_game_date.asc(), Week.week_number.asc()).all()
     validation_division_query = db.query(Division).filter(Division.is_active.is_(True))
     if division_id:
         validation_division_query = validation_division_query.filter(Division.id == division_id)
@@ -10974,14 +11013,14 @@ def export_schedule_management_csv(date: date | None = None, division_id: uuid.U
             warning_message = f'EXPORT VALIDATION: incomplete division/week schedule; Week {validation_week.week_number} expected {expected_games}, scheduled {scheduled_games}, missing {missing_games}'
             export_validation_warnings.append({
                 'week': validation_week.week_number,
-                'week_start_date': str(validation_week.start_date) if validation_week.start_date else None,
+                'week_start_date': str(_week_game_date(validation_week)) if _week_game_date(validation_week) else None,
                 'division': division_label,
                 'expected_games': expected_games,
                 'scheduled_games': scheduled_games,
                 'missing_games': missing_games,
             })
             w.writerow([
-                validation_week.start_date.isoformat() if validation_week.start_date else '',
+                _week_game_date(validation_week).isoformat() if _week_game_date(validation_week) else '',
                 '',
                 validation_division.division_group,
                 validation_division.name,

@@ -1,5 +1,5 @@
 import uuid
-from datetime import date, time
+from datetime import date, time, timedelta
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -52,7 +52,7 @@ def _seed_fall_calendar(db: Session) -> Season:
             season_id=season.id,
             week_number=week_number,
             label=label,
-            start_date=game_date,
+            start_date=game_date - timedelta(days=1),
             end_date=game_date,
             primary_game_date=game_date,
             date_type=date_type,
@@ -123,8 +123,8 @@ def test_blackout_slots_are_suppressed_without_override_and_playoffs_allowed():
         playoff_host = HostLocation(id=uuid.uuid4(), organization_id=org.id, name='Playoff Park', surface_type='GRASS_FIELD', max_small_fields=1, is_active=True)
         blackout_week = db.query(Week).filter(Week.date_type == 'BLACKOUT').one()
         playoff_week = db.query(Week).filter(Week.label == 'Playoff Saturday').one()
-        blackout_availability = HostingAvailability(id=uuid.uuid4(), season_id=season.id, week_id=blackout_week.id, organization_id=org.id, host_location_id=blackout_host.id, available_date=blackout_week.start_date, start_time=time(9, 0), end_time=time(11, 0), is_available=True)
-        playoff_availability = HostingAvailability(id=uuid.uuid4(), season_id=season.id, week_id=playoff_week.id, organization_id=org.id, host_location_id=playoff_host.id, available_date=playoff_week.start_date, start_time=time(9, 0), end_time=time(11, 0), is_available=True)
+        blackout_availability = HostingAvailability(id=uuid.uuid4(), season_id=season.id, week_id=blackout_week.id, organization_id=org.id, host_location_id=blackout_host.id, available_date=blackout_week.primary_game_date, start_time=time(9, 0), end_time=time(11, 0), is_available=True)
+        playoff_availability = HostingAvailability(id=uuid.uuid4(), season_id=season.id, week_id=playoff_week.id, organization_id=org.id, host_location_id=playoff_host.id, available_date=playoff_week.primary_game_date, start_time=time(9, 0), end_time=time(11, 0), is_available=True)
         db.add_all([org, blackout_host, playoff_host, blackout_availability, playoff_availability])
         db.commit()
 
@@ -136,7 +136,7 @@ def test_blackout_slots_are_suppressed_without_override_and_playoffs_allowed():
         assert playoff_result['new_slots_created'] > 0
         readiness = get_schedule_readiness(current_user=None, db=db)
         demand_by_date = {row.host_date: row for row in readiness.weekly_field_demand}
-        assert demand_by_date[blackout_week.start_date].capacity_used == 0
-        assert demand_by_date[playoff_week.start_date].capacity_used == 0
+        assert demand_by_date[blackout_week.primary_game_date].capacity_used == 0
+        assert demand_by_date[playoff_week.primary_game_date].capacity_used == 0
     finally:
         db.close()
