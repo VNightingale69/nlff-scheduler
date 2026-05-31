@@ -144,6 +144,31 @@ class HostPlanGeneratedSlotsTest(unittest.TestCase):
         self.assertGreater(diagnostics[0]['generated_slots_by_size']['LARGE'], 0)
         self.assertIsNone(diagnostics[0]['zero_slot_reason'])
 
+
+    def test_selected_host_repairs_utc_shifted_hosting_availability_date(self):
+        self.availability.available_date = date(2026, 9, 12)
+        self.availability.primary_game_date = date(2026, 9, 12)
+        self.availability.week_id = None
+        self.selection.availability_id = None
+        self.db.commit()
+
+        result = _regenerate_and_validate_slots_for_weeks(
+            self.db,
+            [self.week6],
+            [('COED', 'K-1'), ('COED', '4-5'), ('COED', '6-7')],
+        )
+
+        self.db.refresh(self.availability)
+        self.assertEqual(self.week6.id, self.availability.week_id)
+        self.assertEqual(date(2026, 9, 13), self.availability.primary_game_date)
+        self.assertEqual(date(2026, 9, 13), self.availability.available_date)
+        diagnostics = result['validation_rows'][0]['selected_host_generated_slot_diagnostics']
+        self.assertEqual(str(self.availability.id), diagnostics[0]['hosting_availability_id'])
+        self.assertEqual('season_id_utc_shifted_date_host_location_id', diagnostics[0]['lookup_method_used'])
+        self.assertGreater(diagnostics[0]['generated_slots_by_size']['SMALL'], 0)
+        self.assertGreater(diagnostics[0]['generated_slots_by_size']['MEDIUM'], 0)
+        self.assertGreater(diagnostics[0]['generated_slots_by_size']['LARGE'], 0)
+
     def test_selected_host_warns_when_hosting_availability_record_missing(self):
         self.selection.availability_id = None
         self.db.delete(self.availability)
