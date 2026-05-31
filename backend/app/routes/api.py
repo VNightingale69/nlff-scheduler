@@ -2386,6 +2386,40 @@ HOST_PLAN_SCHEDULABLE_STATUSES = {'SELECTED', 'LOCKED', 'OVERFLOW'}
 HOST_PLAN_IGNORED_STATUSES = {'AVAILABLE', 'EXCLUDED', 'BLOCKED_CAPACITY', 'BLOCKED_ROTATION', 'BLOCKED_FIELD_SIZE'}
 
 
+def _balanced_target_game_split(total_games: int, communities: list[str]) -> dict[str, int]:
+    ordered_communities = sorted(dict.fromkeys(communities))
+    if not ordered_communities:
+        return {}
+    base, remainder = divmod(max(int(total_games or 0), 0), len(ordered_communities))
+    return {
+        community: base + (1 if index < remainder else 0)
+        for index, community in enumerate(ordered_communities)
+    }
+
+
+def _host_plan_capacity_sufficiency(
+    capacity_by_size: dict[str, int],
+    demand_by_size: dict[str, int],
+    doubleheader_adjacency_available: bool = True,
+    home_field_requirement_satisfied: bool = True,
+) -> tuple[bool, list[str]]:
+    reasons: list[str] = []
+    total_capacity = sum(int(capacity_by_size.get(size, 0) or 0) for size in FIELD_SIZE_ORDER)
+    total_demand = sum(int(demand_by_size.get(size, 0) or 0) for size in FIELD_SIZE_ORDER)
+    if total_capacity < total_demand:
+        reasons.append(f'total game capacity is insufficient ({total_capacity} available for {total_demand} required)')
+    for size in FIELD_SIZE_ORDER:
+        capacity = int(capacity_by_size.get(size, 0) or 0)
+        demand = int(demand_by_size.get(size, 0) or 0)
+        if capacity < demand:
+            reasons.append(f'{size.title()} field-size capacity is insufficient ({capacity} available for {demand} required)')
+    if not doubleheader_adjacency_available:
+        reasons.append('selected host communities cannot support same-location back-to-back doubleheaders')
+    if not home_field_requirement_satisfied:
+        reasons.append('selected host communities cannot support home-field requirements')
+    return not reasons, reasons
+
+
 def _host_plan_allowed_host_ids_for_week(db: Session, season_id: uuid.UUID | str | None, week_id: uuid.UUID | str | None = None, game_date: date | None = None) -> set[uuid.UUID] | None:
     if not season_id:
         return None
@@ -2496,9 +2530,22 @@ def _host_availability_matrix_response(db: Session, season_id: uuid.UUID) -> dic
     selection_by_host_date = {(selection.host_location_id, selection.game_date): selection for selection in selection_rows}
 
     slot_counts: dict[tuple[uuid.UUID, date], dict[str, int]] = {}
+    slot_minutes_by_host_date: dict[tuple[uuid.UUID, date], set[int]] = {}
     slot_rows = db.query(GameSlot.host_location_id, GameSlot.slot_date, GameSlot.field_type, func.count(GameSlot.id)).filter(GameSlot.host_location_id.in_(host_ids) if host_ids else False).group_by(GameSlot.host_location_id, GameSlot.slot_date, GameSlot.field_type).all()
     for host_id, slot_date, field_type, count in slot_rows:
         slot_counts.setdefault((host_id, slot_date), {FIELD_SIZE_SMALL: 0, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_LARGE: 0})[_normalize_field_size(field_type) or field_type] = int(count or 0)
+    slot_time_rows = db.query(GameSlot.host_location_id, GameSlot.slot_date, GameSlot.start_time).filter(GameSlot.host_location_id.in_(host_ids) if host_ids else False).all()
+    for host_id, slot_date, start_time in slot_time_rows:
+        minute = _minutes_from_time(start_time)
+        if minute is not None:
+            slot_minutes_by_host_date.setdefault((host_id, slot_date), set()).add(minute)
+    odd_division_requires_doubleheader = any(
+        int(team_count or 0) % 2 == 1 and int(team_count or 0) > 1
+        for (team_count,) in db.query(func.count(Team.id)).join(Division, Team.division_id == Division.id).filter(
+            Team.is_active.is_(True),
+            Division.is_active.is_(True),
+        ).group_by(Division.id).all()
+    )
 
     rows = []
     for host, org in hosts:
@@ -2565,20 +2612,55 @@ def _host_availability_matrix_response(db: Session, season_id: uuid.UUID) -> dic
                 warnings.append(f'{size.title()} capacity short by {required - capacity.get(size, 0)}. Add an overflow field or select more fields.')
         if total_selected_capacity < total_required:
             warnings.append(f'Total selected capacity short by {total_required - total_selected_capacity}. Add an overflow field.')
-        split_total = max(len(community_split), 1)
+        selected_community_names = sorted(community_split)
+        selected_host_ids_for_date = {
+            row['host_location_id']
+            for row in rows
+            if row['cells'][str(game_date)]['status'] in HOST_PLAN_SCHEDULABLE_STATUSES or row['cells'][str(game_date)].get('locked')
+        }
+        doubleheader_adjacency_available = (
+            not odd_division_requires_doubleheader
+            or not slot_time_rows
+            or any(
+                any((minute + 60) in slot_minutes_by_host_date.get((host_id, game_date), set()) for minute in slot_minutes_by_host_date.get((host_id, game_date), set()))
+                for host_id in selected_host_ids_for_date
+            )
+        )
+        home_field_requirement_satisfied = True
+        additional_host_needed, additional_host_reasons = _host_plan_capacity_sufficiency(
+            capacity,
+            required_by_size,
+            doubleheader_adjacency_available=doubleheader_adjacency_available,
+            home_field_requirement_satisfied=home_field_requirement_satisfied,
+        )
+        additional_host_needed = not additional_host_needed
         summaries.append({
             **date_info,
             'total_games_required': total_required,
             'games_required_by_size': required_by_size,
             'available_communities': sorted(available_communities),
             'available_locations': available_locations,
-            'selected_communities': sorted(community_split),
-            'expected_host_communities': sorted(community_split),
+            'selected_communities': selected_community_names,
+            'expected_host_communities': selected_community_names,
             'selected_fields': selected_rows,
             'excluded_available_fields': excluded_rows,
             'estimated_capacity_by_field_size': capacity,
-            'target_game_split': {community: math.ceil(total_required / split_total) for community in sorted(community_split)},
+            'target_game_split': _balanced_target_game_split(total_required, selected_community_names),
             'validation_warnings': warnings,
+            'weekly_host_plan_decision_summary': {
+                'diagnostic_label': 'Weekly Host Plan Decision Summary',
+                'selected_communities': selected_community_names,
+                'excluded_communities': sorted({row['community_name'] for row in excluded_rows}),
+                'total_games_required': total_required,
+                'selected_total_capacity': total_selected_capacity,
+                'selected_small_capacity': capacity.get(FIELD_SIZE_SMALL, 0),
+                'selected_medium_capacity': capacity.get(FIELD_SIZE_MEDIUM, 0),
+                'selected_large_capacity': capacity.get(FIELD_SIZE_LARGE, 0),
+                'doubleheader_adjacency_available': doubleheader_adjacency_available,
+                'home_field_requirement_satisfied': home_field_requirement_satisfied,
+                'additional_host_needed': additional_host_needed,
+                'reason_additional_host_was_added': '; '.join(additional_host_reasons) if additional_host_reasons else None,
+            },
         })
     return {'season': {'id': season.id, 'name': season.name}, 'dates': dates, 'rows': rows, 'summaries': summaries, 'status_options': sorted(HOST_PLAN_SELECTION_STATUSES)}
 
@@ -2642,8 +2724,9 @@ def generate_suggested_host_plan(payload: dict, current_user: User = Depends(req
         raise HTTPException(400, 'game_date must match a Season Week Primary Game Date')
     if _week_date_type(week) == BLACKOUT_DATE_TYPE:
         raise HTTPException(400, 'Blackout dates are visible but excluded from scheduling plans')
+
     required = _weekly_required_games_by_size(db, season_id)
-    remaining = dict(required)
+    total_required = sum(int(value or 0) for value in required.values())
     availability_rows = db.query(HostingAvailability, HostLocation).join(HostLocation, HostLocation.id == HostingAvailability.host_location_id).filter(
         HostingAvailability.season_id == season_id,
         HostingAvailability.available_date == game_date,
@@ -2651,16 +2734,134 @@ def generate_suggested_host_plan(payload: dict, current_user: User = Depends(req
         HostingAvailability.is_available.is_(True),
         HostLocation.is_active.is_(True),
     ).order_by(HostLocation.name).all()
-    selected = 0
-    seen_hosts: set[uuid.UUID] = set()
-    for availability, host in availability_rows:
-        if host.id in seen_hosts:
+
+    availability_by_host: dict[uuid.UUID, HostingAvailability] = {}
+    host_by_id: dict[uuid.UUID, HostLocation] = {}
+    capacity_by_host: dict[uuid.UUID, dict[str, int]] = {}
+    generated_slot_capacity: dict[uuid.UUID, dict[str, int]] = {}
+    generated_slot_minutes_by_host: dict[uuid.UUID, set[int]] = {}
+    generated_slots = db.query(GameSlot).filter(
+        GameSlot.slot_date == game_date,
+        GameSlot.assigned_game_id.is_(None),
+        GameSlot.status == 'OPEN',
+    ).all()
+    for slot in generated_slots:
+        if not slot.host_location_id:
             continue
-        seen_hosts.add(host.id)
-        capacity = _field_capacity_from_host(host)
-        choose = sum(max(0, remaining.get(size, 0)) for size in remaining) > 0
-        status = 'SELECTED' if choose else 'EXCLUDED'
-        row = db.query(HostPlanSelection).filter(HostPlanSelection.season_id == season_id, HostPlanSelection.game_date == game_date, HostPlanSelection.host_location_id == host.id).first()
+        size = _normalize_field_size(slot.field_type)
+        if size not in FIELD_SIZE_ORDER:
+            continue
+        generated_slot_capacity.setdefault(slot.host_location_id, _empty_field_size_counts())[size] += 1
+        minute = _minutes_from_time(slot.start_time)
+        if minute is not None:
+            generated_slot_minutes_by_host.setdefault(slot.host_location_id, set()).add(minute)
+
+    for availability, host in availability_rows:
+        if host.id in host_by_id:
+            continue
+        availability_by_host[host.id] = availability
+        host_by_id[host.id] = host
+        capacity_by_host[host.id] = generated_slot_capacity.get(host.id) or _host_availability_capacity_by_size(db, host, availability)
+
+    existing_rows = db.query(HostPlanSelection).filter(
+        HostPlanSelection.season_id == season_id,
+        HostPlanSelection.game_date == game_date,
+    ).all()
+    existing_by_host = {row.host_location_id: row for row in existing_rows}
+    selected_host_ids: set[uuid.UUID] = {
+        row.host_location_id
+        for row in existing_rows
+        if row.host_location_id in host_by_id and (row.status in HOST_PLAN_SCHEDULABLE_STATUSES or row.locked)
+    }
+    excluded_host_ids: set[uuid.UUID] = {
+        row.host_location_id
+        for row in existing_rows
+        if row.host_location_id in host_by_id and row.status == 'EXCLUDED' and not row.locked
+    }
+
+    def _combined_capacity(host_ids: set[uuid.UUID]) -> dict[str, int]:
+        combined = _empty_field_size_counts()
+        for host_id in host_ids:
+            for size in FIELD_SIZE_ORDER:
+                combined[size] += int((capacity_by_host.get(host_id) or {}).get(size, 0) or 0)
+        return combined
+
+    odd_division_requires_doubleheader = any(
+        int(team_count or 0) % 2 == 1 and int(team_count or 0) > 1
+        for (team_count,) in db.query(func.count(Team.id)).join(Division, Team.division_id == Division.id).filter(
+            Team.is_active.is_(True),
+            Division.is_active.is_(True),
+        ).group_by(Division.id).all()
+    )
+
+    def _has_adjacent_doubleheader(host_ids: set[uuid.UUID]) -> bool:
+        if not odd_division_requires_doubleheader:
+            return True
+        for host_id in host_ids:
+            minutes = generated_slot_minutes_by_host.get(host_id, set())
+            if any((minute + 60) in minutes for minute in minutes):
+                return True
+        # If slots have not been generated yet, do not treat missing slot rows as a hard
+        # doubleheader failure; generated-slot validation will enforce adjacency later.
+        return not generated_slots
+
+    def _home_field_satisfied(host_ids: set[uuid.UUID]) -> bool:
+        selected_orgs = {host_by_id[host_id].organization_id for host_id in host_ids if host_id in host_by_id}
+        return all(any(host_by_id[host_id].organization_id == org_id and sum((capacity_by_host.get(host_id) or {}).values()) > 0 for host_id in host_ids) for org_id in selected_orgs)
+
+    def _sufficiency(host_ids: set[uuid.UUID]) -> tuple[bool, list[str]]:
+        return _host_plan_capacity_sufficiency(
+            _combined_capacity(host_ids),
+            required,
+            doubleheader_adjacency_available=_has_adjacent_doubleheader(host_ids),
+            home_field_requirement_satisfied=_home_field_satisfied(host_ids),
+        )
+
+    added_host_ids: set[uuid.UUID] = set()
+    selected_sufficient = False
+    insufficiency_reasons: list[str] = []
+    additional_host_reason_reasons: list[str] = []
+    if selected_host_ids:
+        selected_sufficient, insufficiency_reasons = _sufficiency(selected_host_ids)
+
+    if not selected_host_ids or not selected_sufficient:
+        candidate_ids = [host_id for host_id in host_by_id if host_id not in selected_host_ids and host_id not in excluded_host_ids]
+        if not selected_host_ids:
+            insufficiency_reasons = ['no host communities are currently selected']
+        additional_host_reason_reasons = list(insufficiency_reasons)
+        for host_id in sorted(candidate_ids, key=lambda hid: (host_by_id[hid].name or '', str(hid))):
+            selected_host_ids.add(host_id)
+            added_host_ids.add(host_id)
+            selected_sufficient, insufficiency_reasons = _sufficiency(selected_host_ids)
+            if selected_sufficient:
+                break
+        if not selected_sufficient:
+            # Only when non-excluded capacity cannot satisfy the week, allow an excluded
+            # location to become overflow. This is the capacity-failure exception to the
+            # explicit exclusion rule.
+            for host_id in sorted(excluded_host_ids - selected_host_ids, key=lambda hid: (host_by_id[hid].name or '', str(hid))):
+                selected_host_ids.add(host_id)
+                added_host_ids.add(host_id)
+                selected_sufficient, insufficiency_reasons = _sufficiency(selected_host_ids)
+                if selected_sufficient:
+                    break
+
+    selected_capacity = _combined_capacity(selected_host_ids)
+    selected_communities = sorted({host_by_id[host_id].organization.name if host_by_id[host_id].organization else str(host_by_id[host_id].organization_id) for host_id in selected_host_ids if host_id in host_by_id})
+    excluded_communities = sorted({host_by_id[host_id].organization.name if host_by_id[host_id].organization else str(host_by_id[host_id].organization_id) for host_id in excluded_host_ids if host_id in host_by_id and host_id not in selected_host_ids})
+    additional_host_needed = bool(added_host_ids)
+    reason_additional = '; '.join(additional_host_reason_reasons or insufficiency_reasons) if additional_host_needed and (additional_host_reason_reasons or insufficiency_reasons) else None
+    if selected_host_ids and not added_host_ids and selected_sufficient:
+        decision_message = 'Selected host plan has sufficient capacity. No additional host community is needed.'
+    elif additional_host_needed:
+        decision_message = f'Additional host recommended because: {reason_additional or "selected capacity was insufficient"}.'
+    else:
+        decision_message = 'No compatible host locations found.'
+
+    selected = 0
+    for host_id, host in host_by_id.items():
+        availability = availability_by_host[host_id]
+        row = existing_by_host.get(host_id)
         if row and row.locked:
             continue
         if not row:
@@ -2669,15 +2870,35 @@ def generate_suggested_host_plan(payload: dict, current_user: User = Depends(req
         row.week_id = week.id if week else availability.week_id
         row.community_id = host.organization_id
         row.availability_id = availability.id
-        row.status = status
-        row.locked = False
-        row.reason = 'Generated suggested host plan' if choose else 'Available but not needed by suggested plan'
-        if choose:
+        if host_id in selected_host_ids:
+            row.status = 'OVERFLOW' if host_id in added_host_ids and host_id in excluded_host_ids else 'SELECTED'
+            row.reason = 'Generated suggested host plan' if host_id not in added_host_ids else f'Additional host recommended because: {reason_additional or "selected capacity was insufficient"}'
             selected += 1
-            for size in remaining:
-                remaining[size] = max(0, remaining[size] - int(capacity.get(size, 0) or 0))
+        else:
+            row.status = 'EXCLUDED'
+            row.reason = 'Available but not needed by suggested plan'
+        row.locked = False
+
+    decision_summary = {
+        'diagnostic_label': 'Weekly Host Plan Decision Summary',
+        'selected_communities': selected_communities,
+        'excluded_communities': excluded_communities,
+        'total_games_required': total_required,
+        'selected_total_capacity': sum(selected_capacity.values()),
+        'selected_small_capacity': selected_capacity.get(FIELD_SIZE_SMALL, 0),
+        'selected_medium_capacity': selected_capacity.get(FIELD_SIZE_MEDIUM, 0),
+        'selected_large_capacity': selected_capacity.get(FIELD_SIZE_LARGE, 0),
+        'doubleheader_adjacency_available': _has_adjacent_doubleheader(selected_host_ids),
+        'home_field_requirement_satisfied': _home_field_satisfied(selected_host_ids),
+        'additional_host_needed': additional_host_needed,
+        'reason_additional_host_was_added': reason_additional,
+    }
     db.commit()
-    return {**_host_availability_matrix_response(db, uuid.UUID(str(season_id))), 'generated_selected_count': selected}
+    response = _host_availability_matrix_response(db, uuid.UUID(str(season_id)))
+    response['generated_selected_count'] = selected
+    response['decision_message'] = decision_message
+    response['weekly_host_plan_decision_summary'] = decision_summary
+    return response
 
 
 @router.post('/host-availability-matrix/week-lock')

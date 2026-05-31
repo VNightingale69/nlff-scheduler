@@ -38,6 +38,21 @@ type MatrixRow = {
   cells: Record<string, MatrixCell>;
 };
 
+type WeeklyHostPlanDecisionSummary = {
+  diagnostic_label?: string;
+  selected_communities: string[];
+  excluded_communities: string[];
+  total_games_required: number;
+  selected_total_capacity: number;
+  selected_small_capacity: number;
+  selected_medium_capacity: number;
+  selected_large_capacity: number;
+  doubleheader_adjacency_available: boolean;
+  home_field_requirement_satisfied: boolean;
+  additional_host_needed: boolean;
+  reason_additional_host_was_added: string | null;
+};
+
 type WeeklySummary = MatrixDate & {
   total_games_required: number;
   available_communities?: string[];
@@ -50,6 +65,7 @@ type WeeklySummary = MatrixDate & {
   estimated_capacity_by_field_size: Record<string, number>;
   target_game_split: Record<string, number>;
   validation_warnings: string[];
+  weekly_host_plan_decision_summary?: WeeklyHostPlanDecisionSummary;
 };
 
 type MatrixResponse = {
@@ -355,8 +371,8 @@ export default function HostAvailabilityMatrix() {
     setMessage('');
     try {
       if (action === 'generate') {
-        await apiFetch('/host-availability-matrix/generate-suggested-plan', { method: 'POST', body: JSON.stringify({ season_id: seasonId, game_date: selectedDate }) }, token);
-        setMessage('Generated a suggested host plan for the selected week.');
+        const result: any = await apiFetch('/host-availability-matrix/generate-suggested-plan', { method: 'POST', body: JSON.stringify({ season_id: seasonId, game_date: selectedDate }) }, token);
+        setMessage(result?.decision_message || 'Generated a suggested host plan for the selected week.');
       } else if (action === 'lock' || action === 'unlock') {
         await apiFetch('/host-availability-matrix/week-lock', { method: 'POST', body: JSON.stringify({ season_id: seasonId, game_date: selectedDate, locked: action === 'lock' }) }, token);
         setMessage(action === 'lock' ? 'Selected week locked.' : 'Selected week unlocked.');
@@ -489,6 +505,20 @@ export default function HostAvailabilityMatrix() {
             <h3 className='font-semibold'>Target game split</h3>
             <ul className='mt-1 list-disc pl-5'>{Object.entries(selectedSummary.target_game_split).map(([community, games]) => <li key={community}>{community}: {games} games</li>)}{!Object.keys(selectedSummary.target_game_split).length ? <li className='text-slate-400'>Select fields to calculate split.</li> : null}</ul>
           </section>
+          {selectedSummary.weekly_host_plan_decision_summary ? <section>
+            <h3 className='font-semibold'>Weekly Host Plan Decision Summary</h3>
+            <dl className='mt-1 space-y-1 text-slate-700'>
+              <div><dt className='inline font-medium'>Selected communities:</dt> <dd className='inline'>{selectedSummary.weekly_host_plan_decision_summary.selected_communities.join(', ') || '—'}</dd></div>
+              <div><dt className='inline font-medium'>Excluded communities:</dt> <dd className='inline'>{selectedSummary.weekly_host_plan_decision_summary.excluded_communities.join(', ') || '—'}</dd></div>
+              <div><dt className='inline font-medium'>Total games required:</dt> <dd className='inline'>{selectedSummary.weekly_host_plan_decision_summary.total_games_required}</dd></div>
+              <div><dt className='inline font-medium'>Selected total capacity:</dt> <dd className='inline'>{selectedSummary.weekly_host_plan_decision_summary.selected_total_capacity}</dd></div>
+              <div><dt className='inline font-medium'>Selected Small / Medium / Large capacity:</dt> <dd className='inline'>{selectedSummary.weekly_host_plan_decision_summary.selected_small_capacity} / {selectedSummary.weekly_host_plan_decision_summary.selected_medium_capacity} / {selectedSummary.weekly_host_plan_decision_summary.selected_large_capacity}</dd></div>
+              <div><dt className='inline font-medium'>Doubleheader adjacency available:</dt> <dd className='inline'>{selectedSummary.weekly_host_plan_decision_summary.doubleheader_adjacency_available ? 'yes' : 'no'}</dd></div>
+              <div><dt className='inline font-medium'>Home-field requirement satisfied:</dt> <dd className='inline'>{selectedSummary.weekly_host_plan_decision_summary.home_field_requirement_satisfied ? 'yes' : 'no'}</dd></div>
+              <div><dt className='inline font-medium'>Additional host needed:</dt> <dd className='inline'>{selectedSummary.weekly_host_plan_decision_summary.additional_host_needed ? 'yes' : 'no'}</dd></div>
+              <div><dt className='inline font-medium'>Reason additional host was added:</dt> <dd className='inline'>{selectedSummary.weekly_host_plan_decision_summary.reason_additional_host_was_added || '—'}</dd></div>
+            </dl>
+          </section> : null}
           <section>
             <h3 className='font-semibold'>Validation</h3>
             {selectedSummary.validation_warnings.length ? <ul className='mt-1 list-disc pl-5 text-rose-700'>{selectedSummary.validation_warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul> : <p className='mt-1 text-emerald-700'>Selected capacity supports the estimated week demand.</p>}

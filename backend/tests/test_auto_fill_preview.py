@@ -1,13 +1,14 @@
 import unittest
 import uuid
 from datetime import date, time
+from types import SimpleNamespace
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import Base
-from app.models import Division, FieldInstance, Game, GameSlot, GameStatus, HostLocation, Organization, Season, Team, Week
-from app.routes.api import auto_fill_apply, auto_fill_preview, auto_schedule_entire_season
+from app.models import Division, FieldInstance, Game, GameSlot, GameStatus, HostLocation, HostPlanSelection, HostingAvailability, Organization, Season, Team, Week
+from app.routes.api import auto_fill_apply, auto_fill_preview, auto_schedule_entire_season, generate_suggested_host_plan
 
 
 class AutoFillPreviewTest(unittest.TestCase):
@@ -50,6 +51,43 @@ class AutoFillPreviewTest(unittest.TestCase):
         self.assertIn('Avoids prior-week team repeat', result['proposals'][0]['reason'])
         self.assertIn('Avoids prior-week community repeat', result['proposals'][0]['reason'])
 
+
+
+    def test_generate_suggested_host_plan_does_not_add_excluded_host_when_selected_capacity_is_sufficient(self):
+        self.week2.primary_game_date = self.week2.start_date
+        lake_county = Organization(id=uuid.uuid4(), name='Lake County', is_active=True)
+        antioch_host = HostLocation(id=uuid.uuid4(), organization_id=self.org_a.id, name='Tim Osmond Sports Complex', is_active=True)
+        lake_host = HostLocation(id=uuid.uuid4(), organization_id=lake_county.id, name='Behm Park', is_active=True)
+        westosha_availability = HostingAvailability(id=uuid.uuid4(), season_id=self.season.id, week_id=self.week2.id, organization_id=self.org_w.id, host_location_id=self.host.id, available_date=self.week2.start_date, start_time=time(9, 0), end_time=time(12, 0), is_available=True, active=True)
+        antioch_availability = HostingAvailability(id=uuid.uuid4(), season_id=self.season.id, week_id=self.week2.id, organization_id=self.org_a.id, host_location_id=antioch_host.id, available_date=self.week2.start_date, start_time=time(9, 0), end_time=time(12, 0), is_available=True, active=True)
+        lake_availability = HostingAvailability(id=uuid.uuid4(), season_id=self.season.id, week_id=self.week2.id, organization_id=lake_county.id, host_location_id=lake_host.id, available_date=self.week2.start_date, start_time=time(9, 0), end_time=time(12, 0), is_available=True, active=True)
+        antioch_field = FieldInstance(id=uuid.uuid4(), host_location_id=antioch_host.id, hosting_availability_id=antioch_availability.id, instance_date=self.week2.start_date, field_name='Antioch Small 1', field_type='SMALL', is_active=True)
+        lake_field = FieldInstance(id=uuid.uuid4(), host_location_id=lake_host.id, hosting_availability_id=lake_availability.id, instance_date=self.week2.start_date, field_name='Lake Small 1', field_type='SMALL', is_active=True)
+        antioch_slot = GameSlot(id=uuid.uuid4(), field_instance_id=antioch_field.id, host_location_id=antioch_host.id, slot_date=self.week2.start_date, start_time=time(9, 0), end_time=time(10, 0), field_type='SMALL', status='OPEN')
+        lake_slot = GameSlot(id=uuid.uuid4(), field_instance_id=lake_field.id, host_location_id=lake_host.id, slot_date=self.week2.start_date, start_time=time(9, 0), end_time=time(10, 0), field_type='SMALL', status='OPEN')
+        westosha_extra_slot = GameSlot(id=uuid.uuid4(), field_instance_id=self.fi.id, host_location_id=self.host.id, slot_date=self.week2.start_date, start_time=time(11, 0), end_time=time(12, 0), field_type='SMALL', status='OPEN')
+        self.db.add_all([lake_county, antioch_host, lake_host, westosha_availability, antioch_availability, lake_availability, antioch_field, lake_field, antioch_slot, lake_slot, westosha_extra_slot])
+        self.db.add_all([
+            HostPlanSelection(season_id=self.season.id, week_id=self.week2.id, game_date=self.week2.start_date, community_id=self.org_a.id, host_location_id=antioch_host.id, availability_id=antioch_availability.id, status='SELECTED'),
+            HostPlanSelection(season_id=self.season.id, week_id=self.week2.id, game_date=self.week2.start_date, community_id=lake_county.id, host_location_id=lake_host.id, availability_id=lake_availability.id, status='SELECTED'),
+            HostPlanSelection(season_id=self.season.id, week_id=self.week2.id, game_date=self.week2.start_date, community_id=self.org_w.id, host_location_id=self.host.id, availability_id=westosha_availability.id, status='EXCLUDED'),
+        ])
+        self.db.commit()
+
+        result = generate_suggested_host_plan(
+            {'season_id': self.season.id, 'game_date': str(self.week2.start_date)},
+            current_user=SimpleNamespace(email='admin@example.com'),
+            db=self.db,
+        )
+
+        self.assertEqual(result['decision_message'], 'Selected host plan has sufficient capacity. No additional host community is needed.')
+        westosha_selection = self.db.query(HostPlanSelection).filter(HostPlanSelection.host_location_id == self.host.id, HostPlanSelection.game_date == self.week2.start_date).one()
+        self.assertEqual(westosha_selection.status, 'EXCLUDED')
+        selected_names = {row.host_location.name for row in self.db.query(HostPlanSelection).filter(HostPlanSelection.game_date == self.week2.start_date, HostPlanSelection.status == 'SELECTED').all()}
+        self.assertEqual(selected_names, {'Tim Osmond Sports Complex', 'Behm Park'})
+        decision_summary = result['weekly_host_plan_decision_summary']
+        self.assertFalse(decision_summary['additional_host_needed'])
+        self.assertEqual(decision_summary['selected_total_capacity'], 2)
 
     def test_weekly_host_plan_ignores_unused_available_locations(self):
         antioch_host = HostLocation(id=uuid.uuid4(), organization_id=self.org_a.id, name='Antioch Complex', is_active=True)
