@@ -447,6 +447,46 @@ class AutoFillPreviewTest(unittest.TestCase):
         self.assertEqual(summary['home_team_games_forced_away'], 0)
         self.assertEqual(summary['validation_flags'], [])
 
+    def test_selected_multiple_locations_balance_by_community_before_location(self):
+        self.wm.is_active = False
+        self.wg.is_active = False
+        self.ab.is_active = False
+        self.as_.is_active = False
+        johnsburg = Organization(id=uuid.uuid4(), name='Johnsburg', is_active=True)
+        antioch_host = HostLocation(id=uuid.uuid4(), organization_id=self.org_a.id, name='Tim Osmond Sports Complex', is_active=True)
+        johnsburg_stadium = HostLocation(id=uuid.uuid4(), organization_id=johnsburg.id, name='Johnsburg Stadium', is_active=True)
+        hiller_park = HostLocation(id=uuid.uuid4(), organization_id=johnsburg.id, name='Hiller Park', is_active=True)
+        rows = [johnsburg, antioch_host, johnsburg_stadium, hiller_park]
+        for idx in range(4):
+            rows.append(Team(id=uuid.uuid4(), organization_id=self.org_a.id, division_id=self.division.id, name=f'Antioch Team {idx + 1}', is_active=True))
+            rows.append(Team(id=uuid.uuid4(), organization_id=johnsburg.id, division_id=self.division.id, name=f'Johnsburg Team {idx + 1}', is_active=True))
+        for host in (antioch_host, johnsburg_stadium, hiller_park):
+            rows.append(HostPlanSelection(season_id=self.season.id, week_id=self.week2.id, game_date=self.week2.start_date, community_id=host.organization_id, host_location_id=host.id, status='SELECTED'))
+            for idx, hour in enumerate((9, 10, 11, 12), start=1):
+                fi = FieldInstance(id=uuid.uuid4(), host_location_id=host.id, hosting_availability_id=uuid.uuid4(), instance_date=self.week2.start_date, field_name=f'{host.name} Field {idx}', field_type='SMALL', is_active=True)
+                slot = GameSlot(id=uuid.uuid4(), field_instance_id=fi.id, host_location_id=host.id, season_id=self.season.id, week_id=self.week2.id, slot_date=self.week2.start_date, start_time=time(hour, 0), end_time=time(hour + 1, 0), field_type='SMALL', status='OPEN')
+                rows.extend([fi, slot])
+        self.db.add_all(rows)
+        self.db.commit()
+
+        result = auto_fill_preview({'season_id': self.season.id, 'week_id': self.week2.id, 'division_id': self.division.id}, db=self.db)
+
+        self.assertEqual(result['proposed_game_count'], 4)
+        summary = result['diagnostics']['host_allocation_summary_by_date']
+        self.assertEqual(summary['selected_host_community_count'], 2)
+        self.assertEqual(summary['adjusted_target_games_by_host_community']['Antioch'], 2)
+        self.assertEqual(summary['adjusted_target_games_by_host_community']['Johnsburg'], 2)
+        self.assertEqual(summary['actual_games_per_host_community']['Antioch'], 2)
+        self.assertEqual(summary['actual_games_per_host_community']['Johnsburg'], 2)
+        johnsburg_location_total = (
+            summary['actual_games_per_host_location'].get('Johnsburg Stadium', 0)
+            + summary['actual_games_per_host_location'].get('Hiller Park', 0)
+        )
+        self.assertEqual(johnsburg_location_total, 2)
+        self.assertEqual(summary['reason_for_community_overage'], {})
+        self.assertEqual(summary['reason_for_community_underage'], {})
+
+
     def test_preview_locks_to_two_hosts_when_one_host_is_insufficient(self):
         second_host = HostLocation(id=uuid.uuid4(), organization_id=self.org_a.id, name='Antioch Park', is_active=True)
         third_host = HostLocation(id=uuid.uuid4(), organization_id=self.org_w.id, name='Wilmot Stadium', is_active=True)
