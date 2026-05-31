@@ -8,8 +8,8 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.auth import ROLE_LEAGUE_ADMIN
 from app.database import Base
-from app.models import Division, FieldInstance, Game, GameSlot, GameStatus, HostLocation, HostingAvailability, Organization, Role, Team
-from app.routes.api import GENERATED_SLOTS_CLEAR_WARNING, clear_generated_game_slots
+from app.models import Division, FieldInstance, Game, GameSlot, GameStatus, HostLocation, HostPlanSelection, HostingAvailability, Organization, Role, Season, Team, Week
+from app.routes.api import GENERATED_SLOTS_CLEAR_WARNING, clear_generated_game_slots, _regenerate_and_validate_slots_for_weeks
 
 
 class GeneratedSlotsClearTest(unittest.TestCase):
@@ -60,6 +60,88 @@ class GeneratedSlotsClearTest(unittest.TestCase):
         self.assertFalse(self.db.get(FieldInstance, self.scheduled_instance.id).is_active)
         self.assertIsNotNone(self.db.get(GameSlot, self.other_slot.id))
         self.assertIsNotNone(self.db.get(FieldInstance, self.other_instance.id))
+
+
+class HostPlanGeneratedSlotsTest(unittest.TestCase):
+    def setUp(self):
+        engine = create_engine('sqlite+pysqlite:///:memory:', future=True)
+        Base.metadata.create_all(engine)
+        self.db: Session = sessionmaker(bind=engine)()
+        self.season = Season(id=uuid.uuid4(), name='Fall 2026', start_date=date(2026, 8, 1), end_date=date(2026, 11, 1), is_active=True)
+        self.week6 = Week(id=uuid.uuid4(), season_id=self.season.id, week_number=6, start_date=date(2026, 9, 13), end_date=date(2026, 9, 19), primary_game_date=date(2026, 9, 13), date_type='REGULAR_SEASON')
+        self.org = Organization(id=uuid.uuid4(), name='Westosha', is_active=True)
+        self.host = HostLocation(
+            id=uuid.uuid4(),
+            organization_id=self.org.id,
+            name='Westosha Stadium',
+            surface_type='GRASS_FIELD',
+            max_small_fields=1,
+            max_medium_fields=1,
+            max_large_fields=1,
+            max_total_fields=3,
+            is_active=True,
+        )
+        self.availability = HostingAvailability(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week6.id,
+            organization_id=self.org.id,
+            host_location_id=self.host.id,
+            available_date=date(2026, 9, 13),
+            start_time=time(9, 0),
+            end_time=time(12, 0),
+            is_available=True,
+            active=True,
+        )
+        self.selection = HostPlanSelection(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week6.id,
+            game_date=date(2026, 9, 13),
+            community_id=self.org.id,
+            host_location_id=self.host.id,
+            availability_id=self.availability.id,
+            status='SELECTED',
+        )
+        self.divisions = [
+            Division(id=uuid.uuid4(), division_group='COED', name='K-1', sort_order=1, required_field_layout_type='SMALL', is_active=True),
+            Division(id=uuid.uuid4(), division_group='COED', name='4-5', sort_order=2, required_field_layout_type='MEDIUM', is_active=True),
+            Division(id=uuid.uuid4(), division_group='COED', name='6-7', sort_order=3, required_field_layout_type='LARGE', is_active=True),
+        ]
+        teams = []
+        for division in self.divisions:
+            for index in range(2):
+                teams.append(Team(id=uuid.uuid4(), organization_id=self.org.id, division_id=division.id, name=f'{division.name} Team {index}', is_active=True))
+        self.db.add_all([self.season, self.week6, self.org, self.host, self.availability, self.selection, *self.divisions, *teams])
+        self.db.commit()
+
+    def test_selected_host_availability_generates_all_required_field_sizes(self):
+        result = _regenerate_and_validate_slots_for_weeks(
+            self.db,
+            [self.week6],
+            [('COED', 'K-1'), ('COED', '4-5'), ('COED', '6-7')],
+        )
+
+        field_types = {field_type for (field_type,) in self.db.query(GameSlot.field_type).filter(GameSlot.slot_date == date(2026, 9, 13)).distinct().all()}
+        self.assertIn('SMALL', field_types)
+        self.assertIn('MEDIUM', field_types)
+        self.assertIn('LARGE', field_types)
+        validation_row = result['validation_rows'][0]
+        self.assertEqual(validation_row['missing_field_sizes'], [])
+        self.assertEqual(validation_row['host_locations_evaluated'], ['Westosha Stadium'])
+
+    def test_playoff_selected_host_does_not_generate_regular_season_slots(self):
+        self.week6.date_type = 'PLAYOFF'
+        self.db.commit()
+
+        result = _regenerate_and_validate_slots_for_weeks(
+            self.db,
+            [self.week6],
+            [('COED', 'K-1'), ('COED', '4-5'), ('COED', '6-7')],
+        )
+
+        self.assertEqual(self.db.query(GameSlot).count(), 0)
+        self.assertEqual(result['validation_rows'], [])
 
 
 if __name__ == '__main__':
