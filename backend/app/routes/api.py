@@ -6537,6 +6537,34 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         for org_id in selected_week_org_ids
     }
     selected_week_target_base = (games_required / max(len(selected_week_org_ids), 1)) if selected_week_org_ids else 0.0
+    # Defensive defaults: hosting equity should influence placement, but a missing or
+    # failed equity calculation must never prevent game-group generation.  This is
+    # intentionally community-first; location-level shares are derived only after
+    # the selected hosting communities for this week/date are known.
+    expected_host_share: dict[uuid.UUID, float] = {}
+    expected_host_share_by_location: dict[uuid.UUID, float] = {}
+
+    def _fallback_equal_community_host_share(total_games: int, org_ids: set[uuid.UUID]) -> dict[uuid.UUID, float]:
+        if not org_ids:
+            return {}
+        equal_share = total_games / max(len(org_ids), 1)
+        return {org_id: equal_share for org_id in org_ids}
+
+    def _integer_targets_from_share(expected_share_by_org: dict[uuid.UUID, float]) -> dict[uuid.UUID, int]:
+        if not expected_share_by_org:
+            return {}
+        targets = {org_id: max(0, int(math.floor(share))) for org_id, share in expected_share_by_org.items()}
+        remaining_games = max(0, games_required - sum(targets.values()))
+        ordered_org_ids = sorted(expected_share_by_org, key=lambda org_id: (
+            -(expected_share_by_org.get(org_id, 0.0) - math.floor(expected_share_by_org.get(org_id, 0.0))),
+            _hosted_games_per_team(org_id),
+            community_games_hosted_to_date.get(org_id, 0),
+            -capacity_score_by_org.get(org_id, 0),
+            org_names_by_id.get(org_id, str(org_id)),
+        ))
+        for org_id in ordered_org_ids[:remaining_games]:
+            targets[org_id] = targets.get(org_id, 0) + 1
+        return targets
 
     def _even_community_game_targets(total_games: int, org_ids: set[uuid.UUID]) -> dict[uuid.UUID, int]:
         if not org_ids:
@@ -6554,7 +6582,51 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             targets[org_id] += 1
         return targets
 
-    selected_week_target_by_org: dict[uuid.UUID, int] = _even_community_game_targets(games_required, selected_week_org_ids)
+    try:
+        expected_host_share = _fallback_equal_community_host_share(games_required, selected_week_org_ids)
+        selected_week_target_by_org: dict[uuid.UUID, int] = _integer_targets_from_share(expected_host_share)
+        if not selected_week_target_by_org and selected_week_org_ids:
+            selected_week_target_by_org = _even_community_game_targets(games_required, selected_week_org_ids)
+    except Exception as exc:
+        logger.warning(
+            'Weekly community hosting equity calculation failed for season_id=%s week_id=%s date=%s; falling back to equal community allocation: %s',
+            season_id,
+            week_id,
+            week_game_date,
+            exc,
+            exc_info=True,
+        )
+        expected_host_share = _fallback_equal_community_host_share(games_required, selected_week_org_ids)
+        selected_week_target_by_org = _even_community_game_targets(games_required, selected_week_org_ids)
+
+    try:
+        for org_id, selected_org_host_ids in selected_week_host_ids_by_org.items():
+            org_share = expected_host_share.get(org_id, selected_week_target_base)
+            if not selected_org_host_ids:
+                continue
+            org_capacity = sum(max(0, host_capacity_by_id.get(host_id, 0)) for host_id in selected_org_host_ids)
+            if org_capacity > 0:
+                for host_id in selected_org_host_ids:
+                    expected_host_share_by_location[host_id] = org_share * (max(0, host_capacity_by_id.get(host_id, 0)) / org_capacity)
+            else:
+                equal_location_share = org_share / max(len(selected_org_host_ids), 1)
+                for host_id in selected_org_host_ids:
+                    expected_host_share_by_location[host_id] = equal_location_share
+    except Exception as exc:
+        logger.warning(
+            'Weekly location hosting equity split failed for season_id=%s week_id=%s date=%s; falling back to equal location allocation: %s',
+            season_id,
+            week_id,
+            week_game_date,
+            exc,
+            exc_info=True,
+        )
+        expected_host_share_by_location = {}
+        for org_id, selected_org_host_ids in selected_week_host_ids_by_org.items():
+            org_share = expected_host_share.get(org_id, selected_week_target_base)
+            equal_location_share = org_share / max(len(selected_org_host_ids), 1) if selected_org_host_ids else 0.0
+            for host_id in selected_org_host_ids:
+                expected_host_share_by_location[host_id] = equal_location_share
     selected_week_target_floor_by_org = {
         org_id: target
         for org_id, target in selected_week_target_by_org.items()
@@ -7293,6 +7365,23 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                             location_balance_bonus = 500 + int(balance_weight * (1.0 - min(1.0, host_load_ratio)))
                             score += location_balance_bonus
                             reason_bits.append(f'balances games across selected community locations (+{location_balance_bonus})')
+                            candidate_location_target = expected_host_share_by_location.get(candidate_host_id, 0.0)
+                            if candidate_location_target > 0:
+                                candidate_location_projected = current_host_projection + 1
+                                if current_host_projection < candidate_location_target:
+                                    score += 1500
+                                    reason_bits.append('selected location below internal community share (+1500)')
+                                sibling_below_location_target = any(
+                                    other_host_id != candidate_host_id
+                                    and other_host_id in selected_host_ids
+                                    and host_org_by_id.get(other_host_id) == candidate_host_org_id
+                                    and projected_games_by_host.get(other_host_id, 0) < expected_host_share_by_location.get(other_host_id, 0.0)
+                                    and any(s.host_location_id == other_host_id for s in remaining_slots)
+                                    for other_host_id in host_ids_by_org.get(candidate_host_org_id, set())
+                                )
+                                if candidate_location_projected > math.ceil(candidate_location_target) and sibling_below_location_target:
+                                    score -= 1500
+                                    warning_bits.append('selected location exceeds internal community share while sibling location is below target (-1500)')
                             overloaded_same_community = any(
                                 other_host_id != candidate_host_id
                                 and other_host_id in selected_host_ids
@@ -7732,6 +7821,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'reason_selected_or_unused': reason,
             'capacity_by_field_size': capacity_by_size,
             'total_capacity': sum(capacity_by_size.values()),
+            'expected_games_hosted': round(expected_host_share_by_location.get(host_id, 0.0), 2),
             'actual_games': projected_games_by_host.get(host_id, 0),
             'unused_compatible_capacity': max(0, sum(capacity_by_size.values()) - projected_games_by_host.get(host_id, 0)),
         })
@@ -8360,7 +8450,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                         else 'skipped: no compatible generated slots for required field size'
                     ),
                     'games_hosted_season_to_date': community_games_hosted_to_date.get(org_id, 0),
-                    'expected_games_hosted': round(expected_host_share, 2),
+                    'expected_games_hosted': round(expected_host_share.get(org_id, selected_week_target_base), 2),
                     'hosting_delta': round(hosting_delta_by_org.get(org_id, 0.0), 2),
                     'available_field_capacity_by_size': {
                         size: sum(1 for host_id in host_ids_by_org.get(org_id, set()) for slot in slots_by_host.get(host_id, []) if slot.field_type == size)
