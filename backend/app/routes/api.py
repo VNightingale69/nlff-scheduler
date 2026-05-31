@@ -903,6 +903,7 @@ def _regenerate_generated_slots(
     field = availability.field
     host = availability.host_location or (field.host_location if field else None) or (availability.physical_field_area.host_location if availability.physical_field_area else None)
     surface_type = (host.surface_type if host else None) or 'GRASS_FIELD'
+    slot_date = availability.primary_game_date or availability.available_date
     templates: list[tuple[str, str]] = []
     turf_layout_blocks: list[tuple[str, int]] = []
     if surface_type == 'TURF_STADIUM':
@@ -923,8 +924,8 @@ def _regenerate_generated_slots(
             and active_configuration_names
         )
         if use_dynamic_layouts:
-            demand_counts = _normalized_demand_counts(demand_counts_override) if demand_counts_override is not None else _turf_demand_counts_for_date(db, host, availability.available_date)
-            total_hours = _hours_between(availability.start_time, availability.end_time, availability.available_date)
+            demand_counts = _normalized_demand_counts(demand_counts_override) if demand_counts_override is not None else _turf_demand_counts_for_date(db, host, slot_date)
+            total_hours = _hours_between(availability.start_time, availability.end_time, slot_date)
             turf_layout_blocks = _plan_turf_layout_blocks(demand_counts, total_hours, active_configuration_names)
         if turf_layout_blocks:
             first_layout = turf_layout_blocks[0][0]
@@ -967,8 +968,8 @@ def _regenerate_generated_slots(
         }
     instances: list[FieldInstance] = []
     created_slots = 0
-    start_dt = datetime.combine(availability.available_date, availability.start_time)
-    end_dt = datetime.combine(availability.available_date, availability.end_time)
+    start_dt = datetime.combine(slot_date, availability.start_time)
+    end_dt = datetime.combine(slot_date, availability.end_time)
     if turf_layout_blocks:
         block_start_dt = start_dt
         for block_index, (layout_name, block_hours) in enumerate(turf_layout_blocks, start=1):
@@ -982,7 +983,7 @@ def _regenerate_generated_slots(
                 host_location_id=host_location_id,
                 hosting_availability_id=availability.id,
                 week_id=availability.week_id,
-                host_date=availability.available_date,
+                host_date=slot_date,
                 sequence_number=block_index,
                 wave_intent=_turf_wave_intent_for_layout(normalized_layout),
                 preferred_layout_code=normalized_layout,
@@ -999,7 +1000,7 @@ def _regenerate_generated_slots(
                 instance = FieldInstance(
                     host_location_id=host_location_id,
                     hosting_availability_id=availability.id,
-                    instance_date=availability.available_date,
+                    instance_date=slot_date,
                     field_name=f'Wave {block_index} {normalized_layout} {field_name}',
                     field_type=field_type,
                     is_active=True,
@@ -1017,7 +1018,7 @@ def _regenerate_generated_slots(
                     slot_start_dt = next_dt
                     continue
                 for instance in block_instances:
-                    db.add(GameSlot(field_instance_id=instance.id, host_location_id=host_location_id, slot_date=availability.available_date, start_time=slot_start_dt.time(), end_time=next_dt.time(), field_type=instance.field_type, status='OPEN', turf_wave_id=wave.id))
+                    db.add(GameSlot(field_instance_id=instance.id, host_location_id=host_location_id, slot_date=slot_date, start_time=slot_start_dt.time(), end_time=next_dt.time(), field_type=instance.field_type, status='OPEN', turf_wave_id=wave.id))
                     created_slots += 1
                 slot_start_dt = next_dt
             block_start_dt = block_end_dt
@@ -1025,7 +1026,7 @@ def _regenerate_generated_slots(
                 break
     else:
         for field_name, field_type in templates:
-            instances.append(FieldInstance(host_location_id=host_location_id, hosting_availability_id=availability.id, instance_date=availability.available_date, field_name=field_name, field_type=field_type, is_active=True))
+            instances.append(FieldInstance(host_location_id=host_location_id, hosting_availability_id=availability.id, instance_date=slot_date, field_name=field_name, field_type=field_type, is_active=True))
         for instance in instances:
             db.add(instance)
         db.flush()
@@ -1033,7 +1034,7 @@ def _regenerate_generated_slots(
         while slot_start_dt < end_dt:
             next_dt = min(slot_start_dt + timedelta(hours=1), end_dt)
             for instance in instances:
-                db.add(GameSlot(field_instance_id=instance.id, host_location_id=host_location_id, slot_date=availability.available_date, start_time=slot_start_dt.time(), end_time=next_dt.time(), field_type=instance.field_type, status='OPEN'))
+                db.add(GameSlot(field_instance_id=instance.id, host_location_id=host_location_id, slot_date=slot_date, start_time=slot_start_dt.time(), end_time=next_dt.time(), field_type=instance.field_type, status='OPEN'))
                 created_slots += 1
             slot_start_dt = next_dt
     logger.info('Generated %s field instances for availability_id=%s host_location_id=%s', len(instances), availability.id, host_location_id)
@@ -2515,9 +2516,7 @@ def _availability_date_type(db: Session, availability: HostingAvailability) -> s
 
 
 def _availability_allows_generated_slots(db: Session, availability: HostingAvailability) -> bool:
-    if bool(getattr(availability, 'admin_override_incompatible_field_size', False)):
-        return True
-    return _availability_date_type(db, availability) != BLACKOUT_DATE_TYPE
+    return _availability_date_type(db, availability) == REGULAR_SEASON_DATE_TYPE
 
 def _field_capacity_from_host(host: HostLocation) -> dict[str, int]:
     return {
@@ -10288,29 +10287,84 @@ def _regenerate_and_validate_slots_for_weeks(
     weeks: list[Week],
     division_order: list[tuple[str, str]],
 ) -> dict[str, object]:
-    week_dates = {_week_game_date(week) for week in weeks if _week_game_date(week)}
+    regular_weeks = [week for week in weeks if _is_regular_season_week(week) and _week_game_date(week)]
+    week_dates = {_week_game_date(week) for week in regular_weeks if _week_game_date(week)}
+    week_by_id = {week.id: week for week in regular_weeks}
+    week_by_date = {_week_game_date(week): week for week in regular_weeks if _week_game_date(week)}
     hosts = db.query(HostLocation).join(HostLocation.organization).filter(
         HostLocation.is_active.is_(True),
         Organization.is_active.is_(True),
     ).order_by(HostLocation.name).all()
+    hosts_by_id = {host.id: host for host in hosts}
     generation_results: list[dict[str, object]] = []
     evaluated_hosts_by_date: dict[date, list[str]] = {week_date: [] for week_date in week_dates}
     generation_reasons_by_date: dict[date, list[str]] = {week_date: [] for week_date in week_dates}
     required_games_by_size = _active_division_week_demand_by_size(db, division_order)
     availabilities_by_host_id: dict[uuid.UUID, list[HostingAvailability]] = {}
     available_hosts_by_date: dict[date, list[HostLocation]] = {week_date: [] for week_date in week_dates}
-    for host in hosts:
-        availabilities = db.query(HostingAvailability).outerjoin(HostingAvailability.physical_field_area).filter(
-            or_(HostingAvailability.host_location_id == host.id, PhysicalFieldArea.host_location_id == host.id),
+
+    def _matching_selected_availability(selection: HostPlanSelection, week: Week, host: HostLocation) -> HostingAvailability | None:
+        game_date = _week_game_date(week)
+        if selection.availability_id:
+            availability = db.query(HostingAvailability).filter(
+                HostingAvailability.id == selection.availability_id,
+                HostingAvailability.host_location_id == host.id,
+                HostingAvailability.is_available.is_(True),
+            ).first()
+            if availability and _availability_allows_generated_slots(db, availability):
+                return availability
+        match_conditions = []
+        if week.id:
+            match_conditions.append(HostingAvailability.week_id == week.id)
+        if game_date:
+            match_conditions.extend([
+                HostingAvailability.available_date == game_date,
+                HostingAvailability.primary_game_date == game_date,
+            ])
+        if not match_conditions:
+            return None
+        return db.query(HostingAvailability).filter(
+            HostingAvailability.season_id == selection.season_id,
+            HostingAvailability.host_location_id == host.id,
             HostingAvailability.is_available.is_(True),
-            HostingAvailability.available_date.in_(week_dates),
-        ).order_by(HostingAvailability.available_date, HostingAvailability.start_time).all()
-        if not availabilities:
+            or_(*match_conditions),
+        ).order_by(HostingAvailability.start_time, HostingAvailability.end_time).first()
+
+    season_ids = {week.season_id for week in regular_weeks if week.season_id}
+    selected_query = db.query(HostPlanSelection)
+    if season_ids:
+        selected_query = selected_query.filter(HostPlanSelection.season_id.in_(season_ids))
+    selected_rows = selected_query.filter(
+        HostPlanSelection.game_date.in_(week_dates),
+    ).order_by(HostPlanSelection.game_date, HostPlanSelection.status, HostPlanSelection.created_at).all() if week_dates else []
+    for selection in selected_rows:
+        selection_status = str(selection.status or '').upper()
+        if selection_status not in HOST_PLAN_SCHEDULABLE_STATUSES and not selection.locked:
             continue
-        availabilities_by_host_id[host.id] = availabilities
-        dates_for_host = {availability.available_date for availability in availabilities}
-        for available_date in dates_for_host:
-            available_hosts_by_date.setdefault(available_date, []).append(host)
+        week = week_by_id.get(selection.week_id) if selection.week_id else None
+        if not week:
+            week = week_by_date.get(selection.game_date)
+        if not week or not _is_regular_season_week(week):
+            continue
+        game_date = _week_game_date(week)
+        if not game_date:
+            continue
+        host = hosts_by_id.get(selection.host_location_id)
+        if not host:
+            continue
+        availability = _matching_selected_availability(selection, week, host)
+        if not availability:
+            generation_reasons_by_date.setdefault(game_date, []).append(
+                f'Selected host has availability but generated zero slots: {host.name}, {game_date}, no matching available Hosting Availability record.'
+            )
+            evaluated_hosts_by_date.setdefault(game_date, []).append(host.name)
+            continue
+        availability.primary_game_date = game_date
+        availability.week_id = availability.week_id or week.id
+        availabilities_by_host_id.setdefault(host.id, [])
+        if availability.id not in {row.id for row in availabilities_by_host_id[host.id]}:
+            availabilities_by_host_id[host.id].append(availability)
+            available_hosts_by_date.setdefault(game_date, []).append(host)
 
     community_index_by_date: dict[date, dict[uuid.UUID, int]] = {}
     hosts_by_date_community: dict[tuple[date, uuid.UUID], list[HostLocation]] = {}
@@ -10319,7 +10373,9 @@ def _regenerate_and_validate_slots_for_weeks(
         community_index_by_date[available_date] = {org_id: index for index, org_id in enumerate(org_ids)}
         for host in date_hosts:
             if host.organization_id:
-                hosts_by_date_community.setdefault((available_date, host.organization_id), []).append(host)
+                hosts_by_date_community.setdefault((available_date, host.organization_id), [])
+                if host.id not in {existing.id for existing in hosts_by_date_community[(available_date, host.organization_id)]}:
+                    hosts_by_date_community[(available_date, host.organization_id)].append(host)
 
     demand_by_availability_id_by_host: dict[uuid.UUID, dict[uuid.UUID, dict[str, int]]] = {}
     for (available_date, org_id), community_hosts in hosts_by_date_community.items():
@@ -10331,11 +10387,12 @@ def _regenerate_and_validate_slots_for_weeks(
         hosts_and_availabilities: list[tuple[HostLocation, HostingAvailability]] = []
         for community_host in sorted(community_hosts, key=lambda h: ((h.name or '').lower(), str(h.id))):
             for availability in availabilities_by_host_id.get(community_host.id, []):
-                if availability.available_date == available_date:
+                if (availability.primary_game_date or availability.available_date) == available_date:
                     hosts_and_availabilities.append((community_host, availability))
         location_allocations = _allocate_community_demand_to_host_locations(db, community_demand, hosts_and_availabilities)
         for community_host, availability in hosts_and_availabilities:
             demand_by_availability_id_by_host.setdefault(community_host.id, {})[availability.id] = location_allocations.get(availability.id, _empty_field_size_counts())
+
 
     for host in hosts:
         availabilities = availabilities_by_host_id.get(host.id, [])
@@ -10346,6 +10403,13 @@ def _regenerate_and_validate_slots_for_weeks(
             for availability in availabilities
         }
         result = _regenerate_hosting_day(db, availabilities, host, demand_by_availability_id)
+        slots_created_by_availability = {
+            availability.id: db.query(GameSlot.id).join(GameSlot.field_instance).filter(
+                FieldInstance.hosting_availability_id == availability.id,
+                GameSlot.slot_date == (availability.primary_game_date or availability.available_date),
+            ).count()
+            for availability in availabilities
+        }
         generation_results.append({
             'host_location_id': str(host.id),
             'host_location_name': host.name,
@@ -10357,10 +10421,15 @@ def _regenerate_and_validate_slots_for_weeks(
             'errors': result.errors,
         })
         for availability in availabilities:
-            evaluated_hosts_by_date.setdefault(availability.available_date, []).append(host.name)
-            generation_reasons_by_date.setdefault(availability.available_date, []).append(
+            availability_game_date = availability.primary_game_date or availability.available_date
+            evaluated_hosts_by_date.setdefault(availability_game_date, []).append(host.name)
+            generation_reasons_by_date.setdefault(availability_game_date, []).append(
                 _availability_generation_reason(db, host, availability, demand_by_availability_id.get(availability.id))
             )
+            if int(slots_created_by_availability.get(availability.id, 0) or 0) == 0:
+                generation_reasons_by_date.setdefault(availability_game_date, []).append(
+                    f'Selected host has availability but generated zero slots: {host.name}, {availability_game_date}, {_availability_generation_reason(db, host, availability, demand_by_availability_id.get(availability.id))}'
+                )
     db.flush()
 
     validation_errors: list[str] = []
@@ -10368,7 +10437,7 @@ def _regenerate_and_validate_slots_for_weeks(
     org_names_for_capacity = {org.id: org.name or str(org.id) for org in db.query(Organization).filter(Organization.is_active.is_(True)).all()}
     for week in weeks:
         game_date = _week_game_date(week)
-        if not game_date or _week_date_type(week) == BLACKOUT_DATE_TYPE:
+        if not game_date or not _is_regular_season_week(week):
             continue
         slot_counts = {FIELD_SIZE_SMALL: 0, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_LARGE: 0}
         for field_type, count in db.query(GameSlot.field_type, func.count(GameSlot.id)).filter(
