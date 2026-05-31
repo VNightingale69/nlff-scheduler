@@ -3592,8 +3592,12 @@ def create_host_location(payload: HostLocationCreate, current_user: User = Depen
 
 @router.get('/host-locations', response_model=PagedResponse[HostLocationRead], dependencies=[Depends(get_current_user)])
 def list_host_locations(search: str | None = None, organization_id: uuid.UUID | None = None, is_active: bool | None = None, page: int = 1, page_size: int = 20, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    role_name = normalize_role_name(current_user.role.name)
     q = db.query(HostLocation)
-    if is_community_admin(current_user): q = q.filter(HostLocation.organization_id == current_user.organization_id)
+    selected_organization_id = organization_id
+    if is_community_admin(current_user):
+        selected_organization_id = current_user.organization_id
+        q = q.filter(HostLocation.organization_id == current_user.organization_id)
     elif organization_id: q = q.filter(HostLocation.organization_id == organization_id)
     if search: q = q.filter(func.lower(HostLocation.name).like(f"%{search.lower()}%"))
     if is_active is not None: q = q.filter(HostLocation.is_active == is_active)
@@ -3606,6 +3610,13 @@ def list_host_locations(search: str | None = None, organization_id: uuid.UUID | 
     active_area_host_ids = {host_id for (host_id,) in db.query(PhysicalFieldArea.host_location_id).filter(PhysicalFieldArea.is_active.is_(True)).distinct().all()}
     active_field_host_ids = {host_id for (host_id,) in db.query(Field.host_location_id).filter(Field.is_active.is_(True)).distinct().all()}
     active_config_host_ids = {host_id for (host_id,) in db.query(HostLocationConfiguration.host_location_id).filter(HostLocationConfiguration.is_active.is_(True)).distinct().all()}
+    logger.info(
+        'Host locations API diagnostics: role=%s user_organization_id=%s selected_organization_id=%s returned_count=%s',
+        role_name,
+        current_user.organization_id,
+        selected_organization_id,
+        len(page_data.items),
+    )
     for item in page_data.items:
         effective_surface = item.surface_type or 'GRASS_FIELD'
         has_active_field_setup = item.id in active_config_host_ids if effective_surface == 'TURF_STADIUM' else item.id in active_area_host_ids or item.id in active_field_host_ids
@@ -3651,8 +3662,11 @@ def create_host_location_configuration(payload: HostLocationConfigurationCreate,
 
 @router.get('/host-location-configurations', response_model=PagedResponse[HostLocationConfigurationRead], dependencies=[Depends(get_current_user)])
 def list_host_location_configurations(host_location_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, page: int = 1, page_size: int = 100, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    role_name = normalize_role_name(current_user.role.name)
+    selected_organization_id = organization_id
     q = db.query(HostLocationConfiguration).join(HostLocationConfiguration.host_location)
     if is_community_admin(current_user):
+        selected_organization_id = current_user.organization_id
         q = q.filter(HostLocation.organization_id == current_user.organization_id)
     elif organization_id:
         q = q.filter(HostLocation.organization_id == organization_id)
@@ -3671,6 +3685,14 @@ def list_host_location_configurations(host_location_id: uuid.UUID | None = None,
     if ensured_any:
         db.commit()
     page_data = paginate(q.order_by(HostLocation.name, HostLocationConfiguration.configuration_name), page, page_size)
+    logger.info(
+        'Host location configurations API diagnostics: role=%s user_organization_id=%s selected_organization_id=%s host_location_id=%s returned_count=%s',
+        role_name,
+        current_user.organization_id,
+        selected_organization_id,
+        host_location_id,
+        len(page_data.items),
+    )
     for config in page_data.items:
         _attach_configuration_instances(config)
     return page_data
@@ -3882,12 +3904,27 @@ def create_field(payload: FieldCreate, current_user: User = Depends(get_current_
     x = Field(**{**payload.model_dump(), 'layout_type': _normalize_field_size(payload.layout_type)}); db.add(x); db.commit(); db.refresh(x); return x
 
 @router.get('/fields', response_model=PagedResponse[FieldRead], dependencies=[Depends(get_current_user)])
-def list_fields(search: str | None = None, host_location_id: uuid.UUID | None = None, page: int = 1, page_size: int = 20, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def list_fields(search: str | None = None, host_location_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, page: int = 1, page_size: int = 20, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    role_name = normalize_role_name(current_user.role.name)
+    selected_organization_id = organization_id
     q = db.query(Field).join(Field.host_location)
-    if is_community_admin(current_user): q = q.filter(HostLocation.organization_id == current_user.organization_id)
+    if is_community_admin(current_user):
+        selected_organization_id = current_user.organization_id
+        q = q.filter(HostLocation.organization_id == current_user.organization_id)
+    elif organization_id:
+        q = q.filter(HostLocation.organization_id == organization_id)
     if host_location_id: q = q.filter(Field.host_location_id == host_location_id)
     if search: q = q.filter(func.lower(Field.name).like(f"%{search.lower()}%"))
-    return paginate(q.order_by(Field.name), page, page_size)
+    page_data = paginate(q.order_by(Field.name), page, page_size)
+    logger.info(
+        'Fields API diagnostics: role=%s user_organization_id=%s selected_organization_id=%s host_location_id=%s returned_count=%s',
+        role_name,
+        current_user.organization_id,
+        selected_organization_id,
+        host_location_id,
+        len(page_data.items),
+    )
+    return page_data
 
 @router.put('/fields/{item_id}', response_model=FieldRead, dependencies=[Depends(get_current_user)])
 def upd_field(item_id: uuid.UUID, payload: FieldCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):

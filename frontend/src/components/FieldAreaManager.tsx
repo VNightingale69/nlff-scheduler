@@ -27,6 +27,8 @@ const TURF_LAYOUTS = [
 const formatSurfaceType = (value?: string) => value === TURF_STADIUM ? 'Turf Stadium' : value === GRASS_FIELD ? 'Grass Field' : 'Not set';
 const fieldTypeLabel = (value?: string) => value ? value.charAt(0).toUpperCase() + value.slice(1).toLowerCase() : '—';
 const configuredFieldsText = (count: number) => `${count} active configured field${count === 1 ? '' : 's'}`;
+const configLabel = (value?: string) => TURF_LAYOUTS.find((layout) => layout.name === value)?.title || value || 'Unknown layout';
+const errorMessage = (error: any, fallback: string) => error?.message || fallback;
 
 const supportedGroups = (layout: typeof TURF_LAYOUTS[number]) => {
   const groups: string[] = [];
@@ -43,47 +45,92 @@ export default function FieldAreaManager() {
   const [orgs, setOrgs] = useState<any[]>([]);
   const [hosts, setHosts] = useState<any[]>([]);
   const [fields, setFields] = useState<any[]>([]);
+  const [hostConfigs, setHostConfigs] = useState<any[]>([]);
   const [orgId, setOrgId] = useState('');
   const [hostId, setHostId] = useState('');
+  const [loadingOrgData, setLoadingOrgData] = useState(false);
+  const [hostLoadError, setHostLoadError] = useState('');
+  const [fieldLoadError, setFieldLoadError] = useState('');
   const [fieldForm, setFieldForm] = useState({ name: '', layout_type: '', is_active: true });
   const [editingFieldId, setEditingFieldId] = useState<string | null>(null);
-
-  const load = async () => {
-    const [o, h, f] = await Promise.all([
-      apiFetch('/organizations?page_size=500', {}, token),
-      apiFetch('/host-locations?page_size=500', {}, token),
-      apiFetch('/fields?page_size=2000', {}, token),
-    ]);
-    setOrgs((o as any).items || []);
-    setHosts((h as any).items || []);
-    setFields((f as any).items || []);
-  };
-
-  useEffect(() => { load().catch((e: any) => { setType('err'); setMessage(e.message || 'Failed to load'); }); }, []);
-
-  const hostOptions = useMemo(() => hosts.filter((h: any) => !orgId || h.organization_id === orgId), [hosts, orgId]);
-  const selectedHost = useMemo(() => hosts.find((h: any) => h.id === hostId), [hosts, hostId]);
-  const fieldsByHost = useMemo(() => fields.reduce((map: any, field: any) => ({ ...map, [field.host_location_id]: [...(map[field.host_location_id] || []), field] }), {}), [fields]);
-  const selectedHostFields = fieldsByHost[hostId] || [];
-  const tableHosts = useMemo(() => hosts.filter((h: any) => (!orgId || h.organization_id === orgId) && (!hostId || h.id === hostId)), [hosts, orgId, hostId]);
-  const orgNameById = useMemo(() => Object.fromEntries(orgs.map((org: any) => [org.id, org.name])), [orgs]);
-
-  const onHostChange = (nextHostId: string) => {
-    const host = hosts.find((h: any) => h.id === nextHostId);
-    setHostId(nextHostId);
-    if (host?.organization_id) setOrgId(host.organization_id);
-    setFieldForm({ name: '', layout_type: '', is_active: true });
-    setEditingFieldId(null);
-  };
 
   const resetFieldForm = () => {
     setFieldForm({ name: '', layout_type: '', is_active: true });
     setEditingFieldId(null);
   };
 
-  const editField = (field: any) => {
-    setFieldForm({ name: field.name || '', layout_type: field.layout_type || '', is_active: Boolean(field.is_active) });
-    setEditingFieldId(field.id);
+  const loadOrganizations = async () => {
+    const data = await apiFetch('/organizations?page_size=500', {}, token);
+    const items = (data as any).items || [];
+    setOrgs(items);
+    if (items.length === 1) setOrgId(items[0].id);
+  };
+
+  const loadOrgData = async (nextOrgId: string, nextHostId = '') => {
+    setHostLoadError('');
+    setFieldLoadError('');
+    setHosts([]);
+    setFields([]);
+    setHostConfigs([]);
+    if (!nextOrgId) return;
+
+    setLoadingOrgData(true);
+    const query = nextHostId ? `host_location_id=${encodeURIComponent(nextHostId)}` : `organization_id=${encodeURIComponent(nextOrgId)}`;
+    const hostQuery = `organization_id=${encodeURIComponent(nextOrgId)}&page_size=2000`;
+    let hostRequestFailed = false;
+
+    try {
+      const hostData = await apiFetch(`/host-locations?${hostQuery}`, {}, token);
+      setHosts((hostData as any).items || []);
+    } catch (e: any) {
+      hostRequestFailed = true;
+      const msg = errorMessage(e, 'Failed to load hosting sites.');
+      setHostLoadError(msg);
+      setType('err');
+      setMessage(msg);
+    }
+
+    try {
+      const [fieldData, configData] = await Promise.all([
+        apiFetch(`/fields?${query}&page_size=5000`, {}, token),
+        apiFetch(`/host-location-configurations?${query}&page_size=5000`, {}, token),
+      ]);
+      setFields((fieldData as any).items || []);
+      setHostConfigs((configData as any).items || []);
+    } catch (e: any) {
+      const msg = errorMessage(e, 'Failed to load field configurations.');
+      setFieldLoadError(msg);
+      setType('err');
+      setMessage(msg);
+    } finally {
+      setLoadingOrgData(false);
+    }
+
+    if (!hostRequestFailed) setHostLoadError('');
+  };
+
+  useEffect(() => { loadOrganizations().catch((e: any) => { setType('err'); setMessage(errorMessage(e, 'Failed to load organizations.')); }); }, []);
+  useEffect(() => { loadOrgData(orgId, hostId); }, [orgId, hostId]);
+
+  const hostOptions = useMemo(() => hosts.filter((h: any) => !orgId || h.organization_id === orgId), [hosts, orgId]);
+  const selectedHost = useMemo(() => hosts.find((h: any) => h.id === hostId), [hosts, hostId]);
+  const fieldsByHost = useMemo(() => fields.reduce((map: any, field: any) => ({ ...map, [field.host_location_id]: [...(map[field.host_location_id] || []), field] }), {}), [fields]);
+  const hostConfigsByHost = useMemo(() => hostConfigs.reduce((map: any, config: any) => ({ ...map, [config.host_location_id]: [...(map[config.host_location_id] || []), config] }), {}), [hostConfigs]);
+  const selectedHostFields = fieldsByHost[hostId] || [];
+  const tableHosts = useMemo(() => hosts.filter((h: any) => (!orgId || h.organization_id === orgId) && (!hostId || h.id === hostId)), [hosts, orgId, hostId]);
+  const orgNameById = useMemo(() => Object.fromEntries(orgs.map((org: any) => [org.id, org.name])), [orgs]);
+
+  const onOrgChange = (nextOrgId: string) => {
+    setOrgId(nextOrgId);
+    setHostId('');
+    resetFieldForm();
+  };
+
+  const onHostChange = (nextHostId: string) => {
+    const host = hosts.find((h: any) => h.id === nextHostId);
+    setHostId(nextHostId);
+    if (host?.organization_id) setOrgId(host.organization_id);
+    resetFieldForm();
   };
 
   const saveField = async () => {
@@ -97,7 +144,7 @@ export default function FieldAreaManager() {
       else await apiFetch('/fields', { method: 'POST', body: JSON.stringify(payload) }, token);
       setType('ok'); setMessage(editingFieldId ? 'Field updated.' : 'Field added.');
       resetFieldForm();
-      await load();
+      await loadOrgData(orgId, hostId);
     } catch (e: any) { setType('err'); setMessage(e.message || 'Save failed'); }
   };
 
@@ -105,8 +152,41 @@ export default function FieldAreaManager() {
     try {
       await apiFetch(`/fields/${field.id}`, { method: 'PUT', body: JSON.stringify({ ...field, layout_type: field.layout_type, is_active: false }) }, token);
       setType('ok'); setMessage('Field deactivated. Inactive fields are not available for slot generation.');
-      await load();
+      await loadOrgData(orgId, hostId);
     } catch (e: any) { setType('err'); setMessage(e.message || 'Unable to deactivate field'); }
+  };
+
+  const renderSetupRows = () => {
+    if (!orgId) return <tr><td className='border p-3 text-center text-slate-500' colSpan={9}>Select an organization to view hosting site setups.</td></tr>;
+    if (hostLoadError || fieldLoadError) return <tr><td className='border p-3 text-center text-rose-700' colSpan={9}>Unable to load setup data. {hostLoadError || fieldLoadError}</td></tr>;
+    if (loadingOrgData) return <tr><td className='border p-3 text-center text-slate-500' colSpan={9}>Loading hosting site setups…</td></tr>;
+    if (!tableHosts.length) return <tr><td className='border p-3 text-center text-slate-500' colSpan={9}>No hosting sites have been added for this community.</td></tr>;
+
+    return tableHosts.map((host: any) => {
+      const hostFields = fieldsByHost[host.id] || [];
+      const activeFields = hostFields.filter((field: any) => field.is_active);
+      const activeConfigs = (hostConfigsByHost[host.id] || []).filter((config: any) => config.is_active);
+      const surfaceType = host.surface_type || GRASS_FIELD;
+      const counts = surfaceType === TURF_STADIUM ? {
+        large: activeConfigs.reduce((sum: number, config: any) => sum + (config.large_field_count || 0), 0),
+        medium: activeConfigs.reduce((sum: number, config: any) => sum + (config.medium_field_count || 0), 0),
+        small: activeConfigs.reduce((sum: number, config: any) => sum + (config.small_field_count || 0), 0),
+      } : {
+        large: activeFields.filter((field: any) => field.layout_type === 'LARGE').length,
+        medium: activeFields.filter((field: any) => field.layout_type === 'MEDIUM').length,
+        small: activeFields.filter((field: any) => field.layout_type === 'SMALL').length,
+      };
+      const isReady = surfaceType === TURF_STADIUM ? Boolean(host.is_active && activeConfigs.length) : activeFields.length > 0;
+      return <tr key={host.id}>
+        <td className='border p-2'>{orgNameById[host.organization_id] || 'Unknown'}</td>
+        <td className='border p-2'>{host.name}</td>
+        <td className='border p-2'>{formatSurfaceType(surfaceType)}</td>
+        <td className='border p-2'>{surfaceType === TURF_STADIUM ? (activeConfigs.length ? activeConfigs.map((config: any) => configLabel(config.configuration_name)).join(', ') : 'No active turf layouts') : configuredFieldsText(activeFields.length)}</td>
+        <td className='border p-2'>{counts.large}</td><td className='border p-2'>{counts.medium}</td><td className='border p-2'>{counts.small}</td>
+        <td className='border p-2'>{isReady ? 'Active' : 'Needs setup'}</td>
+        <td className='border p-2'><button className='rounded border px-2 py-1 text-xs' onClick={() => onHostChange(host.id)}>Edit</button></td>
+      </tr>;
+    });
   };
 
   return <div className='space-y-4'>
@@ -116,15 +196,18 @@ export default function FieldAreaManager() {
     <section className='rounded border p-4'>
       <h2 className='mb-2 font-semibold'>1. Choose Host Location</h2>
       <div className='grid gap-2 md:grid-cols-2'>
-        <select className='rounded border p-2' value={orgId} onChange={(e) => { setOrgId(e.target.value); setHostId(''); resetFieldForm(); }}>
+        <select className='rounded border p-2' value={orgId} onChange={(e) => onOrgChange(e.target.value)}>
           <option value=''>Select Organization</option>
           {orgs.map((org: any) => <option key={org.id} value={org.id}>{org.name}</option>)}
         </select>
-        <select className='rounded border p-2' value={hostId} onChange={(e) => onHostChange(e.target.value)}>
+        <select className='rounded border p-2' value={hostId} onChange={(e) => onHostChange(e.target.value)} disabled={!orgId || Boolean(hostLoadError) || !hostOptions.length}>
           <option value=''>Select Hosting Site</option>
           {hostOptions.map((host: any) => <option key={host.id} value={host.id}>{host.name}</option>)}
         </select>
       </div>
+      {hostLoadError && <p className='mt-3 rounded border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800'>Hosting sites failed to load: {hostLoadError}</p>}
+      {fieldLoadError && <p className='mt-3 rounded border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800'>Field configurations failed to load: {fieldLoadError}</p>}
+      {orgId && !hostLoadError && !loadingOrgData && !hostOptions.length && <p className='mt-3 rounded bg-slate-100 p-3 text-sm text-slate-700'>No hosting sites have been added for this community.</p>}
       {selectedHost && <div className='mt-3 rounded bg-slate-100 px-3 py-2 text-sm font-medium'>Surface Type: {formatSurfaceType(selectedHost.surface_type)}</div>}
       {selectedHost && <p className='mt-2 text-sm text-slate-600'>Surface type is read-only here and is managed from Host Locations.</p>}
     </section>
@@ -164,7 +247,7 @@ export default function FieldAreaManager() {
       <div className='mt-4 overflow-x-auto'>
         <table className='w-full text-sm'>
           <thead><tr><th className='border p-2 text-left'>Field Name</th><th className='border p-2 text-left'>Field Type</th><th className='border p-2 text-left'>Active</th><th className='border p-2 text-left'>Actions</th></tr></thead>
-          <tbody>{selectedHostFields.length ? selectedHostFields.map((field: any) => <tr key={field.id}><td className='border p-2'>{field.name}</td><td className='border p-2'>{fieldTypeLabel(field.layout_type)}</td><td className='border p-2'>{field.is_active ? 'Active' : 'Inactive'}</td><td className='border p-2'><div className='flex gap-2'><button className='rounded border px-2 py-1 text-xs' onClick={() => editField(field)}>Edit Field</button><button className='rounded border px-2 py-1 text-xs' disabled={!field.is_active} onClick={() => deactivateField(field)}>Deactivate Field</button></div></td></tr>) : <tr><td className='border p-3 text-center text-slate-500' colSpan={4}>No fields configured.</td></tr>}</tbody>
+          <tbody>{fieldLoadError ? <tr><td className='border p-3 text-center text-rose-700' colSpan={4}>Field configurations failed to load: {fieldLoadError}</td></tr> : selectedHostFields.length ? selectedHostFields.map((field: any) => <tr key={field.id}><td className='border p-2'>{field.name}</td><td className='border p-2'>{fieldTypeLabel(field.layout_type)}</td><td className='border p-2'>{field.is_active ? 'Active' : 'Inactive'}</td><td className='border p-2'><div className='flex gap-2'><button className='rounded border px-2 py-1 text-xs' onClick={() => { setFieldForm({ name: field.name || '', layout_type: field.layout_type || '', is_active: Boolean(field.is_active) }); setEditingFieldId(field.id); }}>Edit Field</button><button className='rounded border px-2 py-1 text-xs' disabled={!field.is_active} onClick={() => deactivateField(field)}>Deactivate Field</button></div></td></tr>) : <tr><td className='border p-3 text-center text-slate-500' colSpan={4}>No fields configured.</td></tr>}</tbody>
         </table>
       </div>
       <div className='mt-3 rounded bg-slate-50 p-3 text-xs text-slate-700'>
@@ -180,26 +263,7 @@ export default function FieldAreaManager() {
       <div className='overflow-x-auto'>
         <table className='w-full text-sm'>
           <thead><tr><th className='border p-2 text-left'>Organization</th><th className='border p-2 text-left'>Host Location</th><th className='border p-2 text-left'>Surface Type</th><th className='border p-2 text-left'>Available Layout / Configured Fields</th><th className='border p-2 text-left'>Large Fields</th><th className='border p-2 text-left'>Medium Fields</th><th className='border p-2 text-left'>Small Fields</th><th className='border p-2 text-left'>Status</th><th className='border p-2 text-left'>Actions</th></tr></thead>
-          <tbody>{tableHosts.map((host: any) => {
-            const hostFields = fieldsByHost[host.id] || [];
-            const activeFields = hostFields.filter((field: any) => field.is_active);
-            const surfaceType = host.surface_type || GRASS_FIELD;
-            const counts = surfaceType === TURF_STADIUM ? { large: '0–2', medium: '0–2', small: '0–3' } : {
-              large: activeFields.filter((field: any) => field.layout_type === 'LARGE').length,
-              medium: activeFields.filter((field: any) => field.layout_type === 'MEDIUM').length,
-              small: activeFields.filter((field: any) => field.layout_type === 'SMALL').length,
-            };
-            const isReady = surfaceType === TURF_STADIUM ? Boolean(host.is_active) : activeFields.length > 0;
-            return <tr key={host.id}>
-              <td className='border p-2'>{orgNameById[host.organization_id] || 'Unknown'}</td>
-              <td className='border p-2'>{host.name}</td>
-              <td className='border p-2'>{formatSurfaceType(surfaceType)}</td>
-              <td className='border p-2'>{surfaceType === TURF_STADIUM ? 'All approved turf stadium layouts' : configuredFieldsText(activeFields.length)}</td>
-              <td className='border p-2'>{counts.large}</td><td className='border p-2'>{counts.medium}</td><td className='border p-2'>{counts.small}</td>
-              <td className='border p-2'>{isReady ? 'Active' : 'Needs setup'}</td>
-              <td className='border p-2'><button className='rounded border px-2 py-1 text-xs' onClick={() => onHostChange(host.id)}>Edit</button></td>
-            </tr>;
-          })}</tbody>
+          <tbody>{renderSetupRows()}</tbody>
         </table>
       </div>
     </section>
