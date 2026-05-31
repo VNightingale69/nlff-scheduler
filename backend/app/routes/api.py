@@ -25,7 +25,7 @@ from app.schemas import (
 )
 from app.security import create_access_token, create_refresh_token, hash_password, validate_password_strength, verify_password, decode_token
 from app.services.game_statuses import REQUIRED_GAME_STATUSES, ensure_required_game_statuses
-from app.services.organization_cleanup import cleanup_organization_dependencies
+from app.services.organization_cleanup import cleanup_organization_dependencies, collect_organization_delete_inventory
 from app.services.scheduling_validation import validate_game
 
 router = APIRouter(prefix='/api')
@@ -1383,6 +1383,8 @@ def get_organization_delete_check(org_id: uuid.UUID, db: Session = Depends(get_d
     if not o: raise HTTPException(404, 'Organization not found')
     try:
         dependencies = _organization_dependency_summary(db, org_id)
+        inventory = collect_organization_delete_inventory(db, org_id)
+        counts = inventory['counts']
     except SQLAlchemyError:
         db.rollback()
         logger.exception('Organization dependency check failed for org_id=%s', org_id)
@@ -1396,7 +1398,8 @@ def get_organization_delete_check(org_id: uuid.UUID, db: Session = Depends(get_d
     return {
         'organization_id': str(o.id),
         'organization_name': o.name,
-        'can_delete': all((isinstance(count, int) and count == 0) for _, count in dependencies),
+        'can_delete': True,
+        'counts': counts,
         'dependencies': [{'label': label, 'count': count} for label, count in dependencies],
     }
 
