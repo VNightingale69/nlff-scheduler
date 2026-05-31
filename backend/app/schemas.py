@@ -347,15 +347,22 @@ class SavedAvailabilityResponse(BaseModel):
 
 class GeneratedSlotRead(BaseModel):
     id: uuid.UUID
+    season_id: uuid.UUID | None = None
+    season_week_id: uuid.UUID | None = None
     week_id: uuid.UUID | None = None
+    game_date: date
     available_date: date
     date_type: str | None = None
+    host_location_id: uuid.UUID | None = None
     host_location_name: str
+    field_instance_id: uuid.UUID | None = None
     field_instance_name: str
+    field_size: str
     field_type: str
     start_time: time
     end_time: time
     status: str
+    is_available: bool = True
     is_locked: bool = False
 
 

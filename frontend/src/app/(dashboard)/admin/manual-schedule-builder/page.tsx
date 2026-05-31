@@ -466,7 +466,8 @@ export default function ManualScheduleBuilderPage() {
               onClick={async () => {
                 setError('');
                 setSuccess('');
-                setAutoScheduleDiagnostics(null);
+                // Keep the previous diagnostics visible while the next run is in progress.
+                // They will be replaced by the HTTP 200 response even when the response status is warning/incomplete.
                 setAutoScheduleSeasonLoading(true);
                 try {
                   const res: any = await apiFetch('/manual-schedule-builder/auto-schedule-season', { method: 'POST', body: JSON.stringify({ season_id: seasonId, clear_existing: clearExistingBeforeAutoSchedule, dry_run: autoScheduleDryRun }) }, token);
@@ -588,6 +589,10 @@ export default function ManualScheduleBuilderPage() {
               </div>)}
             </div>
           </div> : null}
+          <details className='rounded border border-slate-200 bg-white p-2'>
+            <summary className='cursor-pointer font-semibold'>Raw auto-schedule diagnostics payload</summary>
+            <pre className='mt-2 max-h-96 overflow-auto whitespace-pre-wrap text-xs'>{JSON.stringify(autoScheduleDiagnostics, null, 2)}</pre>
+          </details>
         </div>
       </details> : null}
     </div>
