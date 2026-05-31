@@ -15,6 +15,8 @@ depends_on = None
 
 
 def upgrade() -> None:
+    op.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto;")
+
     op.execute("""
         UPDATE roles SET name = 'LEAGUE_ADMIN', description = 'Global administrative access across all organizations', is_active = true
         WHERE name = 'league_admin' AND NOT EXISTS (SELECT 1 FROM roles WHERE name = 'LEAGUE_ADMIN');
