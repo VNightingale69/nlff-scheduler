@@ -129,7 +129,7 @@ export default function HostingAvailabilityManager() {
         setAreas(a.items || []);
         setConfigs(c.items || []);
         setHostConfigs(hc.items || []);
-        if (user?.role_name === 'community_scheduler') setOrgId(user.organization_id || '');
+        if (user?.role_name === 'COMMUNITY_ADMIN') setOrgId(user.organization_id || '');
         else if (preselectedOrgId) setOrgId(preselectedOrgId);
         if (preselectedHostId) setHostId(preselectedHostId);
       } catch (e: any) {
@@ -537,7 +537,7 @@ export default function HostingAvailabilityManager() {
 
       <section className='rounded border p-4'>
         <h2 className='mb-2 font-semibold'>1. Select Organization</h2>
-        <select disabled={user?.role_name === 'community_scheduler'} value={orgId} onChange={(e) => setOrgId(e.target.value)} className='w-full rounded border p-2 md:w-1/2'>
+        <select disabled={user?.role_name === 'COMMUNITY_ADMIN'} value={orgId} onChange={(e) => setOrgId(e.target.value)} className='w-full rounded border p-2 md:w-1/2'>
           <option value=''>Select organization</option>
           {orgs.map((o: any) => (
             <option key={o.id} value={o.id}>{o.name}</option>

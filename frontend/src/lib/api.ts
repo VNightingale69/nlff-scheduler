@@ -31,7 +31,7 @@ async function parseJsonSafely(raw: string): Promise<unknown> {
   }
 }
 
-export async function apiFetch(path: string, opts: RequestInit = {}, token?: string) {
+export async function apiFetch(path: string, opts: RequestInit = {}, token?: string): Promise<any> {
   let res: Response;
   try {
     res = await fetch(`${API_URL}${path}`, {

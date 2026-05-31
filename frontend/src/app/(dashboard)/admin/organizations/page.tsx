@@ -23,7 +23,7 @@ export default function OrganizationsAdminPage() {
   const [cascadeConfirmed, setCascadeConfirmed] = useState(false);
 
   const user = getAuthUser();
-  const isLeagueAdmin = user?.role_name === 'league_admin';
+  const isLeagueAdmin = user?.role_name === 'LEAGUE_ADMIN';
   const notifyOrganizationsChanged = () => window.dispatchEvent(new Event('organizations:changed'));
   const notifyAdminDataChanged = () => window.dispatchEvent(new Event('admin:data-changed'));
 
@@ -97,15 +97,15 @@ export default function OrganizationsAdminPage() {
 
   return <div className='space-y-4'>
     <Toast message={message} type={type} />
-    <h1 className='text-2xl font-bold'>Organizations</h1>
+    <h1 className='text-2xl font-bold'>{isLeagueAdmin ? 'Organizations' : 'My Community'}</h1>
     <div className='flex gap-2'><input className='w-full max-w-sm rounded border p-2' value={query} onChange={(e) => setQuery(e.target.value)} placeholder='Search...' /><button className='rounded bg-slate-700 px-3 py-2 text-white' onClick={load}>Filter</button></div>
     <div className='grid gap-3 rounded border p-4 md:grid-cols-2'>
       <FormField label='Name' type='text' value={form.name ?? ''} onChange={(v) => setForm({ ...form, name: String(v) })} />
-      <FormField label='Active' type='checkbox' value={form.is_active ?? true} onChange={(v) => setForm({ ...form, is_active: Boolean(v) })} />
-      <div className='md:col-span-2 flex gap-2'><button className='rounded bg-emerald-700 px-4 py-2 text-white disabled:opacity-50' onClick={save} disabled={saving}>{saving ? 'Saving…' : editingId ? 'Update' : 'Create'}</button>{editingId && <button className='rounded border px-4 py-2' onClick={() => { setForm({ is_active: true }); setEditingId(null); }}>Cancel</button>}</div>
+      {isLeagueAdmin && <FormField label='Active' type='checkbox' value={form.is_active ?? true} onChange={(v) => setForm({ ...form, is_active: Boolean(v) })} />}
+      <div className='md:col-span-2 flex gap-2'><button className='rounded bg-emerald-700 px-4 py-2 text-white disabled:opacity-50' onClick={save} disabled={saving || (!isLeagueAdmin && !editingId)}>{saving ? 'Saving…' : editingId ? 'Update' : 'Create'}</button>{editingId && <button className='rounded border px-4 py-2' onClick={() => { setForm({ is_active: true }); setEditingId(null); }}>Cancel</button>}</div>
     </div>
 
-    {loading ? <p>Loading records...</p> : <div className='overflow-x-auto rounded border'><table className='w-full text-left text-sm'><thead className='bg-slate-100'><tr><th className='px-3 py-2'>Name</th><th className='px-3 py-2'>Active</th><th className='px-3 py-2'>Actions</th></tr></thead><tbody>{items.map((item) => <tr key={item.id} className='border-t'><td className='px-3 py-2'>{item.name}</td><td className='px-3 py-2'>{item.is_active ? 'Active' : 'Inactive'}</td><td className='space-x-2 px-3 py-2'><button className='text-blue-700' onClick={() => { setForm(item); setEditingId(item.id); }}>Edit</button><button className='text-rose-700' onClick={() => openDeleteModal(item)}>Delete</button></td></tr>)}</tbody></table></div>}
+    {loading ? <p>Loading records...</p> : <div className='overflow-x-auto rounded border'><table className='w-full text-left text-sm'><thead className='bg-slate-100'><tr><th className='px-3 py-2'>Name</th><th className='px-3 py-2'>Active</th><th className='px-3 py-2'>Actions</th></tr></thead><tbody>{items.map((item) => <tr key={item.id} className='border-t'><td className='px-3 py-2'>{item.name}</td><td className='px-3 py-2'>{item.is_active ? 'Active' : 'Inactive'}</td><td className='space-x-2 px-3 py-2'><button className='text-blue-700' onClick={() => { setForm(item); setEditingId(item.id); }}>Edit</button>{isLeagueAdmin && <button className='text-rose-700' onClick={() => openDeleteModal(item)}>Delete</button>}</td></tr>)}</tbody></table></div>}
 
     {deleteTarget && <div className='fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4'><div className='w-full max-w-lg rounded bg-white p-5 shadow-lg'>
       <h2 className='text-lg font-semibold'>Organization Actions</h2>

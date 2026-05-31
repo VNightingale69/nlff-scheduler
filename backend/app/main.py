@@ -8,10 +8,10 @@ from sqlalchemy.exc import SQLAlchemyError
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
-from app.auth import ROLE_COMMUNITY_SCHEDULER, ROLE_LEAGUE_ADMIN
+from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN
 from app.config import ADMIN_SEED_EMAIL, ADMIN_SEED_FULL_NAME, ADMIN_SEED_PASSWORD, CORS_ORIGINS
 from app.database import get_db
-from app.models import Role, Season, User, Week
+from app.models import Organization, Role, Season, User, Week
 from app.routes.api import ensure_league_defined_divisions, router as api_router
 from app.security import hash_password, validate_password_strength
 from app.services.game_statuses import seed_required_game_statuses
@@ -100,9 +100,19 @@ def seed_auth_data() -> None:
             return
 
         created_roles: list[str] = []
+        for legacy_name, canonical_name in [('league_admin', ROLE_LEAGUE_ADMIN), ('community_scheduler', ROLE_COMMUNITY_ADMIN)]:
+            legacy_role = db.query(Role).filter(Role.name == legacy_name).first()
+            canonical_role = db.query(Role).filter(Role.name == canonical_name).first()
+            if legacy_role and not canonical_role:
+                legacy_role.name = canonical_name
+                legacy_role.description = 'Global administrative access across all organizations' if canonical_name == ROLE_LEAGUE_ADMIN else 'Community-scoped administrative access'
+                legacy_role.is_active = True
+            elif legacy_role and canonical_role:
+                db.query(User).filter(User.role_id == legacy_role.id).update({User.role_id: canonical_role.id}, synchronize_session=False)
+                legacy_role.is_active = False
         for role_name, description in [
             (ROLE_LEAGUE_ADMIN, 'Global administrative access across all organizations'),
-            (ROLE_COMMUNITY_SCHEDULER, 'Organization-scoped scheduling access'),
+            (ROLE_COMMUNITY_ADMIN, 'Community-scoped administrative access'),
         ]:
             role = db.query(Role).filter(Role.name == role_name).first()
             if not role:
@@ -137,7 +147,47 @@ def seed_auth_data() -> None:
                 )
             else:
                 logger.info('Auth seed complete: admin user=%s created; roles already existed.', ADMIN_SEED_EMAIL)
-            return
+
+
+        community_role = db.query(Role).filter(Role.name == ROLE_COMMUNITY_ADMIN).first()
+        if community_role:
+            seeded_accounts = [
+                ('Lake County Stallions', 'Amy Schneider', 'aeschneider622@gmail.com', 'LakeCounty1'),
+                ('Lake County Stallions', 'Katie Gandolf', 'lcstallionsflagfootball@gmail.com', 'LakeCounty2'),
+                ('Lake County Stallions', 'Mike Schneider', 'michaelwb01@yahoo.com', 'LakeCounty3'),
+                ('Cary', 'Brent Harmeier', 'harms827@gmail.com', 'Cary1'),
+                ('Johnsburg', 'Eric Lostroscio', 'elostroscio@gmail.com', 'Johnsburg1'),
+                ('Johnsburg', 'Tiffany Kendzior', 'kendzior.t@gmail.com', 'Johnsburg2'),
+                ('Woodstock', 'Juan Cabajal', 'ju2carb@gmail.com', 'Woodstock1'),
+                ('Westosha', 'Lisa Nightingale', 'LAR_Nightingale@hotmail.com', 'Westosha1'),
+                ('Antioch', 'Nick Stafford', 'nicholasjstafford@gmail.com', 'Antioch1'),
+                ('Prairie Ridge', 'Stephanie Dycha', 'sdycha144@gmail.com', 'PrairieRidge1'),
+            ]
+            for organization_name, full_name, email, password in seeded_accounts:
+                organization = db.query(Organization).filter(Organization.name == organization_name).first()
+                if not organization:
+                    organization = Organization(name=organization_name, is_active=True)
+                    db.add(organization)
+                    db.flush()
+                normalized_email = email.strip().lower()
+                user = db.query(User).filter(User.email.ilike(normalized_email)).first()
+                if not user:
+                    db.add(
+                        User(
+                            email=normalized_email,
+                            full_name=full_name,
+                            password_hash=hash_password(password),
+                            role_id=community_role.id,
+                            organization_id=organization.id,
+                            is_active=True,
+                        )
+                    )
+                else:
+                    user.full_name = full_name
+                    user.role_id = community_role.id
+                    user.organization_id = organization.id
+                    user.is_active = True
+            db.commit()
 
         if created_roles:
             logger.info(
