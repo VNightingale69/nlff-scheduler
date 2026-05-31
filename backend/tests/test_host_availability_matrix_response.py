@@ -50,6 +50,12 @@ class HostAvailabilityMatrixResponseTest(unittest.TestCase):
 
     def test_available_and_unavailable_cells_without_selections_do_not_lock(self):
         response = _host_availability_matrix_response(self.db, self.season.id)
+        self.assertEqual('2026-06-06', response['dates'][0]['game_date'])
+        self.assertEqual('2026-06-06', response['dates'][0]['primary_game_date'])
+        self.assertEqual('2026-06-06', response['dates'][0]['start_date'])
+        self.assertEqual('2026-06-06', response['dates'][0]['end_date'])
+        self.assertEqual('Week 1', response['dates'][0]['week_label'])
+
         rows_by_host = {row['host_location_name']: row for row in response['rows']}
         available_cell = rows_by_host['Available Field']['cells']['2026-06-06']
         unavailable_cell = rows_by_host['Unavailable Field']['cells']['2026-06-06']

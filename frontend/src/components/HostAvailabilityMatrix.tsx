@@ -6,9 +6,13 @@ import { type AuthUser, getAuthUser, getToken } from '@/lib/auth';
 
 type MatrixDate = {
   game_date: string;
+  primary_game_date?: string | null;
+  start_date?: string | null;
+  end_date?: string | null;
   week_id: string | null;
   week_number: number | null;
   label: string;
+  week_label?: string | null;
   is_postseason: boolean;
   status: string | null;
   date_type?: string | null;
@@ -84,10 +88,15 @@ const CELL_CLASSES: Record<string, string> = {
   BLOCKED_FIELD_SIZE: 'bg-purple-100 text-purple-700',
 };
 
+const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
 function formatDate(value: string) {
-  const [year, month, day] = value.split('-').map(Number);
-  if (!year || !month || !day) return value;
-  return new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' }).format(new Date(Date.UTC(year, month - 1, day)));
+  const [yearText, monthText, dayText] = value.split('-');
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  if (!year || !month || !day || month < 1 || month > 12) return value;
+  return `${MONTH_LABELS[month - 1]} ${day}`;
 }
 
 function emptyMatrix(): MatrixResponse {
@@ -140,7 +149,7 @@ export default function HostAvailabilityMatrix() {
       const res = await apiFetch(`/host-availability-matrix?season_id=${seasonId}`, {}, token) as MatrixResponse;
       setMatrix(res);
       const params = new URLSearchParams(window.location.search);
-      const requestedDate = params.get('game_date') || params.get('start_date');
+      const requestedDate = params.get('game_date') || params.get('primary_game_date') || params.get('start_date');
       const hasRequestedDate = Boolean(requestedDate && res.dates.some((date) => date.game_date === requestedDate));
 
       // The matrix should always open in the league-wide season view. Query-string
