@@ -129,6 +129,37 @@ class HostPlanGeneratedSlotsTest(unittest.TestCase):
         validation_row = result['validation_rows'][0]
         self.assertEqual(validation_row['missing_field_sizes'], [])
         self.assertEqual(validation_row['host_locations_evaluated'], ['Westosha Stadium'])
+        diagnostics = validation_row['selected_host_generated_slot_diagnostics']
+        self.assertEqual(1, len(diagnostics))
+        self.assertEqual(str(self.host.id), diagnostics[0]['host_location_id'])
+        self.assertEqual('Westosha Stadium', diagnostics[0]['host_location_name'])
+        self.assertEqual(str(self.week6.id), diagnostics[0]['season_week_id'])
+        self.assertEqual('2026-09-13', diagnostics[0]['primary_game_date'])
+        self.assertEqual(str(self.selection.id), diagnostics[0]['host_plan_selection_id'])
+        self.assertEqual(str(self.availability.id), diagnostics[0]['hosting_availability_id'])
+        self.assertEqual('season_id_week_id_host_location_id', diagnostics[0]['lookup_method_used'])
+        self.assertGreater(diagnostics[0]['generated_slots_by_size']['SMALL'], 0)
+        self.assertGreater(diagnostics[0]['generated_slots_by_size']['MEDIUM'], 0)
+        self.assertGreater(diagnostics[0]['generated_slots_by_size']['LARGE'], 0)
+        self.assertIsNone(diagnostics[0]['zero_slot_reason'])
+
+    def test_selected_host_warns_when_hosting_availability_record_missing(self):
+        self.selection.availability_id = None
+        self.db.delete(self.availability)
+        self.db.commit()
+
+        result = _regenerate_and_validate_slots_for_weeks(
+            self.db,
+            [self.week6],
+            [('COED', 'K-1'), ('COED', '4-5'), ('COED', '6-7')],
+        )
+
+        diagnostics = result['validation_rows'][0]['selected_host_generated_slot_diagnostics']
+        self.assertEqual(1, len(diagnostics))
+        self.assertIsNone(diagnostics[0]['hosting_availability_id'])
+        self.assertEqual('not_found', diagnostics[0]['lookup_method_used'])
+        self.assertEqual('Host selected but no Hosting Availability record exists.', diagnostics[0]['zero_slot_reason'])
+        self.assertTrue(any('Host selected but no Hosting Availability record exists.' in reason for reason in result['validation_rows'][0]['generation_reasons']))
 
     def test_playoff_selected_host_does_not_generate_regular_season_slots(self):
         self.week6.date_type = 'PLAYOFF'
