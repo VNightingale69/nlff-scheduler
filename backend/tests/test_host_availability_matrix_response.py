@@ -88,11 +88,11 @@ class HostAvailabilityMatrixResponseTest(unittest.TestCase):
         self.assertEqual('MISSING_AVAILABILITY', cell['status'])
         self.assertFalse(cell['locked'])
         self.assertFalse(cell['has_saved_availability'])
-        self.assertEqual('Missing Hosting Availability', cell['reason'])
+        self.assertEqual('Selected host is missing Hosting Availability and cannot be used.', cell['reason'])
         self.assertEqual([], response['summaries'][0]['selected_fields'])
 
 
-    def test_selected_host_with_legacy_non_keyed_availability_is_missing_until_repaired(self):
+    def test_selected_host_with_legacy_non_keyed_availability_is_repaired_by_matrix_resolver(self):
         self.availability.primary_game_date = None
         self.db.add(HostPlanSelection(
             id=uuid.uuid4(),
@@ -107,8 +107,11 @@ class HostAvailabilityMatrixResponseTest(unittest.TestCase):
 
         response = _host_availability_matrix_response(self.db, self.season.id)
         cell = {row['host_location_name']: row for row in response['rows']}['Available Field']['cells']['2026-06-06']
-        self.assertEqual('MISSING_AVAILABILITY', cell['status'])
-        self.assertEqual('Missing Hosting Availability', cell['reason'])
+        self.assertEqual('SELECTED', cell['status'])
+        self.assertTrue(cell['has_saved_availability'])
+        self.db.refresh(self.availability)
+        self.assertEqual(self.week.id, self.availability.week_id)
+        self.assertEqual(date(2026, 6, 6), self.availability.primary_game_date)
 
         user = type('User', (), {'email': 'admin@example.com'})()
         result = create_missing_hosting_availabilities(
@@ -117,15 +120,8 @@ class HostAvailabilityMatrixResponseTest(unittest.TestCase):
             db=self.db,
         )
         self.assertEqual(0, result['created'])
-        self.assertEqual(1, result['updated'])
-        self.db.refresh(self.availability)
-        self.assertEqual(self.week.id, self.availability.week_id)
-        self.assertEqual(date(2026, 6, 6), self.availability.primary_game_date)
-
-        repaired_response = _host_availability_matrix_response(self.db, self.season.id)
-        repaired_cell = {row['host_location_name']: row for row in repaired_response['rows']}['Available Field']['cells']['2026-06-06']
-        self.assertEqual('SELECTED', repaired_cell['status'])
-        self.assertTrue(repaired_cell['has_saved_availability'])
+        self.assertEqual(0, result['updated'])
+        self.assertGreaterEqual(result['unchanged'], 1)
 
     def test_selected_host_uses_lookup_for_capacity_summary(self):
         self.db.add(HostPlanSelection(

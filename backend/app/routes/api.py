@@ -909,7 +909,6 @@ def _regenerate_generated_slots(
             GameSlot.host_location_id == host_location_id,
             GameSlot.season_id == availability.season_id,
             GameSlot.week_id == availability.week_id,
-            GameSlot.slot_date == slot_date,
             GameSlot.assigned_game_id.is_(None),
             ~GameSlot.field_instance_id.in_(
                 db.query(FieldInstance.id).filter(FieldInstance.hosting_availability_id == availability.id)
@@ -2478,7 +2477,8 @@ HOST_PLAN_SCHEDULABLE_STATUSES = {'SELECTED', 'LOCKED', 'OVERFLOW'}
 HOST_PLAN_IGNORED_STATUSES = {'AVAILABLE', 'NOT_AVAILABLE', 'EXCLUDED', 'BLOCKED_CAPACITY', 'BLOCKED_ROTATION', 'BLOCKED_FIELD_SIZE'}
 HOST_PLAN_REQUIRES_AVAILABILITY_STATUSES = HOST_PLAN_SCHEDULABLE_STATUSES
 HOST_PLAN_MISSING_AVAILABILITY_MESSAGE = 'Missing Hosting Availability'
-HOST_PLAN_SKIPPED_MISSING_AVAILABILITY_MESSAGE = 'Selected host skipped because no Hosting Availability record exists.'
+HOST_PLAN_SELECTED_MISSING_AVAILABILITY_MESSAGE = 'Selected host is missing Hosting Availability and cannot be used.'
+HOST_PLAN_SKIPPED_MISSING_AVAILABILITY_MESSAGE = 'Host selected but no Hosting Availability record exists.'
 
 
 def _base_host_plan_availability_query(
@@ -2507,6 +2507,143 @@ def _exact_host_plan_availability_query(
     )
 
 
+def _availability_normalized_dates(availability: HostingAvailability) -> set[date]:
+    dates = {
+        _normalize_local_date_only(availability.primary_game_date),
+        _normalize_local_date_only(availability.available_date),
+    }
+    return {value for value in dates if value}
+
+
+def _availability_matches_date(availability: HostingAvailability, expected_date: date) -> bool:
+    return expected_date in _availability_normalized_dates(availability)
+
+
+def _availability_matches_utc_shifted_date(availability: HostingAvailability, expected_date: date) -> bool:
+    shifted_dates = {expected_date - timedelta(days=1), expected_date + timedelta(days=1)}
+    return bool(_availability_normalized_dates(availability).intersection(shifted_dates))
+
+
+def _availability_within_week_range(availability: HostingAvailability, week: Week) -> bool:
+    for value in _availability_normalized_dates(availability):
+        if week.start_date <= value <= week.end_date:
+            return True
+    return False
+
+
+def _repair_hosting_availability_key(
+    db: Session,
+    availability: HostingAvailability,
+    season_id: uuid.UUID | str,
+    week: Week,
+    game_date: date,
+    host: HostLocation | None = None,
+) -> list[str]:
+    repairs: list[str] = []
+    expected_season_id = week.season_id or season_id
+    if str(availability.season_id) != str(expected_season_id):
+        repairs.append(f'season_id:{availability.season_id}->{expected_season_id}')
+        availability.season_id = expected_season_id
+    if availability.week_id != week.id:
+        repairs.append(f'season_week_id:{availability.week_id}->{week.id}')
+        availability.week_id = week.id
+    if _normalize_local_date_only(availability.primary_game_date) != game_date:
+        repairs.append(f'primary_game_date:{availability.primary_game_date}->{game_date}')
+        availability.primary_game_date = game_date
+    if _normalize_local_date_only(availability.available_date) != game_date:
+        repairs.append(f'available_date:{availability.available_date}->{game_date}')
+        availability.available_date = game_date
+    if host and availability.organization_id != host.organization_id:
+        repairs.append(f'organization_id:{availability.organization_id}->{host.organization_id}')
+        availability.organization_id = host.organization_id
+    if repairs:
+        logger.info(
+            'Repaired Hosting Availability key availability_id=%s host_location_id=%s week_id=%s primary_game_date=%s repairs=%s',
+            availability.id,
+            availability.host_location_id,
+            week.id,
+            game_date,
+            '; '.join(repairs),
+        )
+        db.flush()
+    return repairs
+
+
+def _resolve_hosting_availability(
+    db: Session,
+    season_id: uuid.UUID | str,
+    week: Week | None,
+    game_date: date | None,
+    host_location_id: uuid.UUID | str,
+    *,
+    repair: bool = True,
+    host: HostLocation | None = None,
+) -> dict[str, object]:
+    expected_date = _normalize_local_date_only(game_date or _week_game_date(week))
+    result: dict[str, object] = {
+        'availability': None,
+        'lookup_method': 'not_found',
+        'repair_actions': [],
+        'found_record_id': None,
+        'found_record_season_week_id': None,
+        'found_record_primary_game_date': None,
+        'found_record_available_date': None,
+        'found_record_organization_id': None,
+        'found_record_host_location_id': None,
+        'requires_admin_action': 'Create Missing Hosting Availability Record',
+    }
+    if not week or not week.id or not expected_date:
+        result['lookup_method'] = 'missing_week_or_primary_game_date'
+        return result
+
+    base_query = _base_host_plan_availability_query(db, season_id, host_location_id)
+
+    week_rows = base_query.filter(HostingAvailability.week_id == week.id).order_by(HostingAvailability.start_time, HostingAvailability.end_time).all()
+    week_match = next((row for row in week_rows if _availability_matches_date(row, expected_date)), None) or (week_rows[0] if week_rows else None)
+    candidates: list[tuple[HostingAvailability | None, str, bool]] = [
+        (
+            week_match,
+            'season_id_season_week_id_host_location_id',
+            True,
+        ),
+        (
+            base_query.filter(HostingAvailability.primary_game_date == expected_date).order_by(HostingAvailability.start_time, HostingAvailability.end_time).first(),
+            'season_id_primary_game_date_host_location_id',
+            True,
+        ),
+    ]
+
+    broad_rows = base_query.order_by(HostingAvailability.start_time, HostingAvailability.end_time).all()
+    normalized_match = next((row for row in broad_rows if _availability_matches_date(row, expected_date)), None)
+    candidates.append((normalized_match, 'season_id_normalized_local_date_only_primary_game_date_host_location_id', True))
+    shifted_match = next((row for row in broad_rows if _availability_matches_utc_shifted_date(row, expected_date)), None)
+    candidates.append((shifted_match, 'season_id_utc_shifted_date_host_location_id', True))
+    week_range_match = next((row for row in broad_rows if _availability_within_week_range(row, week)), None)
+    candidates.append((week_range_match, 'season_id_host_location_id_date_within_same_season_week_range', True))
+
+    for availability, lookup_method, can_repair in candidates:
+        if not availability:
+            continue
+        if lookup_method == 'season_id_season_week_id_host_location_id' and _availability_matches_date(availability, expected_date):
+            lookup_method = 'season_id_week_id_host_location_id_primary_game_date'
+        result.update({
+            'availability': availability,
+            'lookup_method': lookup_method,
+            'found_record_id': str(availability.id),
+            'found_record_season_week_id': str(availability.week_id) if availability.week_id else None,
+            'found_record_primary_game_date': str(_normalize_local_date_only(availability.primary_game_date)) if availability.primary_game_date else None,
+            'found_record_available_date': str(_normalize_local_date_only(availability.available_date)) if availability.available_date else None,
+            'found_record_organization_id': str(availability.organization_id) if availability.organization_id else None,
+            'found_record_host_location_id': str(availability.host_location_id) if availability.host_location_id else None,
+            'requires_admin_action': None,
+        })
+        if repair and can_repair:
+            result['repair_actions'] = _repair_hosting_availability_key(db, availability, season_id, week, expected_date, host)
+        return result
+
+    return result
+
+
 def _find_host_plan_availability(
     db: Session,
     season_id: uuid.UUID | str,
@@ -2514,18 +2651,8 @@ def _find_host_plan_availability(
     game_date: date | None,
     host_location_id: uuid.UUID | str,
 ) -> tuple[HostingAvailability | None, str]:
-    normalized_game_date = _normalize_local_date_only(game_date or _week_game_date(week))
-    if week and week.id and normalized_game_date:
-        exact_match = _exact_host_plan_availability_query(
-            db,
-            season_id,
-            week.id,
-            normalized_game_date,
-            host_location_id,
-        ).order_by(HostingAvailability.start_time, HostingAvailability.end_time).first()
-        if exact_match:
-            return exact_match, 'season_id_week_id_host_location_id_primary_game_date'
-    return None, 'not_found'
+    resolved = _resolve_hosting_availability(db, season_id, week, game_date, host_location_id, repair=True)
+    return resolved.get('availability'), str(resolved.get('lookup_method') or 'not_found')
 
 
 def _sync_host_plan_selection_availability(db: Session, availability: HostingAvailability) -> int:
@@ -2728,8 +2855,6 @@ def _host_availability_matrix_response(db: Session, season_id: uuid.UUID) -> dic
     availability_rows = db.query(HostingAvailability).filter(
         HostingAvailability.season_id == season_id,
         HostingAvailability.host_location_id.in_(host_ids) if host_ids else False,
-        HostingAvailability.week_id.in_(week_ids) if week_ids else False,
-        HostingAvailability.primary_game_date.in_(game_dates) if game_dates else False,
         HostingAvailability.active.is_(True),
         HostingAvailability.is_available.is_(True),
     ).all()
@@ -2775,9 +2900,16 @@ def _host_availability_matrix_response(db: Session, season_id: uuid.UUID) -> dic
         cells = {}
         for date_info in dates:
             game_date = date.fromisoformat(date_info['game_date'])
-            availability_list = availability_by_host_date.get((host.id, date_info['week_id'], game_date), [])
+            week = next((candidate for candidate in weeks if candidate.id == date_info['week_id']), None)
+            resolved = _resolve_hosting_availability(db, season_id, week, game_date, host.id, repair=True, host=host)
+            selected_availability = resolved.get('availability')
+            if selected_availability:
+                availability_list = _exact_host_plan_availability_query(db, season_id, date_info['week_id'], game_date, host.id).order_by(HostingAvailability.start_time, HostingAvailability.end_time).all()
+                if selected_availability not in availability_list:
+                    availability_list = [selected_availability]
+            else:
+                availability_list = []
             selection = selection_by_host_date.get((host.id, game_date))
-            selected_availability = availability_list[0] if availability_list else None
             has_valid_availability = bool(selected_availability)
             if selection is None:
                 status = 'AVAILABLE' if has_valid_availability else 'NOT_AVAILABLE'
@@ -2802,7 +2934,7 @@ def _host_availability_matrix_response(db: Session, season_id: uuid.UUID) -> dic
             cells[str(game_date)] = {
                 'status': status,
                 'locked': locked,
-                'reason': HOST_PLAN_MISSING_AVAILABILITY_MESSAGE if status == 'MISSING_AVAILABILITY' else (selection.reason if selection and status != 'NOT_AVAILABLE' else (HOST_PLAN_MISSING_AVAILABILITY_MESSAGE if selection else None)),
+                'reason': HOST_PLAN_SELECTED_MISSING_AVAILABILITY_MESSAGE if status == 'MISSING_AVAILABILITY' else (selection.reason if selection and status != 'NOT_AVAILABLE' else (HOST_PLAN_MISSING_AVAILABILITY_MESSAGE if selection else None)),
                 'availability_id': selected_availability.id if selected_availability else None,
                 'has_saved_availability': has_valid_availability,
                 'available_slot_count': len(availability_list),
@@ -3066,14 +3198,15 @@ def generate_suggested_host_plan(payload: dict, current_user: User = Depends(req
 
     required = _weekly_required_games_by_size(db, season_id)
     total_required = sum(int(value or 0) for value in required.values())
-    availability_rows = db.query(HostingAvailability, HostLocation).join(HostLocation, HostLocation.id == HostingAvailability.host_location_id).filter(
-        HostingAvailability.season_id == season_id,
-        HostingAvailability.week_id == week.id,
-        HostingAvailability.primary_game_date == game_date,
-        HostingAvailability.active.is_(True),
-        HostingAvailability.is_available.is_(True),
-        HostLocation.is_active.is_(True),
-    ).order_by(HostLocation.name).all()
+    active_hosts = db.query(HostLocation).filter(HostLocation.is_active.is_(True)).order_by(HostLocation.name).all()
+    availability_rows: list[tuple[HostingAvailability, HostLocation]] = []
+    for host in active_hosts:
+        resolved = _resolve_hosting_availability(db, season_id, week, game_date, host.id, repair=True, host=host)
+        availability = resolved.get('availability')
+        if availability and _availability_allows_generated_slots(db, availability):
+            exact_rows = _exact_host_plan_availability_query(db, season_id, week.id, game_date, host.id).order_by(HostingAvailability.start_time, HostingAvailability.end_time).all()
+            for row in exact_rows or [availability]:
+                availability_rows.append((row, host))
 
     availability_by_host: dict[uuid.UUID, HostingAvailability] = {}
     host_by_id: dict[uuid.UUID, HostLocation] = {}
@@ -3346,25 +3479,22 @@ def repair_host_plan_selections(payload: dict, current_user: User = Depends(requ
             else:
                 unchanged += 1
             continue
-        old_status = row.status
-        old_locked = row.locked
         old_availability_id = row.availability_id
-        row.status = 'NOT_AVAILABLE'
-        row.locked = False
         row.availability_id = None
-        row.reason = HOST_PLAN_SKIPPED_MISSING_AVAILABILITY_MESSAGE
+        row.reason = HOST_PLAN_SELECTED_MISSING_AVAILABILITY_MESSAGE
         correction = {
             'host_plan_selection_id': str(row.id),
             'host_location_id': str(row.host_location_id),
             'game_date': str(row.game_date),
-            'old_status': old_status,
+            'old_status': row.status,
             'new_status': row.status,
-            'old_locked': old_locked,
+            'old_locked': row.locked,
             'new_locked': row.locked,
             'old_availability_id': str(old_availability_id) if old_availability_id else None,
             'new_availability_id': None,
-            'correction': 'changed_to_not_available',
-            'reason': HOST_PLAN_SKIPPED_MISSING_AVAILABILITY_MESSAGE,
+            'correction': 'create_missing_hosting_availability_required',
+            'admin_action': 'Create Missing Hosting Availability Record',
+            'reason': HOST_PLAN_SELECTED_MISSING_AVAILABILITY_MESSAGE,
         }
         logger.info('Repair Host Plan Selections correction: %s', correction)
         repaired.append(correction)
@@ -10767,30 +10897,15 @@ def _regenerate_and_validate_slots_for_weeks(
     availabilities_by_host_id: dict[uuid.UUID, list[HostingAvailability]] = {}
     available_hosts_by_date: dict[date, list[HostLocation]] = {week_date: [] for week_date in week_dates}
 
-    def _base_hosting_availability_query(selection: HostPlanSelection, host: HostLocation):
-        return db.query(HostingAvailability).filter(
-            HostingAvailability.season_id == selection.season_id,
-            HostingAvailability.host_location_id == host.id,
-            HostingAvailability.active.is_(True),
-            HostingAvailability.is_available.is_(True),
-        )
-
-    def _matching_selected_availability(selection: HostPlanSelection, week: Week, host: HostLocation) -> tuple[HostingAvailability | None, str, str | None]:
+    def _matching_selected_availability(selection: HostPlanSelection, week: Week, host: HostLocation) -> tuple[HostingAvailability | None, dict[str, object], str | None]:
         game_date = _normalize_local_date_only(_week_game_date(week))
         if not week.id or not game_date:
-            return None, 'missing_week_or_primary_game_date', 'Selected host is missing season_week_id or primary_game_date.'
-
-        exact_match = _exact_host_plan_availability_query(
-            db,
-            selection.season_id,
-            week.id,
-            game_date,
-            host.id,
-        ).order_by(HostingAvailability.start_time, HostingAvailability.end_time).first()
-        if exact_match and _availability_allows_generated_slots(db, exact_match):
-            return exact_match, 'season_id_week_id_host_location_id_primary_game_date', None
-
-        return None, 'not_found', HOST_PLAN_SKIPPED_MISSING_AVAILABILITY_MESSAGE
+            return None, {'lookup_method': 'missing_week_or_primary_game_date'}, 'Selected host is missing season_week_id or primary_game_date.'
+        resolved = _resolve_hosting_availability(db, selection.season_id, week, game_date, host.id, repair=True, host=host)
+        availability = resolved.get('availability')
+        if availability and _availability_allows_generated_slots(db, availability):
+            return availability, resolved, None
+        return None, resolved, HOST_PLAN_SKIPPED_MISSING_AVAILABILITY_MESSAGE
 
     season_ids = {week.season_id for week in regular_weeks if week.season_id}
     selected_query = db.query(HostPlanSelection)
@@ -10816,15 +10931,23 @@ def _regenerate_and_validate_slots_for_weeks(
         host = hosts_by_id.get(selection.host_location_id)
         if not host:
             continue
-        availability, lookup_method, lookup_warning = _matching_selected_availability(selection, week, host)
+        availability, resolved_availability, lookup_warning = _matching_selected_availability(selection, week, host)
         diagnostic = {
             'host_location_id': str(host.id),
             'host_location_name': host.name,
+            'expected_season_week_id': str(week.id) if week.id else None,
             'season_week_id': str(week.id) if week.id else None,
+            'expected_primary_game_date': str(game_date),
             'primary_game_date': str(game_date),
             'host_plan_selection_id': str(selection.id),
+            'hosting_availability_found': bool(availability),
             'hosting_availability_id': str(availability.id) if availability else None,
-            'lookup_method_used': lookup_method,
+            'found_record_id': resolved_availability.get('found_record_id'),
+            'found_record_season_week_id': resolved_availability.get('found_record_season_week_id'),
+            'found_record_primary_game_date': resolved_availability.get('found_record_primary_game_date'),
+            'found_record_available_date': resolved_availability.get('found_record_available_date'),
+            'lookup_method_used': resolved_availability.get('lookup_method') or 'not_found',
+            'repair_action_taken_or_required': resolved_availability.get('repair_actions') or resolved_availability.get('requires_admin_action'),
             'generated_slots_by_size': _empty_field_size_counts(),
             'zero_slot_reason': None,
         }
