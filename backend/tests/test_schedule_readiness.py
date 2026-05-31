@@ -568,3 +568,104 @@ class WeekEightCommunityCapacityGenerationTest(unittest.TestCase):
             GameSlot.slot_date, GameSlot.start_time, GameSlot.host_location_id, GameSlot.field_instance_id
         ).having(func.count(GameSlot.id) > 1).all()
         self.assertEqual(duplicate_field_times, [])
+
+    def test_week6_uses_league_wide_demand_for_selected_host_slot_generation(self):
+        from app.models import GameSlot, HostLocation, HostPlanSelection, HostingAvailability
+        from app.routes.api import _regenerate_and_validate_slots_for_weeks
+
+        week6 = Week(id=uuid.uuid4(), season_id=self.season.id, week_number=6, start_date=date(2026, 9, 13), end_date=date(2026, 9, 19), primary_game_date=date(2026, 9, 13), date_type='REGULAR_SEASON')
+        self.db.add(week6)
+        self.db.commit()
+        division_order = [
+            ('COED', 'K-1'),
+            ('COED', '2-3'),
+            ('GIRLS', 'K-2'),
+            ('COED', '4-5'),
+            ('GIRLS', '3-5'),
+            ('COED', '6-7'),
+            ('COED', '8'),
+            ('GIRLS', '6-8'),
+        ]
+        for group, name, team_count in [
+            ('COED', 'K-1', 5),
+            ('COED', '2-3', 4),
+            ('GIRLS', 'K-2', 3),
+            ('COED', '4-5', 5),
+            ('GIRLS', '3-5', 4),
+            ('COED', '6-7', 5),
+            ('COED', '8', 4),
+            ('GIRLS', '6-8', 3),
+        ]:
+            self._division_with_teams(group, name, team_count)
+
+        host = HostLocation(
+            id=uuid.uuid4(), organization_id=self.antioch.id, name='Week 6 Full Demand Grass',
+            surface_type='GRASS_FIELD', max_small_fields=3, max_medium_fields=3, max_large_fields=3, max_total_fields=9, is_active=True,
+        )
+        availability = HostingAvailability(
+            id=uuid.uuid4(), season_id=self.season.id, week_id=week6.id, organization_id=self.antioch.id, host_location_id=host.id,
+            available_date=week6.start_date, primary_game_date=week6.start_date, start_time=time(9, 0), end_time=time(16, 0), is_available=True,
+        )
+        selection = HostPlanSelection(
+            id=uuid.uuid4(), season_id=self.season.id, week_id=week6.id, game_date=week6.start_date, community_id=self.antioch.id,
+            host_location_id=host.id, availability_id=availability.id, status='SELECTED', locked=False,
+        )
+        self.db.add_all([host, availability, selection])
+        self.db.commit()
+
+        result = _regenerate_and_validate_slots_for_weeks(self.db, [week6], division_order)
+        self.db.commit()
+
+        validation = result['validation_rows'][0]
+        self.assertEqual(validation['league_wide_demand_by_size'], {'SMALL': 7, 'MEDIUM': 5, 'LARGE': 7})
+        self.assertEqual(validation['required_games_by_size'], {'SMALL': 7, 'MEDIUM': 5, 'LARGE': 7})
+        self.assertEqual(validation['missing_field_sizes'], [])
+        self.assertIsNone(validation['zero_slot_reason'])
+        self.assertEqual(validation['selected_hosts'], ['Week 6 Full Demand Grass'])
+        self.assertEqual(
+            {row['division_name']: (row['team_count'], row['expected_games'], row['field_size']) for row in validation['active_divisions_included']},
+            {
+                'COED K-1': (5, 3, 'SMALL'),
+                'COED 2-3': (4, 2, 'SMALL'),
+                'GIRLS K-2': (3, 2, 'SMALL'),
+                'COED 4-5': (5, 3, 'MEDIUM'),
+                'GIRLS 3-5': (4, 2, 'MEDIUM'),
+                'COED 6-7': (5, 3, 'LARGE'),
+                'COED 8': (4, 2, 'LARGE'),
+                'GIRLS 6-8': (3, 2, 'LARGE'),
+            },
+        )
+        generated_sizes = {field_type for (field_type,) in self.db.query(GameSlot.field_type).filter(GameSlot.week_id == week6.id).distinct().all()}
+        self.assertEqual(generated_sizes, {'SMALL', 'MEDIUM', 'LARGE'})
+
+    def test_week7_girls_k2_generates_small_field_slots(self):
+        from app.models import GameSlot, HostLocation, HostPlanSelection, HostingAvailability
+        from app.routes.api import _regenerate_and_validate_slots_for_weeks
+
+        week7 = Week(id=uuid.uuid4(), season_id=self.season.id, week_number=7, start_date=date(2026, 9, 20), end_date=date(2026, 9, 26), primary_game_date=date(2026, 9, 20), date_type='REGULAR_SEASON')
+        self.db.add(week7)
+        self.db.commit()
+        self._division_with_teams('GIRLS', 'K-2', 5)
+        host = HostLocation(
+            id=uuid.uuid4(), organization_id=self.johnsburg.id, name='Week 7 Small Grass',
+            surface_type='GRASS_FIELD', max_small_fields=2, max_total_fields=2, is_active=True,
+        )
+        availability = HostingAvailability(
+            id=uuid.uuid4(), season_id=self.season.id, week_id=week7.id, organization_id=self.johnsburg.id, host_location_id=host.id,
+            available_date=week7.start_date, primary_game_date=week7.start_date, start_time=time(9, 0), end_time=time(12, 0), is_available=True,
+        )
+        selection = HostPlanSelection(
+            id=uuid.uuid4(), season_id=self.season.id, week_id=week7.id, game_date=week7.start_date, community_id=self.johnsburg.id,
+            host_location_id=host.id, availability_id=availability.id, status='SELECTED', locked=False,
+        )
+        self.db.add_all([host, availability, selection])
+        self.db.commit()
+
+        result = _regenerate_and_validate_slots_for_weeks(self.db, [week7], [('GIRLS', 'K-2')])
+        self.db.commit()
+
+        validation = result['validation_rows'][0]
+        self.assertEqual(validation['league_wide_demand_by_size'], {'SMALL': 3, 'MEDIUM': 0, 'LARGE': 0})
+        self.assertGreater(validation['generated_slots_by_size']['SMALL'], 0)
+        self.assertEqual(validation['missing_field_sizes'], [])
+        self.assertGreater(self.db.query(GameSlot).filter(GameSlot.week_id == week7.id, GameSlot.field_type == 'SMALL').count(), 0)
