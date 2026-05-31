@@ -10,8 +10,22 @@ from app.security import decode_token
 
 security = HTTPBearer()
 
-ROLE_LEAGUE_ADMIN = 'league_admin'
-ROLE_COMMUNITY_SCHEDULER = 'community_scheduler'
+ROLE_LEAGUE_ADMIN = 'LEAGUE_ADMIN'
+ROLE_COMMUNITY_ADMIN = 'COMMUNITY_ADMIN'
+LEGACY_ROLE_LEAGUE_ADMIN = 'league_admin'
+LEGACY_ROLE_COMMUNITY_SCHEDULER = 'community_scheduler'
+ROLE_COMMUNITY_SCHEDULER = ROLE_COMMUNITY_ADMIN
+
+_ROLE_ALIASES = {
+    LEGACY_ROLE_LEAGUE_ADMIN: ROLE_LEAGUE_ADMIN,
+    ROLE_LEAGUE_ADMIN: ROLE_LEAGUE_ADMIN,
+    LEGACY_ROLE_COMMUNITY_SCHEDULER: ROLE_COMMUNITY_ADMIN,
+    ROLE_COMMUNITY_ADMIN: ROLE_COMMUNITY_ADMIN,
+}
+
+
+def normalize_role_name(role_name: str | None) -> str:
+    return _ROLE_ALIASES.get(role_name or '', role_name or '')
 
 
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)) -> User:
@@ -24,28 +38,43 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
 
 
 def require_roles(*allowed_roles: str):
+    normalized_allowed_roles = {normalize_role_name(role) for role in allowed_roles}
+
     def checker(current_user: User = Depends(get_current_user)) -> User:
-        if current_user.role.name not in allowed_roles:
+        if normalize_role_name(current_user.role.name) not in normalized_allowed_roles:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Insufficient role')
         return current_user
 
     return checker
 
 
+def is_league_admin(current_user: User) -> bool:
+    return normalize_role_name(current_user.role.name) == ROLE_LEAGUE_ADMIN
+
+
+def is_community_admin(current_user: User) -> bool:
+    return normalize_role_name(current_user.role.name) == ROLE_COMMUNITY_ADMIN
+
+
 def enforce_organization_scope(request_org_id: uuid.UUID | None, current_user: User) -> None:
-    if current_user.role.name == ROLE_LEAGUE_ADMIN:
+    if is_league_admin(current_user):
         return
-    if current_user.role.name == ROLE_COMMUNITY_SCHEDULER:
+    if is_community_admin(current_user):
         if not current_user.organization_id:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='User has no organization scope')
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='User has no community scope')
         if request_org_id and request_org_id != current_user.organization_id:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Organization scope violation')
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Community scope violation')
         return
     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Unsupported role')
 
 
 def role_by_name(db: Session, role_name: str) -> Role:
-    role = db.query(Role).filter(Role.name == role_name, Role.is_active.is_(True)).first()
+    normalized_role_name = normalize_role_name(role_name)
+    role = db.query(Role).filter(Role.name == normalized_role_name, Role.is_active.is_(True)).first()
+    if not role:
+        legacy_name = next((name for name, normalized in _ROLE_ALIASES.items() if normalized == normalized_role_name), None)
+        if legacy_name:
+            role = db.query(Role).filter(Role.name == legacy_name, Role.is_active.is_(True)).first()
     if not role:
         raise HTTPException(status_code=400, detail=f'Role {role_name} does not exist')
     return role

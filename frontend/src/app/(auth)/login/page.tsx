@@ -42,7 +42,7 @@ export default function Login() {
   const submit = async () => {
     try {
       setLoading(true); setError('');
-      const data = await apiFetch('/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) });
+      const data: any = await apiFetch('/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) });
       if (!data?.access_token) throw new Error('Login response missing access token');
       setTokens(data.access_token, data.refresh_token, data.user || { email, role_name: data.role_name, organization_id: data.organization_id });
       router.push('/dashboard');

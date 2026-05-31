@@ -78,7 +78,7 @@ export default function TeamsByParticipationManager() {
     const token = getToken();
     const orgResp = await apiFetch('/organizations?page_size=500', {}, token);
     setOrgs((orgResp.items || []).filter((o: any) => o.is_active));
-    const initialOrg = user?.role_name === 'community_scheduler' ? user.organization_id : '';
+    const initialOrg = user?.role_name === 'COMMUNITY_ADMIN' ? user.organization_id : '';
     if (initialOrg) { setOrgId(initialOrg); load(initialOrg); }
     else { loadLeagueSummary(); }
   })(); }, []);

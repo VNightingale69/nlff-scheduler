@@ -71,7 +71,8 @@ export default function ScheduleManagementPage() {
     ]);
 
     if (gameResponse.status === 'rejected' || conflictResponse.status === 'rejected') {
-      throw gameResponse.status === 'rejected' ? gameResponse.reason : conflictResponse.reason;
+      if (gameResponse.status === 'rejected') throw gameResponse.reason;
+      if (conflictResponse.status === 'rejected') throw conflictResponse.reason;
     }
 
     setGames((gameResponse.value as any).items || []);

@@ -12,7 +12,7 @@ from sqlalchemy import String, and_, delete, func, inspect as sa_inspect, or_, s
 from sqlalchemy.exc import IntegrityError, ProgrammingError, SQLAlchemyError
 from sqlalchemy.orm import Session, aliased
 
-from app.auth import ROLE_COMMUNITY_SCHEDULER, ROLE_LEAGUE_ADMIN, enforce_organization_scope, get_current_user, require_roles
+from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, enforce_organization_scope, get_current_user, is_community_admin, is_league_admin, normalize_role_name, require_roles
 from app.database import get_db
 from app.models import Division, Field, FieldConfigurationOption, FieldInstance, Game, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostPlanSelection, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Season, Team, TurfWave, User, Week
 from app.schemas import (
@@ -1321,12 +1321,12 @@ def _safe_delete_count(label: str, deleter):
 def _user_payload(user: User) -> dict:
     return {
         'id': user.id, 'email': user.email, 'full_name': user.full_name,
-        'role_name': user.role.name, 'organization_id': user.organization_id,
+        'role_name': normalize_role_name(user.role.name), 'organization_id': user.organization_id,
     }
 
 @router.post('/auth/login', response_model=TokenResponse)
 def login(payload: LoginRequest, db: Session = Depends(get_db)):
-    user = db.query(User).join(User.role).filter(User.email == payload.email, User.is_active.is_(True), Role.is_active.is_(True)).first()
+    user = db.query(User).join(User.role).filter(func.lower(User.email) == payload.email.lower(), User.is_active.is_(True), Role.is_active.is_(True)).first()
     if not user or not verify_password(payload.password, user.password_hash):
         raise HTTPException(status_code=401, detail='Invalid credentials')
     return TokenResponse(access_token=create_access_token(str(user.id)), refresh_token=create_refresh_token(str(user.id)), token_type='bearer').model_dump() | {'user': _user_payload(user)}
@@ -1345,13 +1345,14 @@ def me(current_user: User = Depends(get_current_user)):
 
 @router.post('/users', response_model=UserRead, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def create_user(payload: UserCreate, db: Session = Depends(get_db)):
-    role = db.query(Role).filter(Role.name == payload.role_name, Role.is_active.is_(True)).first()
+    role_name = normalize_role_name(payload.role_name)
+    role = db.query(Role).filter(Role.name == role_name, Role.is_active.is_(True)).first()
     if not role: raise HTTPException(400, 'Invalid role')
-    if payload.role_name == ROLE_COMMUNITY_SCHEDULER and not payload.organization_id: raise HTTPException(400, 'Community scheduler requires organization_id')
+    if role_name == ROLE_COMMUNITY_ADMIN and not payload.organization_id: raise HTTPException(400, 'Community administrator requires organization_id')
     validate_password_strength(payload.password)
-    obj = User(email=payload.email, full_name=payload.full_name, password_hash=hash_password(payload.password), role_id=role.id, organization_id=payload.organization_id, is_active=payload.is_active)
+    obj = User(email=payload.email.lower(), full_name=payload.full_name, password_hash=hash_password(payload.password), role_id=role.id, organization_id=payload.organization_id, is_active=payload.is_active)
     db.add(obj); db.commit(); db.refresh(obj)
-    return UserRead(id=obj.id, created_at=obj.created_at, updated_at=obj.updated_at, email=obj.email, full_name=obj.full_name, role_name=obj.role.name, organization_id=obj.organization_id, is_active=obj.is_active)
+    return UserRead(id=obj.id, created_at=obj.created_at, updated_at=obj.updated_at, email=obj.email, full_name=obj.full_name, role_name=normalize_role_name(obj.role.name), organization_id=obj.organization_id, is_active=obj.is_active)
 
 @router.post('/organizations', response_model=OrganizationRead, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def create_organization(payload: OrganizationCreate, db: Session = Depends(get_db)):
@@ -1360,16 +1361,20 @@ def create_organization(payload: OrganizationCreate, db: Session = Depends(get_d
 @router.get('/organizations', response_model=PagedResponse[OrganizationRead], dependencies=[Depends(get_current_user)])
 def list_organizations(search: str | None = None, is_active: bool | None = None, page: int = 1, page_size: int = 20, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     q = db.query(Organization)
-    if current_user.role.name == ROLE_COMMUNITY_SCHEDULER: q = q.filter(Organization.id == current_user.organization_id)
+    if is_community_admin(current_user): q = q.filter(Organization.id == current_user.organization_id)
     if search: q = q.filter(func.lower(Organization.name).like(f"%{search.lower()}%"))
     if is_active is not None: q = q.filter(Organization.is_active == is_active)
     return paginate(q.order_by(Organization.name), page, page_size)
 
-@router.put('/organizations/{org_id}', response_model=OrganizationRead, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
-def update_organization(org_id: uuid.UUID, payload: OrganizationCreate, db: Session = Depends(get_db)):
+@router.put('/organizations/{org_id}', response_model=OrganizationRead, dependencies=[Depends(get_current_user)])
+def update_organization(org_id: uuid.UUID, payload: OrganizationCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     o = db.query(Organization).filter(Organization.id == org_id).first()
     if not o: raise HTTPException(404, 'Organization not found')
-    for k, v in payload.model_dump().items(): setattr(o, k, v)
+    enforce_organization_scope(o.id, current_user)
+    data = payload.model_dump()
+    if is_community_admin(current_user):
+        data.pop('is_active', None)
+    for k, v in data.items(): setattr(o, k, v)
     db.commit(); db.refresh(o); return o
 
 @router.get('/organizations/{org_id}/delete-check', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
@@ -2295,7 +2300,7 @@ def _build_weekly_field_demand_readiness(db: Session) -> list[dict[str, object]]
     return rows
 
 
-@router.get('/schedule-readiness', response_model=ScheduleReadinessResponse, dependencies=[Depends(get_current_user)])
+@router.get('/schedule-readiness', response_model=ScheduleReadinessResponse, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def get_schedule_readiness(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     ensure_league_defined_divisions(db)
 
@@ -3057,7 +3062,7 @@ def _host_availability_matrix_response(db: Session, season_id: uuid.UUID) -> dic
 
 
 @router.get('/host-availability-matrix')
-def get_host_availability_matrix(season_id: uuid.UUID, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def get_host_availability_matrix(season_id: uuid.UUID, current_user: User = Depends(require_roles(ROLE_LEAGUE_ADMIN)), db: Session = Depends(get_db)):
     return _host_availability_matrix_response(db, season_id)
 
 
@@ -3543,10 +3548,10 @@ def list_organization_division_participation(
     return rows
 
 
-@router.put('/organization-division-participation', response_model=list[OrganizationDivisionParticipationRead], dependencies=[Depends(get_current_user)])
+@router.put('/organization-division-participation', response_model=list[OrganizationDivisionParticipationRead], dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def upsert_organization_division_participation(
     payload: OrganizationDivisionParticipationBulkUpsertRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_roles(ROLE_LEAGUE_ADMIN)),
     db: Session = Depends(get_db),
 ):
     enforce_organization_scope(payload.organization_id, current_user)
@@ -3588,7 +3593,7 @@ def create_host_location(payload: HostLocationCreate, current_user: User = Depen
 @router.get('/host-locations', response_model=PagedResponse[HostLocationRead], dependencies=[Depends(get_current_user)])
 def list_host_locations(search: str | None = None, organization_id: uuid.UUID | None = None, is_active: bool | None = None, page: int = 1, page_size: int = 20, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     q = db.query(HostLocation)
-    if current_user.role.name == ROLE_COMMUNITY_SCHEDULER: q = q.filter(HostLocation.organization_id == current_user.organization_id)
+    if is_community_admin(current_user): q = q.filter(HostLocation.organization_id == current_user.organization_id)
     elif organization_id: q = q.filter(HostLocation.organization_id == organization_id)
     if search: q = q.filter(func.lower(HostLocation.name).like(f"%{search.lower()}%"))
     if is_active is not None: q = q.filter(HostLocation.is_active == is_active)
@@ -3621,6 +3626,7 @@ def list_host_locations(search: str | None = None, organization_id: uuid.UUID | 
 def upd_host_location(item_id: uuid.UUID, payload: HostLocationCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     x = db.query(HostLocation).filter(HostLocation.id == item_id).first()
     if not x: raise HTTPException(404, 'Host location not found')
+    enforce_organization_scope(x.organization_id, current_user)
     enforce_organization_scope(payload.organization_id, current_user)
     surface_type = payload.surface_type or 'GRASS_FIELD'
     if surface_type not in ALLOWED_SURFACE_TYPES:
@@ -3646,12 +3652,12 @@ def create_host_location_configuration(payload: HostLocationConfigurationCreate,
 @router.get('/host-location-configurations', response_model=PagedResponse[HostLocationConfigurationRead], dependencies=[Depends(get_current_user)])
 def list_host_location_configurations(host_location_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, page: int = 1, page_size: int = 100, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     q = db.query(HostLocationConfiguration).join(HostLocationConfiguration.host_location)
-    if current_user.role.name == ROLE_COMMUNITY_SCHEDULER:
+    if is_community_admin(current_user):
         q = q.filter(HostLocation.organization_id == current_user.organization_id)
     elif organization_id:
         q = q.filter(HostLocation.organization_id == organization_id)
     turf_hosts_query = db.query(HostLocation)
-    if current_user.role.name == ROLE_COMMUNITY_SCHEDULER:
+    if is_community_admin(current_user):
         turf_hosts_query = turf_hosts_query.filter(HostLocation.organization_id == current_user.organization_id)
     elif organization_id:
         turf_hosts_query = turf_hosts_query.filter(HostLocation.organization_id == organization_id)
@@ -3674,6 +3680,7 @@ def list_host_location_configurations(host_location_id: uuid.UUID | None = None,
 def upd_host_location_configuration(item_id: uuid.UUID, payload: HostLocationConfigurationCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     x = db.query(HostLocationConfiguration).filter(HostLocationConfiguration.id == item_id).first()
     if not x: raise HTTPException(404, 'Host location configuration not found')
+    enforce_organization_scope(x.host_location.organization_id, current_user)
     host = db.query(HostLocation).filter(HostLocation.id == payload.host_location_id).first()
     if not host: raise HTTPException(400, 'Invalid host location')
     enforce_organization_scope(host.organization_id, current_user)
@@ -3781,7 +3788,7 @@ def create_physical_field_area(payload: PhysicalFieldAreaCreate, current_user: U
 @router.get('/physical-field-areas', response_model=PagedResponse[PhysicalFieldAreaRead], dependencies=[Depends(get_current_user)])
 def list_physical_field_areas(host_location_id: uuid.UUID | None = None, page: int = 1, page_size: int = 50, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     q = db.query(PhysicalFieldArea).join(PhysicalFieldArea.host_location)
-    if current_user.role.name == ROLE_COMMUNITY_SCHEDULER: q = q.filter(HostLocation.organization_id == current_user.organization_id)
+    if is_community_admin(current_user): q = q.filter(HostLocation.organization_id == current_user.organization_id)
     if host_location_id: q = q.filter(PhysicalFieldArea.host_location_id == host_location_id)
     return paginate(q.order_by(PhysicalFieldArea.name), page, page_size)
 
@@ -3789,6 +3796,7 @@ def list_physical_field_areas(host_location_id: uuid.UUID | None = None, page: i
 def upd_physical_field_area(item_id: uuid.UUID, payload: PhysicalFieldAreaCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     x = db.query(PhysicalFieldArea).filter(PhysicalFieldArea.id == item_id).first()
     if not x: raise HTTPException(404, 'Physical field area not found')
+    enforce_organization_scope(x.host_location.organization_id, current_user)
     host_location = db.query(HostLocation).filter(HostLocation.id == payload.host_location_id).first()
     if not host_location: raise HTTPException(400, 'Invalid host location')
     enforce_organization_scope(host_location.organization_id, current_user)
@@ -3823,7 +3831,7 @@ def create_field_configuration_option(payload: FieldConfigurationOptionCreate, c
 @router.get('/field-configuration-options', response_model=PagedResponse[FieldConfigurationOptionRead], dependencies=[Depends(get_current_user)])
 def list_field_configuration_options(physical_field_area_id: uuid.UUID | None = None, page: int = 1, page_size: int = 50, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     q = db.query(FieldConfigurationOption).join(FieldConfigurationOption.physical_field_area).join(PhysicalFieldArea.host_location)
-    if current_user.role.name == ROLE_COMMUNITY_SCHEDULER: q = q.filter(HostLocation.organization_id == current_user.organization_id)
+    if is_community_admin(current_user): q = q.filter(HostLocation.organization_id == current_user.organization_id)
     if physical_field_area_id: q = q.filter(FieldConfigurationOption.physical_field_area_id == physical_field_area_id)
     return paginate(q.order_by(FieldConfigurationOption.name), page, page_size)
 
@@ -3831,6 +3839,7 @@ def list_field_configuration_options(physical_field_area_id: uuid.UUID | None = 
 def upd_field_configuration_option(item_id: uuid.UUID, payload: FieldConfigurationOptionCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     x = db.query(FieldConfigurationOption).filter(FieldConfigurationOption.id == item_id).first()
     if not x: raise HTTPException(404, 'Field configuration option not found')
+    enforce_organization_scope(x.physical_field_area.host_location.organization_id, current_user)
     area = db.query(PhysicalFieldArea).join(PhysicalFieldArea.host_location).filter(PhysicalFieldArea.id == payload.physical_field_area_id).first()
     if not area: raise HTTPException(400, 'Invalid physical field area')
     enforce_organization_scope(area.host_location.organization_id, current_user)
@@ -3875,7 +3884,7 @@ def create_field(payload: FieldCreate, current_user: User = Depends(get_current_
 @router.get('/fields', response_model=PagedResponse[FieldRead], dependencies=[Depends(get_current_user)])
 def list_fields(search: str | None = None, host_location_id: uuid.UUID | None = None, page: int = 1, page_size: int = 20, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     q = db.query(Field).join(Field.host_location)
-    if current_user.role.name == ROLE_COMMUNITY_SCHEDULER: q = q.filter(HostLocation.organization_id == current_user.organization_id)
+    if is_community_admin(current_user): q = q.filter(HostLocation.organization_id == current_user.organization_id)
     if host_location_id: q = q.filter(Field.host_location_id == host_location_id)
     if search: q = q.filter(func.lower(Field.name).like(f"%{search.lower()}%"))
     return paginate(q.order_by(Field.name), page, page_size)
@@ -3884,6 +3893,7 @@ def list_fields(search: str | None = None, host_location_id: uuid.UUID | None = 
 def upd_field(item_id: uuid.UUID, payload: FieldCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     x = db.query(Field).filter(Field.id == item_id).first()
     if not x: raise HTTPException(404, 'Field not found')
+    enforce_organization_scope(x.host_location.organization_id, current_user)
     host_location = db.query(HostLocation).filter(HostLocation.id == payload.host_location_id).first()
     if not host_location: raise HTTPException(400, 'Invalid host location')
     enforce_organization_scope(host_location.organization_id, current_user)
@@ -4004,7 +4014,7 @@ def create_hosting_availability(payload: HostingAvailabilityCreate, current_user
 @router.get('/hosting-availabilities', response_model=PagedResponse[HostingAvailabilityRead], dependencies=[Depends(get_current_user)])
 def list_hosting_availabilities(field_id: uuid.UUID | None = None, field_ids: str | None = None, host_location_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, available_date: str | None = None, available_dates: str | None = None, page: int = 1, page_size: int = 20, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     q = db.query(HostingAvailability).outerjoin(HostingAvailability.host_location).outerjoin(HostingAvailability.field)
-    if current_user.role.name == ROLE_COMMUNITY_SCHEDULER: q = q.filter(or_(HostLocation.organization_id == current_user.organization_id, HostingAvailability.organization_id == current_user.organization_id, HostingAvailability.field_id.in_(db.query(Field.id).join(Field.host_location).filter(HostLocation.organization_id == current_user.organization_id))))
+    if is_community_admin(current_user): q = q.filter(or_(HostLocation.organization_id == current_user.organization_id, HostingAvailability.organization_id == current_user.organization_id, HostingAvailability.field_id.in_(db.query(Field.id).join(Field.host_location).filter(HostLocation.organization_id == current_user.organization_id))))
     elif organization_id: q = q.filter(or_(HostLocation.organization_id == organization_id, HostingAvailability.organization_id == organization_id, HostingAvailability.field_id.in_(db.query(Field.id).join(Field.host_location).filter(HostLocation.organization_id == organization_id))))
     if host_location_id: q = q.filter(or_(HostingAvailability.host_location_id == host_location_id, Field.host_location_id == host_location_id))
     if field_id: q = q.filter(HostingAvailability.field_id == field_id)
@@ -4020,6 +4030,9 @@ def list_hosting_availabilities(field_id: uuid.UUID | None = None, field_ids: st
 def upd_hosting_availability(item_id: uuid.UUID, payload: HostingAvailabilityCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     x = db.query(HostingAvailability).filter(HostingAvailability.id == item_id).first()
     if not x: raise HTTPException(404, 'Hosting availability not found')
+    existing_host = x.host_location or (x.physical_field_area.host_location if x.physical_field_area else None) or (x.field.host_location if x.field else None)
+    if not existing_host: raise HTTPException(400, 'Hosting availability is missing host location data')
+    enforce_organization_scope(existing_host.organization_id, current_user)
     week = _validate_availability_week(payload, db)
     host, field, area, config = _resolve_availability_host_and_validate(payload, current_user, db)
     for k, v in payload.model_dump().items(): setattr(x, k, v)
@@ -4098,7 +4111,7 @@ def bulk_upsert_hosting_availabilities(payload: HostingAvailabilityBulkUpsertReq
     db.commit()
     generated_field_instances = db.query(FieldInstance).join(FieldInstance.host_location)
     generated_slots = db.query(GameSlot).join(GameSlot.host_location)
-    if current_user.role.name == ROLE_COMMUNITY_SCHEDULER:
+    if is_community_admin(current_user):
         generated_field_instances = generated_field_instances.filter(HostLocation.organization_id == current_user.organization_id)
         generated_slots = generated_slots.filter(HostLocation.organization_id == current_user.organization_id)
     return HostingAvailabilityBulkUpsertResponse(
@@ -4134,7 +4147,7 @@ def list_saved_hosting_availability(season_id: uuid.UUID | None = None, organiza
         q = q.filter(HostingAvailability.season_id == season_id)
         if season_game_dates:
             q = q.filter(HostingAvailability.available_date.in_(list(season_game_dates)))
-    if current_user.role.name == ROLE_COMMUNITY_SCHEDULER:
+    if is_community_admin(current_user):
         q = q.filter(HostLocation.organization_id == current_user.organization_id)
     elif organization_id:
         q = q.filter(HostLocation.organization_id == organization_id)
@@ -4250,7 +4263,7 @@ def list_saved_hosting_availability(season_id: uuid.UUID | None = None, organiza
         direct_q = direct_q.filter(HostingAvailability.season_id == season_id)
         if season_game_dates:
             direct_q = direct_q.filter(HostingAvailability.available_date.in_(list(season_game_dates)))
-    if current_user.role.name == ROLE_COMMUNITY_SCHEDULER:
+    if is_community_admin(current_user):
         direct_q = direct_q.filter(HostLocation.organization_id == current_user.organization_id)
     elif organization_id:
         direct_q = direct_q.filter(HostLocation.organization_id == organization_id)
@@ -4317,7 +4330,7 @@ def list_saved_hosting_availability(season_id: uuid.UUID | None = None, organiza
         field_q = field_q.filter(HostingAvailability.season_id == season_id)
         if season_game_dates:
             field_q = field_q.filter(HostingAvailability.available_date.in_(list(season_game_dates)))
-    if current_user.role.name == ROLE_COMMUNITY_SCHEDULER:
+    if is_community_admin(current_user):
         field_q = field_q.filter(HostLocation.organization_id == current_user.organization_id)
     elif organization_id:
         field_q = field_q.filter(HostLocation.organization_id == organization_id)
@@ -4557,7 +4570,7 @@ def _delete_availability_with_generated_slots_guard(db: Session, availability_id
     )
 
 
-@router.get('/hosting-availabilities/generated-slots', response_model=list[GeneratedSlotRead], dependencies=[Depends(get_current_user)])
+@router.get('/hosting-availabilities/generated-slots', response_model=list[GeneratedSlotRead], dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def list_generated_slots(host_location_id: uuid.UUID, available_date: str | None = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     host = db.query(HostLocation).filter(HostLocation.id == host_location_id).first()
     if not host:
@@ -4593,10 +4606,10 @@ def list_generated_slots(host_location_id: uuid.UUID, available_date: str | None
     } for row in rows]
 
 
-@router.get('/field-instances', dependencies=[Depends(get_current_user)])
+@router.get('/field-instances', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def list_field_instances(host_location_id: uuid.UUID | None = None, available_date: str | None = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     q = db.query(FieldInstance, HostLocation.name.label('host_location_name')).join(FieldInstance.host_location)
-    if current_user.role.name == ROLE_COMMUNITY_SCHEDULER:
+    if is_community_admin(current_user):
         q = q.filter(HostLocation.organization_id == current_user.organization_id)
     if host_location_id:
         q = q.filter(FieldInstance.host_location_id == host_location_id)
@@ -4606,7 +4619,7 @@ def list_field_instances(host_location_id: uuid.UUID | None = None, available_da
     return [{'id': r.FieldInstance.id, 'date': r.FieldInstance.instance_date, 'host_location_name': r.host_location_name, 'field_instance_name': r.FieldInstance.field_name, 'field_type': r.FieldInstance.field_type, 'hosting_availability_id': r.FieldInstance.hosting_availability_id} for r in rows]
 
 
-@router.get('/generated-game-slots', response_model=list[GeneratedSlotRead], dependencies=[Depends(get_current_user)])
+@router.get('/generated-game-slots', response_model=list[GeneratedSlotRead], dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def list_generated_game_slots(host_location_id: uuid.UUID | None = None, available_date: str | None = None, status: str | None = None, field_type: str | None = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     q = db.query(
         GameSlot,
@@ -4614,7 +4627,7 @@ def list_generated_game_slots(host_location_id: uuid.UUID | None = None, availab
         HostLocation.name.label('host_location_name'),
         Week.season_id.label('season_id'),
     ).join(GameSlot.field_instance).join(GameSlot.host_location).outerjoin(Week, Week.id == GameSlot.week_id)
-    if current_user.role.name == ROLE_COMMUNITY_SCHEDULER:
+    if is_community_admin(current_user):
         q = q.filter(HostLocation.organization_id == current_user.organization_id)
     if host_location_id:
         q = q.filter(GameSlot.host_location_id == host_location_id)
@@ -4655,8 +4668,8 @@ GENERATED_SLOTS_CLEAR_WARNING = 'Some field instances were preserved because sch
 TURF_WAVE_DELETE_BLOCKED_MESSAGE = 'Cannot delete this hosting availability because generated turf wave records still exist. Clear generated slots/waves first or use force delete if no games are scheduled.'
 
 
-@router.delete('/generated-game-slots', response_model=GeneratedSlotsClearResponse, dependencies=[Depends(get_current_user)])
-def clear_generated_game_slots(host_location_id: uuid.UUID = Query(...), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+@router.delete('/generated-game-slots', response_model=GeneratedSlotsClearResponse, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+def clear_generated_game_slots(host_location_id: uuid.UUID = Query(...), current_user: User = Depends(require_roles(ROLE_LEAGUE_ADMIN)), db: Session = Depends(get_db)):
     host = db.query(HostLocation).filter(HostLocation.id == host_location_id).first()
     if not host:
         raise HTTPException(404, 'Host location not found')
@@ -4733,8 +4746,8 @@ def clear_generated_game_slots(host_location_id: uuid.UUID = Query(...), current
     )
 
 
-@router.post('/generated-game-slots/regenerate', response_model=HostingGenerationRunResult, dependencies=[Depends(get_current_user)])
-def regenerate_generated_game_slots(payload: dict | None = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+@router.post('/generated-game-slots/regenerate', response_model=HostingGenerationRunResult, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+def regenerate_generated_game_slots(payload: dict | None = None, current_user: User = Depends(require_roles(ROLE_LEAGUE_ADMIN)), db: Session = Depends(get_db)):
     payload = payload or {}
     season_id = payload.get('season_id')
     if season_id:
@@ -4792,7 +4805,7 @@ def regenerate_generated_game_slots(payload: dict | None = None, current_user: U
         )
 
     host_query = db.query(HostLocation).filter(HostLocation.is_active.is_(True))
-    if current_user.role.name == ROLE_COMMUNITY_SCHEDULER:
+    if is_community_admin(current_user):
         host_query = host_query.filter(HostLocation.organization_id == current_user.organization_id)
     hosts = host_query.order_by(HostLocation.name).all()
 
@@ -4870,7 +4883,7 @@ def create_team(payload: TeamCreate, current_user: User = Depends(get_current_us
         Team.division_id == payload.division_id,
         Team.is_active.is_(True),
     ).count()
-    if payload.is_active and active_count >= participation.team_count and current_user.role.name != ROLE_LEAGUE_ADMIN:
+    if payload.is_active and active_count >= participation.team_count and not is_league_admin(current_user):
         raise HTTPException(400, 'Cannot exceed participating team count for this division')
     x = Team(**payload.model_dump()); db.add(x); db.commit(); db.refresh(x); return x
 
@@ -4879,7 +4892,7 @@ def list_teams(search: str | None = None, organization_id: uuid.UUID | None = No
     q = db.query(Team)
     if active_divisions_only:
         q = q.join(Team.division).filter(Division.is_active.is_(True))
-    if current_user.role.name == ROLE_COMMUNITY_SCHEDULER: q = q.filter(Team.organization_id == current_user.organization_id)
+    if is_community_admin(current_user): q = q.filter(Team.organization_id == current_user.organization_id)
     elif organization_id: q = q.filter(Team.organization_id == organization_id)
     if division_id: q = q.filter(Team.division_id == division_id)
     if search: q = q.filter(func.lower(Team.name).like(f"%{search.lower()}%"))
@@ -4889,6 +4902,7 @@ def list_teams(search: str | None = None, organization_id: uuid.UUID | None = No
 def upd_team(item_id: uuid.UUID, payload: TeamCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     x = db.query(Team).filter(Team.id == item_id).first()
     if not x: raise HTTPException(404, 'Team not found')
+    enforce_organization_scope(x.organization_id, current_user)
     enforce_organization_scope(payload.organization_id, current_user)
     division = db.query(Division).filter(Division.id == payload.division_id, Division.is_active.is_(True)).first()
     if not division:
@@ -4906,7 +4920,7 @@ def upd_team(item_id: uuid.UUID, payload: TeamCreate, current_user: User = Depen
         Team.is_active.is_(True),
         Team.id != item_id,
     ).count()
-    if payload.is_active and active_count >= participation.team_count and current_user.role.name != ROLE_LEAGUE_ADMIN:
+    if payload.is_active and active_count >= participation.team_count and not is_league_admin(current_user):
         raise HTTPException(400, 'Cannot exceed participating team count for this division')
     for k, v in payload.model_dump().items(): setattr(x, k, v)
     db.commit(); db.refresh(x); return x
@@ -4942,7 +4956,7 @@ def patch_team(item_id: uuid.UUID, payload: TeamUpdate, current_user: User = Dep
             Team.is_active.is_(True),
             Team.id != item_id,
         ).count()
-        if active_count >= participation.team_count and current_user.role.name != ROLE_LEAGUE_ADMIN:
+        if active_count >= participation.team_count and not is_league_admin(current_user):
             raise HTTPException(400, 'Cannot exceed participating team count for this division')
 
     for k, v in updates.items():
@@ -12326,8 +12340,8 @@ def cleanup_unscheduled_games(db: Session = Depends(get_db)):
         'reopened_slots_from_missing_game_links': reopened_missing_links,
     }
 
-@router.get('/schedule-management/export.csv', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
-def export_schedule_management_csv(date: date | None = None, division_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, host_location_id: uuid.UUID | None = None, field_type: str | None = None, field_id: uuid.UUID | None = None, team_id: uuid.UUID | None = None, db: Session = Depends(get_db)):
+@router.get('/schedule-management/export.csv', dependencies=[Depends(get_current_user)])
+def export_schedule_management_csv(date: date | None = None, division_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, host_location_id: uuid.UUID | None = None, field_type: str | None = None, field_id: uuid.UUID | None = None, team_id: uuid.UUID | None = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     rows = _schedule_management_rows(db, {'date': date, 'division_id': division_id, 'organization_id': organization_id, 'host_location_id': host_location_id, 'field_type': field_type, 'field_id': field_id, 'team_id': team_id})
     out = io.StringIO(); w=csv.writer(out); w.writerow(['Date','Time','Division Group','Division','Division ID','Display Division Name','Category/Gender','Normalized Division Key','Home Team','Away Team','Host Location','Field','Field Type','Status'])
     export_division_names: set[str] = set()
