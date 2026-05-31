@@ -94,11 +94,12 @@ type MatrixResponse = {
 
 const HOST_PLAN_SELECTION_ADMIN_EMAIL = 'admin@example.com';
 const HOST_PLAN_SELECTION_PERMISSION_MESSAGE = 'Only admin@example.com can modify host plan selections.';
-const HOST_PLAN_MISSING_AVAILABILITY_MESSAGE = 'This host location has not submitted hosting availability for this date.';
+const HOST_PLAN_MISSING_AVAILABILITY_MESSAGE = 'Missing Hosting Availability';
 const CYCLE = ['AVAILABLE', 'SELECTED', 'EXCLUDED'];
 const LABELS: Record<string, string> = {
   BLANK: '',
   NOT_AVAILABLE: '',
+  MISSING_AVAILABILITY: 'Missing Hosting Availability',
   AVAILABLE: 'X',
   SELECTED: '✓',
   EXCLUDED: 'O',
@@ -112,6 +113,7 @@ const LABELS: Record<string, string> = {
 const CELL_CLASSES: Record<string, string> = {
   BLANK: 'bg-slate-100 text-slate-300',
   NOT_AVAILABLE: 'bg-slate-100 text-slate-300',
+  MISSING_AVAILABILITY: 'bg-rose-100 text-rose-800 ring-1 ring-rose-300',
   AVAILABLE: 'bg-white text-slate-800 hover:bg-slate-50',
   SELECTED: 'bg-emerald-100 text-emerald-800 ring-1 ring-emerald-300',
   EXCLUDED: 'bg-slate-200 text-slate-500',
@@ -399,8 +401,10 @@ export default function HostAvailabilityMatrix() {
         await apiFetch(`/host-availability-matrix/selections?season_id=${seasonId}&game_date=${selectedDate}`, { method: 'DELETE' }, token);
         setMessage('Cleared host plan selections for the selected week. Availability records were not deleted.');
       } else if (action === 'repair') {
-        const result: any = await apiFetch('/host-availability-matrix/repair-selections', { method: 'POST', body: JSON.stringify({ season_id: seasonId, game_date: selectedDate || undefined }) }, token);
-        setMessage(`Repair Host Plan Selections completed: ${result.repaired || 0} corrected, ${result.unchanged || 0} unchanged.`);
+        const confirmed = window.confirm('Create Missing Hosting Availability Records for selected matrix cells on this week? Only confirm if these host/date combinations should be available.');
+        if (!confirmed) return;
+        const result: any = await apiFetch('/host-availability-matrix/create-missing-hosting-availabilities', { method: 'POST', body: JSON.stringify({ season_id: seasonId, game_date: selectedDate || undefined, confirmed: true }) }, token);
+        setMessage(`Create Missing Hosting Availability Records completed: ${result.created || 0} created, ${result.updated || 0} updated, ${result.unchanged || 0} unchanged.`);
       } else {
         await apiFetch('/manual-schedule-builder/auto-schedule-season', { method: 'POST', body: JSON.stringify({ season_id: seasonId, use_host_plan_selections: true }) }, token);
         setMessage('Auto-schedule started using selected, locked, and overflow fields only.');
@@ -447,11 +451,11 @@ export default function HostAvailabilityMatrix() {
         <button className='rounded bg-blue-700 px-3 py-2 text-sm font-semibold text-white disabled:bg-slate-300' disabled={!canModifyMatrix || !selectedDate} onClick={() => runAction('lock')}>Lock Selected Week</button>
         <button className='rounded border border-blue-300 px-3 py-2 text-sm font-semibold text-blue-700 disabled:text-slate-300' disabled={!canModifyMatrix || !selectedDate} onClick={() => runAction('unlock')}>Unlock Selected Week</button>
         <button className='rounded border border-rose-300 px-3 py-2 text-sm font-semibold text-rose-700 disabled:text-slate-300' disabled={!canModifyMatrix || !selectedDate} onClick={() => runAction('clear')}>Clear Host Plan Selections</button>
-        <button className='rounded border border-amber-300 px-3 py-2 text-sm font-semibold text-amber-800 disabled:text-slate-300' disabled={!canModifyMatrix || !seasonId} onClick={() => runAction('repair')}>Repair Host Plan Selections</button>
+        <button className='rounded border border-amber-300 px-3 py-2 text-sm font-semibold text-amber-800 disabled:text-slate-300' disabled={!canModifyMatrix || !seasonId} onClick={() => runAction('repair')}>Create Missing Hosting Availability Records</button>
         <button className='rounded bg-slate-900 px-3 py-2 text-sm font-semibold text-white disabled:bg-slate-300' disabled={!canModifyMatrix || !seasonId} onClick={() => runAction('auto')}>Run Auto-Schedule Using Selected Fields</button>
       </div>
       <div className='mt-3 flex flex-wrap gap-3 text-xs text-slate-600'>
-        <span><b>Blank</b> = not available</span><span><b>X</b> = available</span><span><b>✓</b> = selected for auto-schedule</span><span><b>O</b> = excluded</span><span><b>P</b> = playoff/championship date</span><span><b>L</b> = locked</span>{canModifyMatrix ? <><span><b>Click</b> = available → selected → excluded</span><span><b>Shift-click</b> = lock/unlock</span><span><b>Right-click</b> = lock, unlock, overflow, or note</span></> : <span><b>Read-only</b> = editing disabled</span>}
+        <span><b>Blank</b> = not available</span><span><b>Missing Hosting Availability</b> = selected but missing a matching record</span><span><b>X</b> = available</span><span><b>✓</b> = selected for auto-schedule</span><span><b>O</b> = excluded</span><span><b>P</b> = playoff/championship date</span><span><b>L</b> = locked</span>{canModifyMatrix ? <><span><b>Click</b> = available → selected → excluded</span><span><b>Shift-click</b> = lock/unlock</span><span><b>Right-click</b> = lock, unlock, overflow, or note</span></> : <span><b>Read-only</b> = editing disabled</span>}
       </div>
       {message ? <div className='mt-3 rounded bg-emerald-50 p-2 text-sm text-emerald-800'>{message}</div> : null}
       {error ? <div className='mt-3 rounded bg-rose-50 p-2 text-sm text-rose-800'>{error}</div> : null}

@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import Base
 from app.models import HostLocation, HostPlanSelection, HostingAvailability, Organization, Season, Week
-from app.routes.api import _host_availability_matrix_response
+from app.routes.api import _host_availability_matrix_response, create_missing_hosting_availabilities
 
 
 class HostAvailabilityMatrixResponseTest(unittest.TestCase):
@@ -29,6 +29,7 @@ class HostAvailabilityMatrixResponseTest(unittest.TestCase):
             organization_id=self.available_org.id,
             host_location_id=self.available_host.id,
             available_date=date(2026, 6, 6),
+            primary_game_date=date(2026, 6, 6),
             start_time=time(9, 0),
             end_time=time(10, 0),
             active=True,
@@ -84,11 +85,47 @@ class HostAvailabilityMatrixResponseTest(unittest.TestCase):
 
         rows_by_host = {row['host_location_name']: row for row in response['rows']}
         cell = rows_by_host['Unavailable Field']['cells']['2026-06-06']
-        self.assertEqual('NOT_AVAILABLE', cell['status'])
+        self.assertEqual('MISSING_AVAILABILITY', cell['status'])
         self.assertFalse(cell['locked'])
         self.assertFalse(cell['has_saved_availability'])
-        self.assertEqual('This host location has not submitted hosting availability for this date.', cell['reason'])
+        self.assertEqual('Missing Hosting Availability', cell['reason'])
         self.assertEqual([], response['summaries'][0]['selected_fields'])
+
+
+    def test_selected_host_with_legacy_non_keyed_availability_is_missing_until_repaired(self):
+        self.availability.primary_game_date = None
+        self.db.add(HostPlanSelection(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week.id,
+            game_date=date(2026, 6, 6),
+            community_id=self.available_org.id,
+            host_location_id=self.available_host.id,
+            status='SELECTED',
+        ))
+        self.db.commit()
+
+        response = _host_availability_matrix_response(self.db, self.season.id)
+        cell = {row['host_location_name']: row for row in response['rows']}['Available Field']['cells']['2026-06-06']
+        self.assertEqual('MISSING_AVAILABILITY', cell['status'])
+        self.assertEqual('Missing Hosting Availability', cell['reason'])
+
+        user = type('User', (), {'email': 'admin@example.com'})()
+        result = create_missing_hosting_availabilities(
+            {'season_id': str(self.season.id), 'game_date': '2026-06-06', 'confirmed': True},
+            current_user=user,
+            db=self.db,
+        )
+        self.assertEqual(0, result['created'])
+        self.assertEqual(1, result['updated'])
+        self.db.refresh(self.availability)
+        self.assertEqual(self.week.id, self.availability.week_id)
+        self.assertEqual(date(2026, 6, 6), self.availability.primary_game_date)
+
+        repaired_response = _host_availability_matrix_response(self.db, self.season.id)
+        repaired_cell = {row['host_location_name']: row for row in repaired_response['rows']}['Available Field']['cells']['2026-06-06']
+        self.assertEqual('SELECTED', repaired_cell['status'])
+        self.assertTrue(repaired_cell['has_saved_availability'])
 
     def test_selected_host_uses_lookup_for_capacity_summary(self):
         self.db.add(HostPlanSelection(

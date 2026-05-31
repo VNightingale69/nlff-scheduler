@@ -88,6 +88,7 @@ class HostPlanGeneratedSlotsTest(unittest.TestCase):
             organization_id=self.org.id,
             host_location_id=self.host.id,
             available_date=date(2026, 9, 13),
+            primary_game_date=date(2026, 9, 13),
             start_time=time(9, 0),
             end_time=time(12, 0),
             is_available=True,
@@ -137,7 +138,7 @@ class HostPlanGeneratedSlotsTest(unittest.TestCase):
         self.assertEqual('2026-09-13', diagnostics[0]['primary_game_date'])
         self.assertEqual(str(self.selection.id), diagnostics[0]['host_plan_selection_id'])
         self.assertEqual(str(self.availability.id), diagnostics[0]['hosting_availability_id'])
-        self.assertEqual('season_id_week_id_host_location_id', diagnostics[0]['lookup_method_used'])
+        self.assertEqual('season_id_week_id_host_location_id_primary_game_date', diagnostics[0]['lookup_method_used'])
         self.assertGreater(diagnostics[0]['generated_slots_by_size']['SMALL'], 0)
         self.assertGreater(diagnostics[0]['generated_slots_by_size']['MEDIUM'], 0)
         self.assertGreater(diagnostics[0]['generated_slots_by_size']['LARGE'], 0)
