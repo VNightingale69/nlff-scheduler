@@ -70,6 +70,7 @@ class AutoFillPreviewTest(unittest.TestCase):
             organization_id=self.org_a.id,
             host_location_id=antioch_host.id,
             available_date=self.week2.start_date,
+            primary_game_date=self.week2.start_date,
             start_time=time(9, 0),
             end_time=time(12, 0),
             is_available=True,
@@ -115,9 +116,9 @@ class AutoFillPreviewTest(unittest.TestCase):
         lake_county = Organization(id=uuid.uuid4(), name='Lake County', is_active=True)
         antioch_host = HostLocation(id=uuid.uuid4(), organization_id=self.org_a.id, name='Tim Osmond Sports Complex', max_small_fields=1, is_active=True)
         lake_host = HostLocation(id=uuid.uuid4(), organization_id=lake_county.id, name='Behm Park', max_small_fields=1, is_active=True)
-        westosha_availability = HostingAvailability(id=uuid.uuid4(), season_id=self.season.id, week_id=self.week2.id, organization_id=self.org_w.id, host_location_id=self.host.id, available_date=self.week2.start_date, start_time=time(9, 0), end_time=time(12, 0), is_available=True, active=True)
-        antioch_availability = HostingAvailability(id=uuid.uuid4(), season_id=self.season.id, week_id=self.week2.id, organization_id=self.org_a.id, host_location_id=antioch_host.id, available_date=self.week2.start_date, start_time=time(9, 0), end_time=time(12, 0), is_available=True, active=True)
-        lake_availability = HostingAvailability(id=uuid.uuid4(), season_id=self.season.id, week_id=self.week2.id, organization_id=lake_county.id, host_location_id=lake_host.id, available_date=self.week2.start_date, start_time=time(9, 0), end_time=time(12, 0), is_available=True, active=True)
+        westosha_availability = HostingAvailability(id=uuid.uuid4(), season_id=self.season.id, week_id=self.week2.id, organization_id=self.org_w.id, host_location_id=self.host.id, available_date=self.week2.start_date, primary_game_date=self.week2.start_date, start_time=time(9, 0), end_time=time(12, 0), is_available=True, active=True)
+        antioch_availability = HostingAvailability(id=uuid.uuid4(), season_id=self.season.id, week_id=self.week2.id, organization_id=self.org_a.id, host_location_id=antioch_host.id, available_date=self.week2.start_date, primary_game_date=self.week2.start_date, start_time=time(9, 0), end_time=time(12, 0), is_available=True, active=True)
+        lake_availability = HostingAvailability(id=uuid.uuid4(), season_id=self.season.id, week_id=self.week2.id, organization_id=lake_county.id, host_location_id=lake_host.id, available_date=self.week2.start_date, primary_game_date=self.week2.start_date, start_time=time(9, 0), end_time=time(12, 0), is_available=True, active=True)
         antioch_field = FieldInstance(id=uuid.uuid4(), host_location_id=antioch_host.id, hosting_availability_id=antioch_availability.id, instance_date=self.week2.start_date, field_name='Antioch Small 1', field_type='SMALL', is_active=True)
         lake_field = FieldInstance(id=uuid.uuid4(), host_location_id=lake_host.id, hosting_availability_id=lake_availability.id, instance_date=self.week2.start_date, field_name='Lake Small 1', field_type='SMALL', is_active=True)
         antioch_slot = GameSlot(id=uuid.uuid4(), field_instance_id=antioch_field.id, host_location_id=antioch_host.id, slot_date=self.week2.start_date, start_time=time(9, 0), end_time=time(10, 0), field_type='SMALL', status='OPEN')
