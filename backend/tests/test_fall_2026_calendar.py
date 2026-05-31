@@ -8,8 +8,10 @@ from app.database import Base
 from app.models import (
     Division,
     FieldInstance,
+    Game,
     GameSlot,
     HostLocation,
+    HostPlanSelection,
     HostingAvailability,
     Organization,
     Season,
@@ -18,6 +20,7 @@ from app.models import (
 )
 from app.routes.api import (
     _host_availability_matrix_response,
+    _regenerate_and_validate_slots_for_weeks,
     _regenerate_generated_slots,
     auto_schedule_entire_season,
     get_schedule_readiness,
@@ -142,5 +145,112 @@ def test_blackout_slots_are_suppressed_without_override_and_playoffs_allowed():
         demand_by_date = {row.host_date: row for row in readiness.weekly_field_demand}
         assert demand_by_date[blackout_week.primary_game_date].capacity_used == 0
         assert demand_by_date[playoff_week.primary_game_date].capacity_used == 0
+    finally:
+        db.close()
+
+
+
+def test_auto_scheduler_uses_season_week_primary_dates_after_blackout():
+    db = _db_session()
+    try:
+        season = _seed_fall_calendar(db)
+        org = Organization(id=uuid.uuid4(), name='Host Org', is_active=True)
+        host = HostLocation(
+            id=uuid.uuid4(),
+            organization_id=org.id,
+            name='Regular Park',
+            surface_type='GRASS_FIELD',
+            max_small_fields=2,
+            is_active=True,
+        )
+        division = Division(
+            id=uuid.uuid4(),
+            division_group='COED',
+            name='K/1st',
+            required_field_layout_type='THIRTY_YARD_WIDTH',
+            is_active=True,
+        )
+        teams = [
+            Team(id=uuid.uuid4(), organization_id=org.id, division_id=division.id, name=f'Team {idx}', is_active=True)
+            for idx in range(1, 5)
+        ]
+        blackout_week = db.query(Week).filter(Week.primary_game_date == date(2026, 9, 6)).one()
+        regular_week = db.query(Week).filter(Week.primary_game_date == date(2026, 9, 13)).one()
+        later_week = db.query(Week).filter(Week.primary_game_date == date(2026, 9, 20)).one()
+        blackout_availability = HostingAvailability(
+            id=uuid.uuid4(),
+            season_id=season.id,
+            week_id=blackout_week.id,
+            organization_id=org.id,
+            host_location_id=host.id,
+            available_date=blackout_week.primary_game_date,
+            primary_game_date=blackout_week.primary_game_date,
+            start_time=time(9, 0),
+            end_time=time(11, 0),
+            is_available=True,
+        )
+        regular_availability = HostingAvailability(
+            id=uuid.uuid4(),
+            season_id=season.id,
+            week_id=regular_week.id,
+            organization_id=org.id,
+            host_location_id=host.id,
+            available_date=regular_week.primary_game_date,
+            primary_game_date=regular_week.primary_game_date,
+            start_time=time(9, 0),
+            end_time=time(11, 0),
+            is_available=True,
+        )
+        later_availability = HostingAvailability(
+            id=uuid.uuid4(),
+            season_id=season.id,
+            week_id=later_week.id,
+            organization_id=org.id,
+            host_location_id=host.id,
+            available_date=later_week.primary_game_date,
+            primary_game_date=later_week.primary_game_date,
+            start_time=time(9, 0),
+            end_time=time(11, 0),
+            is_available=True,
+        )
+        db.add_all([org, host, division, *teams, blackout_availability, regular_availability, later_availability])
+        db.add_all([
+            HostPlanSelection(
+                season_id=season.id,
+                week_id=regular_week.id,
+                game_date=regular_week.primary_game_date,
+                community_id=org.id,
+                host_location_id=host.id,
+                availability_id=regular_availability.id,
+                status='SELECTED',
+            ),
+            HostPlanSelection(
+                season_id=season.id,
+                week_id=later_week.id,
+                game_date=later_week.primary_game_date,
+                community_id=org.id,
+                host_location_id=host.id,
+                availability_id=later_availability.id,
+                status='SELECTED',
+            ),
+        ])
+        db.commit()
+
+        weeks = db.query(Week).filter(Week.season_id == season.id).order_by(Week.week_number).all()
+        _regenerate_and_validate_slots_for_weeks(db, weeks, [('COED', 'K/1st')])
+        db.commit()
+
+        assert db.query(GameSlot).filter(GameSlot.week_id == blackout_week.id, GameSlot.slot_date == date(2026, 9, 6)).count() == 0
+        assert db.query(GameSlot).filter(GameSlot.week_id == regular_week.id, GameSlot.slot_date == date(2026, 9, 13)).count() > 0
+        assert db.query(GameSlot).filter(GameSlot.week_id == later_week.id, GameSlot.slot_date == date(2026, 9, 20)).count() > 0
+
+        result = auto_schedule_entire_season({'season_id': season.id}, current_user=None, db=db)
+
+        assert result['committed_games_count'] > 0
+        assert db.query(Game).filter(Game.week_id == blackout_week.id, Game.game_date == date(2026, 9, 6)).count() == 0
+        assert db.query(Game).filter(Game.week_id == regular_week.id, Game.game_date == date(2026, 9, 13)).count() > 0
+        assert db.query(Game).filter(Game.week_id == later_week.id, Game.game_date == date(2026, 9, 20)).count() > 0
+        assert db.query(Game).filter(Game.week_id == regular_week.id, Game.game_date != regular_week.primary_game_date).count() == 0
+        assert db.query(Game).filter(Game.week_id == later_week.id, Game.game_date != later_week.primary_game_date).count() == 0
     finally:
         db.close()

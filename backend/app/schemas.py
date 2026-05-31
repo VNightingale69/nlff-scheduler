@@ -346,6 +346,7 @@ class SavedAvailabilityResponse(BaseModel):
 
 class GeneratedSlotRead(BaseModel):
     id: uuid.UUID
+    week_id: uuid.UUID | None = None
     available_date: date
     date_type: str | None = None
     host_location_name: str

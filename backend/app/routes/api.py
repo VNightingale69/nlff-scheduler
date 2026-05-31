@@ -131,7 +131,12 @@ def _normalize_week_date_type(value: object | None) -> str:
 
 
 def _week_date_type(week: Week | None) -> str:
-    return _normalize_week_date_type(getattr(week, 'date_type', None)) if week else REGULAR_SEASON_DATE_TYPE
+    if not week:
+        return REGULAR_SEASON_DATE_TYPE
+    status_value = str(getattr(week, 'status', '') or '').strip().upper()
+    if status_value in WEEK_DATE_TYPES:
+        return status_value
+    return _normalize_week_date_type(getattr(week, 'date_type', None))
 
 
 def _is_regular_season_week(week: Week | None) -> bool:
@@ -1018,7 +1023,7 @@ def _regenerate_generated_slots(
                     slot_start_dt = next_dt
                     continue
                 for instance in block_instances:
-                    db.add(GameSlot(field_instance_id=instance.id, host_location_id=host_location_id, slot_date=slot_date, start_time=slot_start_dt.time(), end_time=next_dt.time(), field_type=instance.field_type, status='OPEN', turf_wave_id=wave.id))
+                    db.add(GameSlot(field_instance_id=instance.id, host_location_id=host_location_id, week_id=availability.week_id, slot_date=slot_date, start_time=slot_start_dt.time(), end_time=next_dt.time(), field_type=instance.field_type, status='OPEN', turf_wave_id=wave.id))
                     created_slots += 1
                 slot_start_dt = next_dt
             block_start_dt = block_end_dt
@@ -1034,7 +1039,7 @@ def _regenerate_generated_slots(
         while slot_start_dt < end_dt:
             next_dt = min(slot_start_dt + timedelta(hours=1), end_dt)
             for instance in instances:
-                db.add(GameSlot(field_instance_id=instance.id, host_location_id=host_location_id, slot_date=slot_date, start_time=slot_start_dt.time(), end_time=next_dt.time(), field_type=instance.field_type, status='OPEN'))
+                db.add(GameSlot(field_instance_id=instance.id, host_location_id=host_location_id, week_id=availability.week_id, slot_date=slot_date, start_time=slot_start_dt.time(), end_time=next_dt.time(), field_type=instance.field_type, status='OPEN'))
                 created_slots += 1
             slot_start_dt = next_dt
     logger.info('Generated %s field instances for availability_id=%s host_location_id=%s', len(instances), availability.id, host_location_id)
@@ -2890,6 +2895,7 @@ def generate_suggested_host_plan(payload: dict, current_user: User = Depends(req
     generated_slot_capacity: dict[uuid.UUID, dict[str, int]] = {}
     generated_slot_minutes_by_host: dict[uuid.UUID, set[int]] = {}
     generated_slots = db.query(GameSlot).filter(
+        GameSlot.week_id == week.id,
         GameSlot.slot_date == game_date,
         GameSlot.assigned_game_id.is_(None),
         GameSlot.status == 'OPEN',
@@ -4187,7 +4193,8 @@ def list_generated_slots(host_location_id: uuid.UUID, available_date: str | None
     if weeks_by_date:
         q = q.filter(GameSlot.slot_date.in_(list(weeks_by_date)))
     rows = q.order_by(GameSlot.slot_date, GameSlot.start_time, FieldInstance.field_name).all()
-    return [{'id': row.GameSlot.id, 'available_date': row.GameSlot.slot_date, 'date_type': _week_date_type(weeks_by_date.get(row.GameSlot.slot_date)), 'host_location_name': row.host_location_name, 'field_instance_name': row.field_name, 'field_type': row.GameSlot.field_type, 'start_time': row.GameSlot.start_time, 'end_time': row.GameSlot.end_time, 'status': row.GameSlot.status, 'is_locked': row.GameSlot.assigned_game_id is not None} for row in rows]
+    weeks_by_id = {week.id: week for week in db.query(Week).filter(Week.id.in_({row.GameSlot.week_id for row in rows if row.GameSlot.week_id})).all()} if rows else {}
+    return [{'id': row.GameSlot.id, 'week_id': row.GameSlot.week_id, 'available_date': row.GameSlot.slot_date, 'date_type': _week_date_type(weeks_by_id.get(row.GameSlot.week_id) or weeks_by_date.get(row.GameSlot.slot_date)), 'host_location_name': row.host_location_name, 'field_instance_name': row.field_name, 'field_type': row.GameSlot.field_type, 'start_time': row.GameSlot.start_time, 'end_time': row.GameSlot.end_time, 'status': row.GameSlot.status, 'is_locked': row.GameSlot.assigned_game_id is not None} for row in rows]
 
 
 @router.get('/field-instances', dependencies=[Depends(get_current_user)])
@@ -4220,7 +4227,8 @@ def list_generated_game_slots(host_location_id: uuid.UUID | None = None, availab
     if weeks_by_date:
         q = q.filter(GameSlot.slot_date.in_(list(weeks_by_date)))
     rows = q.order_by(GameSlot.slot_date, GameSlot.start_time, FieldInstance.field_name).all()
-    return [{'id': row.GameSlot.id, 'available_date': row.GameSlot.slot_date, 'date_type': _week_date_type(weeks_by_date.get(row.GameSlot.slot_date)), 'host_location_name': row.host_location_name, 'field_instance_name': row.field_name, 'field_type': row.GameSlot.field_type, 'start_time': row.GameSlot.start_time, 'end_time': row.GameSlot.end_time, 'status': row.GameSlot.status, 'is_locked': row.GameSlot.assigned_game_id is not None} for row in rows]
+    weeks_by_id = {week.id: week for week in db.query(Week).filter(Week.id.in_({row.GameSlot.week_id for row in rows if row.GameSlot.week_id})).all()} if rows else {}
+    return [{'id': row.GameSlot.id, 'week_id': row.GameSlot.week_id, 'available_date': row.GameSlot.slot_date, 'date_type': _week_date_type(weeks_by_id.get(row.GameSlot.week_id) or weeks_by_date.get(row.GameSlot.slot_date)), 'host_location_name': row.host_location_name, 'field_instance_name': row.field_name, 'field_type': row.GameSlot.field_type, 'start_time': row.GameSlot.start_time, 'end_time': row.GameSlot.end_time, 'status': row.GameSlot.status, 'is_locked': row.GameSlot.assigned_game_id is not None} for row in rows]
 
 
 GENERATED_SLOTS_CLEAR_WARNING = 'Some field instances were preserved because scheduled games reference them.'
@@ -5277,6 +5285,21 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     week_game_date = _week_game_date(week)
     if not week_game_date:
         raise HTTPException(400, 'Selected week is missing a Primary Game Date')
+    if not _is_regular_season_week(week):
+        return {
+            'proposals': [],
+            'skipped': [{'reason': f'{_week_date_type(week)} weeks are excluded from regular-season auto-schedule.'}],
+            'proposed_game_count': 0,
+            'max_allowed_game_count': 0,
+            'existing_game_count': 0,
+            'unused_team_ids': [],
+            'unused_teams': [],
+            'selected_division_id': str(division_id),
+            'selected_division_key': canonical_division_id_from_division(division),
+            'active_teams_found': 0,
+            'eligible_pairings_generated': 0,
+            'compatible_slots_found': 0,
+        }
     season_weeks = (
         db.query(Week)
         .filter(Week.season_id == season_id)
@@ -5393,6 +5416,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         used_pairs.add(tuple(sorted((g.home_team_id, g.away_team_id))))
     open_slots = db.query(GameSlot).join(GameSlot.field_instance).filter(
         GameSlot.status == 'OPEN',
+        GameSlot.week_id == week_id,
         GameSlot.slot_date == week_game_date,
         GameSlot.field_type == required_field_type,
         GameSlot.assigned_game_id.is_(None),
@@ -5694,6 +5718,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     games_required = max_new_games
     all_open_slots_for_week = db.query(GameSlot).join(GameSlot.field_instance).filter(
         GameSlot.status == 'OPEN',
+        GameSlot.week_id == week_id,
         GameSlot.slot_date == week_game_date,
         GameSlot.assigned_game_id.is_(None),
     ).all()
@@ -7885,6 +7910,8 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
     week_game_date = _week_game_date(week)
     if not week_game_date:
         raise HTTPException(400, 'Selected week is missing a Primary Game Date')
+    if not _is_regular_season_week(week):
+        raise HTTPException(400, f'{_week_date_type(week)} weeks are excluded from regular-season auto-schedule')
     teams = db.query(Team).filter(Team.division_id == division_id, Team.is_active.is_(True)).all()
     division = db.query(Division).filter(Division.id == division_id).first()
     if not division:
@@ -7893,6 +7920,7 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         raise HTTPException(400, 'Division/week produced zero valid schedule candidates.')
     required_field_type = _required_field_type_for_division(division)
     open_slots_count = db.query(GameSlot).filter(
+        GameSlot.week_id == week_id,
         GameSlot.slot_date == week_game_date,
         GameSlot.status == 'OPEN',
         GameSlot.assigned_game_id.is_(None),
@@ -7902,6 +7930,7 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
     if open_slots_count <= 0:
         raise HTTPException(400, 'No valid slot combinations available.')
     host_locations_count = db.query(GameSlot.host_location_id).filter(
+        GameSlot.week_id == week_id,
         GameSlot.slot_date == week_game_date,
         GameSlot.status == 'OPEN',
         GameSlot.assigned_game_id.is_(None),
@@ -7912,6 +7941,7 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
     if host_locations_count <= 0:
         raise HTTPException(400, 'No compatible host locations found.')
     open_slots = db.query(GameSlot).join(GameSlot.field_instance).filter(
+        GameSlot.week_id == week_id,
         GameSlot.slot_date == week_game_date,
         GameSlot.status == 'OPEN',
         GameSlot.assigned_game_id.is_(None),
@@ -9187,16 +9217,16 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
 
     def _host_availability_count_for_week(week: Week) -> int:
         game_date = _week_game_date(week)
-        conditions = [HostingAvailability.is_available.is_(True)]
-        if week.id:
-            conditions.append(HostingAvailability.week_id == week.id)
-        if game_date:
-            conditions.append(HostingAvailability.available_date == game_date)
-        if len(conditions) <= 1:
+        if not week.id or not game_date:
             return 0
         return db.query(func.count(func.distinct(HostingAvailability.host_location_id))).outerjoin(
             HostingAvailability.physical_field_area
-        ).filter(or_(*conditions[1:]), HostingAvailability.is_available.is_(True)).scalar() or 0
+        ).filter(
+            HostingAvailability.season_id == week.season_id,
+            HostingAvailability.week_id == week.id,
+            HostingAvailability.primary_game_date == game_date,
+            HostingAvailability.is_available.is_(True),
+        ).scalar() or 0
 
     def _generated_slot_counts_for_week(week: Week) -> dict[str, int]:
         counts = {FIELD_SIZE_SMALL: 0, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_LARGE: 0}
@@ -9204,6 +9234,7 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         if not game_date:
             return counts
         for field_type, count in db.query(GameSlot.field_type, func.count(GameSlot.id)).filter(
+            GameSlot.week_id == week.id,
             GameSlot.slot_date == game_date,
         ).group_by(GameSlot.field_type).all():
             size = _normalize_field_size(field_type)
@@ -9327,6 +9358,7 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
             game_date = _week_game_date(week)
             if game_date:
                 for host_id, host_name, field_type, count in db.query(GameSlot.host_location_id, HostLocation.name, GameSlot.field_type, func.count(GameSlot.id)).join(HostLocation, HostLocation.id == GameSlot.host_location_id).filter(
+                    GameSlot.week_id == week.id,
                     GameSlot.slot_date == game_date,
                 ).group_by(GameSlot.host_location_id, HostLocation.name, GameSlot.field_type).order_by(HostLocation.name, GameSlot.field_type).all():
                     host_slot_rows.append({
@@ -10305,49 +10337,45 @@ def _regenerate_and_validate_slots_for_weeks(
 
     def _matching_selected_availability(selection: HostPlanSelection, week: Week, host: HostLocation) -> HostingAvailability | None:
         game_date = _week_game_date(week)
-        if selection.availability_id:
+        if selection.availability_id and game_date:
             availability = db.query(HostingAvailability).filter(
                 HostingAvailability.id == selection.availability_id,
+                HostingAvailability.season_id == selection.season_id,
+                HostingAvailability.week_id == week.id,
+                HostingAvailability.primary_game_date == game_date,
                 HostingAvailability.host_location_id == host.id,
                 HostingAvailability.is_available.is_(True),
             ).first()
             if availability and _availability_allows_generated_slots(db, availability):
                 return availability
-        match_conditions = []
-        if week.id:
-            match_conditions.append(HostingAvailability.week_id == week.id)
-        if game_date:
-            match_conditions.extend([
-                HostingAvailability.available_date == game_date,
-                HostingAvailability.primary_game_date == game_date,
-            ])
-        if not match_conditions:
+        if not week.id or not game_date:
             return None
         return db.query(HostingAvailability).filter(
             HostingAvailability.season_id == selection.season_id,
+            HostingAvailability.week_id == week.id,
+            HostingAvailability.primary_game_date == game_date,
             HostingAvailability.host_location_id == host.id,
             HostingAvailability.is_available.is_(True),
-            or_(*match_conditions),
         ).order_by(HostingAvailability.start_time, HostingAvailability.end_time).first()
 
     season_ids = {week.season_id for week in regular_weeks if week.season_id}
     selected_query = db.query(HostPlanSelection)
     if season_ids:
         selected_query = selected_query.filter(HostPlanSelection.season_id.in_(season_ids))
+    regular_week_ids = {week.id for week in regular_weeks if week.id}
     selected_rows = selected_query.filter(
+        HostPlanSelection.week_id.in_(regular_week_ids),
         HostPlanSelection.game_date.in_(week_dates),
-    ).order_by(HostPlanSelection.game_date, HostPlanSelection.status, HostPlanSelection.created_at).all() if week_dates else []
+    ).order_by(HostPlanSelection.game_date, HostPlanSelection.status, HostPlanSelection.created_at).all() if week_dates and regular_week_ids else []
     for selection in selected_rows:
         selection_status = str(selection.status or '').upper()
         if selection_status not in HOST_PLAN_SCHEDULABLE_STATUSES and not selection.locked:
             continue
         week = week_by_id.get(selection.week_id) if selection.week_id else None
-        if not week:
-            week = week_by_date.get(selection.game_date)
         if not week or not _is_regular_season_week(week):
             continue
         game_date = _week_game_date(week)
-        if not game_date:
+        if not game_date or selection.season_id != week.season_id or selection.game_date != game_date:
             continue
         host = hosts_by_id.get(selection.host_location_id)
         if not host:
@@ -10359,8 +10387,9 @@ def _regenerate_and_validate_slots_for_weeks(
             )
             evaluated_hosts_by_date.setdefault(game_date, []).append(host.name)
             continue
+        availability.available_date = game_date
         availability.primary_game_date = game_date
-        availability.week_id = availability.week_id or week.id
+        availability.week_id = week.id
         availabilities_by_host_id.setdefault(host.id, [])
         if availability.id not in {row.id for row in availabilities_by_host_id[host.id]}:
             availabilities_by_host_id[host.id].append(availability)
@@ -10406,6 +10435,7 @@ def _regenerate_and_validate_slots_for_weeks(
         slots_created_by_availability = {
             availability.id: db.query(GameSlot.id).join(GameSlot.field_instance).filter(
                 FieldInstance.hosting_availability_id == availability.id,
+                GameSlot.week_id == availability.week_id,
                 GameSlot.slot_date == (availability.primary_game_date or availability.available_date),
             ).count()
             for availability in availabilities
@@ -10441,6 +10471,7 @@ def _regenerate_and_validate_slots_for_weeks(
             continue
         slot_counts = {FIELD_SIZE_SMALL: 0, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_LARGE: 0}
         for field_type, count in db.query(GameSlot.field_type, func.count(GameSlot.id)).filter(
+            GameSlot.week_id == week.id,
             GameSlot.slot_date == game_date,
         ).group_by(GameSlot.field_type).all():
             size = _normalize_field_size(field_type)
@@ -10454,7 +10485,7 @@ def _regenerate_and_validate_slots_for_weeks(
         location_capacity_by_community: dict[str, list[dict[str, object]]] = {}
         capacity_rows = db.query(HostLocation.organization_id, HostLocation.name, GameSlot.field_type, func.count(GameSlot.id)).select_from(GameSlot).join(
             HostLocation, HostLocation.id == GameSlot.host_location_id
-        ).filter(GameSlot.slot_date == game_date).group_by(HostLocation.organization_id, HostLocation.name, GameSlot.field_type).all()
+        ).filter(GameSlot.week_id == week.id, GameSlot.slot_date == game_date).group_by(HostLocation.organization_id, HostLocation.name, GameSlot.field_type).all()
         for org_id, host_name, field_type, count in capacity_rows:
             community_name = org_names_for_capacity.get(org_id, str(org_id))
             size = _normalize_field_size(field_type) or str(field_type or 'UNKNOWN')
