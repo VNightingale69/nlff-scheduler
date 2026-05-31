@@ -2600,6 +2600,7 @@ def _host_availability_matrix_response(db: Session, season_id: uuid.UUID) -> dic
     dates = [dates_by_value[key] for key in sorted(dates_by_value)]
 
     hosts = db.query(HostLocation, Organization).join(Organization, Organization.id == HostLocation.organization_id).filter(HostLocation.is_active.is_(True), Organization.is_active.is_(True)).order_by(Organization.name, HostLocation.name).all()
+    host_by_id = {str(host.id): host for host, _org in hosts}
     host_ids = [host.id for host, _org in hosts]
     week_ids = [week.id for week in weeks]
     game_dates = [week.primary_game_date for week in weeks if week.primary_game_date]
@@ -2625,6 +2626,15 @@ def _host_availability_matrix_response(db: Session, season_id: uuid.UUID) -> dic
             availability_by_host_date.setdefault((availability.host_location_id, matching_date), []).append(availability)
 
     selection_rows = db.query(HostPlanSelection).filter(HostPlanSelection.season_id == season_id).all()
+    source_game_dates = {date_info['game_date'] for date_info in dates}
+    for selection in selection_rows:
+        if str(selection.game_date) in source_game_dates and str(selection.host_location_id) not in host_by_id:
+            logger.warning(
+                'Host availability matrix skipping selection with missing host_location_id=%s season_id=%s game_date=%s',
+                selection.host_location_id,
+                season_id,
+                selection.game_date,
+            )
     selection_by_host_date = {(selection.host_location_id, selection.game_date): selection for selection in selection_rows}
     availability_by_id = {availability.id: availability for availability in availability_rows}
 
@@ -2703,6 +2713,7 @@ def _host_availability_matrix_response(db: Session, season_id: uuid.UUID) -> dic
         selected_capacity_source_summary = []
         available_locations = []
         available_communities: set[str] = set()
+        warnings = []
         capacity = {FIELD_SIZE_SMALL: 0, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_LARGE: 0}
         community_split: dict[str, int] = {}
         for row in rows:
@@ -2711,13 +2722,19 @@ def _host_availability_matrix_response(db: Session, season_id: uuid.UUID) -> dic
                 available_communities.add(row['community_name'])
                 available_locations.append({'community_name': row['community_name'], 'host_location_name': row['host_location_name']})
             if cell['status'] in HOST_PLAN_SCHEDULABLE_STATUSES or cell.get('locked'):
+                host = host_by_id.get(str(row['host_location_id']))
+                if host is None:
+                    warning = f"Host availability matrix skipped selected row with missing host_location_id={row['host_location_id']} for game_date={game_date}."
+                    logger.warning(warning)
+                    warnings.append(warning)
+                    continue
                 selected_rows.append({'community_name': row['community_name'], 'host_location_name': row['host_location_name']})
                 cell_capacity = cell.get('capacity_by_size') or {}
                 for size in capacity:
                     capacity[size] += int(cell_capacity.get(size, 0) or 0)
                 selected_capacity_source_summary.append(_selected_capacity_source_detail(
                     db,
-                    host_by_id[row['host_location_id']],
+                    host,
                     row['community_name'],
                     availability_by_id.get(cell.get('availability_id')) if cell.get('availability_id') else None,
                     cell_capacity,
@@ -2728,7 +2745,6 @@ def _host_availability_matrix_response(db: Session, season_id: uuid.UUID) -> dic
                 excluded_rows.append({'community_name': row['community_name'], 'host_location_name': row['host_location_name']})
         total_selected_capacity = sum(capacity.values())
         total_required = sum(required_by_size.values())
-        warnings = []
         for size, required in required_by_size.items():
             if capacity.get(size, 0) < required:
                 warnings.append(f'{size.title()} capacity short by {required - capacity.get(size, 0)}. Add an overflow field or select more fields.')

@@ -6,7 +6,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import Base
-from app.models import HostLocation, HostingAvailability, Organization, Season, Week
+from app.models import HostLocation, HostPlanSelection, HostingAvailability, Organization, Season, Week
 from app.routes.api import _host_availability_matrix_response
 
 
@@ -67,6 +67,44 @@ class HostAvailabilityMatrixResponseTest(unittest.TestCase):
         self.assertEqual('NOT_AVAILABLE', unavailable_cell['status'])
         self.assertFalse(unavailable_cell['locked'])
         self.assertFalse(unavailable_cell['has_saved_availability'])
+
+    def test_selected_host_uses_lookup_for_capacity_summary(self):
+        self.db.add(HostPlanSelection(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week.id,
+            game_date=date(2026, 6, 6),
+            community_id=self.available_org.id,
+            host_location_id=self.available_host.id,
+            availability_id=self.availability.id,
+            status='SELECTED',
+        ))
+        self.db.commit()
+
+        response = _host_availability_matrix_response(self.db, self.season.id)
+
+        summary = response['summaries'][0]
+        self.assertEqual([{'community_name': 'Available Org', 'host_location_name': 'Available Field'}], summary['selected_fields'])
+        self.assertEqual('Available Field', summary['weekly_host_plan_decision_summary']['selected_capacity_source_summary'][0]['host_location'])
+
+    def test_missing_selection_host_location_logs_warning_without_crashing(self):
+        missing_host_id = uuid.uuid4()
+        self.db.add(HostPlanSelection(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week.id,
+            game_date=date(2026, 6, 6),
+            community_id=self.available_org.id,
+            host_location_id=missing_host_id,
+            status='SELECTED',
+        ))
+        self.db.commit()
+
+        with self.assertLogs('app.routes.api', level='WARNING') as logs:
+            response = _host_availability_matrix_response(self.db, self.season.id)
+
+        self.assertEqual('2026-06-06', response['dates'][0]['game_date'])
+        self.assertTrue(any(str(missing_host_id) in message for message in logs.output))
 
 
 if __name__ == '__main__':
