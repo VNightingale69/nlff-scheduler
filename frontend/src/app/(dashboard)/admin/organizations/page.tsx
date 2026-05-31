@@ -21,6 +21,7 @@ export default function OrganizationsAdminPage() {
   const [deleteTarget, setDeleteTarget] = useState<Organization | null>(null);
   const [deleteError, setDeleteError] = useState('');
   const [cascadeConfirmed, setCascadeConfirmed] = useState(false);
+  const [deleteNameConfirmation, setDeleteNameConfirmation] = useState('');
 
   const user = getAuthUser();
   const isLeagueAdmin = user?.role_name === 'LEAGUE_ADMIN';
@@ -55,10 +56,10 @@ export default function OrganizationsAdminPage() {
   };
 
   const openDeleteModal = (item: Organization) => {
-    setDeleteTarget(item); setCascadeConfirmed(false); setDeleteError('');
+    setDeleteTarget(item); setCascadeConfirmed(false); setDeleteNameConfirmation(''); setDeleteError('');
   };
 
-  const closeDeleteModal = () => { setDeleteTarget(null); setDeleteError(''); setCascadeConfirmed(false); };
+  const closeDeleteModal = () => { setDeleteTarget(null); setDeleteError(''); setCascadeConfirmed(false); setDeleteNameConfirmation(''); };
 
   const deactivateOrganization = async () => {
     if (!deleteTarget) return;
@@ -93,7 +94,8 @@ export default function OrganizationsAdminPage() {
 
 
   const requiresCascadeConfirmation = isLeagueAdmin;
-  const deleteButtonDisabled = requiresCascadeConfirmation && !cascadeConfirmed;
+  const deleteNameMatches = deleteNameConfirmation.trim() === (deleteTarget?.name || '');
+  const deleteButtonDisabled = requiresCascadeConfirmation && (!cascadeConfirmed || !deleteNameMatches);
 
   return <div className='space-y-4'>
     <Toast message={message} type={type} />
@@ -112,7 +114,7 @@ export default function OrganizationsAdminPage() {
       <p className='mt-2 text-sm text-slate-700'>You are deleting <span className='font-semibold'>{deleteTarget.name}</span>.</p>
       {deleteError && <p className='mt-3 rounded border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700'>{deleteError}</p>}
       <p className='mt-3 rounded border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800'>This will permanently delete the organization and all related setup, teams, host locations, availability, generated slots, and scheduled games. This cannot be undone.</p>
-      {requiresCascadeConfirmation && <div className='mt-3 rounded border border-rose-200 bg-rose-50 p-3 text-sm'><label className='flex items-start gap-2'><input type='checkbox' className='mt-1' checked={cascadeConfirmed} onChange={(e) => setCascadeConfirmed(e.target.checked)} /><span>I understand this will permanently delete this organization and all related setup data.</span></label><p className='mt-2 text-rose-700'>This action cannot be undone.</p></div>}
+      {requiresCascadeConfirmation && <div className='mt-3 space-y-3 rounded border border-rose-200 bg-rose-50 p-3 text-sm'><label className='flex items-start gap-2'><input type='checkbox' className='mt-1' checked={cascadeConfirmed} onChange={(e) => setCascadeConfirmed(e.target.checked)} /><span>I understand this will permanently delete this organization and all related setup data.</span></label><div><label className='font-medium text-rose-900'>Type <span className='font-bold'>{deleteTarget.name}</span> to confirm.</label><input className='mt-1 w-full rounded border border-rose-300 bg-white p-2' value={deleteNameConfirmation} onChange={(e) => setDeleteNameConfirmation(e.target.value)} placeholder={deleteTarget.name} /></div><p className='text-rose-700'>This action cannot be undone.</p></div>}
       <div className='mt-4 flex flex-wrap justify-end gap-2'><button className='rounded border px-3 py-2' onClick={closeDeleteModal}>Cancel</button><button className='rounded border border-amber-500 px-3 py-2 text-amber-700' onClick={deactivateOrganization}>Mark Inactive</button><button className={`rounded px-3 py-2 text-white ${deleteButtonDisabled ? 'bg-slate-400' : 'bg-rose-700 hover:bg-rose-800'}`} disabled={deleteButtonDisabled} onClick={confirmDelete}>Delete Organization</button></div>
     </div></div>}
   </div>;
