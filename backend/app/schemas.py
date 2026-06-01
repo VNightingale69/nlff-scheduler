@@ -661,6 +661,17 @@ class GameValidationResponse(BaseModel):
     soft_warnings: list[ValidationMessage]
 
 
+class ScorePayload(BaseModel):
+    home_score: int
+    away_score: int
+    community_admin_notes: str | None = None
+    league_admin_notes: str | None = None
+
+
+class ScoreApprovePayload(BaseModel):
+    league_admin_notes: str | None = None
+
+
 class PublicGameRead(BaseModel):
     id: uuid.UUID
     game_date: date
@@ -685,6 +696,9 @@ class PublicGameRead(BaseModel):
     game_status_id: uuid.UUID
     game_status_code: str
     game_status_label: str
+    public_score_status: str | None = None
+    home_score: int | None = None
+    away_score: int | None = None
 
 
 from pydantic.generics import GenericModel
