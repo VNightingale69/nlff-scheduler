@@ -62,7 +62,7 @@ def _format_diagnostic_time(value: time | None) -> str | None:
     return value.isoformat() if value else None
 
 
-def _build_host_location_vs_home_team_verification(db: Session, season_id: uuid.UUID | str | None = None) -> dict[str, object]:
+def _build_host_location_vs_home_team_verification(db: Session, season_id: uuid.UUID | str | None = None, *, require_host_owner_as_home_team: bool = False) -> dict[str, object]:
     """Build verification-only diagnostics for scheduled games.
 
     This intentionally does not validate, mutate, fail, or repair any schedule data.
@@ -131,8 +131,18 @@ def _build_host_location_vs_home_team_verification(db: Session, season_id: uuid.
         if category == 'HOST_OWNER_IS_AWAY':
             host_owner_is_away_games.append(row)
 
+    validation_failures: list[str] = []
+    informational_notes: list[str] = []
+    if require_host_owner_as_home_team and counts['HOST_OWNER_IS_AWAY'] > 0:
+        validation_failures.append('Host owner is away team for one or more games while require_host_owner_as_home_team is true.')
+    elif counts['HOST_OWNER_IS_AWAY'] > 0:
+        informational_notes.append('Host owner is away team for one or more games; require_host_owner_as_home_team is false.')
+    if counts['NEUTRAL_SITE'] > 0:
+        informational_notes.append('Neutral-site games were found.')
+
     return {
         'title': 'Host Location vs Home Team Verification',
+        'require_host_owner_as_home_team': require_host_owner_as_home_team,
         'total_games_checked': len(games_checked),
         'same_community_games': counts['SAME_COMMUNITY_GAME'],
         'unknown_location_owner': counts['UNKNOWN_LOCATION_OWNER'],
@@ -140,6 +150,9 @@ def _build_host_location_vs_home_team_verification(db: Session, season_id: uuid.
         'host_owner_is_away_team': counts['HOST_OWNER_IS_AWAY'],
         'neutral_site_games': counts['NEUTRAL_SITE'],
         'counts_by_category': counts,
+        'validation_failures': validation_failures,
+        'validation_failure_count': len(validation_failures),
+        'informational_notes': informational_notes,
         'host_owner_is_away_games': host_owner_is_away_games,
         'games': games_checked,
     }
@@ -533,6 +546,54 @@ def _grass_capacity_limits_for_host(db: Session, host: HostLocation) -> dict[str
 
 def _estimated_games_from_team_count(team_count: int | None) -> int:
     return (max(int(team_count or 0), 0) + 1) // 2
+
+
+def _diagnostic_no_bye_doubleheaders_enabled(division: Division | None = None, season: Season | None = None) -> bool:
+    """Return the diagnostics view of odd-team no-bye scheduling.
+
+    The current auto-scheduler defaults to no-bye odd divisions unless a future
+    season/division setting explicitly opts out. Keep this helper diagnostic-only
+    so expected counts can follow those settings when they are introduced without
+    changing scheduling behavior here.
+    """
+    setting_names = (
+        'no_byes',
+        'no_bye_scheduling_enabled',
+        'odd_team_no_bye_doubleheaders_enabled',
+        'enable_odd_team_doubleheaders',
+    )
+    for source in (division, season):
+        if source is None:
+            continue
+        for name in setting_names:
+            if hasattr(source, name):
+                return bool(getattr(source, name))
+        for name in ('bye_scheduling_enabled', 'allow_byes'):
+            if hasattr(source, name):
+                return not bool(getattr(source, name))
+    return True
+
+
+def _diagnostic_expected_games_for_team_count(active_team_count: int | None, *, no_bye_doubleheaders_enabled: bool = True) -> int:
+    team_count = max(int(active_team_count or 0), 0)
+    if team_count % 2 == 0:
+        return team_count // 2
+    if no_bye_doubleheaders_enabled:
+        return (team_count + 1) // 2
+    return team_count // 2
+
+
+def _diagnostic_active_teams_expected_to_play(active_team_count: int | None, *, no_bye_doubleheaders_enabled: bool = True) -> int:
+    team_count = max(int(active_team_count or 0), 0)
+    if team_count % 2 == 0 or no_bye_doubleheaders_enabled:
+        return team_count
+    return max(0, team_count - 1)
+
+
+def _diagnostic_field_size_diff(expected: dict[str, int], actual: dict[str, int]) -> tuple[dict[str, int], dict[str, int]]:
+    missing = {size: max(0, int(expected.get(size, 0) or 0) - int(actual.get(size, 0) or 0)) for size in FIELD_SIZE_ORDER}
+    extra = {size: max(0, int(actual.get(size, 0) or 0) - int(expected.get(size, 0) or 0)) for size in FIELD_SIZE_ORDER}
+    return missing, extra
 
 
 def _empty_field_size_counts() -> dict[str, int]:
@@ -10193,8 +10254,20 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
     def _division_label(division: Division) -> str:
         return f'{division.division_group or ""} {division.name or ""}'.strip() or str(division.id)
 
-    def _division_required_games(active_team_count: int) -> int:
-        return (int(active_team_count or 0) + 1) // 2
+    def _division_no_bye_doubleheaders_enabled(division: Division | None) -> bool:
+        return _diagnostic_no_bye_doubleheaders_enabled(division, season)
+
+    def _division_required_games(active_team_count: int, division: Division | None = None) -> int:
+        return _diagnostic_expected_games_for_team_count(
+            active_team_count,
+            no_bye_doubleheaders_enabled=_division_no_bye_doubleheaders_enabled(division),
+        )
+
+    def _division_active_teams_expected_to_play(active_team_count: int, division: Division | None = None) -> int:
+        return _diagnostic_active_teams_expected_to_play(
+            active_team_count,
+            no_bye_doubleheaders_enabled=_division_no_bye_doubleheaders_enabled(division),
+        )
 
     def _skip_reason_code(reason: str | None) -> str:
         text = (reason or '').strip().lower()
@@ -10299,31 +10372,22 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
 
     def _week_field_size_counts(week_id: uuid.UUID) -> dict[str, int]:
         counts = {FIELD_SIZE_SMALL: 0, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_LARGE: 0}
-        rows = db.query(GameSlot.field_type, func.count(Game.id)).select_from(Game).join(Game.status).join(
+        rows = db.query(Game.id, GameSlot.field_type, Field.layout_type, FieldInstance.field_type).select_from(Game).join(Game.status).outerjoin(
             GameSlot, GameSlot.assigned_game_id == Game.id
-        ).filter(
+        ).outerjoin(Field, Field.id == Game.field_id).outerjoin(FieldInstance, FieldInstance.id == Game.field_instance_id).filter(
             Game.season_id == season_id,
             Game.week_id == week_id,
             GameStatus.code != 'UNSCHEDULED',
             GameStatus.is_active.is_(True),
-        ).group_by(GameSlot.field_type).all()
-        for field_type, count in rows:
-            size = _normalize_field_size(field_type) or str(field_type or '').upper()
+        ).all()
+        for _game_id, slot_field_type, field_layout_type, field_instance_type in rows:
+            size = _normalize_field_size(slot_field_type) or _normalize_field_size(field_instance_type) or _normalize_field_size(field_layout_type) or str(slot_field_type or field_instance_type or field_layout_type or '').upper()
             if size in counts:
-                counts[size] = int(count or 0)
+                counts[size] += 1
         return counts
 
     def _active_team_count(division_id: uuid.UUID) -> int:
         return db.query(Team.id).filter(Team.division_id == division_id, Team.is_active.is_(True)).count()
-
-    def _expected_regular_season_week_total() -> int:
-        total = 0
-        for group, name in division_order:
-            division = divisions_by_key.get(canonical_division_id(group, name)) or divisions_by_normalized_name.get(normalize_division_name(f'{group} {name}'))
-            if not division or not division.is_active:
-                continue
-            total += _division_required_games(_active_team_count(division.id))
-        return total
 
     def _host_availability_count_for_week(week: Week) -> int:
         game_date = _week_game_date(week)
@@ -10362,17 +10426,16 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         no_active_divisions = int(diagnostics.get('divisions_evaluated') or 0) == 0
         no_regular_weeks = int(diagnostics.get('regular_season_weeks_found') or diagnostics.get('weeks_evaluated') or 0) == 0
         every_game_already_scheduled = expected_games > 0 and existing_scheduled >= expected_games
+        unresolved_games = max(0, expected_games - existing_scheduled)
         if no_active_teams:
             categories.add('no_active_teams')
         if no_active_divisions:
             categories.add('no_active_divisions')
         if no_regular_weeks:
             categories.add('no_weeks_found')
-        if every_game_already_scheduled:
-            categories.add('all_games_already_scheduled')
         if (no_active_teams or no_active_divisions or no_regular_weeks) and generated_game_groups == 0 and not every_game_already_scheduled:
             categories.add('no_required_game_groups')
-        if int(diagnostics.get('host_availability_total') or 0) == 0:
+        if unresolved_games > 0 and int(diagnostics.get('host_availability_total') or 0) == 0:
             categories.add('no_host_availability')
         placement_attempts = int(diagnostics.get('placement_attempts') or 0)
         preview_count = int(diagnostics.get('preview_assignments_count') or 0)
@@ -10381,18 +10444,16 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         database_failures = int(diagnostics.get('database_commit_failed_count') or 0)
         dry_run_result = bool(diagnostics.get('dry_run'))
         missing_slot_sizes = diagnostics.get('missing_generated_slot_field_sizes') or []
-        if missing_slot_sizes:
+        if unresolved_games > 0 and missing_slot_sizes:
             categories.add('no_generated_slots')
         scheduled_count = int(diagnostics.get('scheduled_games_count') or 0)
         compatible_slot_count = int(diagnostics.get('compatible_generated_slots_total') or 0)
         skipped_count = int(diagnostics.get('skipped_count') or 0)
-        if expected_games > 0 and scheduled_count == 0 and existing_scheduled >= expected_games:
-            categories.add('all_games_already_scheduled')
-        if expected_games > 0 and compatible_slot_count == 0 and not missing_slot_sizes:
+        if unresolved_games > 0 and compatible_slot_count == 0 and not missing_slot_sizes:
             categories.add('no_compatible_slots')
-        if expected_games > 0 and scheduled_count == 0 and skipped_count > 0:
+        if unresolved_games > 0 and scheduled_count == 0 and skipped_count > 0:
             categories.add('placement_blocked_by_constraints')
-        if placement_attempts > 0 and committed_count == 0:
+        if unresolved_games > 0 and placement_attempts > 0 and committed_count == 0:
             categories.discard('unknown')
             if dry_run_result and preview_count > 0:
                 categories.add('dry_run_prevented_commit')
@@ -10402,10 +10463,11 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
                 categories.add('placement_candidates_failed_validation')
             if preview_count == 0 and validation_failures == 0 and database_failures == 0:
                 categories.add('no_valid_assignments')
+        if not categories and unresolved_games == 0 and validation_failures == 0 and database_failures == 0:
+            return []
         if not categories:
             categories.add('unknown')
         category_order = [
-            'all_games_already_scheduled',
             'no_active_teams',
             'no_active_divisions',
             'no_weeks_found',
@@ -10456,6 +10518,9 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
                 'division_id': str(division.id),
                 'division_name': _division_label(division),
                 'active_team_count': team_count,
+                'no_bye_doubleheaders_enabled': _division_no_bye_doubleheaders_enabled(division),
+                'expected_games_per_week': _division_required_games(team_count, division),
+                'active_teams_expected_to_play_per_week': _division_active_teams_expected_to_play(team_count, division),
                 'active_teams': [name for _, name in team_rows],
             })
         for week in regular_weeks:
@@ -10489,7 +10554,7 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
                     compatible_generated_slots_total += int(count or 0)
             for division in active_divisions:
                 division_label = _division_label(division)
-                required_games = _division_required_games(active_team_count_by_division.get(division.id, 0))
+                required_games = _division_required_games(active_team_count_by_division.get(division.id, 0), division)
                 expected_games_by_week[week_key] = expected_games_by_week.get(week_key, 0) + required_games
                 required_game_groups_total += required_games
                 existing = _actual_created_game_count_for_week(division.id, week.id)
@@ -10503,6 +10568,11 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
                     'week': week.week_number,
                     'week_id': str(week.id),
                     'expected_games': required_games,
+                    'active_team_count': active_team_count_by_division.get(division.id, 0),
+                    'active_teams_expected_to_play': _division_active_teams_expected_to_play(active_team_count_by_division.get(division.id, 0), division),
+                    'team_appearances_expected': required_games * 2,
+                    'no_bye_doubleheaders_enabled': _division_no_bye_doubleheaders_enabled(division),
+                    'required_field_size': _required_field_type_for_division(division),
                     'existing_scheduled_games': existing,
                 })
                 generated_game_groups_by_division_week.append({
@@ -10513,6 +10583,8 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
                     'expected_games': required_games,
                     'existing_scheduled_games': existing,
                     'generated_game_groups': generated_groups,
+                    'no_bye_doubleheaders_enabled': _division_no_bye_doubleheaders_enabled(division),
+                    'required_field_size': _required_field_type_for_division(division),
                 })
                 if required_games == 0:
                     skipped_game_groups.append({
@@ -10589,13 +10661,14 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
             'preview_assignments_count': preview_assignments_count,
             'preview_games_count': preview_games_count,
             'committed_assignments_count': committed_assignments_count,
-            'committed_games_count': committed_assignments_count,
-            'failed_validation_count': max(failed_validation_count, sum(failed_validation_reasons.values())),
-            'failed_validation_reasons': dict(failed_validation_reasons),
+            'committed_games_count': existing_scheduled_games_total,
+            'failed_validation_count': 0 if (sum(expected_games_by_week.values()) > 0 and existing_scheduled_games_total >= sum(expected_games_by_week.values())) else max(failed_validation_count, sum(failed_validation_reasons.values())),
+            'failed_validation_reasons': {} if (sum(expected_games_by_week.values()) > 0 and existing_scheduled_games_total >= sum(expected_games_by_week.values())) else dict(failed_validation_reasons),
             'database_commit_failed_count': database_commit_failed_count,
             'dry_run': dry_run,
-            'scheduled_games_count': total_games_created,
+            'scheduled_games_count': existing_scheduled_games_total,
             'existing_scheduled_games_total': existing_scheduled_games_total,
+            'all_required_games_already_scheduled': sum(expected_games_by_week.values()) > 0 and existing_scheduled_games_total >= sum(expected_games_by_week.values()),
             'skipped_count': sum(skipped_attempts_by_reason.values()),
             'skipped_reasons': dict(skipped_attempts_by_reason),
         }
@@ -10628,14 +10701,10 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
     preplacement_expected_games = int(preplacement_diagnostics.get('expected_games_total') or 0)
     if preplacement_generated_groups == 0 and (
         'no_required_game_groups' in preplacement_root_causes
-        or 'all_games_already_scheduled' in preplacement_root_causes
         or preplacement_expected_games == 0
     ):
         _log_auto_schedule_result(preplacement_diagnostics, logging.WARNING)
-        if 'all_games_already_scheduled' in preplacement_root_causes:
-            message = 'Auto-schedule completed but no games were scheduled: all games already scheduled.'
-        else:
-            message = 'Auto-schedule completed but no games were scheduled: no required game groups were generated.'
+        message = 'Auto-schedule completed but no games were scheduled: no required game groups were generated.'
         if dry_run:
             db.rollback()
         else:
@@ -10660,6 +10729,8 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
             'skipped_attempts_by_reason': skipped_attempts_by_reason,
             'required_games_still_missing': [],
             'warnings': warnings,
+            'informational_notes': [],
+            'validation_failures': validation_errors,
             'validation_errors': validation_errors,
             'validation_warnings': validation_warnings,
             'weekly_schedule_diagnostics': [],
@@ -10706,7 +10777,7 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
             apply_skipped: list[dict[str, object]] = []
             generated_game_groups = 0
             active_team_count = _active_team_count(division.id)
-            required_games = _division_required_games(active_team_count)
+            required_games = _division_required_games(active_team_count, division)
             unscheduled_teams: list[str] = []
             unresolved_conflicts: list[dict[str, object]] = []
             host_count = 0
@@ -10971,15 +11042,6 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
                 )
                 warnings.append(f'Balance under-target teams for {division_label}: {under_target_teams}')
 
-    season_weeks = [w for w in weeks if w.start_date]
-    september_13_weeks = [w for w in season_weeks if w.start_date.month == 9 and w.start_date.day == 13 and _is_regular_season_week(w)]
-    september_13_slots = db.query(GameSlot.id).join(FieldInstance, FieldInstance.id == GameSlot.field_instance_id).join(
-        HostLocation, HostLocation.id == FieldInstance.host_location_id
-    ).filter(
-        GameSlot.slot_date == date(season.start_date.year, 9, 13)
-    ).count() if season.start_date else 0
-
-    expected_regular_season_games = _expected_regular_season_week_total()
     hard_validation: list[dict[str, object]] = []
     for week in _regular_season_weeks():
         week_game_date = _week_game_date(week)
@@ -10994,23 +11056,59 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
             if team_id
         }
         unique_teams_playing = len(unique_team_ids)
+        team_appearances_actual = sum(
+            1
+            for game in scheduled_games
+            for team_id in (game.home_team_id, game.away_team_id)
+            if team_id
+        )
         field_size_counts = _week_field_size_counts(week.id)
-        missing_total = max(0, expected_regular_season_games - scheduled_games_total)
+        expected_games_for_week = 0
+        active_teams_expected_to_play = 0
+        team_appearances_expected = 0
+        expected_games_by_field_size = _empty_field_size_counts()
+        for division in _active_divisions_for_auto_schedule():
+            active_count = _active_team_count(division.id)
+            division_expected_games = _division_required_games(active_count, division)
+            expected_games_for_week += division_expected_games
+            active_teams_expected_to_play += _division_active_teams_expected_to_play(active_count, division)
+            team_appearances_expected += division_expected_games * 2
+            required_size = _required_field_type_for_division(division)
+            if required_size in expected_games_by_field_size:
+                expected_games_by_field_size[required_size] += division_expected_games
+        missing_total = max(0, expected_games_for_week - scheduled_games_total)
+        missing_by_size, extra_by_size = _diagnostic_field_size_diff(expected_games_by_field_size, field_size_counts)
+        team_appearance_counts: dict[uuid.UUID, int] = {}
+        for game in scheduled_games:
+            for team_id in (game.home_team_id, game.away_team_id):
+                if team_id:
+                    team_appearance_counts[team_id] = team_appearance_counts.get(team_id, 0) + 1
+        doubleheader_teams_count = sum(1 for count in team_appearance_counts.values() if count > 1)
+        bye_teams_count = max(0, active_teams_expected_to_play - unique_teams_playing)
         week_diagnostic = weekly_diagnostics_by_week_id.setdefault(week.id, {
             'week': week.week_number,
             'week_start_date': str(week_game_date) if week_game_date else None,
-            'expected_games_total': expected_regular_season_games,
+            'expected_games_total': 0,
             'generated_game_groups_total': 0,
             'scheduled_games_total': 0,
             'missing_games_total': 0,
             'skipped_placements_total': 0,
             'divisions': [],
         })
-        week_diagnostic['expected_games_total'] = expected_regular_season_games
+        week_diagnostic['expected_games_total'] = expected_games_for_week
         week_diagnostic['scheduled_games_total'] = scheduled_games_total
         week_diagnostic['missing_games_total'] = missing_total
+        week_diagnostic['active_teams_expected_to_play'] = active_teams_expected_to_play
         week_diagnostic['unique_teams_playing'] = unique_teams_playing
+        week_diagnostic['team_appearances_expected'] = team_appearances_expected
+        week_diagnostic['team_appearances_actual'] = team_appearances_actual
+        week_diagnostic['doubleheader_teams_count'] = doubleheader_teams_count
+        week_diagnostic['bye_teams_count'] = bye_teams_count
         week_diagnostic['field_size_counts'] = field_size_counts
+        week_diagnostic['expected_games_by_field_size'] = expected_games_by_field_size
+        week_diagnostic['actual_games_by_field_size'] = field_size_counts
+        week_diagnostic['missing_games_by_field_size'] = missing_by_size
+        week_diagnostic['extra_games_by_field_size'] = extra_by_size
         missing_divisions = [
             division_row
             for division_row in week_diagnostic.get('divisions', [])
@@ -11019,10 +11117,18 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         validation_row = {
             'week': week.week_number,
             'week_start_date': str(week_game_date) if week_game_date else None,
-            'expected_games': expected_regular_season_games,
+            'expected_games': expected_games_for_week,
             'scheduled_games': scheduled_games_total,
+            'active_teams_expected_to_play': active_teams_expected_to_play,
             'unique_teams_playing': unique_teams_playing,
-            'expected_unique_teams_playing': 43,
+            'team_appearances_expected': team_appearances_expected,
+            'team_appearances_actual': team_appearances_actual,
+            'doubleheader_teams_count': doubleheader_teams_count,
+            'bye_teams_count': bye_teams_count,
+            'expected_games_by_field_size': expected_games_by_field_size,
+            'actual_games_by_field_size': field_size_counts,
+            'missing_games_by_field_size': missing_by_size,
+            'extra_games_by_field_size': extra_by_size,
             'field_size_counts': field_size_counts,
             'missing_games': missing_total,
             'missing_divisions': missing_divisions,
@@ -11032,55 +11138,34 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
                 for reason in (division_row.get('skip_reasons') or ['unknown'])
             }),
         }
-        if expected_regular_season_games != 22:
+        if scheduled_games_total != expected_games_for_week:
             validation_errors.append(
-                f'Week {week.week_number}: expected regular-season game count is {expected_regular_season_games}; hard validation expects 22 based on current league setup.'
+                f'Week {week.week_number}: scheduled_games={scheduled_games_total}, expected_games={expected_games_for_week}, missing_games={missing_total}.'
             )
-        if scheduled_games_total != expected_regular_season_games:
+        if unique_teams_playing != active_teams_expected_to_play:
             validation_errors.append(
-                f'Week {week.week_number}: scheduled_games={scheduled_games_total}, expected_games={expected_regular_season_games}, missing_games={missing_total}.'
+                f'Week {week.week_number}: unique_teams_playing={unique_teams_playing}, active_teams_expected_to_play={active_teams_expected_to_play}.'
             )
-        if unique_teams_playing != 43:
+        if team_appearances_actual != team_appearances_expected:
             validation_errors.append(
-                f'Week {week.week_number}: unique_teams_playing={unique_teams_playing}, expected_unique_teams_playing=43.'
+                f'Week {week.week_number}: team_appearances_actual={team_appearances_actual}, team_appearances_expected={team_appearances_expected}.'
+            )
+        if any(missing_by_size.values()):
+            validation_errors.append(
+                f'Week {week.week_number}: field-size demand not met; missing_games_by_field_size={missing_by_size}.'
             )
         if missing_total > 0 and not any(row.get('week') == week.week_number for row in required_games_missing):
             required_games_missing.append({
                 'division': 'WEEK_TOTAL',
                 'week': week.week_number,
-                'required_games': expected_regular_season_games,
+                'required_games': expected_games_for_week,
                 'created_games': scheduled_games_total,
                 'missing_games': missing_total,
                 'missing_divisions': missing_divisions,
                 'skipped_placement_reasons': validation_row['skipped_placement_reasons'],
             })
-        if week_game_date == date(2026, 9, 13):
-            expected_by_size = {FIELD_SIZE_SMALL: 10, FIELD_SIZE_MEDIUM: 5, FIELD_SIZE_LARGE: 7}
-            missing_by_size = {
-                size: max(0, expected_count - int(field_size_counts.get(size, 0) or 0))
-                for size, expected_count in expected_by_size.items()
-            }
-            validation_row['september_13_validation'] = {
-                'expected_small_games': expected_by_size[FIELD_SIZE_SMALL],
-                'expected_medium_games': expected_by_size[FIELD_SIZE_MEDIUM],
-                'expected_large_games': expected_by_size[FIELD_SIZE_LARGE],
-                'actual_small_games': field_size_counts[FIELD_SIZE_SMALL],
-                'actual_medium_games': field_size_counts[FIELD_SIZE_MEDIUM],
-                'actual_large_games': field_size_counts[FIELD_SIZE_LARGE],
-                'missing_small_games': missing_by_size[FIELD_SIZE_SMALL],
-                'missing_medium_games': missing_by_size[FIELD_SIZE_MEDIUM],
-                'missing_large_games': missing_by_size[FIELD_SIZE_LARGE],
-            }
-            if any(missing_by_size.values()):
-                validation_errors.append(
-                    '09/13/2026 field-size validation failed: '
-                    f"missing_small_games={missing_by_size[FIELD_SIZE_SMALL]}, "
-                    f"missing_medium_games={missing_by_size[FIELD_SIZE_MEDIUM]}, "
-                    f"missing_large_games={missing_by_size[FIELD_SIZE_LARGE]}."
-                )
         hard_validation.append(validation_row)
 
-    schedule_complete = not validation_errors and not required_games_missing
     skipped_attempts_message = (
         f"{sum(skipped_attempts_by_reason.values())} placement attempts skipped:\n"
         f"- Already scheduled: {skipped_attempts_summary.get('Already scheduled', 0)}\n"
@@ -11091,19 +11176,22 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
     )
 
     auto_schedule_diagnostics = _build_auto_schedule_diagnostics()
-    root_cause_categories = list(auto_schedule_diagnostics.get('root_cause_categories') or ['unknown'])
-    if int(auto_schedule_diagnostics.get('expected_games_total') or 0) > 0 and total_games_created == 0 and not dry_run:
+    root_cause_categories = list(auto_schedule_diagnostics.get('root_cause_categories') or [])
+    informational_notes: list[str] = []
+    if auto_schedule_diagnostics.get('all_required_games_already_scheduled'):
+        informational_notes.append('All required game groups were already scheduled before this pass.')
+    if int(auto_schedule_diagnostics.get('expected_games_total') or 0) > 0 and total_games_created == 0 and not dry_run and not auto_schedule_diagnostics.get('all_required_games_already_scheduled'):
         warning_message = 'Auto-schedule completed but no games were scheduled.'
-        if 'all_games_already_scheduled' in root_cause_categories:
-            warning_message = 'Auto-schedule completed but no games were scheduled: all games already scheduled.'
-        elif 'no_generated_slots' in root_cause_categories:
+        if 'no_generated_slots' in root_cause_categories:
             missing_sizes = ', '.join(auto_schedule_diagnostics.get('missing_generated_slot_field_sizes') or [])
             warning_message = f'Auto-schedule completed but no games were scheduled: no generated slots for required field sizes ({missing_sizes or "unknown"}).'
         elif 'no_required_game_groups' in root_cause_categories:
             warning_message = 'Auto-schedule completed but no games were scheduled: no required game groups were generated.'
         warnings.append(warning_message)
         validation_errors.append('Auto-schedule placed 0 games even though expected_games > 0; review auto_schedule_diagnostics.root_cause_categories.')
-        schedule_complete = False
+    if auto_schedule_diagnostics.get('all_required_games_already_scheduled'):
+        validation_errors = [error for error in validation_errors if 'no compatible generated slots' not in str(error).lower() and 'no generated slots' not in str(error).lower()]
+        required_games_missing = []
     _log_auto_schedule_result(auto_schedule_diagnostics, logging.WARNING if total_games_created == 0 else logging.INFO)
 
     # Intentionally do not run post-schedule optimization automatically.
@@ -11115,9 +11203,32 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
 
     host_location_verification = _build_host_location_vs_home_team_verification(db, season_id)
     auto_schedule_diagnostics['host_location_vs_home_team_verification'] = host_location_verification
+    if int(host_location_verification.get('host_owner_is_away_team') or 0) > 0 and not bool(host_location_verification.get('require_host_owner_as_home_team')):
+        informational_notes.append('Host owner is away team for one or more games; host-owner home assignment is verification-only.')
+    if int(host_location_verification.get('neutral_site_games') or 0) > 0:
+        informational_notes.append('Neutral-site games were found during host-location verification.')
 
-    final_status = 'complete' if schedule_complete else 'incomplete'
-    final_message = 'Auto-schedule completed.' if schedule_complete else 'Auto-schedule completed with missing required games; review validation_errors and diagnostics.'
+    expected_games_total = int(auto_schedule_diagnostics.get('expected_games_total') or 0)
+    committed_games_count = int(auto_schedule_diagnostics.get('committed_games_count') or 0)
+    scheduled_games_count = int(auto_schedule_diagnostics.get('existing_scheduled_games_total') or 0)
+    failed_validation_total = int(auto_schedule_diagnostics.get('failed_validation_count') or 0)
+    required_missing_total = sum(int(row.get('missing_games') or 0) for row in required_games_missing)
+    division_week_counts_complete = all(
+        int(row.get('generated_game_groups') or 0) == int(row.get('expected_games') or 0)
+        and int(row.get('existing_scheduled_games') or 0) == int(row.get('expected_games') or 0)
+        for row in (auto_schedule_diagnostics.get('generated_game_groups_by_division_week') or [])
+    )
+    diagnostic_complete = (
+        expected_games_total == committed_games_count
+        and expected_games_total == scheduled_games_count
+        and required_missing_total == 0
+        and failed_validation_total == 0
+        and division_week_counts_complete
+        and not validation_errors
+    )
+
+    final_status = 'complete' if diagnostic_complete else 'incomplete'
+    final_message = 'Auto-schedule completed successfully. All required games are scheduled.' if diagnostic_complete else 'Auto-schedule completed with missing required games; review validation_failures and diagnostics.'
     if dry_run:
         final_status = 'complete' if preview_assignments_count > 0 else 'warning'
         if preview_assignments_count > 0:
@@ -11125,12 +11236,10 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         else:
             reason_message = '; '.join(validation_errors[:3]) or '; '.join(warnings[:3]) or 'review auto_schedule_diagnostics.root_cause_categories.'
             final_message = f'Dry run found no valid assignments. {reason_message}'
-    elif total_games_created == 0:
+    elif total_games_created == 0 and not diagnostic_complete:
         final_status = 'warning'
         final_message = 'Auto-schedule completed but no games were scheduled.'
-        if 'all_games_already_scheduled' in root_cause_categories:
-            final_message = 'Auto-schedule completed but no games were scheduled: all games already scheduled.'
-        elif 'no_generated_slots' in root_cause_categories:
+        if 'no_generated_slots' in root_cause_categories:
             missing_sizes_message = ', '.join(auto_schedule_diagnostics.get('missing_generated_slot_field_sizes') or []) or 'unknown'
             final_message = f'Auto-schedule completed but no games were scheduled: no generated slots for required field sizes ({missing_sizes_message}).'
         elif 'no_required_game_groups' in root_cause_categories:
@@ -11141,26 +11250,21 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         'message': final_message,
         'dry_run': dry_run,
         'preview_games_count': preview_games_count,
-        'committed_games_count': committed_assignments_count,
-        'scheduled_games_count': committed_assignments_count,
+        'committed_games_count': committed_games_count,
+        'scheduled_games_count': scheduled_games_count,
         'total_games_created': total_games_created,
         'root_cause_categories': root_cause_categories,
         'auto_schedule_diagnostics': auto_schedule_diagnostics,
         'host_location_vs_home_team_verification': host_location_verification,
         'slot_capacity_validation': slot_preflight,
-        'season_date_diagnostics': {
-            'target_date_checked': f"{season.start_date.year}-09-13" if season.start_date else None,
-            'matching_week_numbers': [w.week_number for w in september_13_weeks],
-            'date_in_regular_season_weeks': len(september_13_weeks) > 0,
-            'available_slots_on_target_date': september_13_slots,
-            'date_excluded_reason': None if len(september_13_weeks) > 0 else 'No season week starts on September 13; date is outside defined weekly schedule windows.',
-        },
         'games_skipped': sum(skipped_attempts_by_reason.values()),
         'skipped_attempts_message': skipped_attempts_message,
         'skipped_attempts_summary': skipped_attempts_summary,
         'skipped_attempts_by_reason': skipped_attempts_by_reason,
         'required_games_still_missing': required_games_missing,
         'warnings': warnings,
+        'informational_notes': informational_notes,
+        'validation_failures': validation_errors,
         'validation_errors': validation_errors,
         'validation_warnings': validation_warnings,
         'weekly_schedule_diagnostics': sorted(weekly_diagnostics_by_week_id.values(), key=lambda row: (int(row.get('week') or 0), str(row.get('week_start_date') or ''))),
