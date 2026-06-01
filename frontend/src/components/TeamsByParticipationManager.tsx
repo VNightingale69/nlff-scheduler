@@ -307,6 +307,10 @@ export default function TeamsByParticipationManager() {
       <div className='rounded border bg-slate-50 p-3 text-sm text-slate-700'>
         Managing teams for <span className='font-semibold'>{selectedOrg?.name || 'selected community'}</span>.
       </div>
+      <div className='rounded border border-sky-200 bg-sky-50 p-3 text-sm text-sky-900'>
+        <div className='mb-1 font-semibold'>Team naming guidance</div>
+        <p>When creating teams, use a consistent team name that includes the community name, division/grade level, and a differentiator such as a color. Examples: Westosha Coed K/1 Maroon, Westosha Coed K/1 Silver.</p>
+      </div>
       {teams.length === 0 && <p className='rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900'>No teams have been added for this community.</p>}
       {divisions.length === 0 && !error && <p className='rounded border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700'>No active divisions are available for team setup.</p>}
       {divisions.map((d) => {
