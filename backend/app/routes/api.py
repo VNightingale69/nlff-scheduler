@@ -4905,27 +4905,48 @@ def regenerate_generated_game_slots(payload: dict | None = None, current_user: U
     )
 
 
-@router.post('/teams', response_model=TeamRead, dependencies=[Depends(get_current_user)])
-def create_team(payload: TeamCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    enforce_organization_scope(payload.organization_id, current_user)
-    division = db.query(Division).filter(Division.id == payload.division_id, Division.is_active.is_(True)).first()
+def _team_payload_for_user(payload: TeamCreate, current_user: User) -> dict:
+    data = payload.model_dump()
+    if is_community_admin(current_user):
+        if not current_user.organization_id:
+            raise HTTPException(status_code=403, detail='User has no community scope')
+        data['organization_id'] = current_user.organization_id
+    return data
+
+
+def _enforce_team_division_rules(organization_id: uuid.UUID, division_id: uuid.UUID, is_active: bool, current_user: User, db: Session, exclude_team_id: uuid.UUID | None = None) -> None:
+    division = db.query(Division).filter(Division.id == division_id, Division.is_active.is_(True)).first()
     if not division:
         raise HTTPException(400, 'Division is inactive or does not exist')
+
     participation = db.query(OrganizationDivisionParticipation).filter(
-        OrganizationDivisionParticipation.organization_id == payload.organization_id,
-        OrganizationDivisionParticipation.division_id == payload.division_id,
+        OrganizationDivisionParticipation.organization_id == organization_id,
+        OrganizationDivisionParticipation.division_id == division_id,
         OrganizationDivisionParticipation.is_participating.is_(True),
     ).first()
     if not participation:
-        raise HTTPException(400, 'Organization is not participating in this division')
-    active_count = db.query(Team).filter(
-        Team.organization_id == payload.organization_id,
-        Team.division_id == payload.division_id,
+        if is_league_admin(current_user):
+            raise HTTPException(400, 'Organization is not participating in this division')
+        return
+
+    active_count_query = db.query(Team).filter(
+        Team.organization_id == organization_id,
+        Team.division_id == division_id,
         Team.is_active.is_(True),
-    ).count()
-    if payload.is_active and active_count >= participation.team_count and not is_league_admin(current_user):
+    )
+    if exclude_team_id:
+        active_count_query = active_count_query.filter(Team.id != exclude_team_id)
+    active_count = active_count_query.count()
+    if is_active and active_count >= participation.team_count and not is_league_admin(current_user):
         raise HTTPException(400, 'Cannot exceed participating team count for this division')
-    x = Team(**payload.model_dump()); db.add(x); db.commit(); db.refresh(x); return x
+
+
+@router.post('/teams', response_model=TeamRead, dependencies=[Depends(get_current_user)])
+def create_team(payload: TeamCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    data = _team_payload_for_user(payload, current_user)
+    enforce_organization_scope(data['organization_id'], current_user)
+    _enforce_team_division_rules(data['organization_id'], data['division_id'], data['is_active'], current_user, db)
+    x = Team(**data); db.add(x); db.commit(); db.refresh(x); return x
 
 @router.get('/teams', response_model=PagedResponse[TeamRead], dependencies=[Depends(get_current_user)])
 def list_teams(search: str | None = None, organization_id: uuid.UUID | None = None, division_id: uuid.UUID | None = None, active_divisions_only: bool = True, page: int = 1, page_size: int = 20, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -4943,26 +4964,10 @@ def upd_team(item_id: uuid.UUID, payload: TeamCreate, current_user: User = Depen
     x = db.query(Team).filter(Team.id == item_id).first()
     if not x: raise HTTPException(404, 'Team not found')
     enforce_organization_scope(x.organization_id, current_user)
-    enforce_organization_scope(payload.organization_id, current_user)
-    division = db.query(Division).filter(Division.id == payload.division_id, Division.is_active.is_(True)).first()
-    if not division:
-        raise HTTPException(400, 'Division is inactive or does not exist')
-    participation = db.query(OrganizationDivisionParticipation).filter(
-        OrganizationDivisionParticipation.organization_id == payload.organization_id,
-        OrganizationDivisionParticipation.division_id == payload.division_id,
-        OrganizationDivisionParticipation.is_participating.is_(True),
-    ).first()
-    if not participation:
-        raise HTTPException(400, 'Organization is not participating in this division')
-    active_count = db.query(Team).filter(
-        Team.organization_id == payload.organization_id,
-        Team.division_id == payload.division_id,
-        Team.is_active.is_(True),
-        Team.id != item_id,
-    ).count()
-    if payload.is_active and active_count >= participation.team_count and not is_league_admin(current_user):
-        raise HTTPException(400, 'Cannot exceed participating team count for this division')
-    for k, v in payload.model_dump().items(): setattr(x, k, v)
+    data = _team_payload_for_user(payload, current_user)
+    enforce_organization_scope(data['organization_id'], current_user)
+    _enforce_team_division_rules(data['organization_id'], data['division_id'], data['is_active'], current_user, db, item_id)
+    for k, v in data.items(): setattr(x, k, v)
     db.commit(); db.refresh(x); return x
 
 @router.patch('/teams/{item_id}', response_model=TeamRead, dependencies=[Depends(get_current_user)])
@@ -4982,22 +4987,7 @@ def patch_team(item_id: uuid.UUID, payload: TeamUpdate, current_user: User = Dep
             raise HTTPException(400, 'Team name is required')
 
     new_is_active = updates.get('is_active', x.is_active)
-    if new_is_active:
-        participation = db.query(OrganizationDivisionParticipation).filter(
-            OrganizationDivisionParticipation.organization_id == x.organization_id,
-            OrganizationDivisionParticipation.division_id == x.division_id,
-            OrganizationDivisionParticipation.is_participating.is_(True),
-        ).first()
-        if not participation:
-            raise HTTPException(400, 'Organization is not participating in this division')
-        active_count = db.query(Team).filter(
-            Team.organization_id == x.organization_id,
-            Team.division_id == x.division_id,
-            Team.is_active.is_(True),
-            Team.id != item_id,
-        ).count()
-        if active_count >= participation.team_count and not is_league_admin(current_user):
-            raise HTTPException(400, 'Cannot exceed participating team count for this division')
+    _enforce_team_division_rules(x.organization_id, x.division_id, new_is_active, current_user, db, item_id)
 
     for k, v in updates.items():
         setattr(x, k, v)
