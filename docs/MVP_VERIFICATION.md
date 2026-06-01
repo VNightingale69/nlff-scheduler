@@ -1,6 +1,6 @@
 # MVP Verification Checklist and Developer Runbook
 
-This document is the practical test guide for validating the Northern Lakes Flag Football scheduling MVP.
+This document is the practical test guide for validating the Community Flag Scheduler scheduling MVP.
 
 ## 1) Local runbook
 

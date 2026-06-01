@@ -1,6 +1,6 @@
-# Northern Lakes Flag Football Scheduler
+# Community Flag Scheduler
 
-Northern Lakes Flag Football (NLFF) scheduling MVP with a FastAPI backend, Next.js frontend, and PostgreSQL database.
+Community Flag Scheduler scheduling MVP with a FastAPI backend, Next.js frontend, and PostgreSQL database.
 
 ## Tech Stack
 

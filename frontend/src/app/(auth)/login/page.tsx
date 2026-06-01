@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { ApiError, apiFetch } from '@/lib/api';
 import { type AuthUser, setTokens } from '@/lib/auth';
+import { APP_NAME, APP_SUBTITLE } from '@/config/branding';
 
 export default function Login() {
   const [email, setEmail] = useState('');
@@ -60,5 +61,5 @@ export default function Login() {
     } catch (error) { setError(extractErrorMessage(error)); } finally { setLoading(false); }
   };
 
-  return <main className='flex min-h-screen items-center justify-center p-4'><div className='w-full max-w-md rounded border bg-white p-6 shadow-sm'><h1 className='mb-1 text-xl font-bold'>NLFF Administrative Login</h1><p className='mb-4 text-sm text-slate-600'>Sign in to manage scheduling setup entities.</p>{error && <p className='mb-3 text-sm text-rose-600'>{error}</p>}<input className='mb-2 w-full rounded border p-2' placeholder='Email' value={email} onChange={(e) => setEmail(e.target.value)} /><input className='mb-3 w-full rounded border p-2' type='password' placeholder='Password' value={password} onChange={(e) => setPassword(e.target.value)} /><button onClick={submit} disabled={loading} className='w-full rounded bg-slate-900 p-2 text-white'>{loading ? 'Signing in...' : 'Sign in'}</button></div></main>;
+  return <main className='flex min-h-screen items-center justify-center p-4'><div className='w-full max-w-md rounded border bg-white p-6 shadow-sm'><h1 className='mb-1 text-xl font-bold'>{APP_NAME}</h1><p className='text-sm font-medium text-slate-700'>{APP_SUBTITLE}</p><p className='mb-4 mt-2 text-sm text-slate-600'>Sign in to manage scheduling setup entities.</p>{error && <p className='mb-3 text-sm text-rose-600'>{error}</p>}<input className='mb-2 w-full rounded border p-2' placeholder='Email' value={email} onChange={(e) => setEmail(e.target.value)} /><input className='mb-3 w-full rounded border p-2' type='password' placeholder='Password' value={password} onChange={(e) => setPassword(e.target.value)} /><button onClick={submit} disabled={loading} className='w-full rounded bg-slate-900 p-2 text-white'>{loading ? 'Signing in...' : 'Sign in'}</button></div></main>;
 }
