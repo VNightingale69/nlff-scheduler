@@ -142,7 +142,15 @@ export default function HostingAvailabilityManager() {
     })();
   }, [preselectedHostId, preselectedOrgId]);
 
-  const hostOptions = useMemo(() => hosts.filter((h: any) => !orgId || h.organization_id === orgId), [hosts, orgId]);
+  const effectiveOrgId = isCommunityAdmin ? (user?.organization_id || '') : orgId;
+
+  useEffect(() => {
+    if (isCommunityAdmin && user?.organization_id && orgId !== user.organization_id) {
+      setOrgId(user.organization_id);
+    }
+  }, [isCommunityAdmin, orgId, user?.organization_id]);
+
+  const hostOptions = useMemo(() => hosts.filter((h: any) => !effectiveOrgId || h.organization_id === effectiveOrgId), [hosts, effectiveOrgId]);
   const selectedHost = useMemo(() => hostOptions.find((h: any) => h.id === hostId), [hostId, hostOptions]);
   const visibleAreas = useMemo(() => areas.filter((a: any) => a.is_active && (!hostId || a.host_location_id === hostId)), [areas, hostId]);
   const hostConfigsForSelectedHost = useMemo(() => hostConfigs.filter((c: any) => c.is_active && c.host_location_id === hostId), [hostConfigs, hostId]);
@@ -234,7 +242,7 @@ export default function HostingAvailabilityManager() {
   const loadSavedAvailability = async () => {
     const params = new URLSearchParams();
     if (seasonId) params.set('season_id', seasonId);
-    if (orgId) params.set('organization_id', orgId);
+    if (effectiveOrgId) params.set('organization_id', effectiveOrgId);
     if (hostId) params.set('host_location_id', hostId);
     if (savedDateFilter) params.set('available_date', savedDateFilter);
     if (savedSiteTypeFilter) params.set('site_type', savedSiteTypeFilter);
@@ -263,7 +271,7 @@ export default function HostingAvailabilityManager() {
 
   useEffect(() => {
     loadSavedAvailability().catch(() => setSavedAvailability([]));
-  }, [hostId, orgId, savedDateFilter, savedSiteTypeFilter, savedLayoutFilter, seasonId]);
+  }, [hostId, effectiveOrgId, savedDateFilter, savedSiteTypeFilter, savedLayoutFilter, seasonId]);
 
   const editSaved = (entry: any) => {
     if (entry.week_id) setSelectedWeekIds([entry.week_id]);
@@ -325,7 +333,7 @@ export default function HostingAvailabilityManager() {
             slots.push({
               season_id: seasonId,
               week_id: week.id,
-              organization_id: orgId,
+              ...(!isCommunityAdmin && orgId ? { organization_id: orgId } : {}),
               host_location_id: hostId,
               selected_configuration_id: isTurfHost && (!autoSelectLayout || lockSelectedLayout) ? configId : null,
               auto_select_turf_layout: autoSelectLayout,
@@ -538,7 +546,7 @@ export default function HostingAvailabilityManager() {
 
       <section className='rounded border p-4'>
         <h2 className='mb-2 font-semibold'>1. Select Organization</h2>
-        <select disabled={user?.role_name === 'COMMUNITY_ADMIN'} value={orgId} onChange={(e) => setOrgId(e.target.value)} className='w-full rounded border p-2 md:w-1/2'>
+        <select disabled={isCommunityAdmin} value={effectiveOrgId} onChange={(e) => setOrgId(e.target.value)} className='w-full rounded border p-2 md:w-1/2'>
           <option value=''>Select organization</option>
           {orgs.map((o: any) => (
             <option key={o.id} value={o.id}>{o.name}</option>
