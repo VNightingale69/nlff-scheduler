@@ -430,6 +430,9 @@ class ScheduleReadinessTurfWaveRow(BaseModel):
     transition_after_minutes: int = 0
     generated_field_instances: list[str] = []
     assigned_games: int = 0
+    capacity_slots: int = 0
+    utilization_percent: float = 0.0
+    idle_hours_after_wave: float = 0.0
     notes: str | None = None
     slot_level_configurations: list[ScheduleReadinessTurfWaveSlotRow] = []
     warnings: list[str] = []
