@@ -42,7 +42,6 @@ const HOST_CONFIG_OPTIONS = [
   { value: 'TWO_MEDIUM', label: '2 Medium', used: 110, remaining: 10 },
   { value: 'THREE_SMALL', label: '3 Small', used: 100, remaining: 20 },
   { value: 'ONE_LARGE_ONE_SMALL', label: '1 Large + 1 Small', used: 90, remaining: 30 },
-  { value: 'ONE_MEDIUM_ONE_SMALL', label: '1 Medium + 1 Small', used: 85, remaining: 35 },
 ];
 const configLabel = (value: string) => HOST_CONFIG_OPTIONS.find((option) => option.value === value)?.label || value;
 

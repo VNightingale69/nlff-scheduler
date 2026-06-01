@@ -2,11 +2,17 @@
 import { useEffect, useMemo, useState } from 'react';
 import Toast from './Toast';
 import { apiFetch } from '@/lib/api';
-import { getToken } from '@/lib/auth';
+import { getAuthUser, getToken } from '@/lib/auth';
 
 const TURF_STADIUM = 'TURF_STADIUM';
 const GRASS_FIELD = 'GRASS_FIELD';
 const FIELD_TYPES = ['SMALL', 'MEDIUM', 'LARGE'];
+const FACILITY_TYPES = [
+  { value: TURF_STADIUM, label: 'Turf Stadium', fieldSize: undefined },
+  { value: 'LARGE_GRASS_FIELD', label: 'Large Grass Field', fieldSize: 'LARGE' },
+  { value: 'MEDIUM_GRASS_FIELD', label: 'Medium Grass Field', fieldSize: 'MEDIUM' },
+  { value: 'SMALL_GRASS_FIELD', label: 'Small Grass Field', fieldSize: 'SMALL' },
+];
 
 const DIVISION_COMPATIBILITY = {
   SMALL: ['Coed K-1', 'Coed 2-3', 'Girls K-2'],
@@ -21,11 +27,13 @@ const TURF_LAYOUTS = [
   { name: 'TWO_MEDIUM', title: 'Two Medium Fields', spaceUsed: 110, remaining: 10, large: 0, medium: 2, small: 0 },
   { name: 'THREE_SMALL', title: 'Three Small Fields', spaceUsed: 100, remaining: 20, large: 0, medium: 0, small: 3 },
   { name: 'ONE_LARGE_ONE_SMALL', title: 'One Large Field + One Small Field', spaceUsed: 90, remaining: 30, large: 1, medium: 0, small: 1 },
-  { name: 'ONE_MEDIUM_ONE_SMALL', title: 'One Medium Field + One Small Field', spaceUsed: 85, remaining: 35, large: 0, medium: 1, small: 1 },
 ];
 
 const formatSurfaceType = (value?: string) => value === TURF_STADIUM ? 'Turf Stadium' : value === GRASS_FIELD ? 'Grass Field' : 'Not set';
-const fieldTypeLabel = (value?: string) => value ? value.charAt(0).toUpperCase() + value.slice(1).toLowerCase() : '—';
+const _fieldTypeLabel = (value?: string) => value ? value.charAt(0).toUpperCase() + value.slice(1).toLowerCase() : '—';
+const facilityTypeLabel = (value?: string) => FACILITY_TYPES.find((option) => option.value === value)?.label || 'Not set';
+const grassFacilityTypeForSize = (value?: string) => `${_fieldTypeLabel(value)} Grass Field`;
+const fieldTypeLabel = _fieldTypeLabel;
 const configuredFieldsText = (count: number) => `${count} active configured field${count === 1 ? '' : 's'}`;
 const configLabel = (value?: string) => TURF_LAYOUTS.find((layout) => layout.name === value)?.title || value || 'Unknown layout';
 const errorMessage = (error: any, fallback: string) => error?.message || fallback;
@@ -40,6 +48,8 @@ const supportedGroups = (layout: typeof TURF_LAYOUTS[number]) => {
 
 export default function FieldAreaManager() {
   const token = getToken();
+  const authUser = getAuthUser();
+  const isCommunityAdmin = authUser?.role_name === 'COMMUNITY_ADMIN';
   const [message, setMessage] = useState('');
   const [type, setType] = useState<'ok' | 'err'>('ok');
   const [orgs, setOrgs] = useState<any[]>([]);
@@ -53,6 +63,8 @@ export default function FieldAreaManager() {
   const [fieldLoadError, setFieldLoadError] = useState('');
   const [fieldForm, setFieldForm] = useState({ name: '', layout_type: '', is_active: true });
   const [editingFieldId, setEditingFieldId] = useState<string | null>(null);
+  const [facilityForm, setFacilityForm] = useState('');
+  const [savingFacility, setSavingFacility] = useState(false);
 
   const resetFieldForm = () => {
     setFieldForm({ name: '', layout_type: '', is_active: true });
@@ -116,9 +128,20 @@ export default function FieldAreaManager() {
   const selectedHost = useMemo(() => hosts.find((h: any) => h.id === hostId), [hosts, hostId]);
   const fieldsByHost = useMemo(() => fields.reduce((map: any, field: any) => ({ ...map, [field.host_location_id]: [...(map[field.host_location_id] || []), field] }), {}), [fields]);
   const hostConfigsByHost = useMemo(() => hostConfigs.reduce((map: any, config: any) => ({ ...map, [config.host_location_id]: [...(map[config.host_location_id] || []), config] }), {}), [hostConfigs]);
+  const facilityTypeForHost = (host: any) => {
+    const surfaceType = host?.surface_type || GRASS_FIELD;
+    if (surfaceType === TURF_STADIUM) return TURF_STADIUM;
+    const activeFields = (fieldsByHost[host?.id] || []).filter((field: any) => field.is_active);
+    const fixedSize = activeFields.find((field: any) => FIELD_TYPES.includes(field.layout_type))?.layout_type;
+    return fixedSize ? `${fixedSize}_GRASS_FIELD` : '';
+  };
   const selectedHostFields = fieldsByHost[hostId] || [];
   const tableHosts = useMemo(() => hosts.filter((h: any) => (!orgId || h.organization_id === orgId) && (!hostId || h.id === hostId)), [hosts, orgId, hostId]);
   const orgNameById = useMemo(() => Object.fromEntries(orgs.map((org: any) => [org.id, org.name])), [orgs]);
+
+  useEffect(() => {
+    setFacilityForm(selectedHost ? facilityTypeForHost(selectedHost) : '');
+  }, [selectedHost, fieldsByHost]);
 
   const onOrgChange = (nextOrgId: string) => {
     setOrgId(nextOrgId);
@@ -156,11 +179,57 @@ export default function FieldAreaManager() {
     } catch (e: any) { setType('err'); setMessage(e.message || 'Unable to deactivate field'); }
   };
 
+  const hostPayload = (host: any, surfaceType: string, fieldSize?: string) => ({
+    organization_id: host.organization_id,
+    name: host.name,
+    address: host.address || null,
+    address_line1: host.address_line1 || host.address || null,
+    address_line2: host.address_line2 || null,
+    city: host.city || null,
+    state: host.state || null,
+    zip_code: host.zip_code || null,
+    surface_type: surfaceType,
+    max_small_fields: fieldSize === 'SMALL' ? 1 : 0,
+    max_medium_fields: fieldSize === 'MEDIUM' ? 1 : 0,
+    max_large_fields: fieldSize === 'LARGE' ? 1 : 0,
+    max_total_fields: fieldSize ? 1 : 0,
+    notes: host.notes || null,
+    is_active: host.is_active !== false,
+  });
+
+  const saveFacilityType = async () => {
+    try {
+      if (!selectedHost) { setType('err'); setMessage('Hosting site is required.'); return; }
+      if (!facilityForm) { setType('err'); setMessage('Facility type is required.'); return; }
+      setSavingFacility(true);
+      if (facilityForm === TURF_STADIUM) {
+        await apiFetch(`/host-locations/${selectedHost.id}`, { method: 'PUT', body: JSON.stringify(hostPayload(selectedHost, TURF_STADIUM)) }, token);
+        setType('ok'); setMessage('Facility saved as Turf Stadium. The scheduler will choose the best layout for each hosting date.');
+      } else {
+        const fieldSize = FACILITY_TYPES.find((option) => option.value === facilityForm)?.fieldSize;
+        if (!fieldSize) { setType('err'); setMessage('Select a valid grass field size.'); return; }
+        await apiFetch(`/host-locations/${selectedHost.id}`, { method: 'PUT', body: JSON.stringify(hostPayload(selectedHost, GRASS_FIELD, fieldSize)) }, token);
+        const activeFields = selectedHostFields.filter((field: any) => field.is_active);
+        const primaryField = activeFields[0] || selectedHostFields[0];
+        const fieldPayload = { host_location_id: selectedHost.id, physical_field_area_id: primaryField?.physical_field_area_id || null, name: primaryField?.name || selectedHost.name, layout_type: fieldSize, is_active: true, notes: primaryField?.notes || null };
+        if (primaryField) await apiFetch(`/fields/${primaryField.id}`, { method: 'PUT', body: JSON.stringify(fieldPayload) }, token);
+        else await apiFetch('/fields', { method: 'POST', body: JSON.stringify(fieldPayload) }, token);
+        for (const extraField of activeFields.slice(1)) {
+          await apiFetch(`/fields/${extraField.id}`, { method: 'PUT', body: JSON.stringify({ ...extraField, is_active: false }) }, token);
+        }
+        setType('ok'); setMessage(`Facility saved as ${facilityTypeLabel(facilityForm)}.`);
+      }
+      await loadOrgData(orgId, hostId);
+    } catch (e: any) { setType('err'); setMessage(e.message || 'Facility save failed'); }
+    finally { setSavingFacility(false); }
+  };
+
   const renderSetupRows = () => {
-    if (!orgId) return <tr><td className='border p-3 text-center text-slate-500' colSpan={9}>Select an organization to view hosting site setups.</td></tr>;
-    if (hostLoadError || fieldLoadError) return <tr><td className='border p-3 text-center text-rose-700' colSpan={9}>Unable to load setup data. {hostLoadError || fieldLoadError}</td></tr>;
-    if (loadingOrgData) return <tr><td className='border p-3 text-center text-slate-500' colSpan={9}>Loading hosting site setups…</td></tr>;
-    if (!tableHosts.length) return <tr><td className='border p-3 text-center text-slate-500' colSpan={9}>No hosting sites have been added for this community.</td></tr>;
+    const colSpan = isCommunityAdmin ? 5 : 9;
+    if (!orgId) return <tr><td className='border p-3 text-center text-slate-500' colSpan={colSpan}>Select an organization to view hosting site setups.</td></tr>;
+    if (hostLoadError || fieldLoadError) return <tr><td className='border p-3 text-center text-rose-700' colSpan={colSpan}>Unable to load setup data. {hostLoadError || fieldLoadError}</td></tr>;
+    if (loadingOrgData) return <tr><td className='border p-3 text-center text-slate-500' colSpan={colSpan}>Loading hosting site setups…</td></tr>;
+    if (!tableHosts.length) return <tr><td className='border p-3 text-center text-slate-500' colSpan={colSpan}>No hosting sites have been added for this community.</td></tr>;
 
     return tableHosts.map((host: any) => {
       const hostFields = fieldsByHost[host.id] || [];
@@ -176,7 +245,16 @@ export default function FieldAreaManager() {
         medium: activeFields.filter((field: any) => field.layout_type === 'MEDIUM').length,
         small: activeFields.filter((field: any) => field.layout_type === 'SMALL').length,
       };
-      const isReady = surfaceType === TURF_STADIUM ? Boolean(host.is_active && activeConfigs.length) : activeFields.length > 0;
+      const isReady = surfaceType === TURF_STADIUM ? Boolean(host.is_active) : activeFields.length > 0;
+      if (isCommunityAdmin) {
+        return <tr key={host.id}>
+          <td className='border p-2'>{orgNameById[host.organization_id] || 'Unknown'}</td>
+          <td className='border p-2'>{host.name}</td>
+          <td className='border p-2'>{surfaceType === TURF_STADIUM ? 'Turf Stadium' : (activeFields[0]?.layout_type ? grassFacilityTypeForSize(activeFields[0].layout_type) : 'Grass Field')}</td>
+          <td className='border p-2'>{isReady ? 'Active' : 'Needs setup'}</td>
+          <td className='border p-2'><button className='rounded border px-2 py-1 text-xs' onClick={() => onHostChange(host.id)}>Edit</button></td>
+        </tr>;
+      }
       return <tr key={host.id}>
         <td className='border p-2'>{orgNameById[host.organization_id] || 'Unknown'}</td>
         <td className='border p-2'>{host.name}</td>
@@ -208,11 +286,24 @@ export default function FieldAreaManager() {
       {hostLoadError && <p className='mt-3 rounded border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800'>Hosting sites failed to load: {hostLoadError}</p>}
       {fieldLoadError && <p className='mt-3 rounded border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800'>Field configurations failed to load: {fieldLoadError}</p>}
       {orgId && !hostLoadError && !loadingOrgData && !hostOptions.length && <p className='mt-3 rounded bg-slate-100 p-3 text-sm text-slate-700'>No hosting sites have been added for this community.</p>}
-      {selectedHost && <div className='mt-3 rounded bg-slate-100 px-3 py-2 text-sm font-medium'>Surface Type: {formatSurfaceType(selectedHost.surface_type)}</div>}
-      {selectedHost && <p className='mt-2 text-sm text-slate-600'>Surface type is read-only here and is managed from Host Locations.</p>}
+      {!isCommunityAdmin && selectedHost && <div className='mt-3 rounded bg-slate-100 px-3 py-2 text-sm font-medium'>Surface Type: {formatSurfaceType(selectedHost.surface_type)}</div>}
+      {!isCommunityAdmin && selectedHost && <p className='mt-2 text-sm text-slate-600'>Surface type is read-only here and is managed from Host Locations.</p>}
     </section>
 
-    {selectedHost?.surface_type === TURF_STADIUM && <section className='rounded border p-4'>
+    {isCommunityAdmin && selectedHost && <section className='rounded border p-4'>
+      <h2 className='font-semibold'>Facility Type</h2>
+      <p className='mt-1 text-sm text-slate-600'>Choose the business-friendly facility type for this host location. Grass fields stay fixed at the size you select.</p>
+      <p className='mt-2 rounded bg-emerald-50 p-3 text-sm text-emerald-900'>For turf stadiums, select Turf Stadium only. The application will determine the best field layout for each hosting date during scheduling.</p>
+      <div className='mt-3 grid gap-2 md:grid-cols-[1fr_auto]'>
+        <select className='rounded border p-2' value={facilityForm} onChange={(e) => setFacilityForm(e.target.value)}>
+          <option value=''>Select Facility Type</option>
+          {FACILITY_TYPES.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+        </select>
+        <button className='rounded bg-emerald-700 px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-50' onClick={saveFacilityType} disabled={savingFacility}>{savingFacility ? 'Saving…' : 'Save Facility Type'}</button>
+      </div>
+    </section>}
+
+    {!isCommunityAdmin && selectedHost?.surface_type === TURF_STADIUM && <section className='rounded border p-4'>
       <h2 className='font-semibold'>Approved Turf Stadium Layouts</h2>
       <p className='text-sm text-slate-600'>All approved layouts that fit the 120-yard stadium footprint are supported automatically. These cards are read-only reference for scheduling capacity.</p>
       <div className='mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-3'>
@@ -227,7 +318,7 @@ export default function FieldAreaManager() {
       <p className='mt-3 rounded bg-emerald-50 p-3 text-sm text-emerald-900'>All approved turf stadium layouts are available for this location. The scheduler will select the best layout for each host date unless a layout is locked in Hosting Availability.</p>
     </section>}
 
-    {selectedHost?.surface_type === GRASS_FIELD && <section className='rounded border p-4'>
+    {!isCommunityAdmin && selectedHost?.surface_type === GRASS_FIELD && <section className='rounded border p-4'>
       <div className='flex flex-wrap items-center justify-between gap-2'>
         <div>
           <h2 className='font-semibold'>Manual Grass Field Setup</h2>
@@ -259,10 +350,10 @@ export default function FieldAreaManager() {
     </section>}
 
     <section className='rounded border p-4'>
-      <h2 className='mb-2 font-semibold'>Current Hosting Site Setups</h2>
+      <h2 className='mb-2 font-semibold'>Current Facility Setups</h2>
       <div className='overflow-x-auto'>
         <table className='w-full text-sm'>
-          <thead><tr><th className='border p-2 text-left'>Organization</th><th className='border p-2 text-left'>Host Location</th><th className='border p-2 text-left'>Surface Type</th><th className='border p-2 text-left'>Available Layout / Configured Fields</th><th className='border p-2 text-left'>Large Fields</th><th className='border p-2 text-left'>Medium Fields</th><th className='border p-2 text-left'>Small Fields</th><th className='border p-2 text-left'>Status</th><th className='border p-2 text-left'>Actions</th></tr></thead>
+          <thead>{isCommunityAdmin ? <tr><th className='border p-2 text-left'>Organization / Community</th><th className='border p-2 text-left'>Host Location</th><th className='border p-2 text-left'>Facility Type</th><th className='border p-2 text-left'>Status</th><th className='border p-2 text-left'>Actions</th></tr> : <tr><th className='border p-2 text-left'>Organization</th><th className='border p-2 text-left'>Host Location</th><th className='border p-2 text-left'>Surface Type</th><th className='border p-2 text-left'>Available Layout / Configured Fields</th><th className='border p-2 text-left'>Large Fields</th><th className='border p-2 text-left'>Medium Fields</th><th className='border p-2 text-left'>Small Fields</th><th className='border p-2 text-left'>Status</th><th className='border p-2 text-left'>Actions</th></tr>}</thead>
           <tbody>{renderSetupRows()}</tbody>
         </table>
       </div>

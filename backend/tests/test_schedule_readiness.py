@@ -336,7 +336,7 @@ class TurfMixedLayoutPlanningTest(unittest.TestCase):
         self.db.flush()
         configurations = []
         selected_config = None
-        for layout in ('TWO_LARGE', 'ONE_MEDIUM_TWO_SMALL', 'ONE_LARGE_ONE_MEDIUM', 'TWO_MEDIUM', 'THREE_SMALL', 'ONE_LARGE_ONE_SMALL', 'ONE_MEDIUM_ONE_SMALL'):
+        for layout in ('TWO_LARGE', 'ONE_MEDIUM_TWO_SMALL', 'ONE_LARGE_ONE_MEDIUM', 'TWO_MEDIUM', 'THREE_SMALL', 'ONE_LARGE_ONE_SMALL'):
             config = HostLocationConfiguration(id=uuid.uuid4(), host_location_id=host.id, configuration_name=layout, is_active=True)
             _apply_turf_configuration_metadata(config, layout)
             configurations.append(config)
