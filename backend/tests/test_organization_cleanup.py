@@ -124,6 +124,8 @@ class OrganizationCleanupTest(unittest.TestCase):
     def test_dry_run_reports_without_deleting(self):
         result = cleanup_organization_dependencies(self.db, self.org.id, dry_run=True)
         self.assertTrue(result['dry_run'])
+        self.assertEqual(result['organization_id'], str(self.org.id))
+        self.assertEqual(result['organization_name'], 'Antioch Vikings')
         fk_pairs = {(fk['table'], fk['referred_table']) for fk in result['dependent_foreign_keys']}
         self.assertIn(('host_locations', 'organizations'), fk_pairs)
         self.assertIn(('users', 'organizations'), fk_pairs)
@@ -144,8 +146,14 @@ class OrganizationCleanupTest(unittest.TestCase):
         self.assertEqual(self.db.query(Game).count(), 1)
 
     def test_cleanup_deletes_dependencies_and_selected_org_only(self):
-        result = cleanup_organization_dependencies(self.db, self.org.id, dry_run=False)
+        org_id = self.org.id
+        organization_id = str(org_id)
+        assigned_admin_id = self.assigned_admin.id
+        community_admin_id = self.community_admin.id
+        result = cleanup_organization_dependencies(self.db, org_id, dry_run=False)
         self.assertFalse(result['dry_run'])
+        self.assertEqual(result['organization_id'], organization_id)
+        self.assertEqual(result['organization_name'], 'Antioch Vikings')
         for key in [
             'organizations', 'teams', 'games', 'game_slots', 'generated_slots', 'host_locations', 'fields',
             'physical_field_areas', 'host_location_configurations', 'hosting_availabilities',
@@ -153,14 +161,14 @@ class OrganizationCleanupTest(unittest.TestCase):
             'organization_division_participations', 'users',
         ]:
             self.assertGreaterEqual(result['deleted'][key], 1, key)
-        self.assertIsNone(self.db.get(Organization, self.org.id))
+        self.assertIsNone(self.db.get(Organization, org_id))
         self.assertIsNotNone(self.db.get(Organization, self.other_org.id))
         self.assertEqual(self.db.get(Organization, self.other_org.id).name, 'Westosha Falcons')
         self.assertIsNotNone(self.db.get(Team, self.other_team.id))
         self.assertIsNotNone(self.db.get(HostLocation, self.other_host.id))
         self.assertIsNotNone(self.db.get(User, self.global_admin.id))
-        self.assertIsNone(self.db.get(User, self.assigned_admin.id))
-        self.assertIsNone(self.db.get(User, self.community_admin.id))
+        self.assertIsNone(self.db.get(User, assigned_admin_id))
+        self.assertIsNone(self.db.get(User, community_admin_id))
         self.assertEqual(self.db.query(GameSlot).count(), 0)
         self.assertEqual(self.db.query(Game).count(), 0)
         self.assertEqual(self.db.query(HostingAvailability).count(), 0)
@@ -236,9 +244,10 @@ class OrganizationDeleteEndpointPermissionsTest(unittest.TestCase):
         self.league_role = Role(id=uuid.uuid4(), name=ROLE_LEAGUE_ADMIN, is_active=True)
         self.community_role = Role(id=uuid.uuid4(), name=ROLE_COMMUNITY_ADMIN, is_active=True)
         self.org = Organization(id=uuid.uuid4(), name='Endpoint Org', is_active=True)
+        self.division = Division(id=uuid.uuid4(), name='Endpoint 3rd', division_group='COED', sort_order=1, required_field_layout_type='SMALL', is_active=True)
         self.league_user = User(id=uuid.uuid4(), email='league@example.com', full_name='League', password_hash=hash_password('Password123!'), role_id=self.league_role.id, organization_id=None, is_active=True)
         self.community_user = User(id=uuid.uuid4(), email='comm@example.com', full_name='Community', password_hash=hash_password('Password123!'), role_id=self.community_role.id, organization_id=self.org.id, is_active=True)
-        self.db.add_all([self.league_role, self.community_role, self.org, self.league_user, self.community_user])
+        self.db.add_all([self.league_role, self.community_role, self.org, self.division, self.league_user, self.community_user])
         self.db.commit()
 
         def override_get_db():
@@ -255,6 +264,42 @@ class OrganizationDeleteEndpointPermissionsTest(unittest.TestCase):
         app.dependency_overrides.clear()
         self.db.close()
 
+    def _create_dependent_organization(self, name: str, email_prefix: str):
+        org = Organization(id=uuid.uuid4(), name=name, is_active=True)
+        host = HostLocation(id=uuid.uuid4(), organization_id=org.id, name=f'{name} Fields', is_active=True)
+        team = Team(id=uuid.uuid4(), organization_id=org.id, division_id=self.division.id, name=f'{name} Team', is_active=True)
+        participation = OrganizationDivisionParticipation(
+            id=uuid.uuid4(),
+            organization_id=org.id,
+            division_id=self.division.id,
+            is_participating=True,
+            team_count=1,
+            is_active=True,
+        )
+        user = User(
+            id=uuid.uuid4(),
+            email=f'{email_prefix}@example.com',
+            full_name=f'{name} Admin',
+            password_hash=hash_password('Password123!'),
+            role_id=self.community_role.id,
+            organization_id=org.id,
+            is_active=True,
+        )
+        self.db.add_all([org, host, team, participation, user])
+        self.db.commit()
+        return org.id, org.name
+
+    def _assert_no_basic_org_orphans(self):
+        orphan_checks = {
+            'users.organization_id': "SELECT COUNT(*) FROM users WHERE organization_id IS NOT NULL AND organization_id NOT IN (SELECT id FROM organizations)",
+            'host_locations.organization_id': "SELECT COUNT(*) FROM host_locations WHERE organization_id NOT IN (SELECT id FROM organizations)",
+            'teams.organization_id': "SELECT COUNT(*) FROM teams WHERE organization_id NOT IN (SELECT id FROM organizations)",
+            'organization_division_participations.organization_id': "SELECT COUNT(*) FROM organization_division_participations WHERE organization_id NOT IN (SELECT id FROM organizations)",
+        }
+        for label, sql in orphan_checks.items():
+            with self.subTest(label=label):
+                self.assertEqual(self.db.execute(text(sql)).scalar_one(), 0)
+
     def test_community_admin_cannot_delete_organizations(self):
         response = self.client.delete(
             f'/api/organizations/{self.org.id}',
@@ -262,6 +307,27 @@ class OrganizationDeleteEndpointPermissionsTest(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 403)
         self.assertIsNotNone(self.db.get(Organization, self.org.id))
+
+    def test_league_admin_can_delete_dependent_organizations_without_object_deleted_error(self):
+        token = create_access_token(str(self.league_user.id))
+        for org_name, email_prefix in [('Johnsburg Skyhawks', 'johnsburg'), ('Westosha Falcons', 'westosha')]:
+            org_id, expected_name = self._create_dependent_organization(org_name, email_prefix)
+            response = self.client.delete(
+                f'/api/organizations/{org_id}',
+                headers={'Authorization': f'Bearer {token}'},
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            payload = response.json()
+            self.assertEqual(payload['organization_id'], str(org_id))
+            self.assertEqual(payload['organization_name'], expected_name)
+            self.assertEqual(payload['deleted']['organizations'], 1)
+            self.assertGreaterEqual(payload['deleted']['users'], 1)
+            self.assertGreaterEqual(payload['deleted']['teams'], 1)
+            self.assertGreaterEqual(payload['deleted']['host_locations'], 1)
+            self.assertGreaterEqual(payload['deleted']['organization_division_participations'], 1)
+            self.db.expire_all()
+            self.assertIsNone(self.db.get(Organization, org_id))
+            self._assert_no_basic_org_orphans()
 
     def test_league_admin_can_delete_unused_duplicate_safely(self):
         response = self.client.delete(

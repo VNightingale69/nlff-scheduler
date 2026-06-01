@@ -328,6 +328,8 @@ def cleanup_organization_dependencies(db: Session, org_id: uuid.UUID, dry_run: b
     try:
         inventory = collect_organization_delete_inventory(db, org_id)
         org = inventory['organization']
+        organization_id = str(org.id)
+        organization_name = org.name
         ids_by_key = inventory['ids']
         counts = inventory['counts']
         dependent_foreign_keys = _foreign_key_catalog_for_log(db)
@@ -345,8 +347,8 @@ def cleanup_organization_dependencies(db: Session, org_id: uuid.UUID, dry_run: b
             return {
                 'success': True,
                 'dry_run': True,
-                'organization_id': str(org_id),
-                'organization_name': org.name,
+                'organization_id': organization_id,
+                'organization_name': organization_name,
                 'would_delete': counts,
                 'dependent_foreign_keys': dependent_foreign_keys,
             }
@@ -376,8 +378,8 @@ def cleanup_organization_dependencies(db: Session, org_id: uuid.UUID, dry_run: b
         return {
             'success': True,
             'dry_run': False,
-            'organization_id': str(org_id),
-            'organization_name': org.name,
+            'organization_id': organization_id,
+            'organization_name': organization_name,
             'counts': counts,
             'deleted': deleted,
             'dependent_foreign_keys': dependent_foreign_keys,
