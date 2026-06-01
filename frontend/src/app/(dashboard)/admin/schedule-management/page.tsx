@@ -173,11 +173,17 @@ export default function ScheduleManagementPage() {
       { key: 'uneven_counts', label: 'Uneven Game Counts', count: uneven.length, severity: uneven.length > 0 ? 'Info' : 'OK', details: uneven.map((r: any) => `${r.team_name}: ${r.games_scheduled} games (division avg ${r.division_average})`) },
       { key: 'double_headers', label: 'Double Headers', count: doubleHeaders.length, severity: doubleHeaders.length > 0 ? 'Info' : 'OK', details: doubleHeaders.map((r: any) => `${r.team_name} on ${formatDisplayDate(r.date)}: ${r.games} games`) },
       { key: 'non_back_to_back_double_headers', label: 'Non-Back-to-Back Double Headers', count: nonBackToBack.length, severity: nonBackToBack.length > 0 ? 'Issue' : 'OK', details: nonBackToBack.map((r: any) => `${r.team_name} on ${formatDisplayDate(r.date)}`) },
-      { key: 'low_field_utilization', label: 'Low Field Utilization', count: lowUtilization.length, severity: lowUtilization.length > 0 ? 'Info' : 'OK', details: lowUtilization.map((r: any) => {
-        const turfDetails = r.surface_type === 'TURF_STADIUM'
-          ? ` (Wave 1 ${r.wave_1_utilization ?? '—'}%, Wave 2 ${r.wave_2_utilization ?? '—'}%, idle ${r.idle_hours ?? 0}h)`
-          : '';
-        return `${r.host_location_name} ${formatDisplayDate(r.date)}: ${r.utilization_percent}%${turfDetails}`;
+      { key: 'low_field_utilization', label: 'Low Field Utilization', count: lowUtilization.length, severity: lowUtilization.length > 0 ? 'Info' : 'OK', details: lowUtilization.flatMap((r: any) => {
+        if (r.surface_type !== 'TURF_STADIUM') {
+          return [`${r.host_location_name} ${formatDisplayDate(r.date)}: ${r.utilization_percent}%`];
+        }
+        const waveRows = (r.wave_utilization || []).map((wave: any) => {
+          const available = (wave.available_field_components || []).map((c: any) => `${c.count} ${String(c.field_type || '').toLowerCase()}`).join(', ') || 'none';
+          const unused = (wave.unused_components || []).map((c: any) => `${c.count} ${String(c.field_type || '').toLowerCase()}`).join(', ') || 'none';
+          const games = (wave.games_placed || []).map((game: any) => `${game.home_team} vs ${game.away_team}`).join('; ') || 'none';
+          return `${r.host_location_name} ${formatDisplayDate(r.date)} ${wave.start_time}-${wave.end_time} wave ${wave.sequence_number}: ${wave.layout || wave.preferred_layout_code}, available ${available}, games ${games}, unused ${unused}, utilization ${wave.utilization_percent}%`;
+        });
+        return waveRows.length ? waveRows : [`${r.host_location_name} ${formatDisplayDate(r.date)}: ${r.utilization_percent}% (idle ${r.idle_hours ?? 0}h)`];
       }) },
     ] as Array<{ key: string; label: string; count: number; severity: Severity; details: string[] }>;
 
