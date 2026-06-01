@@ -5,6 +5,7 @@ import { useSearchParams } from 'next/navigation';
 import { API_URL } from '@/lib/api';
 import { getDivisionLabel } from '@/lib/divisionLabel';
 import { formatDisplayDate, formatDisplayTime } from '@/lib/displayFormat';
+import Link from 'next/link';
 import { APP_SCHEDULE_NAME, APP_SUBTITLE } from '@/config/branding';
 
 type Game = {
@@ -103,7 +104,7 @@ function PublicScheduleContent() {
 
   return (
     <div className='mx-auto max-w-6xl space-y-4 p-4'>
-      <div><h1 className='text-2xl font-bold'>{APP_SCHEDULE_NAME}</h1><p className='mt-1 text-sm font-medium text-slate-600'>{APP_SUBTITLE}</p></div>
+      <div className='flex flex-wrap items-start justify-between gap-3'><div><h1 className='text-2xl font-bold'>{APP_SCHEDULE_NAME}</h1><p className='mt-1 text-sm font-medium text-slate-600'>{APP_SUBTITLE}</p></div><Link className='rounded border px-3 py-2 text-sm hover:bg-slate-50' href='/rulebook'>Rulebook</Link></div>
 
       <div className='grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5'>
         <select className='rounded border p-2' value={filters.host_location_id || ''} onChange={(e) => setFilters({ ...filters, host_location_id: e.target.value })}>

@@ -15,6 +15,7 @@ export const ENTITIES: Record<string, EntityConfig> = {
   seasons: { title: 'Seasons', path: '/seasons', nav: true, fields: [{ key: 'name', label: 'Name' }, { key: 'start_date', label: 'Start Date', type: 'date' }, { key: 'end_date', label: 'End Date', type: 'date' }, { key: 'is_active', label: 'Active', type: 'checkbox' }] },
   weeks: { title: 'Season Weeks / Game Dates', path: '/weeks', nav: true, fields: [{ key: 'season_id', label: 'Season', type: 'select' }, { key: 'week_number', label: 'Week Number', type: 'number' }, { key: 'start_date', label: 'Start Date', type: 'date' }, { key: 'end_date', label: 'End Date', type: 'date' }, { key: 'date_type', label: 'Date Type', type: 'select' }] },
   games: { title: 'Games', path: '/games', nav: true, fields: [] },
+  rulebook: { title: 'Rulebook', path: '/rulebook', nav: true, roles: ['LEAGUE_ADMIN', 'COMMUNITY_ADMIN'], fields: [] },
   'hosting-availability': { title: 'Hosting Availability', path: '/hosting-availabilities', nav: true, fields: [{ key: 'field_id', label: 'Field ID' }, { key: 'available_date', label: 'Available Date', type: 'date' }, { key: 'start_time', label: 'Start Time', type: 'time' }, { key: 'end_time', label: 'End Time', type: 'time' }, { key: 'is_available', label: 'Is Available', type: 'checkbox' }] },
   'host-availability-matrix': { title: 'Host Availability Matrix', path: '/host-availability-matrix', nav: true, fields: [] },
   'generated-slots': { title: 'Generated Slots', path: '/generated-game-slots', nav: true, fields: [] },

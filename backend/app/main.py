@@ -27,6 +27,7 @@ REQUIRED_TABLES = {
     'hosting_availability': 'hosting_availabilities',
     'teams': 'teams',
     'host_locations': 'host_locations',
+    'rulebooks': 'rulebooks',
 }
 
 

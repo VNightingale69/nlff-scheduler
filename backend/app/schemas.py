@@ -64,6 +64,21 @@ class TokenResponse(BaseModel):
     user: TokenUser | None = None
 
 
+
+
+class RulebookRead(BaseSchema):
+    original_filename: str
+    content_type: str
+    file_size_bytes: int
+    uploaded_by_user_id: uuid.UUID
+    uploaded_by_name: str | None = None
+    uploaded_by_email: str | None = None
+    uploaded_at: datetime
+    is_active: bool
+    view_url: str = '/api/public/rulebook/view'
+    download_url: str = '/api/public/rulebook/download'
+
+
 class OrganizationCreate(BaseModel):
     name: str
     is_active: bool = True
