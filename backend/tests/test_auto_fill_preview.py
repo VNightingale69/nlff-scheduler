@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import Base
 from app.models import Division, FieldInstance, Game, GameSlot, GameStatus, HostLocation, HostPlanSelection, HostingAvailability, Organization, Season, Team, TurfWave, Week
-from app.routes.api import _build_host_location_vs_home_team_verification, _build_turf_stadium_utilization_diagnostics, _host_availability_matrix_response, auto_fill_apply, auto_fill_preview, auto_schedule_entire_season, generate_suggested_host_plan
+from app.routes.api import _build_host_location_vs_home_team_verification, _build_turf_stadium_utilization_diagnostics, _diagnostic_active_teams_expected_to_play, _diagnostic_expected_games_for_team_count, _diagnostic_field_size_diff, _host_availability_matrix_response, auto_fill_apply, auto_fill_preview, auto_schedule_entire_season, generate_suggested_host_plan
 
 
 class AutoFillPreviewTest(unittest.TestCase):
@@ -72,6 +72,54 @@ class AutoFillPreviewTest(unittest.TestCase):
         self.assertEqual(away_row['home_team_community_name'], 'Antioch')
         self.assertEqual(away_row['away_team_community_name'], 'Westosha')
         self.assertEqual(away_row['category'], 'HOST_OWNER_IS_AWAY')
+
+    def test_host_owner_verification_is_informational_unless_required(self):
+        game = Game(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week2.id,
+            home_team_id=self.ab.id,
+            away_team_id=self.wm.id,
+            game_status_id=self.status.id,
+            game_date=self.week2.start_date,
+            kickoff_time=time(9, 0),
+        )
+        self.db.add(game)
+        self.db.flush()
+        self.slot.assigned_game_id = game.id
+        self.slot.status = 'BOOKED'
+        self.db.commit()
+
+        informational = _build_host_location_vs_home_team_verification(self.db, self.season.id)
+        required = _build_host_location_vs_home_team_verification(self.db, self.season.id, require_host_owner_as_home_team=True)
+
+        self.assertEqual(informational['host_owner_is_away_team'], 1)
+        self.assertEqual(informational['validation_failure_count'], 0)
+        self.assertTrue(informational['informational_notes'])
+        self.assertEqual(required['host_owner_is_away_team'], 1)
+        self.assertEqual(required['validation_failure_count'], 1)
+
+    def test_host_owner_verification_passes_when_no_away_owned_hosts(self):
+        game = Game(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week2.id,
+            home_team_id=self.wm.id,
+            away_team_id=self.ab.id,
+            game_status_id=self.status.id,
+            game_date=self.week2.start_date,
+            kickoff_time=time(9, 0),
+        )
+        self.db.add(game)
+        self.db.flush()
+        self.slot.assigned_game_id = game.id
+        self.slot.status = 'BOOKED'
+        self.db.commit()
+
+        diagnostics = _build_host_location_vs_home_team_verification(self.db, self.season.id, require_host_owner_as_home_team=True)
+
+        self.assertEqual(diagnostics['host_owner_is_away_team'], 0)
+        self.assertEqual(diagnostics['validation_failure_count'], 0)
 
 
     def test_turf_wave_diagnostics_report_partial_component_utilization(self):
@@ -1371,6 +1419,77 @@ class AutoScheduleRequiredGameGroupDiagnosticsTest(unittest.TestCase):
 
         result = auto_schedule_entire_season({'season_id': self.season.id}, db=self.db)
 
-        self.assertIn('all_games_already_scheduled', result['root_cause_categories'])
+        self.assertEqual(result['status'], 'complete')
+        self.assertNotIn('all_games_already_scheduled', result['root_cause_categories'])
         self.assertNotIn('no_required_game_groups', result['root_cause_categories'])
-        self.assertIn('all games already scheduled', result['message'])
+        self.assertIn('All required game groups were already scheduled before this pass.', result['informational_notes'])
+        self.assertEqual(result['message'], 'Auto-schedule completed successfully. All required games are scheduled.')
+
+
+class SchedulingDiagnosticsDynamicRulesTest(unittest.TestCase):
+    def test_complete_status_formula(self):
+        expected_games_total = 12
+        committed_games_count = 12
+        scheduled_games_count = 12
+        required_games_still_missing = 0
+        failed_validation_count = 0
+        division_week_rows = [{'generated_game_groups': 3, 'existing_scheduled_games': 3, 'expected_games': 3}]
+
+        complete = (
+            expected_games_total == committed_games_count
+            and expected_games_total == scheduled_games_count
+            and required_games_still_missing == 0
+            and failed_validation_count == 0
+            and all(row['generated_game_groups'] == row['expected_games'] and row['existing_scheduled_games'] == row['expected_games'] for row in division_week_rows)
+        )
+
+        self.assertTrue(complete)
+
+    def test_odd_team_no_bye_doubleheader_division_expectations(self):
+        expected_games = _diagnostic_expected_games_for_team_count(7, no_bye_doubleheaders_enabled=True)
+        active_expected = _diagnostic_active_teams_expected_to_play(7, no_bye_doubleheaders_enabled=True)
+        team_appearances = expected_games * 2
+        actual_team_counts = [2, 1, 1, 1, 1, 1, 1]
+
+        self.assertEqual(expected_games, 4)
+        self.assertEqual(active_expected, 7)
+        self.assertEqual(team_appearances, 8)
+        self.assertEqual(sum(actual_team_counts), team_appearances)
+        self.assertEqual(len([count for count in actual_team_counts if count > 0]), active_expected)
+
+    def test_odd_team_bye_division_expectations(self):
+        expected_games = _diagnostic_expected_games_for_team_count(7, no_bye_doubleheaders_enabled=False)
+        active_expected = _diagnostic_active_teams_expected_to_play(7, no_bye_doubleheaders_enabled=False)
+        team_appearances = expected_games * 2
+        actual_team_counts = [1, 1, 1, 1, 1, 1, 0]
+
+        self.assertEqual(expected_games, 3)
+        self.assertEqual(active_expected, 6)
+        self.assertEqual(team_appearances, 6)
+        self.assertEqual(sum(actual_team_counts), team_appearances)
+        self.assertEqual(len([count for count in actual_team_counts if count > 0]), active_expected)
+
+    def test_even_team_division_expectations(self):
+        expected_games = _diagnostic_expected_games_for_team_count(8, no_bye_doubleheaders_enabled=True)
+
+        self.assertEqual(expected_games, 4)
+        self.assertEqual(_diagnostic_active_teams_expected_to_play(8, no_bye_doubleheaders_enabled=True), 8)
+        self.assertEqual(expected_games * 2, 8)
+
+    def test_dynamic_field_size_validation(self):
+        expected_by_size = {'SMALL': 2 + 3, 'MEDIUM': 4, 'LARGE': 3 + 5}
+        actual_by_size = {'SMALL': 5, 'MEDIUM': 4, 'LARGE': 8}
+
+        missing, extra = _diagnostic_field_size_diff(expected_by_size, actual_by_size)
+
+        self.assertEqual(expected_by_size, {'SMALL': 5, 'MEDIUM': 4, 'LARGE': 8})
+        self.assertEqual(missing, {'SMALL': 0, 'MEDIUM': 0, 'LARGE': 0})
+        self.assertEqual(extra, {'SMALL': 0, 'MEDIUM': 0, 'LARGE': 0})
+
+    def test_field_size_validation_changes_when_team_counts_change(self):
+        expected_small_before = _diagnostic_expected_games_for_team_count(4, no_bye_doubleheaders_enabled=True)
+        expected_small_after = _diagnostic_expected_games_for_team_count(6, no_bye_doubleheaders_enabled=True)
+
+        self.assertEqual(expected_small_before, 2)
+        self.assertEqual(expected_small_after, 3)
+        self.assertGreater(expected_small_after, expected_small_before)
