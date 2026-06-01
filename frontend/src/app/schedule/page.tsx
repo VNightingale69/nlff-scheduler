@@ -1,10 +1,11 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { Suspense, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { API_URL } from '@/lib/api';
 import { getDivisionLabel } from '@/lib/divisionLabel';
 import { formatDisplayDate, formatDisplayTime } from '@/lib/displayFormat';
+import { APP_SCHEDULE_NAME, APP_SUBTITLE } from '@/config/branding';
 
 type Game = {
   id: string;
@@ -71,7 +72,7 @@ const buildScheduleQuery = (activeFilters: PublicScheduleFilters) => {
   return query;
 };
 
-export default function PublicSchedulePage() {
+function PublicScheduleContent() {
   const searchParams = useSearchParams();
   const [games, setGames] = useState<Game[]>([]);
   const [filters, setFilters] = useState<PublicScheduleFilters>({ week_id: searchParams.get('week_id') || undefined });
@@ -102,7 +103,7 @@ export default function PublicSchedulePage() {
 
   return (
     <div className='mx-auto max-w-6xl space-y-4 p-4'>
-      <h1 className='text-2xl font-bold'>Northern Lakes Flag Football Public Schedule</h1>
+      <div><h1 className='text-2xl font-bold'>{APP_SCHEDULE_NAME}</h1><p className='mt-1 text-sm font-medium text-slate-600'>{APP_SUBTITLE}</p></div>
 
       <div className='grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5'>
         <select className='rounded border p-2' value={filters.host_location_id || ''} onChange={(e) => setFilters({ ...filters, host_location_id: e.target.value })}>
@@ -170,5 +171,13 @@ export default function PublicSchedulePage() {
         </div>
       )}
     </div>
+  );
+}
+
+export default function PublicSchedulePage() {
+  return (
+    <Suspense fallback={<div className='mx-auto max-w-6xl p-4'>Loading published schedule...</div>}>
+      <PublicScheduleContent />
+    </Suspense>
   );
 }

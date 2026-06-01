@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import { type AuthUser, clearTokens, getAuthUser } from '@/lib/auth';
 import { ENTITIES } from '@/config/entities';
+import { APP_NAME, APP_SUBTITLE } from '@/config/branding';
 
 export default function DashboardShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
@@ -49,7 +50,7 @@ export default function DashboardShell({ children }: { children: React.ReactNode
     [navOrder, role]
   );
 
-  return <div className='min-h-screen bg-slate-50 md:flex'><aside className='w-full bg-slate-900 p-4 text-white md:w-64'><h2 className='mb-2 font-bold'>NLFF Admin</h2><p className='mb-4 text-xs text-slate-300'>{user?.email || 'Authenticated User'}</p><nav className='space-y-2'>{links.map(([key, cfg]) => <div key={key}>{key === 'host-availability-matrix' ? <div className='px-2 pt-2 text-xs font-semibold uppercase tracking-wide text-slate-400'>Scheduling</div> : null}<Link className={`block rounded px-2 py-1 ${pathname?.includes(`/admin/${key}`) || pathname === `/organizations` ? 'bg-slate-700' : 'hover:bg-slate-800'}`} href={`/admin/${key}`}>{role === 'COMMUNITY_ADMIN' ? communityTitles[key] || cfg.title : cfg.title}</Link></div>)}
+  return <div className='min-h-screen bg-slate-50 md:flex'><aside className='w-full bg-slate-900 p-4 text-white md:w-64'><div className='mb-4'><h2 className='font-bold leading-tight'>{APP_NAME}</h2><p className='text-xs text-slate-300'>{APP_SUBTITLE}</p></div><p className='mb-4 text-xs text-slate-300'>{user?.email || 'Authenticated User'}</p><nav className='space-y-2'>{links.map(([key, cfg]) => <div key={key}>{key === 'host-availability-matrix' ? <div className='px-2 pt-2 text-xs font-semibold uppercase tracking-wide text-slate-400'>Scheduling</div> : null}<Link className={`block rounded px-2 py-1 ${pathname?.includes(`/admin/${key}`) || pathname === `/organizations` ? 'bg-slate-700' : 'hover:bg-slate-800'}`} href={`/admin/${key}`}>{role === 'COMMUNITY_ADMIN' ? communityTitles[key] || cfg.title : cfg.title}</Link></div>)}
   <Link className='block rounded px-2 py-1 hover:bg-slate-800' href='/schedule'>Published Schedule</Link>
-  </nav><button className='mt-6 text-sm underline' onClick={() => { clearTokens(); router.push('/login'); }}>Sign out</button></aside><main className='flex-1'><header className='border-b bg-white px-4 py-3 font-semibold'>{role === 'COMMUNITY_ADMIN' ? 'Community Management' : 'Administrative Management'}</header><section className='p-4'>{children}</section></main></div>;
+  </nav><button className='mt-6 text-sm underline' onClick={() => { clearTokens(); router.push('/login'); }}>Sign out</button></aside><main className='flex-1'><header className='border-b bg-white px-4 py-3'><div className='font-semibold'>{role === 'COMMUNITY_ADMIN' ? 'Community Management' : 'Community Flag Scheduler Administration'}</div><div className='text-sm text-slate-500'>{APP_SUBTITLE}</div></header><section className='p-4'>{children}</section></main></div>;
 }

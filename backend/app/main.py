@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN
+from app.branding import APP_API_TITLE
 from app.config import ADMIN_SEED_EMAIL, ADMIN_SEED_FULL_NAME, ADMIN_SEED_PASSWORD, CORS_ORIGINS
 from app.database import get_db
 from app.models import Organization, Role, Season, User, Week
@@ -16,7 +17,7 @@ from app.routes.api import ensure_league_defined_divisions, router as api_router
 from app.security import hash_password, validate_password_strength
 from app.services.game_statuses import seed_required_game_statuses
 
-app = FastAPI(title='Northern Lakes Flag Football Scheduler API')
+app = FastAPI(title=APP_API_TITLE)
 logger = logging.getLogger(__name__)
 
 
