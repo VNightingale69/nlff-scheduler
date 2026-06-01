@@ -432,6 +432,21 @@ def _turf_unused_compatible_capacity(slot_counts: dict[str, int], assigned_count
     }
 
 
+def _component_count_items(counts: dict[str, int]) -> list[dict[str, object]]:
+    return [
+        {'field_type': size, 'count': int(counts.get(size, 0) or 0)}
+        for size in FIELD_SIZE_ORDER
+        if int(counts.get(size, 0) or 0) > 0
+    ]
+
+
+def _turf_wave_layout_counts(layout_code: str | None, slots: list[GameSlot] | None = None) -> dict[str, int]:
+    metadata = _turf_configuration_metadata(layout_code)
+    if metadata:
+        return {size: int(metadata['counts'].get(size, 0) or 0) for size in FIELD_SIZE_ORDER}
+    return _turf_slot_counts_from_slots(slots or [])
+
+
 def _normalize_configuration_name(value: str | None) -> str:
     normalized = str(value or '').strip().upper().replace('-', '_').replace(' ', '_')
     return BACKWARD_COMPATIBLE_TURF_CONFIGURATION_ALIASES.get(normalized, normalized)
@@ -7056,11 +7071,51 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         wave_slots = db.query(GameSlot).filter(GameSlot.turf_wave_id == wave_id).all()
         capacity = sum(1 for wave_slot in wave_slots if _normalize_field_size(wave_slot.field_type) == normalized_size)
         assigned = sum(1 for wave_slot in wave_slots if _normalize_field_size(wave_slot.field_type) == normalized_size and wave_slot.assigned_game_id)
-        proposed = int(proposed_turf_wave_usage_by_id.get(wave_id, 0) or 0)
+        proposed = sum(
+            1
+            for proposal in plans
+            if proposal.get('turf_wave_id') == str(wave_id)
+            and _normalize_field_size(proposal.get('field_type')) == normalized_size
+        )
         return capacity, assigned, proposed
 
-    def _has_existing_turf_large_capacity() -> bool:
-        if _normalize_field_size(required_field_type) != FIELD_SIZE_LARGE:
+    def _turf_wave_total_snapshot(wave_id: uuid.UUID | None) -> tuple[int, int, int, dict[str, int], dict[str, int]]:
+        if not wave_id:
+            return 0, 0, 0, {size: 0 for size in FIELD_SIZE_ORDER}, {size: 0 for size in FIELD_SIZE_ORDER}
+        wave_slots = db.query(GameSlot).filter(GameSlot.turf_wave_id == wave_id).all()
+        slot_counts = _turf_slot_counts_from_slots(wave_slots)
+        assigned_counts = _turf_slot_counts_from_slots(wave_slots, assigned_only=True)
+        proposed_by_size = {size: 0 for size in FIELD_SIZE_ORDER}
+        proposed_total = 0
+        for proposal in plans:
+            if proposal.get('turf_wave_id') != str(wave_id):
+                continue
+            proposed_size = _normalize_field_size(proposal.get('field_type'))
+            if proposed_size in proposed_by_size:
+                proposed_by_size[proposed_size] += 1
+                proposed_total += 1
+        # Keep the existing aggregate counter as a defensive fallback for in-flight
+        # placements that have not yet been appended to proposals.
+        proposed_total = max(proposed_total, int(proposed_turf_wave_usage_by_id.get(wave_id, 0) or 0))
+        return sum(slot_counts.values()), sum(assigned_counts.values()), proposed_total, slot_counts, assigned_counts
+
+    def _remaining_compatible_turf_slots_for_wave(required_size: str | None, exclude_wave_id: uuid.UUID | None = None) -> int:
+        normalized_size = _normalize_field_size(required_size)
+        if not normalized_size:
+            return 0
+        count = 0
+        for remaining_slot in remaining_slots:
+            if exclude_wave_id and remaining_slot.turf_wave_id == exclude_wave_id:
+                continue
+            if not remaining_slot.turf_wave_id or _normalize_field_size(remaining_slot.field_type) != normalized_size:
+                continue
+            if remaining_slot.host_location_id and host_surface_by_id.get(remaining_slot.host_location_id) == 'TURF_STADIUM':
+                count += 1
+        return count
+
+    def _has_existing_turf_wave_capacity(field_size: str | None) -> bool:
+        normalized_size = _normalize_field_size(field_size)
+        if not normalized_size:
             return False
         active_host_ids = set(projected_games_by_host.keys()) | set(selected_host_ids)
         for remaining_slot in remaining_slots:
@@ -7068,9 +7123,9 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                 continue
             if host_surface_by_id.get(remaining_slot.host_location_id) != 'TURF_STADIUM':
                 continue
-            if _normalize_field_size(remaining_slot.field_type) != FIELD_SIZE_LARGE or not remaining_slot.turf_wave_id:
+            if _normalize_field_size(remaining_slot.field_type) != normalized_size or not remaining_slot.turf_wave_id:
                 continue
-            capacity, assigned, proposed = _turf_wave_capacity_snapshot(remaining_slot.turf_wave_id, FIELD_SIZE_LARGE)
+            capacity, assigned, proposed = _turf_wave_capacity_snapshot(remaining_slot.turf_wave_id, normalized_size)
             if capacity > assigned + proposed:
                 return True
         return False
@@ -7341,20 +7396,47 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                                 reason_bits.append('approved turf slot-level configuration (+200)')
                             assigned_turf_counts = _turf_slot_counts_from_slots(turf_time_slots, assigned_only=True)
                             unused_turf_capacity = _turf_unused_compatible_capacity(turf_counts, assigned_turf_counts)
-                            if unused_turf_capacity.get(required_field_type, 0) > 0:
+                            normalized_required_size = _normalize_field_size(required_field_type)
+                            if unused_turf_capacity.get(normalized_required_size, 0) > 0:
                                 score += 500
                                 reason_bits.append('fills compatible unused turf wave capacity (+500)')
-                            if _normalize_field_size(required_field_type) == FIELD_SIZE_LARGE:
-                                wave_capacity, wave_assigned, wave_proposed = _turf_wave_capacity_snapshot(selected_field_slot.turf_wave_id, FIELD_SIZE_LARGE)
-                                if wave_capacity > wave_assigned + wave_proposed:
-                                    score += 1200
-                                    reason_bits.append('fills existing turf large-field wave before opening another location (+1200)')
-                                projected_wave_fill = (wave_assigned + wave_proposed + 1) / max(wave_capacity, 1)
-                                score += int(projected_wave_fill * 300)
-                                reason_bits.append('prefers fewer, fuller turf large-field waves')
-                        elif _has_existing_turf_large_capacity():
-                            score -= 900
-                            warning_bits.append('existing turf stadium large-field wave still has unused capacity (-900)')
+
+                            wave_capacity, wave_assigned, wave_proposed, wave_counts, wave_assigned_counts = _turf_wave_total_snapshot(selected_field_slot.turf_wave_id)
+                            projected_assigned = wave_assigned + wave_proposed + 1
+                            projected_wave_fill = projected_assigned / max(wave_capacity, 1)
+                            if projected_assigned >= wave_capacity and wave_capacity > 0:
+                                score += 3500
+                                reason_bits.append('full turf-wave utilization (+3500)')
+                            else:
+                                score -= int((1.0 - projected_wave_fill) * 900)
+                                warning_bits.append('partial turf-wave utilization penalty')
+                            score += int(projected_wave_fill * 1200)
+                            reason_bits.append('turf-wave utilization score favors fuller same-slot layouts')
+
+                            current_wave_required_capacity, current_wave_required_assigned, current_wave_required_proposed = _turf_wave_capacity_snapshot(selected_field_slot.turf_wave_id, normalized_required_size)
+                            if current_wave_required_capacity > current_wave_required_assigned + current_wave_required_proposed:
+                                score += 1400
+                                reason_bits.append('fills existing compatible turf-wave component before another wave (+1400)')
+                            if wave_assigned + wave_proposed == 0:
+                                compatible_elsewhere = _remaining_compatible_turf_slots_for_wave(normalized_required_size, exclude_wave_id=selected_field_slot.turf_wave_id)
+                                if compatible_elsewhere > 0:
+                                    score -= 2200
+                                    warning_bits.append('opening a new partial turf wave while compatible turf capacity remains elsewhere (-2200)')
+                            elif projected_assigned < wave_capacity:
+                                unused_after = {
+                                    size: max(int(wave_counts.get(size, 0) or 0) - int(wave_assigned_counts.get(size, 0) or 0), 0)
+                                    for size in FIELD_SIZE_ORDER
+                                }
+                                if normalized_required_size in unused_after:
+                                    unused_after[normalized_required_size] = max(unused_after[normalized_required_size] - 1, 0)
+                                warning_bits.append(
+                                    'turf wave remains partially filled after placement: ' + ', '.join(
+                                        f'{count} {size.lower()}' for size, count in unused_after.items() if count > 0
+                                    )
+                                )
+                        elif _has_existing_turf_wave_capacity(required_field_type):
+                            score -= 1200
+                            warning_bits.append('existing turf stadium wave still has compatible unused capacity (-1200)')
                         if is_odd_division and no_byes and selected_double_header_team_id and selected_double_header_team_id in {a, b}:
                             prior_double_header_slots = [
                                 p for p in plans
@@ -12721,19 +12803,49 @@ def _build_turf_stadium_utilization_diagnostics(db: Session, season_id: uuid.UUI
         })
         slots = db.query(GameSlot).filter(GameSlot.turf_wave_id == wave.id).all()
         capacity = len(slots)
-        assigned = sum(1 for slot in slots if slot.assigned_game_id)
+        assigned_slots = [slot for slot in slots if slot.assigned_game_id]
+        assigned = len(assigned_slots)
         utilization = round((assigned / capacity * 100) if capacity else 0, 1)
+        available_counts = _turf_wave_layout_counts(wave.preferred_layout_code, slots)
+        placed_counts = _turf_slot_counts_from_slots(slots, assigned_only=True)
+        unused_counts = _turf_unused_compatible_capacity(available_counts, placed_counts)
+        placed_games = []
+        for slot in assigned_slots:
+            game = slot.assigned_game
+            if not game:
+                continue
+            home = game.home_team
+            away = game.away_team
+            division = home.division if home else None
+            placed_games.append({
+                'game_id': str(game.id),
+                'slot_id': str(slot.id),
+                'field_type': _normalize_field_size(slot.field_type),
+                'field': slot.field_instance.field_name if slot.field_instance else None,
+                'home_team': home.name if home else None,
+                'away_team': away.name if away else None,
+                'division': division.name if division else None,
+            })
+        optimization_warnings = []
+        if capacity and 0 < assigned < capacity:
+            optimization_warnings.append('Partial turf wave utilization: unused components remain available in this wave.')
         wave_row = {
             'wave_id': str(wave.id),
             'sequence_number': wave.sequence_number,
             'wave_intent': wave.wave_intent,
+            'layout': wave.preferred_layout_code,
             'preferred_layout_code': wave.preferred_layout_code,
             'start_time': str(wave.start_time),
             'end_time': str(wave.end_time),
+            'available_field_components': _component_count_items(available_counts),
+            'games_placed': placed_games,
+            'unused_components': _component_count_items(unused_counts),
+            'optimization_warnings': optimization_warnings,
             'capacity_slots': capacity,
             'assigned_slots': assigned,
             'open_slots': max(capacity - assigned, 0),
             'utilization_percent': utilization,
+            'status': _quality_status(assigned == capacity, warning=assigned > 0),
         }
         data['assigned_slots'] = int(data['assigned_slots']) + assigned
         data['open_slots'] = int(data['open_slots']) + max(capacity - assigned, 0)
@@ -12760,7 +12872,15 @@ def _build_turf_stadium_utilization_diagnostics(db: Session, season_id: uuid.UUI
             data['wave_1_utilization'] = wave_utilization[0]['utilization_percent']
         if len(wave_utilization) > 1:
             data['wave_2_utilization'] = wave_utilization[1]['utilization_percent']
-        data['status'] = _quality_status(data['utilization_percent'] >= 70 and between_gap_hours == 0, warning=data['utilization_percent'] >= 40)
+        partial_wave_warnings = []
+        for wave_row in wave_utilization:
+            partial_wave_warnings.extend(wave_row.get('optimization_warnings') or [])
+        data['optimization_warnings'] = partial_wave_warnings
+        has_partial_wave = any(0 < int(row.get('assigned_slots') or 0) < int(row.get('capacity_slots') or 0) for row in wave_utilization)
+        data['status'] = _quality_status(
+            data['utilization_percent'] >= 70 and between_gap_hours == 0 and not has_partial_wave,
+            warning=data['utilization_percent'] >= 40 or has_partial_wave,
+        )
         diagnostics.append(data)
     return diagnostics
 

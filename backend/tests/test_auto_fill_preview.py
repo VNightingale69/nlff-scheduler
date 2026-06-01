@@ -7,8 +7,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import Base
-from app.models import Division, FieldInstance, Game, GameSlot, GameStatus, HostLocation, HostPlanSelection, HostingAvailability, Organization, Season, Team, Week
-from app.routes.api import _build_host_location_vs_home_team_verification, _host_availability_matrix_response, auto_fill_apply, auto_fill_preview, auto_schedule_entire_season, generate_suggested_host_plan
+from app.models import Division, FieldInstance, Game, GameSlot, GameStatus, HostLocation, HostPlanSelection, HostingAvailability, Organization, Season, Team, TurfWave, Week
+from app.routes.api import _build_host_location_vs_home_team_verification, _build_turf_stadium_utilization_diagnostics, _host_availability_matrix_response, auto_fill_apply, auto_fill_preview, auto_schedule_entire_season, generate_suggested_host_plan
 
 
 class AutoFillPreviewTest(unittest.TestCase):
@@ -72,6 +72,70 @@ class AutoFillPreviewTest(unittest.TestCase):
         self.assertEqual(away_row['home_team_community_name'], 'Antioch')
         self.assertEqual(away_row['away_team_community_name'], 'Westosha')
         self.assertEqual(away_row['category'], 'HOST_OWNER_IS_AWAY')
+
+
+    def test_turf_wave_diagnostics_report_partial_component_utilization(self):
+        self.week2.primary_game_date = self.week2.start_date
+        self.host.surface_type = 'TURF_STADIUM'
+        availability = HostingAvailability(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week2.id,
+            organization_id=self.org_w.id,
+            host_location_id=self.host.id,
+            available_date=self.week2.start_date,
+            start_time=time(9, 0),
+            end_time=time(10, 0),
+            is_available=True,
+        )
+        wave = TurfWave(
+            id=uuid.uuid4(),
+            host_location_id=self.host.id,
+            hosting_availability_id=availability.id,
+            week_id=self.week2.id,
+            host_date=self.week2.start_date,
+            sequence_number=1,
+            wave_intent='SMALL_MEDIUM',
+            preferred_layout_code='ONE_MEDIUM_TWO_SMALL',
+            start_time=time(9, 0),
+            end_time=time(10, 0),
+        )
+        medium_field = FieldInstance(id=uuid.uuid4(), host_location_id=self.host.id, hosting_availability_id=availability.id, instance_date=self.week2.start_date, field_name='Medium Field 1', field_type='MEDIUM', is_active=True)
+        small_field_2 = FieldInstance(id=uuid.uuid4(), host_location_id=self.host.id, hosting_availability_id=availability.id, instance_date=self.week2.start_date, field_name='Small Field 2', field_type='SMALL', is_active=True)
+        game = Game(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week2.id,
+            home_team_id=self.wg.id,
+            away_team_id=self.as_.id,
+            game_status_id=self.status.id,
+            game_date=self.week2.start_date,
+            kickoff_time=time(9, 0),
+        )
+        self.slot.turf_wave_id = wave.id
+        self.slot.assigned_game_id = game.id
+        self.slot.status = 'BOOKED'
+        medium_slot = GameSlot(id=uuid.uuid4(), field_instance_id=medium_field.id, host_location_id=self.host.id, slot_date=self.week2.start_date, start_time=time(9, 0), end_time=time(10, 0), field_type='MEDIUM', status='OPEN', turf_wave_id=wave.id)
+        small_slot_2 = GameSlot(id=uuid.uuid4(), field_instance_id=small_field_2.id, host_location_id=self.host.id, slot_date=self.week2.start_date, start_time=time(9, 0), end_time=time(10, 0), field_type='SMALL', status='OPEN', turf_wave_id=wave.id)
+        self.db.add_all([availability, wave, medium_field, small_field_2, game, medium_slot, small_slot_2])
+        self.db.commit()
+
+        diagnostics = _build_turf_stadium_utilization_diagnostics(self.db, self.season.id)
+
+        self.assertEqual(len(diagnostics), 1)
+        wave_row = diagnostics[0]['wave_utilization'][0]
+        self.assertEqual(wave_row['layout'], 'ONE_MEDIUM_TWO_SMALL')
+        self.assertEqual(wave_row['available_field_components'], [
+            {'field_type': 'SMALL', 'count': 2},
+            {'field_type': 'MEDIUM', 'count': 1},
+        ])
+        self.assertEqual(wave_row['unused_components'], [
+            {'field_type': 'SMALL', 'count': 1},
+            {'field_type': 'MEDIUM', 'count': 1},
+        ])
+        self.assertEqual(wave_row['utilization_percent'], 33.3)
+        self.assertEqual(wave_row['status'], 'Warning')
+        self.assertTrue(diagnostics[0]['optimization_warnings'])
 
     def test_avoids_prior_week_exact_matchup_when_alternatives_exist(self):
         result = auto_fill_preview({'season_id': self.season.id, 'week_id': self.week2.id, 'division_id': self.division.id}, db=self.db)
