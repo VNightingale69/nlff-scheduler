@@ -2,7 +2,7 @@
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { ApiError, apiFetch } from '@/lib/api';
-import { setTokens } from '@/lib/auth';
+import { type AuthUser, setTokens } from '@/lib/auth';
 
 export default function Login() {
   const [email, setEmail] = useState('');
@@ -39,12 +39,23 @@ export default function Login() {
     return error.message || 'Login failed. Please verify credentials.';
   };
 
+  const buildAuthUser = (data: any): AuthUser => {
+    const responseUser = data?.user || {};
+
+    return {
+      ...responseUser,
+      email: responseUser.email || data?.email || email,
+      role_name: responseUser.role_name || data?.role_name,
+      organization_id: responseUser.organization_id ?? data?.organization_id ?? null,
+    };
+  };
+
   const submit = async () => {
     try {
       setLoading(true); setError('');
       const data: any = await apiFetch('/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) });
       if (!data?.access_token) throw new Error('Login response missing access token');
-      setTokens(data.access_token, data.refresh_token, data.user || { email, role_name: data.role_name, organization_id: data.organization_id });
+      setTokens(data.access_token, data.refresh_token, buildAuthUser(data));
       router.push('/dashboard');
     } catch (error) { setError(extractErrorMessage(error)); } finally { setLoading(false); }
   };
