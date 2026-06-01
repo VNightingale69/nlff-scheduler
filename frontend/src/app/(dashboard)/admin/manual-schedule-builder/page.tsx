@@ -53,6 +53,8 @@ export default function ManualScheduleBuilderPage() {
   const divisionTeams = useMemo(() => options.teams.filter((t: any) => t.division_id === divisionId && t.is_active), [options, divisionId]);
   const seasonWeeks = useMemo(() => options.weeks.filter((w: any) => w.season_id === seasonId), [options, seasonId]);
   const canSave = Boolean(seasonId && weekId && divisionId && homeTeamId && awayTeamId && slotId);
+  const hostLocationVerification = autoScheduleDiagnostics?.host_location_vs_home_team_verification || autoScheduleDiagnostics?.auto_schedule_diagnostics?.host_location_vs_home_team_verification || null;
+  const hostOwnerAwayGames = hostLocationVerification?.host_owner_is_away_games || [];
 
   const getWeekOptionLabel = (week: any) => {
     const baseLabel = week.label || `Week ${week.week_number}`;
@@ -512,6 +514,58 @@ export default function ManualScheduleBuilderPage() {
               {Object.entries(autoScheduleDiagnostics.skipped_attempts_by_reason || {}).map(([reason, count]: any) => <li key={reason}>{reason}: {count}</li>)}
             </ul>
           </div>
+          {hostLocationVerification ? <section className='rounded border border-slate-200 bg-white p-3'>
+            <h3 className='font-semibold'>Host Location vs Home Team Verification</h3>
+            <div className='mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-3'>
+              <div>Total games checked: <span className='font-semibold'>{hostLocationVerification.total_games_checked ?? 0}</span></div>
+              <div>Same-community games: <span className='font-semibold'>{hostLocationVerification.same_community_games ?? 0}</span></div>
+              <div>Unknown location owner: <span className='font-semibold'>{hostLocationVerification.unknown_location_owner ?? 0}</span></div>
+              <div>Host owner is home team: <span className='font-semibold'>{hostLocationVerification.host_owner_is_home_team ?? 0}</span></div>
+              <div>Host owner is away team: <span className='font-semibold'>{hostLocationVerification.host_owner_is_away_team ?? 0}</span></div>
+              <div>Neutral-site games: <span className='font-semibold'>{hostLocationVerification.neutral_site_games ?? 0}</span></div>
+            </div>
+            <div className='mt-3'>
+              <div className='font-medium'>HOST_OWNER_IS_AWAY games</div>
+              {hostOwnerAwayGames.length === 0 ? (
+                <p className='mt-1 text-slate-700'>No host-owner-as-away games found.</p>
+              ) : (
+                <div className='mt-2 overflow-x-auto'>
+                  <table className='min-w-full border text-xs'>
+                    <thead>
+                      <tr className='bg-slate-100'>
+                        <th className='border p-1 text-left'>Date</th>
+                        <th className='border p-1 text-left'>Time</th>
+                        <th className='border p-1 text-left'>Division</th>
+                        <th className='border p-1 text-left'>Location</th>
+                        <th className='border p-1 text-left'>Field</th>
+                        <th className='border p-1 text-left'>Location Owner</th>
+                        <th className='border p-1 text-left'>Home Team</th>
+                        <th className='border p-1 text-left'>Home Team Community</th>
+                        <th className='border p-1 text-left'>Away Team</th>
+                        <th className='border p-1 text-left'>Away Team Community</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {hostOwnerAwayGames.map((game: any) => (
+                        <tr key={game.game_id}>
+                          <td className='border p-1'>{game.date ? formatDisplayDate(game.date) : 'N/A'}</td>
+                          <td className='border p-1'>{game.start_time ? formatDisplayTime(game.start_time) : 'N/A'}</td>
+                          <td className='border p-1'>{game.division || 'N/A'}</td>
+                          <td className='border p-1'>{game.location || 'Unassigned'}</td>
+                          <td className='border p-1'>{game.field || 'Unassigned'}</td>
+                          <td className='border p-1'>{game.host_location_owner_community_name || 'Unknown'}</td>
+                          <td className='border p-1'>{game.home_team || 'TBD'}</td>
+                          <td className='border p-1'>{game.home_team_community_name || 'Unknown'}</td>
+                          <td className='border p-1'>{game.away_team || 'TBD'}</td>
+                          <td className='border p-1'>{game.away_team_community_name || 'Unknown'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          </section> : null}
           <div>
             <div className='font-semibold'>3. Required games still missing: {(autoScheduleDiagnostics.required_games_still_missing || []).length}</div>
             {(autoScheduleDiagnostics.required_games_still_missing || []).map((row: any, idx: number) => <div key={`${row.division}-${row.week}-${idx}`} className='ml-3'>{row.division} Week {row.week} — Required: {row.required_games}, Created: {row.created_games}, Missing: {row.missing_games}</div>)}

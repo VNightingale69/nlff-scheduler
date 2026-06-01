@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import Base
 from app.models import Division, FieldInstance, Game, GameSlot, GameStatus, HostLocation, HostPlanSelection, HostingAvailability, Organization, Season, Team, Week
-from app.routes.api import _host_availability_matrix_response, auto_fill_apply, auto_fill_preview, auto_schedule_entire_season, generate_suggested_host_plan
+from app.routes.api import _build_host_location_vs_home_team_verification, _host_availability_matrix_response, auto_fill_apply, auto_fill_preview, auto_schedule_entire_season, generate_suggested_host_plan
 
 
 class AutoFillPreviewTest(unittest.TestCase):
@@ -42,6 +42,36 @@ class AutoFillPreviewTest(unittest.TestCase):
             kickoff_time=time(10, 0),
         ))
         self.db.commit()
+
+    def test_host_location_vs_home_team_verification_reports_away_owned_host(self):
+        game = Game(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week2.id,
+            home_team_id=self.ab.id,
+            away_team_id=self.wm.id,
+            game_status_id=self.status.id,
+            game_date=self.week2.start_date,
+            kickoff_time=time(9, 0),
+        )
+        self.db.add(game)
+        self.db.flush()
+        self.slot.assigned_game_id = game.id
+        self.slot.status = 'BOOKED'
+        self.db.commit()
+
+        diagnostics = _build_host_location_vs_home_team_verification(self.db, self.season.id)
+
+        self.assertEqual(diagnostics['total_games_checked'], 2)
+        self.assertEqual(diagnostics['host_owner_is_away_team'], 1)
+        self.assertEqual(len(diagnostics['host_owner_is_away_games']), 1)
+        away_row = diagnostics['host_owner_is_away_games'][0]
+        self.assertEqual(away_row['game_id'], str(game.id))
+        self.assertEqual(away_row['location'], 'Westosha Park')
+        self.assertEqual(away_row['host_location_owner_community_name'], 'Westosha')
+        self.assertEqual(away_row['home_team_community_name'], 'Antioch')
+        self.assertEqual(away_row['away_team_community_name'], 'Westosha')
+        self.assertEqual(away_row['category'], 'HOST_OWNER_IS_AWAY')
 
     def test_avoids_prior_week_exact_matchup_when_alternatives_exist(self):
         result = auto_fill_preview({'season_id': self.season.id, 'week_id': self.week2.id, 'division_id': self.division.id}, db=self.db)
