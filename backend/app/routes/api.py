@@ -41,6 +41,109 @@ RULEBOOK_STORAGE_WARNING = (
 )
 
 
+HOST_LOCATION_VERIFICATION_CATEGORIES = (
+    'SAME_COMMUNITY_GAME',
+    'UNKNOWN_LOCATION_OWNER',
+    'HOST_OWNER_IS_HOME',
+    'HOST_OWNER_IS_AWAY',
+    'NEUTRAL_SITE',
+)
+
+
+def _serialize_diagnostic_id(value: object) -> str | None:
+    return str(value) if value is not None else None
+
+
+def _format_diagnostic_date(value: date | None) -> str | None:
+    return value.isoformat() if value else None
+
+
+def _format_diagnostic_time(value: time | None) -> str | None:
+    return value.isoformat() if value else None
+
+
+def _build_host_location_vs_home_team_verification(db: Session, season_id: uuid.UUID | str | None = None) -> dict[str, object]:
+    """Build verification-only diagnostics for scheduled games.
+
+    This intentionally does not validate, mutate, fail, or repair any schedule data.
+    It only reports whether each scheduled game's host-location owner matches the
+    home team, away team, neither team, or cannot be resolved.
+    """
+    query = db.query(Game).join(Game.status).filter(GameStatus.code != 'UNSCHEDULED')
+    if season_id:
+        query = query.filter(Game.season_id == season_id)
+
+    games = query.order_by(Game.game_date.asc(), Game.kickoff_time.asc(), Game.id.asc()).all()
+    game_ids = [game.id for game in games]
+    slots_by_game_id: dict[uuid.UUID, GameSlot] = {}
+    if game_ids:
+        for slot in db.query(GameSlot).filter(GameSlot.assigned_game_id.in_(game_ids)).all():
+            if slot.assigned_game_id and slot.assigned_game_id not in slots_by_game_id:
+                slots_by_game_id[slot.assigned_game_id] = slot
+
+    counts = {category: 0 for category in HOST_LOCATION_VERIFICATION_CATEGORIES}
+    games_checked: list[dict[str, object]] = []
+    host_owner_is_away_games: list[dict[str, object]] = []
+
+    for game in games:
+        slot = slots_by_game_id.get(game.id)
+        host_location = game.host_location or (slot.host_location if slot else None)
+        field_instance = game.field_instance or (slot.field_instance if slot else None)
+        home_team = game.home_team
+        away_team = game.away_team
+        home_community = home_team.organization if home_team else None
+        away_community = away_team.organization if away_team else None
+        host_owner = host_location.organization if host_location else None
+        host_owner_id = getattr(host_location, 'organization_id', None) if host_location else None
+        home_community_id = getattr(home_team, 'organization_id', None) if home_team else None
+        away_community_id = getattr(away_team, 'organization_id', None) if away_team else None
+
+        if home_community_id is not None and home_community_id == away_community_id:
+            category = 'SAME_COMMUNITY_GAME'
+        elif host_owner_id is None or host_owner is None:
+            category = 'UNKNOWN_LOCATION_OWNER'
+        elif host_owner_id == home_community_id:
+            category = 'HOST_OWNER_IS_HOME'
+        elif host_owner_id == away_community_id:
+            category = 'HOST_OWNER_IS_AWAY'
+        else:
+            category = 'NEUTRAL_SITE'
+
+        counts[category] += 1
+        row = {
+            'game_id': _serialize_diagnostic_id(game.id),
+            'date': _format_diagnostic_date(game.game_date),
+            'start_time': _format_diagnostic_time(game.kickoff_time),
+            'division': f'{home_team.division.division_group or ""} {home_team.division.name or ""}'.strip() if home_team and home_team.division else None,
+            'location': host_location.name if host_location else None,
+            'field': field_instance.field_name if field_instance else (game.field.name if game.field else None),
+            'host_location_owner_community_id': _serialize_diagnostic_id(host_owner_id),
+            'host_location_owner_community_name': host_owner.name if host_owner else None,
+            'home_team': home_team.name if home_team else None,
+            'home_team_community_id': _serialize_diagnostic_id(home_community_id),
+            'home_team_community_name': home_community.name if home_community else None,
+            'away_team': away_team.name if away_team else None,
+            'away_team_community_id': _serialize_diagnostic_id(away_community_id),
+            'away_team_community_name': away_community.name if away_community else None,
+            'category': category,
+        }
+        games_checked.append(row)
+        if category == 'HOST_OWNER_IS_AWAY':
+            host_owner_is_away_games.append(row)
+
+    return {
+        'title': 'Host Location vs Home Team Verification',
+        'total_games_checked': len(games_checked),
+        'same_community_games': counts['SAME_COMMUNITY_GAME'],
+        'unknown_location_owner': counts['UNKNOWN_LOCATION_OWNER'],
+        'host_owner_is_home_team': counts['HOST_OWNER_IS_HOME'],
+        'host_owner_is_away_team': counts['HOST_OWNER_IS_AWAY'],
+        'neutral_site_games': counts['NEUTRAL_SITE'],
+        'counts_by_category': counts,
+        'host_owner_is_away_games': host_owner_is_away_games,
+        'games': games_checked,
+    }
+
 def _rulebook_storage_dir() -> Path:
     upload_dir = Path(RULEBOOK_UPLOAD_DIR)
     if not upload_dir.is_absolute():
@@ -10455,6 +10558,8 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
             db.rollback()
         else:
             db.commit()
+        host_location_verification = _build_host_location_vs_home_team_verification(db, season_id)
+        preplacement_diagnostics['host_location_vs_home_team_verification'] = host_location_verification
         return {
             'status': 'warning',
             'message': message,
@@ -10465,6 +10570,7 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
             'total_games_created': 0,
             'root_cause_categories': preplacement_root_causes or ['unknown'],
             'auto_schedule_diagnostics': preplacement_diagnostics,
+            'host_location_vs_home_team_verification': host_location_verification,
             'slot_capacity_validation': None,
             'games_skipped': 0,
             'skipped_attempts_message': '0 placement attempts skipped; placement was not started because required game groups were not generated.',
@@ -10925,6 +11031,9 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
     else:
         db.commit()
 
+    host_location_verification = _build_host_location_vs_home_team_verification(db, season_id)
+    auto_schedule_diagnostics['host_location_vs_home_team_verification'] = host_location_verification
+
     final_status = 'complete' if schedule_complete else 'incomplete'
     final_message = 'Auto-schedule completed.' if schedule_complete else 'Auto-schedule completed with missing required games; review validation_errors and diagnostics.'
     if dry_run:
@@ -10955,6 +11064,7 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         'total_games_created': total_games_created,
         'root_cause_categories': root_cause_categories,
         'auto_schedule_diagnostics': auto_schedule_diagnostics,
+        'host_location_vs_home_team_verification': host_location_verification,
         'slot_capacity_validation': slot_preflight,
         'season_date_diagnostics': {
             'target_date_checked': f"{season.start_date.year}-09-13" if season.start_date else None,
