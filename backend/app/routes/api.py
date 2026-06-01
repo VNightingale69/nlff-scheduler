@@ -1329,7 +1329,7 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
     user = db.query(User).join(User.role).filter(func.lower(User.email) == payload.email.lower(), User.is_active.is_(True), Role.is_active.is_(True)).first()
     if not user or not verify_password(payload.password, user.password_hash):
         raise HTTPException(status_code=401, detail='Invalid credentials')
-    return TokenResponse(access_token=create_access_token(str(user.id)), refresh_token=create_refresh_token(str(user.id)), token_type='bearer').model_dump() | {'user': _user_payload(user)}
+    return TokenResponse(access_token=create_access_token(str(user.id)), refresh_token=create_refresh_token(str(user.id)), token_type='bearer', user=_user_payload(user))
 
 @router.post('/auth/refresh', response_model=TokenResponse)
 def refresh(payload: RefreshRequest, db: Session = Depends(get_db)):
@@ -1337,7 +1337,7 @@ def refresh(payload: RefreshRequest, db: Session = Depends(get_db)):
     user = db.query(User).join(User.role).filter(User.id == uuid.UUID(token_data['sub']), User.is_active.is_(True), Role.is_active.is_(True)).first()
     if not user:
         raise HTTPException(status_code=401, detail='Invalid refresh token')
-    return TokenResponse(access_token=create_access_token(str(user.id)), refresh_token=create_refresh_token(str(user.id)), token_type='bearer').model_dump() | {'user': _user_payload(user)}
+    return TokenResponse(access_token=create_access_token(str(user.id)), refresh_token=create_refresh_token(str(user.id)), token_type='bearer', user=_user_payload(user))
 
 @router.get('/auth/me')
 def me(current_user: User = Depends(get_current_user)):

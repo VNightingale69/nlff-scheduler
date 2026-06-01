@@ -49,10 +49,19 @@ class RefreshRequest(BaseModel):
     refresh_token: str
 
 
+class TokenUser(BaseModel):
+    id: uuid.UUID
+    email: EmailStr
+    full_name: str
+    role_name: str
+    organization_id: uuid.UUID | None
+
+
 class TokenResponse(BaseModel):
     access_token: str
     refresh_token: str
     token_type: str = 'bearer'
+    user: TokenUser | None = None
 
 
 class OrganizationCreate(BaseModel):

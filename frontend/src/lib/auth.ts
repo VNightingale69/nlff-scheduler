@@ -3,10 +3,10 @@
 export type UserRole = 'LEAGUE_ADMIN' | 'COMMUNITY_ADMIN';
 
 export interface AuthUser {
-  email?: string;
+  email: string;
   full_name?: string;
   role_name?: UserRole;
-  organization_id?: string | null;
+  organization_id: string | null;
 }
 
 const ACCESS_TOKEN_KEY = 'access_token';
@@ -26,7 +26,14 @@ export const getAuthUser = (): AuthUser | null => {
 export const setTokens = (accessToken: string, refreshToken: string, user?: AuthUser) => {
   localStorage.setItem(ACCESS_TOKEN_KEY, accessToken);
   localStorage.setItem(REFRESH_TOKEN_KEY, refreshToken);
-  if (user) localStorage.setItem(AUTH_USER_KEY, JSON.stringify(user));
+  if (user) {
+    localStorage.setItem(AUTH_USER_KEY, JSON.stringify({
+      ...user,
+      email: user.email,
+      role_name: user.role_name,
+      organization_id: user.organization_id ?? null,
+    }));
+  }
 };
 
 export const clearTokens = () => {
