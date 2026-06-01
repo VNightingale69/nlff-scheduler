@@ -1,13 +1,16 @@
 import logging
+import re
 import uuid
 from collections.abc import Iterable
+from dataclasses import dataclass
 
 from fastapi import HTTPException
-from sqlalchemy import or_
+from sqlalchemy import inspect, or_
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.auth import ROLE_LEAGUE_ADMIN
+from app.database import Base
 from app.models import (
     Field,
     FieldConfigurationOption,
@@ -34,6 +37,47 @@ class OrganizationCleanupError(Exception):
     pass
 
 
+@dataclass(frozen=True)
+class DependentForeignKey:
+    table: str
+    columns: tuple[str, ...]
+    referred_table: str
+    referred_columns: tuple[str, ...]
+    constraint: str
+    ondelete: str | None = None
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            'table': self.table,
+            'columns': list(self.columns),
+            'referred_table': self.referred_table,
+            'referred_columns': list(self.referred_columns),
+            'constraint': self.constraint,
+            'ondelete': self.ondelete,
+        }
+
+
+ORGANIZATION_DELETE_TARGET_TABLES = {
+    'organizations',
+    'host_locations',
+    'fields',
+    'teams',
+    'generated_slots',
+    'game_slots',
+    'games',
+    'hosting_availabilities',
+    'physical_field_areas',
+    'field_configuration_options',
+    'field_instances',
+    'turf_waves',
+    'host_location_configurations',
+}
+
+
+CONSTRAINT_DETAIL_RE = re.compile(r'(?:constraint|foreign key constraint) ["\']?([^"\'\s]+)["\']?', re.IGNORECASE)
+TABLE_DETAIL_RE = re.compile(r'(?:on|from) table ["\']?([^"\'\s]+)["\']?', re.IGNORECASE)
+
+
 def _unique(values: Iterable[uuid.UUID | None]) -> list[uuid.UUID]:
     seen: set[uuid.UUID] = set()
     result: list[uuid.UUID] = []
@@ -53,6 +97,131 @@ def _delete_by_ids(db: Session, model: type, ids: list[uuid.UUID]) -> int:
     if not ids:
         return 0
     return db.query(model).filter(model.id.in_(ids)).delete(synchronize_session=False)
+
+
+def _metadata_dependent_foreign_keys() -> list[DependentForeignKey]:
+    foreign_keys: list[DependentForeignKey] = []
+    for table in Base.metadata.tables.values():
+        for constraint in table.foreign_key_constraints:
+            elements = list(constraint.elements)
+            if not elements:
+                continue
+            referred_table = elements[0].column.table.name
+            if referred_table not in ORGANIZATION_DELETE_TARGET_TABLES:
+                continue
+            foreign_keys.append(
+                DependentForeignKey(
+                    table=table.name,
+                    columns=tuple(element.parent.name for element in elements),
+                    referred_table=referred_table,
+                    referred_columns=tuple(element.column.name for element in elements),
+                    constraint=constraint.name or _fallback_constraint_name(table.name, tuple(element.parent.name for element in elements), referred_table),
+                    ondelete=elements[0].ondelete,
+                )
+            )
+    return sorted(foreign_keys, key=lambda fk: (fk.referred_table, fk.table, fk.columns))
+
+
+def _database_dependent_foreign_keys(db: Session) -> list[DependentForeignKey]:
+    """Return DB-reflected FKs when available, falling back to SQLAlchemy metadata in tests/offline mode."""
+    try:
+        inspector = inspect(db.bind)
+        table_names = set(inspector.get_table_names())
+        foreign_keys: list[DependentForeignKey] = []
+        for table_name in sorted(table_names):
+            for fk in inspector.get_foreign_keys(table_name):
+                referred_table = fk.get('referred_table')
+                if referred_table not in ORGANIZATION_DELETE_TARGET_TABLES:
+                    continue
+                columns = tuple(fk.get('constrained_columns') or [])
+                referred_columns = tuple(fk.get('referred_columns') or [])
+                foreign_keys.append(
+                    DependentForeignKey(
+                        table=table_name,
+                        columns=columns,
+                        referred_table=str(referred_table),
+                        referred_columns=referred_columns,
+                        constraint=fk.get('name') or _fallback_constraint_name(table_name, columns, str(referred_table)),
+                        ondelete=(fk.get('options') or {}).get('ondelete'),
+                    )
+                )
+        return sorted(foreign_keys, key=lambda fk: (fk.referred_table, fk.table, fk.columns))
+    except Exception:
+        logger.exception('Unable to inspect database foreign keys for organization delete; using model metadata')
+        return _metadata_dependent_foreign_keys()
+
+
+def _fallback_constraint_name(table: str, columns: tuple[str, ...], referred_table: str) -> str:
+    column_part = '_'.join(columns) if columns else 'fk'
+    return f'{table}_{column_part}_{referred_table}_fkey'
+
+
+def _foreign_key_catalog_for_log(db: Session) -> list[dict[str, object]]:
+    return [fk.as_dict() for fk in _database_dependent_foreign_keys(db)]
+
+
+def _extract_blocking_dependency(exc: SQLAlchemyError, db: Session) -> dict[str, str | None]:
+    orig = getattr(exc, 'orig', None)
+    diag = getattr(orig, 'diag', None)
+    constraint = getattr(diag, 'constraint_name', None) if diag is not None else None
+    table = getattr(diag, 'table_name', None) if diag is not None else None
+    message = str(orig or exc)
+
+    if constraint is None:
+        match = CONSTRAINT_DETAIL_RE.search(message)
+        if match:
+            constraint = match.group(1)
+    if table is None:
+        match = TABLE_DETAIL_RE.search(message)
+        if match:
+            table = match.group(1)
+
+    for fk in _database_dependent_foreign_keys(db):
+        if constraint and fk.constraint == constraint:
+            table = table or fk.table
+            return {
+                'table': fk.table,
+                'constraint': fk.constraint,
+                'columns': ','.join(fk.columns),
+                'referred_table': fk.referred_table,
+                'message': message,
+            }
+        if table and fk.table == table:
+            return {
+                'table': fk.table,
+                'constraint': fk.constraint,
+                'columns': ','.join(fk.columns),
+                'referred_table': fk.referred_table,
+                'message': message,
+            }
+
+    return {'table': table, 'constraint': constraint, 'columns': None, 'referred_table': None, 'message': message}
+
+
+def _blocked_delete_http_error(org_id: uuid.UUID, exc: SQLAlchemyError, db: Session) -> HTTPException:
+    blocker = _extract_blocking_dependency(exc, db)
+    table = blocker.get('table') or 'unknown table'
+    constraint = blocker.get('constraint') or 'unknown constraint'
+    message = f'Unable to delete organization because {table}.{constraint} blocked deletion. No data was deleted.'
+    logger.exception(
+        'Organization dependency cleanup failed for org_id=%s blocked_table=%s blocked_constraint=%s blocked_columns=%s referred_table=%s',
+        org_id,
+        blocker.get('table'),
+        blocker.get('constraint'),
+        blocker.get('columns'),
+        blocker.get('referred_table'),
+    )
+    return HTTPException(
+        status_code=500,
+        detail={
+            'error': 'organization_delete_failed',
+            'message': message,
+            'blocked_table': blocker.get('table'),
+            'blocked_constraint': blocker.get('constraint'),
+            'blocked_columns': blocker.get('columns'),
+            'blocked_referred_table': blocker.get('referred_table'),
+        },
+    )
 
 
 def collect_organization_delete_inventory(db: Session, org_id: uuid.UUID) -> dict[str, object]:
@@ -140,9 +309,9 @@ def collect_organization_delete_inventory(db: Session, org_id: uuid.UUID) -> dic
         'turf_waves': turf_wave_ids,
         'field_instances': field_instance_ids,
         'hosting_availabilities': availability_ids,
-        'host_location_configurations': configuration_ids,
         'field_configuration_options': field_configuration_option_ids,
         'fields': field_ids,
+        'host_location_configurations': configuration_ids,
         'physical_field_areas': area_ids,
         'host_locations': host_location_ids,
         'teams': team_ids,
@@ -161,14 +330,30 @@ def cleanup_organization_dependencies(db: Session, org_id: uuid.UUID, dry_run: b
         org = inventory['organization']
         ids_by_key = inventory['ids']
         counts = inventory['counts']
+        dependent_foreign_keys = _foreign_key_catalog_for_log(db)
 
-        logger.info('[ORG DELETE] organization_id=%s organization_name=%s dry_run=%s counts=%s', org_id, org.name, dry_run, counts)
+        logger.info(
+            '[ORG DELETE] organization_id=%s organization_name=%s dry_run=%s counts=%s dependent_foreign_keys=%s',
+            org_id,
+            org.name,
+            dry_run,
+            counts,
+            dependent_foreign_keys,
+        )
         if dry_run:
             db.rollback()
-            return {'success': True, 'dry_run': True, 'organization_id': str(org_id), 'organization_name': org.name, 'would_delete': counts}
+            return {
+                'success': True,
+                'dry_run': True,
+                'organization_id': str(org_id),
+                'organization_name': org.name,
+                'would_delete': counts,
+                'dependent_foreign_keys': dependent_foreign_keys,
+            }
 
         deleted: dict[str, int] = {}
         # Delete child/schedule rows first so every FK is cleared before parent rows are removed.
+        # Order matters: game_slots bridges games/field_instances/turf_waves, so remove it before all three parents.
         deleted['game_slots'] = _delete_by_ids(db, GameSlot, ids_by_key['game_slots'])
         deleted['generated_slots'] = deleted['game_slots']
         deleted['games'] = _delete_by_ids(db, Game, ids_by_key['games'])
@@ -176,9 +361,9 @@ def cleanup_organization_dependencies(db: Session, org_id: uuid.UUID, dry_run: b
         deleted['turf_waves'] = _delete_by_ids(db, TurfWave, ids_by_key['turf_waves'])
         deleted['field_instances'] = _delete_by_ids(db, FieldInstance, ids_by_key['field_instances'])
         deleted['hosting_availabilities'] = _delete_by_ids(db, HostingAvailability, ids_by_key['hosting_availabilities'])
-        deleted['host_location_configurations'] = _delete_by_ids(db, HostLocationConfiguration, ids_by_key['host_location_configurations'])
         deleted['field_configuration_options'] = _delete_by_ids(db, FieldConfigurationOption, ids_by_key['field_configuration_options'])
         deleted['fields'] = _delete_by_ids(db, Field, ids_by_key['fields'])
+        deleted['host_location_configurations'] = _delete_by_ids(db, HostLocationConfiguration, ids_by_key['host_location_configurations'])
         deleted['physical_field_areas'] = _delete_by_ids(db, PhysicalFieldArea, ids_by_key['physical_field_areas'])
         deleted['organization_division_participations'] = _delete_by_ids(db, OrganizationDivisionParticipation, ids_by_key['organization_division_participations'])
         deleted['teams'] = _delete_by_ids(db, Team, ids_by_key['teams'])
@@ -195,14 +380,14 @@ def cleanup_organization_dependencies(db: Session, org_id: uuid.UUID, dry_run: b
             'organization_name': org.name,
             'counts': counts,
             'deleted': deleted,
+            'dependent_foreign_keys': dependent_foreign_keys,
         }
     except HTTPException:
         db.rollback()
         raise
-    except SQLAlchemyError:
+    except SQLAlchemyError as exc:
         db.rollback()
-        logger.exception('Organization dependency cleanup failed for org_id=%s', org_id)
-        raise HTTPException(status_code=500, detail={'error': 'organization_delete_failed', 'message': 'Unable to delete organization because dependent records could not be cleaned up. No data was deleted.'})
+        raise _blocked_delete_http_error(org_id, exc, db) from exc
     except Exception:
         db.rollback()
         logger.exception('Organization cleanup failed unexpectedly for org_id=%s', org_id)

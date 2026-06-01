@@ -4,7 +4,7 @@ from datetime import date, time
 
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -39,12 +39,19 @@ from app.services.organization_cleanup import cleanup_organization_dependencies
 class OrganizationCleanupTest(unittest.TestCase):
     def setUp(self):
         engine = create_engine('sqlite+pysqlite:///:memory:', future=True)
+
+        @event.listens_for(engine, 'connect')
+        def _set_sqlite_pragma(dbapi_connection, _):
+            cursor = dbapi_connection.cursor()
+            cursor.execute('PRAGMA foreign_keys=ON')
+            cursor.close()
+
         Base.metadata.create_all(engine)
         self.db: Session = sessionmaker(bind=engine)()
 
         self.league_role = Role(id=uuid.uuid4(), name=ROLE_LEAGUE_ADMIN, is_active=True)
         self.community_role = Role(id=uuid.uuid4(), name=ROLE_COMMUNITY_ADMIN, is_active=True)
-        self.org = Organization(id=uuid.uuid4(), name='Westosha', is_active=True)
+        self.org = Organization(id=uuid.uuid4(), name='Antioch Vikings', is_active=True)
         self.other_org = Organization(id=uuid.uuid4(), name='Westosha Falcons', is_active=True)
         self.division = Division(id=uuid.uuid4(), name='3rd', division_group='COED', sort_order=1, required_field_layout_type='SMALL', is_active=True)
         self.season = Season(id=uuid.uuid4(), name='Fall 2026', start_date=date(2026, 8, 1), end_date=date(2026, 11, 1), is_active=True)
@@ -117,6 +124,19 @@ class OrganizationCleanupTest(unittest.TestCase):
     def test_dry_run_reports_without_deleting(self):
         result = cleanup_organization_dependencies(self.db, self.org.id, dry_run=True)
         self.assertTrue(result['dry_run'])
+        fk_pairs = {(fk['table'], fk['referred_table']) for fk in result['dependent_foreign_keys']}
+        self.assertIn(('host_locations', 'organizations'), fk_pairs)
+        self.assertIn(('users', 'organizations'), fk_pairs)
+        self.assertIn(('organization_division_participations', 'organizations'), fk_pairs)
+        self.assertIn(('host_plan_selections', 'organizations'), fk_pairs)
+        self.assertIn(('hosting_availabilities', 'organizations'), fk_pairs)
+        self.assertIn(('fields', 'host_locations'), fk_pairs)
+        self.assertIn(('physical_field_areas', 'host_locations'), fk_pairs)
+        self.assertIn(('host_location_configurations', 'host_locations'), fk_pairs)
+        self.assertIn(('field_instances', 'hosting_availabilities'), fk_pairs)
+        self.assertIn(('turf_waves', 'hosting_availabilities'), fk_pairs)
+        self.assertIn(('game_slots', 'games'), fk_pairs)
+        self.assertIn(('games', 'teams'), fk_pairs)
         self.assertEqual(result['would_delete']['organizations'], 1)
         self.assertEqual(result['would_delete']['generated_slots'], 1)
         self.assertEqual(result['would_delete']['users'], 2)
@@ -145,6 +165,41 @@ class OrganizationCleanupTest(unittest.TestCase):
         self.assertEqual(self.db.query(Game).count(), 0)
         self.assertEqual(self.db.query(HostingAvailability).count(), 0)
         self.assertEqual(self.db.query(HostPlanSelection).count(), 0)
+        self.assert_no_orphaned_organization_dependencies()
+
+    def assert_no_orphaned_organization_dependencies(self):
+        orphan_checks = {
+            'users.organization_id': "SELECT COUNT(*) FROM users WHERE organization_id IS NOT NULL AND organization_id NOT IN (SELECT id FROM organizations)",
+            'host_locations.organization_id': "SELECT COUNT(*) FROM host_locations WHERE organization_id NOT IN (SELECT id FROM organizations)",
+            'teams.organization_id': "SELECT COUNT(*) FROM teams WHERE organization_id NOT IN (SELECT id FROM organizations)",
+            'organization_division_participations.organization_id': "SELECT COUNT(*) FROM organization_division_participations WHERE organization_id NOT IN (SELECT id FROM organizations)",
+            'hosting_availabilities.organization_id': "SELECT COUNT(*) FROM hosting_availabilities WHERE organization_id IS NOT NULL AND organization_id NOT IN (SELECT id FROM organizations)",
+            'host_plan_selections.community_id': "SELECT COUNT(*) FROM host_plan_selections WHERE community_id NOT IN (SELECT id FROM organizations)",
+            'fields.host_location_id': "SELECT COUNT(*) FROM fields WHERE host_location_id NOT IN (SELECT id FROM host_locations)",
+            'physical_field_areas.host_location_id': "SELECT COUNT(*) FROM physical_field_areas WHERE host_location_id NOT IN (SELECT id FROM host_locations)",
+            'field_configuration_options.physical_field_area_id': "SELECT COUNT(*) FROM field_configuration_options WHERE physical_field_area_id NOT IN (SELECT id FROM physical_field_areas)",
+            'hosting_availabilities.host_location_id': "SELECT COUNT(*) FROM hosting_availabilities WHERE host_location_id IS NOT NULL AND host_location_id NOT IN (SELECT id FROM host_locations)",
+            'hosting_availabilities.field_id': "SELECT COUNT(*) FROM hosting_availabilities WHERE field_id IS NOT NULL AND field_id NOT IN (SELECT id FROM fields)",
+            'hosting_availabilities.physical_field_area_id': "SELECT COUNT(*) FROM hosting_availabilities WHERE physical_field_area_id IS NOT NULL AND physical_field_area_id NOT IN (SELECT id FROM physical_field_areas)",
+            'hosting_availabilities.field_configuration_option_id': "SELECT COUNT(*) FROM hosting_availabilities WHERE field_configuration_option_id IS NOT NULL AND field_configuration_option_id NOT IN (SELECT id FROM field_configuration_options)",
+            'hosting_availabilities.selected_configuration_id': "SELECT COUNT(*) FROM hosting_availabilities WHERE selected_configuration_id IS NOT NULL AND selected_configuration_id NOT IN (SELECT id FROM host_location_configurations)",
+            'field_instances.host_location_id': "SELECT COUNT(*) FROM field_instances WHERE host_location_id NOT IN (SELECT id FROM host_locations)",
+            'field_instances.hosting_availability_id': "SELECT COUNT(*) FROM field_instances WHERE hosting_availability_id NOT IN (SELECT id FROM hosting_availabilities)",
+            'turf_waves.host_location_id': "SELECT COUNT(*) FROM turf_waves WHERE host_location_id NOT IN (SELECT id FROM host_locations)",
+            'turf_waves.hosting_availability_id': "SELECT COUNT(*) FROM turf_waves WHERE hosting_availability_id NOT IN (SELECT id FROM hosting_availabilities)",
+            'game_slots.field_instance_id': "SELECT COUNT(*) FROM game_slots WHERE field_instance_id NOT IN (SELECT id FROM field_instances)",
+            'game_slots.host_location_id': "SELECT COUNT(*) FROM game_slots WHERE host_location_id NOT IN (SELECT id FROM host_locations)",
+            'game_slots.assigned_game_id': "SELECT COUNT(*) FROM game_slots WHERE assigned_game_id IS NOT NULL AND assigned_game_id NOT IN (SELECT id FROM games)",
+            'game_slots.turf_wave_id': "SELECT COUNT(*) FROM game_slots WHERE turf_wave_id IS NOT NULL AND turf_wave_id NOT IN (SELECT id FROM turf_waves)",
+            'games.home_team_id': "SELECT COUNT(*) FROM games WHERE home_team_id NOT IN (SELECT id FROM teams)",
+            'games.away_team_id': "SELECT COUNT(*) FROM games WHERE away_team_id NOT IN (SELECT id FROM teams)",
+            'games.field_id': "SELECT COUNT(*) FROM games WHERE field_id IS NOT NULL AND field_id NOT IN (SELECT id FROM fields)",
+            'games.host_location_id': "SELECT COUNT(*) FROM games WHERE host_location_id IS NOT NULL AND host_location_id NOT IN (SELECT id FROM host_locations)",
+            'games.field_instance_id': "SELECT COUNT(*) FROM games WHERE field_instance_id IS NOT NULL AND field_instance_id NOT IN (SELECT id FROM field_instances)",
+        }
+        for label, sql in orphan_checks.items():
+            with self.subTest(label=label):
+                self.assertEqual(self.db.execute(text(sql)).scalar_one(), 0)
 
     def test_not_found_returns_user_friendly_error(self):
         with self.assertRaises(HTTPException) as ctx:
