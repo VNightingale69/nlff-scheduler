@@ -46,6 +46,25 @@ class User(Base, TimestampMixin):
     organization = relationship('Organization')
 
 
+
+
+class Rulebook(Base, TimestampMixin):
+    __tablename__ = 'rulebooks'
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    stored_filename: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    content_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    file_size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    uploaded_by_user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('users.id'), nullable=False)
+    uploaded_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    file_path: Mapped[str] = mapped_column(String(500), nullable=False)
+
+    uploaded_by = relationship('User')
+    __table_args__ = (Index('ix_rulebooks_active', 'is_active'),)
+
+
 class Division(Base, TimestampMixin):
     __tablename__ = 'divisions'
 

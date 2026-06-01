@@ -17,7 +17,7 @@ export default function DashboardShell({ children }: { children: React.ReactNode
 
   const role = user?.role_name;
   const navOrder = role === 'COMMUNITY_ADMIN'
-    ? ['organizations', 'teams', 'host-locations', 'fields', 'hosting-availability', 'games']
+    ? ['organizations', 'teams', 'host-locations', 'fields', 'hosting-availability', 'games', 'rulebook']
     : [
       'organizations',
       'divisions',
@@ -34,6 +34,7 @@ export default function DashboardShell({ children }: { children: React.ReactNode
       'schedule-management',
       'game-statuses',
       'games',
+      'rulebook',
     ];
   const communityTitles: Record<string, string> = {
     organizations: 'My Community',
@@ -42,6 +43,7 @@ export default function DashboardShell({ children }: { children: React.ReactNode
     fields: 'My Fields',
     'hosting-availability': 'My Hosting Availability',
     games: 'League Schedule',
+    rulebook: 'Rulebook',
   };
   const links = useMemo(
     () => navOrder
@@ -52,5 +54,6 @@ export default function DashboardShell({ children }: { children: React.ReactNode
 
   return <div className='min-h-screen bg-slate-50 md:flex'><aside className='w-full bg-slate-900 p-4 text-white md:w-64'><div className='mb-4'><h2 className='font-bold leading-tight'>{APP_NAME}</h2><p className='text-xs text-slate-300'>{APP_SUBTITLE}</p></div><p className='mb-4 text-xs text-slate-300'>{user?.email || 'Authenticated User'}</p><nav className='space-y-2'>{links.map(([key, cfg]) => <div key={key}>{key === 'host-availability-matrix' ? <div className='px-2 pt-2 text-xs font-semibold uppercase tracking-wide text-slate-400'>Scheduling</div> : null}<Link className={`block rounded px-2 py-1 ${pathname?.includes(`/admin/${key}`) || pathname === `/organizations` ? 'bg-slate-700' : 'hover:bg-slate-800'}`} href={`/admin/${key}`}>{role === 'COMMUNITY_ADMIN' ? communityTitles[key] || cfg.title : cfg.title}</Link></div>)}
   <Link className='block rounded px-2 py-1 hover:bg-slate-800' href='/schedule'>Published Schedule</Link>
+  <Link className='block rounded px-2 py-1 hover:bg-slate-800' href='/rulebook'>Public Rulebook</Link>
   </nav><button className='mt-6 text-sm underline' onClick={() => { clearTokens(); router.push('/login'); }}>Sign out</button></aside><main className='flex-1'><header className='border-b bg-white px-4 py-3'><div className='font-semibold'>{role === 'COMMUNITY_ADMIN' ? 'Community Management' : 'Community Flag Scheduler Administration'}</div><div className='text-sm text-slate-500'>{APP_SUBTITLE}</div></header><section className='p-4'>{children}</section></main></div>;
 }

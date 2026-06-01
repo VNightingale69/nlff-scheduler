@@ -1,0 +1,152 @@
+import uuid
+
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.pool import StaticPool
+from sqlalchemy.orm import sessionmaker
+
+from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN
+from app.database import Base, get_db
+from app.main import app
+from app.models import Organization, Role, Rulebook, User
+from app.routes import api as api_routes
+from app.security import create_access_token, hash_password
+
+
+def _auth_header(user_id):
+    return {'Authorization': f'Bearer {create_access_token(str(user_id))}'}
+
+
+class TestRulebookFeature:
+    def setup_method(self):
+        engine = create_engine(
+            'sqlite+pysqlite:///:memory:',
+            connect_args={'check_same_thread': False},
+            poolclass=StaticPool,
+            future=True,
+        )
+        Base.metadata.create_all(engine)
+        self.SessionLocal = sessionmaker(bind=engine)
+        self.db = self.SessionLocal()
+
+        league_role = Role(name=ROLE_LEAGUE_ADMIN, description='League Admin', is_active=True)
+        community_role = Role(name=ROLE_COMMUNITY_ADMIN, description='Community Admin', is_active=True)
+        organization = Organization(name='Community One', is_active=True)
+        self.db.add_all([league_role, community_role, organization])
+        self.db.flush()
+
+        self.league_admin = User(
+            email='league@example.com',
+            full_name='League Admin',
+            password_hash=hash_password('Password123!'),
+            role_id=league_role.id,
+            is_active=True,
+        )
+        self.community_admin = User(
+            email='community@example.com',
+            full_name='Community Admin',
+            password_hash=hash_password('Password123!'),
+            role_id=community_role.id,
+            organization_id=organization.id,
+            is_active=True,
+        )
+        self.db.add_all([self.league_admin, self.community_admin])
+        self.db.commit()
+
+        def override_get_db():
+            db = self.SessionLocal()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        app.dependency_overrides[get_db] = override_get_db
+        self.client = TestClient(app)
+
+    def teardown_method(self):
+        app.dependency_overrides.clear()
+        self.db.close()
+
+    def _set_upload_dir(self, tmp_path):
+        api_routes.RULEBOOK_UPLOAD_DIR = str(tmp_path / 'rulebooks')
+
+    def _upload_pdf(self, filename='rules.pdf', content=b'%PDF-1.4\nrulebook'):
+        return self.client.post(
+            '/api/admin/rulebook/upload',
+            headers=_auth_header(self.league_admin.id),
+            files={'file': (filename, content, 'application/pdf')},
+        )
+
+    def test_league_admin_can_upload_pdf_and_metadata_is_returned(self, tmp_path):
+        self._set_upload_dir(tmp_path)
+
+        response = self._upload_pdf('Community Rules.pdf')
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload['original_filename'] == 'Community Rules.pdf'
+        assert payload['content_type'] == 'application/pdf'
+        assert payload['file_size_bytes'] == len(b'%PDF-1.4\nrulebook')
+        assert payload['uploaded_by_email'] == 'league@example.com'
+        assert payload['is_active'] is True
+
+    def test_non_admin_users_cannot_upload_pdf(self, tmp_path):
+        self._set_upload_dir(tmp_path)
+
+        response = self.client.post(
+            '/api/admin/rulebook/upload',
+            headers=_auth_header(self.community_admin.id),
+            files={'file': ('rules.pdf', b'%PDF-1.4\nrulebook', 'application/pdf')},
+        )
+
+        assert response.status_code == 403
+
+    def test_non_pdf_upload_is_rejected(self, tmp_path):
+        self._set_upload_dir(tmp_path)
+
+        response = self.client.post(
+            '/api/admin/rulebook/upload',
+            headers=_auth_header(self.league_admin.id),
+            files={'file': ('rules.txt', b'not a pdf', 'text/plain')},
+        )
+
+        assert response.status_code == 400
+        assert response.json()['detail'] == 'Only PDF files are allowed.'
+
+    def test_current_and_public_metadata_are_returned(self, tmp_path):
+        self._set_upload_dir(tmp_path)
+        self._upload_pdf('rules.pdf')
+
+        authenticated = self.client.get('/api/rulebook', headers=_auth_header(self.community_admin.id))
+        public = self.client.get('/api/public/rulebook')
+
+        assert authenticated.status_code == 200
+        assert public.status_code == 200
+        assert authenticated.json()['original_filename'] == 'rules.pdf'
+        assert public.json()['original_filename'] == 'rules.pdf'
+
+    def test_public_users_can_download_active_pdf(self, tmp_path):
+        self._set_upload_dir(tmp_path)
+        content = b'%PDF-1.4\npublic download'
+        self._upload_pdf('rules.pdf', content)
+
+        response = self.client.get('/api/public/rulebook/download')
+
+        assert response.status_code == 200
+        assert response.content == content
+        assert response.headers['content-type'] == 'application/pdf'
+        assert 'attachment' in response.headers['content-disposition']
+
+    def test_replacing_rulebook_makes_newest_active_and_prior_inactive(self, tmp_path):
+        self._set_upload_dir(tmp_path)
+        first = self._upload_pdf('first.pdf', b'%PDF-1.4\nfirst').json()
+        second = self._upload_pdf('second.pdf', b'%PDF-1.4\nsecond').json()
+
+        public = self.client.get('/api/public/rulebook')
+        inactive = self.db.query(Rulebook).filter(Rulebook.id == uuid.UUID(first['id'])).one()
+        active = self.db.query(Rulebook).filter(Rulebook.id == uuid.UUID(second['id'])).one()
+
+        assert public.status_code == 200
+        assert public.json()['original_filename'] == 'second.pdf'
+        assert inactive.is_active is False
+        assert active.is_active is True

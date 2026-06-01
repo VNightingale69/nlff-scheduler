@@ -3,8 +3,9 @@ import os
 import io
 import math
 import uuid
-from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import StreamingResponse
+from pathlib import Path
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi.responses import FileResponse, StreamingResponse
 import logging
 from datetime import date, datetime, time, timedelta
 
@@ -12,14 +13,15 @@ from sqlalchemy import String, and_, delete, func, inspect as sa_inspect, or_, s
 from sqlalchemy.exc import IntegrityError, ProgrammingError, SQLAlchemyError
 from sqlalchemy.orm import Session, aliased
 
+from app.config import RULEBOOK_MAX_SIZE_BYTES, RULEBOOK_UPLOAD_DIR
 from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, enforce_organization_scope, get_current_user, is_community_admin, is_league_admin, normalize_role_name, require_roles
 from app.database import get_db
-from app.models import Division, Field, FieldConfigurationOption, FieldInstance, Game, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostPlanSelection, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Season, Team, TurfWave, User, Week
+from app.models import Division, Field, FieldConfigurationOption, FieldInstance, Game, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostPlanSelection, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Rulebook, Season, Team, TurfWave, User, Week
 from app.schemas import (
     DivisionCreate, DivisionRead, FieldConfigurationOptionCreate, FieldConfigurationOptionRead, FieldCreate, FieldRead, GameCreate, GameRead, GameSaveResponse,
     OrganizationDivisionParticipationBulkUpsertRequest, OrganizationDivisionParticipationRead,
     GeneratedSlotRead, GeneratedSlotsClearResponse, HostAvailabilityMatrixSaveRequest, HostAvailabilityMatrixSaveResponse, HostLocationCreate, HostLocationRead, HostLocationConfigurationCreate, HostLocationConfigurationRead, HostingAvailabilityCreate, HostingAvailabilityRead, HostingAvailabilityBulkUpsertRequest, HostingAvailabilityBulkUpsertResponse, HostingGenerationRunResult, HostingGenerationLocationResult, PhysicalFieldAreaCreate, PhysicalFieldAreaRead, SavedAvailabilityResponse,
-    LoginRequest, OrganizationCreate, OrganizationRead, PagedResponse, PublicGameRead, RefreshRequest,
+    LoginRequest, OrganizationCreate, OrganizationRead, PagedResponse, PublicGameRead, RefreshRequest, RulebookRead,
     TeamCreate, TeamRead, TeamUpdate, TokenResponse, UserCreate, UserRead,
     HOST_PLAN_SELECTION_STATUSES, ScheduleReadinessDivisionRow, ScheduleReadinessHostDateRow, ScheduleReadinessHostSiteRow, ScheduleReadinessResponse, ScheduleReadinessTotals, ScheduleReadinessTurfWaveRow, ScheduleReadinessTurfWaveSlotRow
 )
@@ -32,6 +34,56 @@ router = APIRouter(prefix='/api')
 logger = logging.getLogger(__name__)
 HOST_PLAN_SELECTION_ADMIN_EMAIL = 'admin@example.com'
 HOST_PLAN_SELECTION_PERMISSION_MESSAGE = 'Only admin@example.com can modify host plan selections.'
+RULEBOOK_ALLOWED_CONTENT_TYPE = 'application/pdf'
+RULEBOOK_STORAGE_WARNING = (
+    'TODO: Configure RULEBOOK_UPLOAD_DIR to use a Railway volume or replace local rulebook storage '
+    'with S3-compatible storage, Supabase Storage, or Cloudinary before relying on uploads in production.'
+)
+
+
+def _rulebook_storage_dir() -> Path:
+    upload_dir = Path(RULEBOOK_UPLOAD_DIR)
+    if not upload_dir.is_absolute():
+        upload_dir = Path.cwd() / upload_dir
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    return upload_dir
+
+
+def _active_rulebook(db: Session) -> Rulebook | None:
+    return db.query(Rulebook).filter(Rulebook.is_active.is_(True)).order_by(Rulebook.uploaded_at.desc(), Rulebook.created_at.desc()).first()
+
+
+def _serialize_rulebook(rulebook: Rulebook) -> dict:
+    uploader = getattr(rulebook, 'uploaded_by', None)
+    return {
+        'id': rulebook.id,
+        'created_at': rulebook.created_at,
+        'updated_at': rulebook.updated_at,
+        'original_filename': rulebook.original_filename,
+        'content_type': rulebook.content_type,
+        'file_size_bytes': rulebook.file_size_bytes,
+        'uploaded_by_user_id': rulebook.uploaded_by_user_id,
+        'uploaded_by_name': getattr(uploader, 'full_name', None),
+        'uploaded_by_email': getattr(uploader, 'email', None),
+        'uploaded_at': rulebook.uploaded_at,
+        'is_active': rulebook.is_active,
+        'view_url': '/api/public/rulebook/view',
+        'download_url': '/api/public/rulebook/download',
+    }
+
+
+def _ensure_active_rulebook(db: Session) -> Rulebook:
+    rulebook = _active_rulebook(db)
+    if not rulebook:
+        raise HTTPException(status_code=404, detail='No rulebook has been uploaded yet.')
+    return rulebook
+
+
+def _validate_rulebook_upload(file: UploadFile) -> str:
+    original_filename = Path(file.filename or 'rulebook.pdf').name or 'rulebook.pdf'
+    if not original_filename.lower().endswith('.pdf') or file.content_type != RULEBOOK_ALLOWED_CONTENT_TYPE:
+        raise HTTPException(status_code=400, detail='Only PDF files are allowed.')
+    return original_filename[:255]
 
 
 def _enforce_host_plan_selection_admin(current_user: User) -> None:
@@ -1329,6 +1381,88 @@ def _user_payload(user: User) -> dict:
         'id': user.id, 'email': user.email, 'full_name': user.full_name,
         'role_name': normalize_role_name(user.role.name), 'organization_id': user.organization_id,
     }
+
+
+@router.post('/admin/rulebook/upload', response_model=RulebookRead, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+def upload_rulebook(file: UploadFile = File(...), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    original_filename = _validate_rulebook_upload(file)
+    storage_dir = _rulebook_storage_dir()
+    stored_filename = f'{uuid.uuid4()}.pdf'
+    destination = storage_dir / stored_filename
+    total_bytes = 0
+
+    try:
+        with destination.open('wb') as output:
+            while chunk := file.file.read(1024 * 1024):
+                total_bytes += len(chunk)
+                if total_bytes > RULEBOOK_MAX_SIZE_BYTES:
+                    output.close()
+                    destination.unlink(missing_ok=True)
+                    limit_mb = RULEBOOK_MAX_SIZE_BYTES // (1024 * 1024)
+                    raise HTTPException(status_code=413, detail=f'File is too large. Maximum size is {limit_mb} MB.')
+                output.write(chunk)
+
+        if total_bytes == 0:
+            destination.unlink(missing_ok=True)
+            raise HTTPException(status_code=400, detail='Uploaded rulebook PDF is empty.')
+
+        db.query(Rulebook).filter(Rulebook.is_active.is_(True)).update({Rulebook.is_active: False}, synchronize_session=False)
+        rulebook = Rulebook(
+            original_filename=original_filename,
+            stored_filename=stored_filename,
+            content_type=RULEBOOK_ALLOWED_CONTENT_TYPE,
+            file_size_bytes=total_bytes,
+            uploaded_by_user_id=current_user.id,
+            is_active=True,
+            file_path=str(destination),
+        )
+        db.add(rulebook)
+        db.commit()
+        db.refresh(rulebook)
+        return _serialize_rulebook(rulebook)
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        destination.unlink(missing_ok=True)
+        raise
+    finally:
+        file.file.close()
+
+
+@router.get('/rulebook', response_model=RulebookRead, dependencies=[Depends(get_current_user)])
+def get_rulebook(db: Session = Depends(get_db)):
+    return _serialize_rulebook(_ensure_active_rulebook(db))
+
+
+@router.get('/public/rulebook', response_model=RulebookRead)
+def get_public_rulebook(db: Session = Depends(get_db)):
+    return _serialize_rulebook(_ensure_active_rulebook(db))
+
+
+def _rulebook_file_response(db: Session, disposition: str) -> FileResponse:
+    rulebook = _ensure_active_rulebook(db)
+    file_path = Path(rulebook.file_path)
+    if not file_path.exists() or not file_path.is_file():
+        raise HTTPException(status_code=404, detail='The active rulebook file is not available.')
+    return FileResponse(
+        path=file_path,
+        media_type=RULEBOOK_ALLOWED_CONTENT_TYPE,
+        filename=rulebook.original_filename,
+        content_disposition_type=disposition,
+    )
+
+
+@router.get('/public/rulebook/download')
+def download_public_rulebook(db: Session = Depends(get_db)):
+    return _rulebook_file_response(db, 'attachment')
+
+
+@router.get('/public/rulebook/view')
+def view_public_rulebook(db: Session = Depends(get_db)):
+    return _rulebook_file_response(db, 'inline')
+
 
 @router.post('/auth/login', response_model=TokenResponse)
 def login(payload: LoginRequest, db: Session = Depends(get_db)):
