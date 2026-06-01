@@ -732,18 +732,29 @@ def _simulate_turf_layout_sequence(
 
     def _score_allocation(hours_by_layout: list[int]) -> tuple[int, list[tuple[str, int]], dict[str, int]]:
         remaining = {size: max(int(demand_counts.get(size, 0) or 0), 0) for size in FIELD_SIZE_ORDER}
+        total_capacity = 0
         scheduled_together = False
         for layout_name, hours in zip(relevant_sequence, hours_by_layout):
             counts = _turf_configuration_metadata(layout_name)['counts']
             before_small = remaining[FIELD_SIZE_SMALL]
             before_medium = remaining[FIELD_SIZE_MEDIUM]
             for size in FIELD_SIZE_ORDER:
+                total_capacity += counts[size] * hours
                 remaining[size] = max(remaining[size] - counts[size] * hours, 0)
             if layout_name == 'ONE_MEDIUM_TWO_SMALL' and before_small > remaining[FIELD_SIZE_SMALL] and before_medium > remaining[FIELD_SIZE_MEDIUM]:
                 scheduled_together = True
         unscheduled = sum(remaining.values())
+        used_hours = sum(hours_by_layout)
         layout_changes = max(0, len(relevant_sequence) - 1)
+        scheduled_total = sum(max(int(demand_counts.get(size, 0) or 0), 0) - remaining[size] for size in FIELD_SIZE_ORDER)
+        unused_capacity = max(total_capacity - scheduled_total, 0)
+        utilization = scheduled_total / max(total_capacity, 1)
         score = -10000 * unscheduled - 1000 * max(0, layout_changes - 1)
+        # Turf stadiums are wave venues: use the minimum contiguous wave hours needed
+        # for demand, and prefer fuller waves over sparse all-day blocks.
+        score -= used_hours * 125
+        score -= unused_capacity * 30
+        score += int(utilization * 500)
         if mixed_layout_available and demand_counts.get(FIELD_SIZE_SMALL, 0) > 0 and demand_counts.get(FIELD_SIZE_MEDIUM, 0) > 0:
             if 'ONE_MEDIUM_TWO_SMALL' in relevant_sequence:
                 score += 500
@@ -773,9 +784,10 @@ def _simulate_turf_layout_sequence(
         nonlocal best
         remaining_blocks = len(relevant_sequence) - index
         if remaining_blocks == 1:
-            candidate = _score_allocation(prefix + [hours_left])
-            if best is None or candidate[0] > best[0]:
-                best = candidate
+            for hours in range(1, hours_left + 1):
+                candidate = _score_allocation(prefix + [hours])
+                if best is None or candidate[0] > best[0]:
+                    best = candidate
             return
         max_hours = hours_left - (remaining_blocks - 1)
         for hours in range(1, max_hours + 1):
@@ -796,7 +808,7 @@ def _plan_turf_layout_blocks(
         return []
     mixed_layout_available = 'ONE_MEDIUM_TWO_SMALL' in active_configuration_names
     sequence_candidates: list[list[str]] = []
-    if demand_counts.get(FIELD_SIZE_SMALL, 0) > 0 and demand_counts.get(FIELD_SIZE_MEDIUM, 0) > 0 and mixed_layout_available:
+    if (demand_counts.get(FIELD_SIZE_SMALL, 0) > 0 or demand_counts.get(FIELD_SIZE_MEDIUM, 0) > 0) and mixed_layout_available:
         if demand_counts.get(FIELD_SIZE_LARGE, 0) > 0 and 'TWO_LARGE' in active_configuration_names:
             sequence_candidates.append(['ONE_MEDIUM_TWO_SMALL', 'TWO_LARGE'])
         sequence_candidates.append(['ONE_MEDIUM_TWO_SMALL'])
@@ -1632,7 +1644,7 @@ def _build_turf_wave_plan_for_site(db: Session, host: HostLocation, host_date: d
 
     result: list[ScheduleReadinessTurfWaveRow] = []
     saw_large_wave = False
-    for wave in waves:
+    for wave_index, wave in enumerate(waves):
         wave_slots = db.query(GameSlot).join(GameSlot.field_instance).filter(
             GameSlot.turf_wave_id == wave.id,
         ).order_by(GameSlot.start_time, FieldInstance.field_name).all()
@@ -1703,6 +1715,14 @@ def _build_turf_wave_plan_for_site(db: Session, host: HostLocation, host_date: d
             transition_after_minutes=wave.transition_after_minutes,
             generated_field_instances=sorted({slot.field_instance.field_name for slot in wave_slots if slot.field_instance}),
             assigned_games=assigned_count,
+            capacity_slots=len(wave_slots),
+            utilization_percent=round((assigned_count / len(wave_slots) * 100) if wave_slots else 0, 1),
+            idle_hours_after_wave=round(
+                _hours_between_times(wave.end_time, waves[wave_index + 1].start_time, host_date)
+                if wave_index + 1 < len(waves)
+                else 0.0,
+                2,
+            ),
             notes=wave.notes,
             slot_level_configurations=slot_rows,
             warnings=sorted(set(wave_warnings)),
@@ -6328,8 +6348,11 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             host_ids_by_org.setdefault(host_row.organization_id, set()).add(host_row.id)
     host_org_by_id: dict[uuid.UUID, uuid.UUID] = {}
     host_name_by_id: dict[uuid.UUID, str] = {}
+    host_surface_by_id: dict[uuid.UUID, str] = {}
     for host in host_capacity:
-        host_row = db.query(HostLocation.id, HostLocation.organization_id, HostLocation.name).filter(HostLocation.id == host['host_id']).first()
+        host_row = db.query(HostLocation.id, HostLocation.organization_id, HostLocation.name, HostLocation.surface_type).filter(HostLocation.id == host['host_id']).first()
+        if host_row:
+            host_surface_by_id[host_row.id] = host_row.surface_type or 'GRASS_FIELD'
         if host_row and host_row.organization_id:
             host_org_by_id[host_row.id] = host_row.organization_id
             host_name_by_id[host_row.id] = host_row.name or ''
@@ -6787,6 +6810,33 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         existing_field_usage_by_host_date_division_layout[(str(host_id), str(slot_date), str(field_id), layout_key)] = int(usage_count or 0)
 
     proposed_field_usage_by_host_date_division_layout: dict[tuple[str, str, str, str], int] = {}
+    proposed_turf_wave_usage_by_id: dict[uuid.UUID, int] = {}
+
+    def _turf_wave_capacity_snapshot(wave_id: uuid.UUID | None, field_size: str | None) -> tuple[int, int, int]:
+        if not wave_id or not field_size:
+            return 0, 0, 0
+        normalized_size = _normalize_field_size(field_size)
+        wave_slots = db.query(GameSlot).filter(GameSlot.turf_wave_id == wave_id).all()
+        capacity = sum(1 for wave_slot in wave_slots if _normalize_field_size(wave_slot.field_type) == normalized_size)
+        assigned = sum(1 for wave_slot in wave_slots if _normalize_field_size(wave_slot.field_type) == normalized_size and wave_slot.assigned_game_id)
+        proposed = int(proposed_turf_wave_usage_by_id.get(wave_id, 0) or 0)
+        return capacity, assigned, proposed
+
+    def _has_existing_turf_large_capacity() -> bool:
+        if _normalize_field_size(required_field_type) != FIELD_SIZE_LARGE:
+            return False
+        active_host_ids = set(projected_games_by_host.keys()) | set(selected_host_ids)
+        for remaining_slot in remaining_slots:
+            if not remaining_slot.host_location_id or remaining_slot.host_location_id not in active_host_ids:
+                continue
+            if host_surface_by_id.get(remaining_slot.host_location_id) != 'TURF_STADIUM':
+                continue
+            if _normalize_field_size(remaining_slot.field_type) != FIELD_SIZE_LARGE or not remaining_slot.turf_wave_id:
+                continue
+            capacity, assigned, proposed = _turf_wave_capacity_snapshot(remaining_slot.turf_wave_id, FIELD_SIZE_LARGE)
+            if capacity > assigned + proposed:
+                return True
+        return False
 
     def _first_compatible_open_slot_by_field_order(host_location_id: uuid.UUID | None, slot_date, slot_time) -> GameSlot | None:
         if not host_location_id:
@@ -7057,6 +7107,17 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                             if unused_turf_capacity.get(required_field_type, 0) > 0:
                                 score += 500
                                 reason_bits.append('fills compatible unused turf wave capacity (+500)')
+                            if _normalize_field_size(required_field_type) == FIELD_SIZE_LARGE:
+                                wave_capacity, wave_assigned, wave_proposed = _turf_wave_capacity_snapshot(selected_field_slot.turf_wave_id, FIELD_SIZE_LARGE)
+                                if wave_capacity > wave_assigned + wave_proposed:
+                                    score += 1200
+                                    reason_bits.append('fills existing turf large-field wave before opening another location (+1200)')
+                                projected_wave_fill = (wave_assigned + wave_proposed + 1) / max(wave_capacity, 1)
+                                score += int(projected_wave_fill * 300)
+                                reason_bits.append('prefers fewer, fuller turf large-field waves')
+                        elif _has_existing_turf_large_capacity():
+                            score -= 900
+                            warning_bits.append('existing turf stadium large-field wave still has unused capacity (-900)')
                         if is_odd_division and no_byes and selected_double_header_team_id and selected_double_header_team_id in {a, b}:
                             prior_double_header_slots = [
                                 p for p in plans
@@ -7692,6 +7753,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'field': selected_field_slot.field_instance.field_name if selected_field_slot.field_instance else '',
             'field_instance_id': str(selected_field_slot.field_instance_id) if selected_field_slot.field_instance_id else None,
             'field_type': selected_field_slot.field_type,
+            'turf_wave_id': str(selected_field_slot.turf_wave_id) if selected_field_slot.turf_wave_id else None,
             'score': int(best['score']),
             'reason': '; '.join(reason_bits + ['deterministic field assignment: earliest available time then first compatible open field by host order']),
             'warnings': best['warning_bits'],
@@ -7767,6 +7829,8 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             layout_key,
         )
         proposed_field_usage_by_host_date_division_layout[proposed_usage_key] = proposed_field_usage_by_host_date_division_layout.get(proposed_usage_key, 0) + 1
+        if selected_field_slot.turf_wave_id:
+            proposed_turf_wave_usage_by_id[selected_field_slot.turf_wave_id] = proposed_turf_wave_usage_by_id.get(selected_field_slot.turf_wave_id, 0) + 1
         field_time_occupied[(str(selected_field_slot.host_location_id), str(selected_field_slot.field_instance_id), selected_field_slot.slot_date, selected_field_slot.start_time)] = division.name
         team_time_occupied.add((str(best['home_team_id']), selected_field_slot.slot_date, selected_field_slot.start_time))
         team_time_occupied.add((str(best['away_team_id']), selected_field_slot.slot_date, selected_field_slot.start_time))
@@ -12089,6 +12153,90 @@ def _empty_quality_report() -> dict:
     }
 
 
+def _hours_between_times(start_value, end_value, on_date: date) -> float:
+    if not start_value or not end_value:
+        return 0.0
+    start_dt = datetime.combine(on_date, start_value)
+    end_dt = datetime.combine(on_date, end_value)
+    return max((end_dt - start_dt).total_seconds() / 3600, 0.0)
+
+
+def _build_turf_stadium_utilization_diagnostics(db: Session, season_id: uuid.UUID | None = None) -> list[dict[str, object]]:
+    query = db.query(TurfWave, HostLocation, HostingAvailability).join(
+        HostLocation, HostLocation.id == TurfWave.host_location_id
+    ).join(
+        HostingAvailability, HostingAvailability.id == TurfWave.hosting_availability_id
+    ).filter(HostLocation.surface_type == 'TURF_STADIUM')
+    if season_id:
+        query = query.filter(HostingAvailability.season_id == season_id)
+    rows = query.order_by(TurfWave.host_date, HostLocation.name, TurfWave.sequence_number, TurfWave.start_time).all()
+    waves_by_site_date: dict[tuple[uuid.UUID, date], dict[str, object]] = {}
+    for wave, host, availability in rows:
+        key = (host.id, wave.host_date)
+        data = waves_by_site_date.setdefault(key, {
+            'host_location_id': str(host.id),
+            'host_location_name': host.name,
+            'date': wave.host_date.isoformat(),
+            'surface_type': 'TURF_STADIUM',
+            'assigned_slots': 0,
+            'open_slots': 0,
+            'utilization_percent': 0.0,
+            'wave_1_utilization': None,
+            'wave_2_utilization': None,
+            'wave_utilization': [],
+            'idle_hours': 0.0,
+            'idle_hours_between_waves': 0.0,
+            'status': 'OK',
+            '_waves': [],
+            '_availability_start': availability.start_time,
+            '_availability_end': availability.end_time,
+        })
+        slots = db.query(GameSlot).filter(GameSlot.turf_wave_id == wave.id).all()
+        capacity = len(slots)
+        assigned = sum(1 for slot in slots if slot.assigned_game_id)
+        utilization = round((assigned / capacity * 100) if capacity else 0, 1)
+        wave_row = {
+            'wave_id': str(wave.id),
+            'sequence_number': wave.sequence_number,
+            'wave_intent': wave.wave_intent,
+            'preferred_layout_code': wave.preferred_layout_code,
+            'start_time': str(wave.start_time),
+            'end_time': str(wave.end_time),
+            'capacity_slots': capacity,
+            'assigned_slots': assigned,
+            'open_slots': max(capacity - assigned, 0),
+            'utilization_percent': utilization,
+        }
+        data['assigned_slots'] = int(data['assigned_slots']) + assigned
+        data['open_slots'] = int(data['open_slots']) + max(capacity - assigned, 0)
+        data['wave_utilization'].append(wave_row)
+        data['_waves'].append(wave)
+
+    diagnostics: list[dict[str, object]] = []
+    for data in waves_by_site_date.values():
+        waves = sorted(data.pop('_waves'), key=lambda wave: (wave.start_time, wave.sequence_number))
+        host_date = date.fromisoformat(str(data['date']))
+        availability_start = data.pop('_availability_start')
+        availability_end = data.pop('_availability_end')
+        wave_hours = sum(_hours_between_times(wave.start_time, wave.end_time, host_date) for wave in waves)
+        availability_hours = _hours_between_times(availability_start, availability_end, host_date)
+        between_gap_hours = 0.0
+        for previous, current in zip(waves, waves[1:]):
+            between_gap_hours += _hours_between_times(previous.end_time, current.start_time, host_date)
+        data['idle_hours_between_waves'] = round(between_gap_hours, 2)
+        data['idle_hours'] = round(max(availability_hours - wave_hours, 0.0), 2)
+        total = int(data['assigned_slots']) + int(data['open_slots'])
+        data['utilization_percent'] = round((int(data['assigned_slots']) / total * 100) if total else 0, 1)
+        wave_utilization = data.get('wave_utilization') or []
+        if wave_utilization:
+            data['wave_1_utilization'] = wave_utilization[0]['utilization_percent']
+        if len(wave_utilization) > 1:
+            data['wave_2_utilization'] = wave_utilization[1]['utilization_percent']
+        data['status'] = _quality_status(data['utilization_percent'] >= 70 and between_gap_hours == 0, warning=data['utilization_percent'] >= 40)
+        diagnostics.append(data)
+    return diagnostics
+
+
 
 @router.get('/schedule-management/publish-diagnostics', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def schedule_publish_diagnostics(season_id: uuid.UUID | None = None, db: Session = Depends(get_db)):
@@ -12251,12 +12399,20 @@ def schedule_quality_report(division_id: uuid.UUID | None = None, organization_i
             double_headers.append({'team_name': team_stats[team_id]['team_name'], 'date': game_date.isoformat(), 'games': len(entries), 'is_back_to_back': back_to_back, 'status': _quality_status(back_to_back, warning=False)})
 
         field_utilization = []
+        turf_utilization_by_key = {
+            (row['host_location_name'], row['date']): row
+            for row in _build_turf_stadium_utilization_diagnostics(db, season.id)
+        }
         for data in utilization.values():
             data['open_slots'] = max(data['open_slots'] - data['assigned_slots'], 0)
             total = data['assigned_slots'] + data['open_slots']
             data['utilization_percent'] = round((data['assigned_slots'] / total * 100) if total else 0, 1)
             data['status'] = _quality_status(data['utilization_percent'] >= 70, warning=data['utilization_percent'] >= 40)
+            turf_data = turf_utilization_by_key.pop((data['host_location_name'], data['date']), None)
+            if turf_data:
+                data.update(turf_data)
             field_utilization.append(data)
+        field_utilization.extend(turf_utilization_by_key.values())
 
         return {
             **quality,
