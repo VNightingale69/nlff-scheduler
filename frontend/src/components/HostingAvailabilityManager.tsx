@@ -18,7 +18,7 @@ const displayHour = (hour: number) => formatDisplayTime(`${hour === 24 ? 0 : hou
 
 const formatDateLabel = (date: string) => formatDisplayDate(date);
 
-const layoutLabel = (layout: string) => (layout === 'Active Grass Fields' ? 'Active Grass Fields' : layout === 'Auto Select Best Layout' ? 'Auto Select Best Layout' : layout === '2x53' || layout === 'TWO_LARGE' ? '2 Large' : layout === 'ONE_MEDIUM_TWO_SMALL' ? '1 Medium + 2 Small' : layout === 'ONE_LARGE_ONE_MEDIUM' ? '1 Large + 1 Medium' : layout === 'TWO_MEDIUM' ? '2 Medium' : layout === '3x30' || layout === 'THREE_SMALL' ? '3 Small' : layout === 'ONE_LARGE_ONE_SMALL' ? '1 Large + 1 Small' : layout === 'ONE_MEDIUM_ONE_SMALL' ? '1 Medium + 1 Small' : 'Custom Layout');
+const layoutLabel = (layout: string) => (layout === 'Active Grass Fields' ? 'Active Grass Fields' : layout === 'Auto Select Best Layout' ? 'Auto Select Best Layout' : layout === '2x53' || layout === 'TWO_LARGE' ? '2 Large' : layout === 'ONE_MEDIUM_TWO_SMALL' ? '1 Medium + 2 Small' : layout === 'ONE_LARGE_ONE_MEDIUM' ? '1 Large + 1 Medium' : layout === 'TWO_MEDIUM' ? '2 Medium' : layout === '3x30' || layout === 'THREE_SMALL' ? '3 Small' : layout === 'ONE_LARGE_ONE_SMALL' ? '1 Large + 1 Small' : 'Custom Layout');
 
 const STATUS_BADGE: Record<string, string> = {
   Hosting: 'bg-emerald-100 text-emerald-800',
@@ -104,6 +104,7 @@ export default function HostingAvailabilityManager() {
   const [savedLayoutFilter, setSavedLayoutFilter] = useState('');
 
   const user = getAuthUser();
+  const isCommunityAdmin = user?.role_name === 'COMMUNITY_ADMIN';
   const token = getToken();
   const searchParams = useSearchParams();
   const preselectedHostId = searchParams.get('host_location_id') || '';
@@ -317,8 +318,8 @@ export default function HostingAvailabilityManager() {
         for (const week of selectedWeeks) {
           const d = week.primary_game_date as string;
           const configId = getSelectedConfigId(hostId, d, hostConfigsForSelectedHost[0]?.id || '');
-          const autoSelectLayout = isTurfHost ? getAutoSelectLayout(hostId, d) : false;
-          const lockSelectedLayout = isTurfHost ? getLockLayout(hostId, d) : false;
+          const autoSelectLayout = isTurfHost ? (isCommunityAdmin ? true : getAutoSelectLayout(hostId, d)) : false;
+          const lockSelectedLayout = isTurfHost ? (isCommunityAdmin ? false : getLockLayout(hostId, d)) : false;
           if (isTurfHost && (!autoSelectLayout || lockSelectedLayout) && !configId) continue;
           for (const range of summaryRanges(hostId, d)) {
             slots.push({
@@ -612,7 +613,7 @@ export default function HostingAvailabilityManager() {
 
       <section className='rounded border p-4'>
         <h2 className='mb-2 font-semibold'>3. Hosting Site Setup</h2>
-        {!hostId ? <p className='text-slate-500'>Select a hosting site to view configured layouts.</p> : (
+        {!hostId ? <p className='text-slate-500'>Select a hosting site to view facility setup.</p> : (
           <div className='space-y-3'>
             {(visibleAreas.length ? visibleAreas : (selectedHost ? [{ id: selectedHost.id, name: selectedHost.name, field_space_type: selectedHost.surface_type, hostLevel: true }] : [])).map((area: any) => {
               const cfgs = area.hostLevel ? hostConfigsForSelectedHost.map((c: any) => ({ ...c, name: c.configuration_name, physical_field_area_id: area.id, thirty_yard_capacity: 0, fifty_three_yard_capacity: 0 })) : (configsByArea[area.id] || []);
@@ -620,9 +621,9 @@ export default function HostingAvailabilityManager() {
                 <div key={area.id} className='rounded border bg-slate-50 p-3'>
                   <div className='font-medium'>{area.name}</div>
                   <div className='text-sm text-slate-600'>{area.field_space_type === STADIUM_TYPE || area.field_space_type === 'TURF_STADIUM' ? 'Turf Stadium' : 'Grass/Park Site'}</div>
-                  <ul className='mt-2 list-disc pl-6 text-sm'>
+                  {isCommunityAdmin ? <p className='mt-2 rounded bg-emerald-50 p-2 text-sm text-emerald-900'>{area.field_space_type === STADIUM_TYPE || area.field_space_type === 'TURF_STADIUM' ? 'Turf stadium layouts are selected automatically during scheduling.' : 'Grass field size is fixed from My Fields.'}</p> : <ul className='mt-2 list-disc pl-6 text-sm'>
                     {cfgs.map((c: any) => <li key={c.id}>{layoutLabel(c.name)} ({c.small_field_count || c.thirty_yard_capacity || 0} Small / {c.medium_field_count || 0} Medium / {c.large_field_count || c.fifty_three_yard_capacity || 0} Large)</li>)}
-                  </ul>
+                  </ul>}
                 </div>
               );
             })}
@@ -672,7 +673,7 @@ export default function HostingAvailabilityManager() {
       </section>
 
       <section className='rounded border p-4 overflow-auto'>
-        <h2 className='mb-2 font-semibold'>5–7. Hourly Availability + Layout Selection</h2>
+        <h2 className='mb-2 font-semibold'>{isCommunityAdmin ? '5–7. Hourly Availability' : '5–7. Hourly Availability + Layout Selection'}</h2>
         {loading || !hostId || !selectedDates.length ? <p className='text-slate-500'>Select hosting site and dates.</p> : selectedDates.map((date) => (
           <div key={date} className='mb-4'>
             <h3 className='mb-2 font-medium'>{weekLabelForDate(date)} — {formatDateLabel(date)}</h3>
@@ -689,7 +690,7 @@ export default function HostingAvailabilityManager() {
                       <div className='text-sm text-slate-600'>{isStadium ? 'Turf Stadium' : 'Grass/Park Site'}</div>
                     </div>
                     {isStadium ? (
-                      <div className='flex flex-col gap-2 md:items-end'>
+                      isCommunityAdmin ? <div className='max-w-md rounded bg-emerald-50 p-2 text-sm text-emerald-900'>The scheduler will determine the best turf stadium layout for each selected hosting date.</div> : <div className='flex flex-col gap-2 md:items-end'>
                         <select className='rounded border p-2 text-sm' value={selectedCfg} disabled={getAutoSelectLayout(area.id, date) && !getLockLayout(area.id, date)} onChange={(e) => setActiveConfigByAreaDate({ ...activeConfigByAreaDate, [layoutKey(area.id, date)]: e.target.value })}>
                           {cfgs.map((c: any) => <option key={c.id} value={c.id}>{layoutLabel(c.name)}</option>)}
                         </select>
@@ -731,12 +732,12 @@ export default function HostingAvailabilityManager() {
         <div className='mb-3 grid gap-2 md:grid-cols-4'>
           <input type='date' className='rounded border p-2' value={savedDateFilter} onChange={(e) => setSavedDateFilter(e.target.value)} />
           <select className='rounded border p-2' value={savedSiteTypeFilter} onChange={(e) => setSavedSiteTypeFilter(e.target.value)}><option value=''>All Site Types</option><option value='TURF_STADIUM'>Turf Stadium</option><option value='GRASS_FIELD'>Grass Field</option><option value='STADIUM_SITE'>Legacy Stadium Site</option><option value='GRASS_PARK_SITE'>Legacy Grass/Park Site</option></select>
-          <select className='rounded border p-2' value={savedLayoutFilter} onChange={(e) => setSavedLayoutFilter(e.target.value)}><option value=''>All Layouts</option><option value='2x53'>Two Large Fields</option><option value='3x30'>Three Small Fields</option><option value='TWO_LARGE'>Two Large</option><option value='ONE_MEDIUM_TWO_SMALL'>One Medium + Two Small</option><option value='TWO_MEDIUM'>Two Medium</option><option value='THREE_SMALL'>Three Small</option><option value='ONE_LARGE_ONE_MEDIUM'>One Large + One Medium</option><option value='ONE_LARGE_ONE_SMALL'>One Large + One Small</option><option value='ONE_MEDIUM_ONE_SMALL'>One Medium + One Small</option></select>
+          {!isCommunityAdmin && <select className='rounded border p-2' value={savedLayoutFilter} onChange={(e) => setSavedLayoutFilter(e.target.value)}><option value=''>All Layouts</option><option value='2x53'>Two Large Fields</option><option value='3x30'>Three Small Fields</option><option value='TWO_LARGE'>Two Large</option><option value='ONE_MEDIUM_TWO_SMALL'>One Medium + Two Small</option><option value='TWO_MEDIUM'>Two Medium</option><option value='THREE_SMALL'>Three Small</option><option value='ONE_LARGE_ONE_MEDIUM'>One Large + One Medium</option><option value='ONE_LARGE_ONE_SMALL'>One Large + One Small</option></select>}
         </div>
         {!hostId ? <p className='text-slate-500'>Select a hosting site to view saved availability.</p> : !savedAvailability.length ? <p className='text-slate-500'>No saved availability has been entered for this hosting site.</p> : <div className='space-y-3'>{savedAvailability.map((entry: any, idx: number) => (
           <div key={`${entry.available_date}-${idx}`} className='rounded border bg-slate-50 p-3 text-sm'>
             <div className='flex items-start justify-between gap-2'>
-              <div><div className='font-semibold'>{formatDateLabel(entry.available_date)}</div><div>{entry.host_location_name}</div><div>{entry.site_type === 'STADIUM_SITE' || entry.site_type === 'TURF_STADIUM' ? 'Turf Stadium' : 'Grass Field'}</div><div>Available Layout: {layoutLabel(entry.available_layout)}</div><div>{entry.auto_select_turf_layout ? 'Auto-select enabled' : 'Manual layout'}{entry.lock_selected_layout ? ' • Layout locked' : ''}</div><div>Capacity: {entry.small_field_capacity} Small / {entry.medium_field_capacity || 0} Medium / {entry.large_field_capacity} Large</div></div>
+              <div><div className='font-semibold'>{formatDateLabel(entry.available_date)}</div><div>{entry.host_location_name}</div><div>{entry.site_type === 'STADIUM_SITE' || entry.site_type === 'TURF_STADIUM' ? 'Turf Stadium' : 'Grass Field'}</div>{isCommunityAdmin ? <div>{entry.site_type === 'STADIUM_SITE' || entry.site_type === 'TURF_STADIUM' ? 'Turf layout will be selected during scheduling.' : 'Grass field size is fixed.'}</div> : <><div>Available Layout: {layoutLabel(entry.available_layout)}</div><div>{entry.auto_select_turf_layout ? 'Auto-select enabled' : 'Manual layout'}{entry.lock_selected_layout ? ' • Layout locked' : ''}</div><div>Capacity: {entry.small_field_capacity} Small / {entry.medium_field_capacity || 0} Medium / {entry.large_field_capacity} Large</div></>}</div>
               <div className='flex gap-2'><button onClick={() => editSaved(entry)} className='rounded border px-3 py-1'>Edit</button><button onClick={() => deleteSaved(entry)} className='rounded border border-red-300 px-3 py-1 text-red-700'>Delete</button></div>
             </div>
             <div className='mt-1'>Available:</div><ul className='list-disc pl-6'>{entry.time_ranges.map((range: any, rIdx: number) => <li key={rIdx}>{displayHour(Number(range.start_time.slice(0,2)))}–{displayHour(Number(range.end_time.slice(0,2)))}</li>)}</ul>
@@ -791,7 +792,7 @@ export default function HostingAvailabilityManager() {
                 <div key={`summary-${area.id}-${date}`} className='rounded border bg-slate-50 p-3 text-sm'>
                   <div className='font-medium'>{weekLabelForDate(date)} — {formatDateLabel(date)}</div>
                   <div>{selectedHost.name}</div>
-                  <div>{isTurfArea ? (getAutoSelectLayout(area.id, date) && !getLockLayout(area.id, date) ? 'Scheduler will auto-select best turf layout' : `Locked layout: ${layoutLabel(selectedCfg?.name || '')}`) : 'Active configured grass fields will be used'}</div>
+                  <div>{isTurfArea ? (isCommunityAdmin ? 'Scheduler will determine the best turf layout during scheduling' : (getAutoSelectLayout(area.id, date) && !getLockLayout(area.id, date) ? 'Scheduler will auto-select best turf layout' : `Locked layout: ${layoutLabel(selectedCfg?.name || '')}`)) : 'Active configured grass fields will be used'}</div>
                   <div className='mt-1'>Available:</div>
                   <ul className='list-disc pl-6'>
                     {ranges.map((r, i) => <li key={i}>{displayHour(r.start)}–{displayHour(r.end)}</li>)}

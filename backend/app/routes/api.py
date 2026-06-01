@@ -214,12 +214,6 @@ TURF_STADIUM_CONFIGURATIONS = {
         'remaining_yards': 30,
         'counts': {FIELD_SIZE_LARGE: 1, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_SMALL: 1},
     },
-    'ONE_MEDIUM_ONE_SMALL': {
-        'configuration_name': '1 Medium + 1 Small',
-        'space_used_yards': 85,
-        'remaining_yards': 35,
-        'counts': {FIELD_SIZE_LARGE: 0, FIELD_SIZE_MEDIUM: 1, FIELD_SIZE_SMALL: 1},
-    },
 }
 BACKWARD_COMPATIBLE_TURF_CONFIGURATION_ALIASES = {
     '2X53': 'TWO_LARGE',
@@ -256,7 +250,7 @@ def _is_approved_turf_slot_counts(counts: dict[str, int]) -> bool:
 
 def _turf_wave_intent_for_layout(layout_code: str) -> str:
     normalized = _normalize_configuration_name(layout_code)
-    if normalized == 'ONE_MEDIUM_TWO_SMALL' or normalized == 'ONE_MEDIUM_ONE_SMALL':
+    if normalized == 'ONE_MEDIUM_TWO_SMALL':
         return TURF_WAVE_INTENT_SMALL_MEDIUM
     if normalized == 'TWO_LARGE':
         return TURF_WAVE_INTENT_LARGE
@@ -812,7 +806,7 @@ def _plan_turf_layout_blocks(
             if demand_counts.get(FIELD_SIZE_LARGE, 0) > 0 and 'TWO_LARGE' in active_configuration_names:
                 pure_sequence.append('TWO_LARGE')
             sequence_candidates.append(pure_sequence)
-    for layout_name in ('TWO_LARGE', 'ONE_LARGE_ONE_MEDIUM', 'ONE_LARGE_ONE_SMALL', 'THREE_SMALL', 'TWO_MEDIUM', 'ONE_MEDIUM_ONE_SMALL'):
+    for layout_name in ('TWO_LARGE', 'ONE_LARGE_ONE_MEDIUM', 'ONE_LARGE_ONE_SMALL', 'THREE_SMALL', 'TWO_MEDIUM'):
         if layout_name in active_configuration_names:
             sequence_candidates.append([layout_name])
 
