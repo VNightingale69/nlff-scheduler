@@ -7140,25 +7140,153 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         )
         return capacity, assigned, proposed
 
-    def _turf_wave_total_snapshot(wave_id: uuid.UUID | None) -> tuple[int, int, int, dict[str, int], dict[str, int]]:
-        if not wave_id:
-            return 0, 0, 0, {size: 0 for size in FIELD_SIZE_ORDER}, {size: 0 for size in FIELD_SIZE_ORDER}
-        wave_slots = db.query(GameSlot).filter(GameSlot.turf_wave_id == wave_id).all()
-        slot_counts = _turf_slot_counts_from_slots(wave_slots)
-        assigned_counts = _turf_slot_counts_from_slots(wave_slots, assigned_only=True)
+    scheduled_games_by_division_id: dict[uuid.UUID, int] = {}
+    scheduled_division_rows = db.query(Team.division_id, func.count(Game.id)).select_from(Game).join(
+        Team, Team.id == Game.home_team_id
+    ).join(Game.status).filter(
+        Game.season_id == season_id,
+        Game.week_id == week_id,
+        GameStatus.code == 'SCHEDULED',
+        GameStatus.is_active.is_(True),
+    ).group_by(Team.division_id).all()
+    for scheduled_division_id, scheduled_count in scheduled_division_rows:
+        if scheduled_division_id:
+            scheduled_games_by_division_id[scheduled_division_id] = int(scheduled_count or 0)
+
+    active_team_counts_by_division_id: dict[uuid.UUID, int] = {}
+    active_team_division_rows = db.query(Team.division_id, func.count(Team.id)).join(
+        Division, Division.id == Team.division_id
+    ).filter(
+        Team.is_active.is_(True),
+        Division.is_active.is_(True),
+        Team.division_id.isnot(None),
+    ).group_by(Team.division_id).all()
+    for active_division_id, active_count in active_team_division_rows:
+        if active_division_id:
+            active_team_counts_by_division_id[active_division_id] = int(active_count or 0)
+
+    weekly_unscheduled_game_demand_by_size = {size: 0 for size in FIELD_SIZE_ORDER}
+    if active_team_counts_by_division_id:
+        active_divisions = db.query(Division).filter(Division.id.in_(list(active_team_counts_by_division_id.keys()))).all()
+        for active_division in active_divisions:
+            active_count = active_team_counts_by_division_id.get(active_division.id, 0)
+            required_games = (active_count + 1) // 2 if no_byes else active_count // 2
+            remaining_games = max(0, required_games - scheduled_games_by_division_id.get(active_division.id, 0))
+            normalized_size = _normalize_field_size(_required_field_type_for_division(active_division))
+            if normalized_size in weekly_unscheduled_game_demand_by_size:
+                weekly_unscheduled_game_demand_by_size[normalized_size] += remaining_games
+
+    def _proposed_turf_wave_counts_by_size(wave_id: uuid.UUID | None) -> dict[str, int]:
         proposed_by_size = {size: 0 for size in FIELD_SIZE_ORDER}
-        proposed_total = 0
+        if not wave_id:
+            return proposed_by_size
         for proposal in plans:
             if proposal.get('turf_wave_id') != str(wave_id):
                 continue
             proposed_size = _normalize_field_size(proposal.get('field_type'))
             if proposed_size in proposed_by_size:
                 proposed_by_size[proposed_size] += 1
-                proposed_total += 1
+        return proposed_by_size
+
+    def _turf_wave_total_snapshot(wave_id: uuid.UUID | None) -> tuple[int, int, int, dict[str, int], dict[str, int]]:
+        if not wave_id:
+            return 0, 0, 0, {size: 0 for size in FIELD_SIZE_ORDER}, {size: 0 for size in FIELD_SIZE_ORDER}
+        wave_slots = db.query(GameSlot).filter(GameSlot.turf_wave_id == wave_id).all()
+        slot_counts = _turf_slot_counts_from_slots(wave_slots)
+        assigned_counts = _turf_slot_counts_from_slots(wave_slots, assigned_only=True)
+        proposed_by_size = _proposed_turf_wave_counts_by_size(wave_id)
+        proposed_total = sum(proposed_by_size.values())
         # Keep the existing aggregate counter as a defensive fallback for in-flight
         # placements that have not yet been appended to proposals.
         proposed_total = max(proposed_total, int(proposed_turf_wave_usage_by_id.get(wave_id, 0) or 0))
         return sum(slot_counts.values()), sum(assigned_counts.values()), proposed_total, slot_counts, assigned_counts
+
+    def _projected_unscheduled_game_demand_by_size(candidate_size: str | None = None) -> dict[str, int]:
+        demand = {size: int(weekly_unscheduled_game_demand_by_size.get(size, 0) or 0) for size in FIELD_SIZE_ORDER}
+        for proposal in plans:
+            proposed_size = _normalize_field_size(proposal.get('field_type'))
+            if proposed_size in demand:
+                demand[proposed_size] = max(demand[proposed_size] - 1, 0)
+        normalized_candidate_size = _normalize_field_size(candidate_size)
+        if normalized_candidate_size in demand:
+            demand[normalized_candidate_size] = max(demand[normalized_candidate_size] - 1, 0)
+        return demand
+
+    def _turf_wave_packing_projection(wave_id: uuid.UUID | None, candidate_size: str | None) -> dict[str, object]:
+        empty_counts = {size: 0 for size in FIELD_SIZE_ORDER}
+        if not wave_id:
+            return {
+                'capacity': 0,
+                'current_used': 0,
+                'projected_used': 0,
+                'packable_additional': 0,
+                'packable_total': 0,
+                'unused_after_pack': 0,
+                'unused_after_candidate': 0,
+                'fill_ratio': 0.0,
+                'candidate_counts': empty_counts,
+                'remaining_after_candidate': empty_counts,
+            }
+        wave_slots = db.query(GameSlot).filter(GameSlot.turf_wave_id == wave_id).all()
+        slot_counts = _turf_slot_counts_from_slots(wave_slots)
+        assigned_counts = _turf_slot_counts_from_slots(wave_slots, assigned_only=True)
+        proposed_counts = _proposed_turf_wave_counts_by_size(wave_id)
+        candidate_counts = {
+            size: int(assigned_counts.get(size, 0) or 0) + int(proposed_counts.get(size, 0) or 0)
+            for size in FIELD_SIZE_ORDER
+        }
+        normalized_candidate_size = _normalize_field_size(candidate_size)
+        if normalized_candidate_size in candidate_counts:
+            candidate_counts[normalized_candidate_size] += 1
+        remaining_after_candidate = {
+            size: max(int(slot_counts.get(size, 0) or 0) - int(candidate_counts.get(size, 0) or 0), 0)
+            for size in FIELD_SIZE_ORDER
+        }
+        demand_after_candidate = _projected_unscheduled_game_demand_by_size(normalized_candidate_size)
+        packable_by_size = {
+            size: min(remaining_after_candidate[size], int(demand_after_candidate.get(size, 0) or 0))
+            for size in FIELD_SIZE_ORDER
+        }
+        capacity = sum(slot_counts.values())
+        current_used = sum(assigned_counts.values()) + sum(proposed_counts.values())
+        projected_used = sum(candidate_counts.values())
+        packable_additional = sum(packable_by_size.values())
+        packable_total = projected_used + packable_additional
+        return {
+            'capacity': capacity,
+            'current_used': current_used,
+            'projected_used': projected_used,
+            'packable_additional': packable_additional,
+            'packable_total': packable_total,
+            'unused_after_pack': max(capacity - packable_total, 0),
+            'unused_after_candidate': max(capacity - projected_used, 0),
+            'fill_ratio': (packable_total / max(capacity, 1)) if capacity else 0.0,
+            'candidate_counts': candidate_counts,
+            'remaining_after_candidate': remaining_after_candidate,
+        }
+
+    def _has_partially_used_compatible_turf_wave(field_size: str | None, exclude_wave_id: uuid.UUID | None = None) -> bool:
+        normalized_size = _normalize_field_size(field_size)
+        if not normalized_size:
+            return False
+        seen_wave_ids: set[uuid.UUID] = set()
+        for remaining_slot in remaining_slots:
+            if not remaining_slot.turf_wave_id or remaining_slot.turf_wave_id in seen_wave_ids:
+                continue
+            seen_wave_ids.add(remaining_slot.turf_wave_id)
+            if exclude_wave_id and remaining_slot.turf_wave_id == exclude_wave_id:
+                continue
+            if not remaining_slot.host_location_id or host_surface_by_id.get(remaining_slot.host_location_id) != 'TURF_STADIUM':
+                continue
+            projection = _turf_wave_packing_projection(remaining_slot.turf_wave_id, None)
+            remaining = projection.get('remaining_after_candidate') or {}
+            if (
+                int(projection.get('current_used') or 0) > 0
+                and int(projection.get('current_used') or 0) < int(projection.get('capacity') or 0)
+                and int(remaining.get(normalized_size, 0) or 0) > 0
+            ):
+                return True
+        return False
 
     def _remaining_compatible_turf_slots_for_wave(required_size: str | None, exclude_wave_id: uuid.UUID | None = None) -> int:
         normalized_size = _normalize_field_size(required_size)
@@ -7462,9 +7590,26 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                                 score += 500
                                 reason_bits.append('fills compatible unused turf wave capacity (+500)')
 
-                            wave_capacity, wave_assigned, wave_proposed, wave_counts, wave_assigned_counts = _turf_wave_total_snapshot(selected_field_slot.turf_wave_id)
+                            wave_capacity, wave_assigned, wave_proposed, _wave_counts, _wave_assigned_counts = _turf_wave_total_snapshot(selected_field_slot.turf_wave_id)
                             projected_assigned = wave_assigned + wave_proposed + 1
                             projected_wave_fill = projected_assigned / max(wave_capacity, 1)
+                            packing = _turf_wave_packing_projection(selected_field_slot.turf_wave_id, normalized_required_size)
+                            packable_total = int(packing.get('packable_total') or 0)
+                            packable_additional = int(packing.get('packable_additional') or 0)
+                            unused_after_pack = int(packing.get('unused_after_pack') or 0)
+                            unused_after_candidate = int(packing.get('unused_after_candidate') or 0)
+                            packing_fill_ratio = float(packing.get('fill_ratio') or 0.0)
+                            packing_bonus = int(packing_fill_ratio * 5000) + (packable_additional * 900) - (unused_after_pack * 650)
+                            score += packing_bonus
+                            reason_bits.append(
+                                f'turf wave packing projects {packable_total}/{wave_capacity} components usable after compatible unscheduled games ({packing_bonus:+d})'
+                            )
+                            if packable_total >= wave_capacity and wave_capacity > 0:
+                                score += 4500
+                                reason_bits.append('candidate can fill entire turf wave with compatible games (+4500)')
+                            elif wave_capacity > 0 and unused_after_pack <= 1:
+                                score += 2500
+                                reason_bits.append('candidate nearly fills turf wave with compatible games (+2500)')
                             if projected_assigned >= wave_capacity and wave_capacity > 0:
                                 score += 3500
                                 reason_bits.append('full turf-wave utilization (+3500)')
@@ -7479,22 +7624,28 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                                 score += 1400
                                 reason_bits.append('fills existing compatible turf-wave component before another wave (+1400)')
                             if wave_assigned + wave_proposed == 0:
+                                compatible_partial_wave_exists = _has_partially_used_compatible_turf_wave(normalized_required_size, exclude_wave_id=selected_field_slot.turf_wave_id)
                                 compatible_elsewhere = _remaining_compatible_turf_slots_for_wave(normalized_required_size, exclude_wave_id=selected_field_slot.turf_wave_id)
-                                if compatible_elsewhere > 0:
-                                    score -= 2200
-                                    warning_bits.append('opening a new partial turf wave while compatible turf capacity remains elsewhere (-2200)')
+                                if compatible_partial_wave_exists:
+                                    score -= 5200
+                                    warning_bits.append('opening a new turf wave while a compatible partially used wave can be filled (-5200)')
+                                elif compatible_elsewhere > 0:
+                                    score -= 3000
+                                    warning_bits.append('opening a new partial turf wave while compatible turf capacity remains elsewhere (-3000)')
                             elif projected_assigned < wave_capacity:
-                                unused_after = {
-                                    size: max(int(wave_counts.get(size, 0) or 0) - int(wave_assigned_counts.get(size, 0) or 0), 0)
-                                    for size in FIELD_SIZE_ORDER
-                                }
-                                if normalized_required_size in unused_after:
-                                    unused_after[normalized_required_size] = max(unused_after[normalized_required_size] - 1, 0)
+                                unused_after = dict(packing.get('remaining_after_candidate') or {})
                                 warning_bits.append(
                                     'turf wave remains partially filled after placement: ' + ', '.join(
                                         f'{count} {size.lower()}' for size, count in unused_after.items() if count > 0
                                     )
                                 )
+                            if unused_after_candidate > 0:
+                                component_penalty = unused_after_candidate * 400
+                                score -= component_penalty
+                                warning_bits.append(f'unused turf wave component penalty (-{component_penalty})')
+                            if wave_capacity >= 3 and projected_assigned == 1:
+                                score -= 6500
+                                warning_bits.append('leaving a three-component turf wave with only one used component (-6500)')
                         elif _has_existing_turf_wave_capacity(required_field_type):
                             score -= 1200
                             warning_bits.append('existing turf stadium wave still has compatible unused capacity (-1200)')
@@ -8092,10 +8243,11 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             candidate_pool = cross_candidates if cross_candidates else filtered_candidates
 
             if candidate_pool:
+                same_community_rejected_available = any(c['same_community'] for c in filtered_candidates)
                 for candidate in candidate_pool:
                     candidate['is_cross_candidate'] = candidate in cross_candidates
-                valid_candidates = candidate_pool
-                break
+                    candidate['same_community_rejected_available'] = same_community_rejected_available
+                valid_candidates.extend(candidate_pool)
 
         if not valid_candidates:
             break
@@ -8103,7 +8255,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         best = max(valid_candidates, key=lambda c: c['score'])
         selected_field_slot = best['selected_field_slot']
         if best.get('is_cross_candidate'):
-            same_community_rejected = any(c['same_community'] for c in filtered_candidates)
+            same_community_rejected = bool(best.get('same_community_rejected_available'))
             if same_community_rejected:
                 best['reason_bits'].append('Same-community matchup avoided because cross-community option exists')
         if best['prior_week_team_repeat']:

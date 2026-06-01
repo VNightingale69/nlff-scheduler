@@ -185,6 +185,101 @@ class AutoFillPreviewTest(unittest.TestCase):
         self.assertEqual(wave_row['status'], 'Warning')
         self.assertTrue(diagnostics[0]['optimization_warnings'])
 
+    def test_auto_fill_preview_prefers_packable_partial_turf_wave_over_earlier_empty_wave(self):
+        self.host.surface_type = 'TURF_STADIUM'
+        self.slot.status = 'CLOSED'
+        availability = HostingAvailability(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week2.id,
+            organization_id=self.org_w.id,
+            host_location_id=self.host.id,
+            available_date=self.week2.start_date,
+            primary_game_date=self.week2.start_date,
+            start_time=time(8, 0),
+            end_time=time(10, 0),
+            is_available=True,
+        )
+        empty_wave = TurfWave(
+            id=uuid.uuid4(),
+            host_location_id=self.host.id,
+            hosting_availability_id=availability.id,
+            week_id=self.week2.id,
+            host_date=self.week2.start_date,
+            sequence_number=1,
+            wave_intent='SMALL_MEDIUM',
+            preferred_layout_code='THREE_SMALL',
+            start_time=time(8, 0),
+            end_time=time(9, 0),
+        )
+        partial_wave = TurfWave(
+            id=uuid.uuid4(),
+            host_location_id=self.host.id,
+            hosting_availability_id=availability.id,
+            week_id=self.week2.id,
+            host_date=self.week2.start_date,
+            sequence_number=2,
+            wave_intent='SMALL_MEDIUM',
+            preferred_layout_code='ONE_MEDIUM_TWO_SMALL',
+            start_time=time(9, 0),
+            end_time=time(10, 0),
+        )
+        medium_division = Division(id=uuid.uuid4(), division_group='COED', name='4th/5th', required_field_layout_type='MEDIUM', is_active=True)
+        medium_home = Team(id=uuid.uuid4(), organization_id=self.org_w.id, division_id=medium_division.id, name='Westosha Medium', is_active=True)
+        medium_away = Team(id=uuid.uuid4(), organization_id=self.org_a.id, division_id=medium_division.id, name='Antioch Medium', is_active=True)
+        medium_game = Game(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week2.id,
+            home_team_id=medium_home.id,
+            away_team_id=medium_away.id,
+            game_status_id=self.status.id,
+            game_date=self.week2.start_date,
+            kickoff_time=time(9, 0),
+        )
+        self.db.add_all([availability, empty_wave, partial_wave, medium_division, medium_home, medium_away, medium_game])
+
+        def add_wave_slot(wave, field_type, hour, name, assigned_game_id=None):
+            field = FieldInstance(
+                id=uuid.uuid4(),
+                host_location_id=self.host.id,
+                hosting_availability_id=availability.id,
+                instance_date=self.week2.start_date,
+                field_name=name,
+                field_type=field_type,
+                is_active=True,
+            )
+            slot = GameSlot(
+                id=uuid.uuid4(),
+                field_instance_id=field.id,
+                host_location_id=self.host.id,
+                season_id=self.season.id,
+                week_id=self.week2.id,
+                slot_date=self.week2.start_date,
+                start_time=time(hour, 0),
+                end_time=time(hour + 1, 0),
+                field_type=field_type,
+                status='ASSIGNED' if assigned_game_id else 'OPEN',
+                assigned_game_id=assigned_game_id,
+                turf_wave_id=wave.id,
+            )
+            self.db.add_all([field, slot])
+            return slot
+
+        for index in range(3):
+            add_wave_slot(empty_wave, 'SMALL', 8, f'Empty Small {index + 1}')
+        add_wave_slot(partial_wave, 'MEDIUM', 9, 'Partial Medium', medium_game.id)
+        add_wave_slot(partial_wave, 'SMALL', 9, 'Partial Small 1')
+        add_wave_slot(partial_wave, 'SMALL', 9, 'Partial Small 2')
+        self.db.commit()
+
+        preview = auto_fill_preview({'season_id': self.season.id, 'week_id': self.week2.id, 'division_id': self.division.id}, db=self.db)
+
+        self.assertGreaterEqual(preview['proposed_game_count'], 1)
+        self.assertEqual(preview['proposals'][0]['turf_wave_id'], str(partial_wave.id))
+        self.assertEqual(preview['proposals'][0]['proposed_start_time'], '09:00:00')
+        self.assertIn('turf wave packing projects 3/3 components usable', preview['proposals'][0]['reason'])
+
     def test_avoids_prior_week_exact_matchup_when_alternatives_exist(self):
         result = auto_fill_preview({'season_id': self.season.id, 'week_id': self.week2.id, 'division_id': self.division.id}, db=self.db)
         self.assertEqual(result['proposed_game_count'], 1)
