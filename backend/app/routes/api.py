@@ -5828,17 +5828,82 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         ).first()
         return conflict is not None
 
-    def _host_owner_category(game: Game, slot: GameSlot | None) -> str:
+    def _host_owner_category(game: Game, slot: GameSlot | None, *, home_team: Team | None = None, away_team: Team | None = None) -> str:
         host_org_id = slot.host_location.organization_id if slot and slot.host_location else None
-        if host_org_id and game.home_team and host_org_id == game.home_team.organization_id:
+        effective_home = home_team or game.home_team
+        effective_away = away_team or game.away_team
+        if host_org_id and effective_home and host_org_id == effective_home.organization_id:
             return 'HOME'
-        if host_org_id and game.away_team and host_org_id == game.away_team.organization_id:
+        if host_org_id and effective_away and host_org_id == effective_away.organization_id:
             return 'AWAY'
         return 'NEUTRAL'
 
-    def _breaks_host_balance(game: Game, source: GameSlot, target: GameSlot) -> bool:
+    def _compaction_home_away_plan(game: Game, target: GameSlot) -> dict[str, object]:
+        original_home = game.home_team
+        original_away = game.away_team
+        target_host = target.host_location
+        target_owner = target_host.organization if target_host else None
+        target_owner_id = getattr(target_host, 'organization_id', None) if target_host else None
+        home_community_id = getattr(original_home, 'organization_id', None) if original_home else None
+        away_community_id = getattr(original_away, 'organization_id', None) if original_away else None
+        same_community = bool(home_community_id is not None and home_community_id == away_community_id)
+        home_matches = bool(target_owner_id is not None and home_community_id == target_owner_id)
+        away_matches = bool(target_owner_id is not None and away_community_id == target_owner_id)
+        final_home = original_home
+        final_away = original_away
+        swapped = False
+        if same_community:
+            reason = 'SAME_COMMUNITY_GAME_KEEP_EXISTING_HOME_AWAY'
+        elif away_matches and not home_matches:
+            final_home = original_away
+            final_away = original_home
+            swapped = True
+            reason = 'TARGET_HOST_OWNER_MATCHES_ORIGINAL_AWAY_TEAM'
+        elif home_matches:
+            reason = 'TARGET_HOST_OWNER_MATCHES_ORIGINAL_HOME_TEAM'
+        elif target_owner_id is None:
+            reason = 'TARGET_HOST_OWNER_UNKNOWN_KEEP_EXISTING_HOME_AWAY'
+        else:
+            reason = 'NEUTRAL_SITE_KEEP_EXISTING_HOME_AWAY'
+        final_home_community_id = getattr(final_home, 'organization_id', None) if final_home else None
+        final_away_community_id = getattr(final_away, 'organization_id', None) if final_away else None
+        would_create_host_owner_as_away = bool(
+            target_owner_id is not None
+            and final_home_community_id != final_away_community_id
+            and target_owner_id == final_away_community_id
+            and target_owner_id != final_home_community_id
+        )
+        return {
+            'original_home_team': original_home.name if original_home else None,
+            'original_away_team': original_away.name if original_away else None,
+            'target_host_location': target_host.name if target_host else None,
+            'target_host_owner': target_owner.name if target_owner else None,
+            'target_host_location_owner_community_id': str(target_owner_id) if target_owner_id is not None else None,
+            'home_team_community_id': str(home_community_id) if home_community_id is not None else None,
+            'away_team_community_id': str(away_community_id) if away_community_id is not None else None,
+            'final_home_team': final_home.name if final_home else None,
+            'final_away_team': final_away.name if final_away else None,
+            'final_home_team_id': final_home.id if final_home else None,
+            'final_away_team_id': final_away.id if final_away else None,
+            'final_home_team_community_id': str(final_home_community_id) if final_home_community_id is not None else None,
+            'final_away_team_community_id': str(final_away_community_id) if final_away_community_id is not None else None,
+            'final_home_team_obj': final_home,
+            'final_away_team_obj': final_away,
+            'home_away_swapped_by_compaction': swapped,
+            'home_away_swap_reason': reason,
+            'would_create_host_owner_as_away': would_create_host_owner_as_away,
+        }
+
+    def _breaks_host_balance(game: Game, source: GameSlot, target: GameSlot, home_away_plan: dict[str, object] | None = None) -> bool:
         source_category = _host_owner_category(game, source)
-        target_category = _host_owner_category(game, target)
+        final_home = home_away_plan.get('final_home_team_obj') if home_away_plan else None
+        final_away = home_away_plan.get('final_away_team_obj') if home_away_plan else None
+        target_category = _host_owner_category(
+            game,
+            target,
+            home_team=final_home if isinstance(final_home, Team) else None,
+            away_team=final_away if isinstance(final_away, Team) else None,
+        )
         if source_category == 'HOME' and target_category != 'HOME':
             return True
         if source_category in {'HOME', 'AWAY'} and target_category == 'NEUTRAL':
@@ -5927,7 +5992,7 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
             'MOVES_YOUNGER_DIVISION_TOO_LATE', 'WORSENS_HOST_COMMUNITY_BALANCE', 'VIOLATES_HOST_COMMUNITY_HARD_RULE',
             'VIOLATES_HOME_SITE_REQUIREMENT', 'NO_NET_WAVE_IMPROVEMENT', 'TARGET_SLOT_NOT_AVAILABLE',
             'TARGET_FIELD_INSTANCE_NOT_FOUND', 'TARGET_WAVE_NOT_FOUND', 'SOURCE_GAME_LOCKED', 'SOURCE_GAME_ALREADY_OPTIMAL',
-            'COMPACTION_DISABLED', 'SOURCE_SLOT_NOT_FOUND', 'UNKNOWN_REJECTION_REASON'
+            'COMPACTION_DISABLED', 'SOURCE_SLOT_NOT_FOUND', 'WOULD_CREATE_HOST_OWNER_AS_AWAY', 'UNKNOWN_REJECTION_REASON'
         } else 'UNKNOWN_REJECTION_REASON'
         diagnostics['moves_rejected'] = int(diagnostics['moves_rejected']) + 1
         diagnostics['rejected_moves_count'] = int(diagnostics.get('rejected_moves_count') or 0) + 1
@@ -5989,7 +6054,12 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
             _reject(game, source, target, 'SOURCE_GAME_ALREADY_OPTIMAL', detail='Source game is already in the target slot.', hard_constraint_failure=False, target_wave=target_wave); return -10_000, []
         if source.slot_date != target.slot_date or game.game_date != target.slot_date:
             _reject(game, source, target, 'MOVES_GAME_TO_DIFFERENT_DATE', detail=f'Move would change the game date from {game.game_date.isoformat() if game.game_date else source.slot_date.isoformat()} to {target.slot_date.isoformat()}.', target_wave=target_wave); return -10_000, []
-        required_size = _required_field_type_for_division(game.home_team.division if game.home_team else None)
+        home_away_plan = _compaction_home_away_plan(game, target)
+        if home_away_plan.get('would_create_host_owner_as_away'):
+            _reject(game, source, target, 'WOULD_CREATE_HOST_OWNER_AS_AWAY', detail='Candidate move would leave the target host-location owner assigned as the away team after applying compaction home/away rules.', target_wave=target_wave); return -10_000, []
+        final_home_team = home_away_plan.get('final_home_team_obj')
+        final_home_team = final_home_team if isinstance(final_home_team, Team) else game.home_team
+        required_size = _required_field_type_for_division(final_home_team.division if final_home_team else None)
         if _normalize_field_size(target.field_type) != required_size:
             _reject(game, source, target, 'WRONG_FIELD_SIZE', detail=f'Division requires {required_size}, but target field component is {_normalize_field_size(target.field_type)}.', target_wave=target_wave); return -10_000, []
         if _field_has_time_conflict(game, target):
@@ -6000,8 +6070,8 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
             _reject(game, source, target, 'BREAKS_DOUBLEHEADER_BACK_TO_BACK', detail=_doubleheader_detail(game, source, target), target_wave=target_wave); return -10_000, []
         if target.start_time > source.start_time and _division_sort_for_game(game) <= 4:
             _reject(game, source, target, 'MOVES_YOUNGER_DIVISION_TOO_LATE', detail=f'Moving this younger division game from {source.start_time.isoformat()} to {target.start_time.isoformat()} would make it later in the day.', target_wave=target_wave); return -10_000, []
-        if _breaks_host_balance(game, source, target):
-            _reject(game, source, target, 'WORSENS_HOST_COMMUNITY_BALANCE', detail='Move would change a home/away community-hosted game to a less favorable host ownership category.', target_wave=target_wave); return -10_000, []
+        if _breaks_host_balance(game, source, target, home_away_plan):
+            _reject(game, source, target, 'WORSENS_HOST_COMMUNITY_BALANCE', detail='Move would change a home/away community-hosted game to a less favorable host ownership category after applying compaction home/away rules.', target_wave=target_wave); return -10_000, []
 
         waves, slots_by_wave = _wave_rows()
         before_active = _metrics()['active_turf_waves_used']
@@ -6029,7 +6099,7 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
             score += 25
         if target.start_time > source.start_time and _division_sort_for_game(game) <= 4:
             score -= 50
-        if _breaks_host_balance(game, source, target):
+        if _breaks_host_balance(game, source, target, home_away_plan):
             score -= 75
         if _breaks_doubleheader(game, target):
             score -= 100
@@ -6668,17 +6738,28 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
             'game_field_instance_id': game.field_instance_id,
             'game_date': game.game_date,
             'game_time': game.kickoff_time,
+            'home_team_id': game.home_team_id,
+            'away_team_id': game.away_team_id,
             'source_assigned_game_id': source.assigned_game_id,
             'source_status': source.status,
             'target_assigned_game_id': target.assigned_game_id,
             'target_status': target.status,
         })
+        home_away_plan = _compaction_home_away_plan(game, target)
         accepted = diagnostics['accepted_moves']
         if isinstance(accepted, list):
             accepted.append({
                 'game_id': str(game.id),
                 'division': _division_label_for_game(game),
                 'teams': _game_teams(game),
+                'original_home_team': home_away_plan.get('original_home_team'),
+                'original_away_team': home_away_plan.get('original_away_team'),
+                'target_host_location': home_away_plan.get('target_host_location'),
+                'target_host_owner': home_away_plan.get('target_host_owner'),
+                'final_home_team': home_away_plan.get('final_home_team'),
+                'final_away_team': home_away_plan.get('final_away_team'),
+                'home_away_swapped_by_compaction': bool(home_away_plan.get('home_away_swapped_by_compaction')),
+                'home_away_swap_reason': home_away_plan.get('home_away_swap_reason'),
                 'original_host': source.host_location.name if source.host_location else None,
                 'original_time': source.start_time.isoformat(),
                 'original_field': _slot_label(source),
@@ -6694,6 +6775,17 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         target.status = 'BOOKED'
         source.assigned_game_id = None
         source.status = 'OPEN'
+        final_home_team_id = home_away_plan.get('final_home_team_id')
+        final_away_team_id = home_away_plan.get('final_away_team_id')
+        final_home_team_obj = home_away_plan.get('final_home_team_obj')
+        final_away_team_obj = home_away_plan.get('final_away_team_obj')
+        if final_home_team_id is not None and final_away_team_id is not None:
+            game.home_team_id = final_home_team_id
+            game.away_team_id = final_away_team_id
+            if isinstance(final_home_team_obj, Team):
+                game.home_team = final_home_team_obj
+            if isinstance(final_away_team_obj, Team):
+                game.away_team = final_away_team_obj
         game.host_location_id = target.host_location_id
         game.field_instance_id = target.field_instance_id
         game.game_date = target.slot_date
@@ -6707,6 +6799,10 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
                 scheduled_game['field_instance_id'] = target.field_instance_id
                 scheduled_game['field_name'] = target.field_instance.field_name if target.field_instance else None
                 scheduled_game['field_type'] = _normalize_field_size(target.field_type)
+                scheduled_game['home_team_id'] = game.home_team_id
+                scheduled_game['home_team_name'] = game.home_team.name if game.home_team else None
+                scheduled_game['away_team_id'] = game.away_team_id
+                scheduled_game['away_team_name'] = game.away_team.name if game.away_team else None
                 scheduled_game['generated_slot_id'] = target.id
                 scheduled_game['_source_slot'] = target
                 break
@@ -6736,13 +6832,23 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
     diagnostics['waves_improved_count'] = int(diagnostics.get('moves_accepted') or 0)
 
     validation = build_schedule_quality_report(db, season_id)
-    if snapshots and validation.get('hard_errors'):
+    post_compaction_host_verification = _build_host_location_vs_home_team_verification(
+        db,
+        season_id,
+        require_host_owner_as_home_team=True,
+    )
+    diagnostics['post_compaction_host_location_vs_home_team_verification'] = post_compaction_host_verification
+    post_compaction_errors = list(validation.get('hard_errors') or [])
+    post_compaction_errors.extend(post_compaction_host_verification.get('validation_failures') or [])
+    if snapshots and post_compaction_errors:
         for snapshot in reversed(snapshots):
             game = snapshot['game']; source = snapshot['source']; target = snapshot['target']
             game.host_location_id = snapshot['game_host_location_id']
             game.field_instance_id = snapshot['game_field_instance_id']
             game.game_date = snapshot['game_date']
             game.kickoff_time = snapshot['game_time']
+            game.home_team_id = snapshot['home_team_id']
+            game.away_team_id = snapshot['away_team_id']
             source.assigned_game_id = snapshot['source_assigned_game_id']
             source.status = snapshot['source_status']
             target.assigned_game_id = snapshot['target_assigned_game_id']
@@ -6751,7 +6857,7 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         diagnostics['rollback_occurred'] = True
         diagnostics['rollback_reason'] = 'VALIDATION_FAILED_AFTER_COMPACTION'
         diagnostics['warnings'].append('Turf wave compaction attempted but rolled back because validation failed.')
-        diagnostics['validation_errors'] = validation.get('hard_errors')
+        diagnostics['validation_errors'] = post_compaction_errors
         diagnostics['accepted_moves'] = []
         diagnostics['moves_accepted'] = 0
         diagnostics['accepted_moves_count'] = 0
