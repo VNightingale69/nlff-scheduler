@@ -251,7 +251,7 @@ class AutoFillPreviewTest(unittest.TestCase):
         source_medium_field = FieldInstance(id=uuid.uuid4(), host_location_id=self.host.id, hosting_availability_id=availability.id, instance_date=self.week2.start_date, field_name='Source Medium', field_type='MEDIUM', is_active=True)
         medium_target = GameSlot(id=uuid.uuid4(), field_instance_id=medium_field.id, host_location_id=self.host.id, slot_date=self.week2.start_date, start_time=time(9, 0), end_time=time(10, 0), field_type='MEDIUM', status='OPEN', turf_wave_id=wave.id)
         open_small = GameSlot(id=uuid.uuid4(), field_instance_id=open_small_field.id, host_location_id=self.host.id, slot_date=self.week2.start_date, start_time=time(9, 0), end_time=time(10, 0), field_type='SMALL', status='OPEN', turf_wave_id=wave.id)
-        medium_source = GameSlot(id=uuid.uuid4(), field_instance_id=source_medium_field.id, host_location_id=self.host.id, season_id=self.season.id, week_id=self.week2.id, slot_date=self.week2.start_date, start_time=time(9, 0), end_time=time(10, 0), field_type='MEDIUM', status='BOOKED', assigned_game_id=medium_game.id)
+        medium_source = GameSlot(id=uuid.uuid4(), field_instance_id=source_medium_field.id, host_location_id=self.host.id, season_id=None, week_id=self.week2.id, slot_date=self.week2.start_date, start_time=time(9, 0), end_time=time(10, 0), field_type='MEDIUM', status='BOOKED', assigned_game_id=medium_game.id)
         self.db.add_all([
             availability, wave, medium_division, medium_home, medium_away, small_game, medium_game,
             medium_field, open_small_field, source_medium_field, medium_target, open_small, medium_source,
@@ -292,6 +292,8 @@ class AutoFillPreviewTest(unittest.TestCase):
         self.assertTrue(detail['medium_games_exist_elsewhere_same_date'])
         self.assertEqual(detail['medium_games_considered'], 1)
         self.assertEqual(detail['candidate_games_found_count'], 1)
+        self.assertGreater(compaction['total_candidate_moves_evaluated'], 0)
+        self.assertNotIn('no_candidate_reason', detail)
 
     def test_turf_wave_compaction_details_are_grouped_by_start_time(self):
         self.host.surface_type = 'TURF_STADIUM'
