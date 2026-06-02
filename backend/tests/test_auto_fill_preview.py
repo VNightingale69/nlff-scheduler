@@ -182,6 +182,13 @@ class AutoFillPreviewTest(unittest.TestCase):
             {'field_type': 'MEDIUM', 'count': 1},
         ])
         self.assertEqual(wave_row['utilization_percent'], 33.3)
+        self.assertEqual(wave_row['capacity_components'], [
+            {'field_type': 'SMALL', 'count': 2},
+            {'field_type': 'MEDIUM', 'count': 1},
+        ])
+        self.assertEqual(wave_row['used_components'], [{'field_type': 'SMALL', 'count': 1}])
+        self.assertEqual(wave_row['unused_component_count'], 2)
+        self.assertEqual(wave_row['optimization_note'], 'PARTIALLY_USED_ONE_MEDIUM_TWO_SMALL')
         self.assertEqual(wave_row['status'], 'Warning')
         self.assertTrue(diagnostics[0]['optimization_warnings'])
 

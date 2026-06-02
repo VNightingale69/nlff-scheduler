@@ -181,7 +181,8 @@ export default function ScheduleManagementPage() {
           const available = (wave.available_field_components || []).map((c: any) => `${c.count} ${String(c.field_type || '').toLowerCase()}`).join(', ') || 'none';
           const unused = (wave.unused_components || []).map((c: any) => `${c.count} ${String(c.field_type || '').toLowerCase()}`).join(', ') || 'none';
           const games = (wave.games_placed || []).map((game: any) => `${game.home_team} vs ${game.away_team}`).join('; ') || 'none';
-          return `${r.host_location_name} ${formatDisplayDate(r.date)} ${wave.start_time}-${wave.end_time} wave ${wave.sequence_number}: ${wave.layout || wave.preferred_layout_code}, available ${available}, games ${games}, unused ${unused}, utilization ${wave.utilization_percent}%`;
+          const note = wave.optimization_note || 'UNUSED_COMPONENTS_REMAIN';
+          return `${r.host_location_name} ${formatDisplayDate(r.date)} ${wave.start_time}-${wave.end_time} wave ${wave.sequence_number}: ${wave.layout || wave.preferred_layout_code}, available ${available}, games ${games}, unused ${unused}, utilization ${wave.utilization_percent}%, note ${note}`;
         });
         return waveRows.length ? waveRows : [`${r.host_location_name} ${formatDisplayDate(r.date)}: ${r.utilization_percent}% (idle ${r.idle_hours ?? 0}h)`];
       }) },
@@ -345,6 +346,50 @@ export default function ScheduleManagementPage() {
                   </div>
                 </details>
               ))}
+            </section>
+
+            <section className='space-y-2'>
+              <h3 className='font-semibold'>Turf Wave Utilization</h3>
+              {(quality.field_utilization || []).filter((row: any) => row.surface_type === 'TURF_STADIUM').length === 0 ? (
+                <p className='text-sm text-slate-600'>No turf stadium waves found for this schedule.</p>
+              ) : (
+                <div className='overflow-x-auto'>
+                  <table className='min-w-full border text-sm'>
+                    <thead>
+                      <tr className='border-b bg-slate-50 text-left'>
+                        <th className='p-2'>Host</th>
+                        <th className='p-2'>Date</th>
+                        <th className='p-2'>Start</th>
+                        <th className='p-2'>Wave</th>
+                        <th className='p-2'>Layout</th>
+                        <th className='p-2'>Assigned games</th>
+                        <th className='p-2'>Capacity</th>
+                        <th className='p-2'>Used</th>
+                        <th className='p-2'>Unused</th>
+                        <th className='p-2'>Utilization</th>
+                        <th className='p-2'>Optimization note</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(quality.field_utilization || []).filter((row: any) => row.surface_type === 'TURF_STADIUM').flatMap((row: any) => (row.wave_utilization || []).map((wave: any) => (
+                        <tr key={`${wave.wave_id}-${wave.start_time}`} className='border-b align-top'>
+                          <td className='p-2'>{wave.host_location || row.host_location_name}</td>
+                          <td className='p-2'>{formatDisplayDate(wave.date || row.date)}</td>
+                          <td className='p-2'>{wave.start_time}</td>
+                          <td className='p-2'>{wave.wave_name || `Wave ${wave.sequence_number}`}</td>
+                          <td className='p-2'>{wave.layout || wave.preferred_layout_code || '—'}</td>
+                          <td className='p-2'>{(wave.assigned_games || wave.games_placed || []).map((game: any) => `${game.home_team} vs ${game.away_team}`).join('; ') || '—'}</td>
+                          <td className='p-2'>{(wave.capacity_components || wave.available_field_components || []).map((c: any) => `${c.count} ${String(c.field_type || '').toLowerCase()}`).join(', ') || '—'}</td>
+                          <td className='p-2'>{(wave.used_components || []).map((c: any) => `${c.count} ${String(c.field_type || '').toLowerCase()}`).join(', ') || `${wave.used_component_count ?? wave.assigned_slots ?? 0}`}</td>
+                          <td className='p-2'>{(wave.unused_components || []).map((c: any) => `${c.count} ${String(c.field_type || '').toLowerCase()}`).join(', ') || `${wave.unused_component_count ?? wave.open_slots ?? 0}`}</td>
+                          <td className='p-2'>{wave.utilization_percent ?? 0}%</td>
+                          <td className='p-2'>{wave.optimization_note || 'UNUSED_COMPONENTS_REMAIN'}</td>
+                        </tr>
+                      )))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </section>
           </>
         )}

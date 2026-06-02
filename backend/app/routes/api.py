@@ -7201,6 +7201,27 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         proposed_total = max(proposed_total, int(proposed_turf_wave_usage_by_id.get(wave_id, 0) or 0))
         return sum(slot_counts.values()), sum(assigned_counts.values()), proposed_total, slot_counts, assigned_counts
 
+    def _turf_wave_layout_code(wave_id: uuid.UUID | None) -> str | None:
+        if not wave_id:
+            return None
+        wave = db.query(TurfWave).filter(TurfWave.id == wave_id).first()
+        return _normalize_configuration_name(wave.preferred_layout_code) if wave else None
+
+    def _turf_wave_remaining_counts_after_candidate(wave_id: uuid.UUID | None, candidate_size: str | None = None) -> dict[str, int]:
+        _capacity, _assigned_total, _proposed_total, slot_counts, assigned_counts = _turf_wave_total_snapshot(wave_id)
+        proposed_counts = _proposed_turf_wave_counts_by_size(wave_id)
+        used_counts = {
+            size: int(assigned_counts.get(size, 0) or 0) + int(proposed_counts.get(size, 0) or 0)
+            for size in FIELD_SIZE_ORDER
+        }
+        normalized_candidate_size = _normalize_field_size(candidate_size)
+        if normalized_candidate_size in used_counts:
+            used_counts[normalized_candidate_size] += 1
+        return {
+            size: max(int(slot_counts.get(size, 0) or 0) - int(used_counts.get(size, 0) or 0), 0)
+            for size in FIELD_SIZE_ORDER
+        }
+
     def _projected_unscheduled_game_demand_by_size(candidate_size: str | None = None) -> dict[str, int]:
         demand = {size: int(weekly_unscheduled_game_demand_by_size.get(size, 0) or 0) for size in FIELD_SIZE_ORDER}
         for proposal in plans:
@@ -7287,6 +7308,42 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             ):
                 return True
         return False
+
+    def _has_same_day_partial_two_large_wave(slot: GameSlot, *, exclude_wave_id: uuid.UUID | None = None, earlier_only: bool = False) -> bool:
+        if _normalize_field_size(slot.field_type) != FIELD_SIZE_LARGE:
+            return False
+        seen_wave_ids: set[uuid.UUID] = set()
+        for remaining_slot in remaining_slots:
+            if not remaining_slot.turf_wave_id or remaining_slot.turf_wave_id in seen_wave_ids:
+                continue
+            seen_wave_ids.add(remaining_slot.turf_wave_id)
+            if exclude_wave_id and remaining_slot.turf_wave_id == exclude_wave_id:
+                continue
+            if remaining_slot.host_location_id != slot.host_location_id or remaining_slot.slot_date != slot.slot_date:
+                continue
+            if earlier_only and remaining_slot.start_time >= slot.start_time:
+                continue
+            if _turf_wave_layout_code(remaining_slot.turf_wave_id) != 'TWO_LARGE':
+                continue
+            projection = _turf_wave_packing_projection(remaining_slot.turf_wave_id, None)
+            remaining = projection.get('remaining_after_candidate') or {}
+            if int(projection.get('current_used') or 0) == 1 and int(remaining.get(FIELD_SIZE_LARGE, 0) or 0) > 0:
+                return True
+        return False
+
+    def _compatible_current_division_lookahead_count(remaining_counts: dict[str, int], candidate_home_id: uuid.UUID, candidate_away_id: uuid.UUID, slot_date, slot_time) -> int:
+        # The scheduler applies hard constraints when the later game is actually placed.
+        # This conservative same-division lookahead only awards small soft bonuses when
+        # enough currently unscheduled teams could legally share this exact kickoff.
+        needed_same_size = int(remaining_counts.get(_normalize_field_size(required_field_type), 0) or 0)
+        if needed_same_size <= 0:
+            return 0
+        available_for_same_time = [
+            team_id for team_id in available_team_ids
+            if team_id not in {candidate_home_id, candidate_away_id}
+            and (str(team_id), slot_date, slot_time) not in team_time_occupied
+        ]
+        return min(needed_same_size, len(available_for_same_time) // 2)
 
     def _remaining_compatible_turf_slots_for_wave(required_size: str | None, exclude_wave_id: uuid.UUID | None = None) -> int:
         normalized_size = _normalize_field_size(required_size)
@@ -7623,6 +7680,63 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                             if current_wave_required_capacity > current_wave_required_assigned + current_wave_required_proposed:
                                 score += 1400
                                 reason_bits.append('fills existing compatible turf-wave component before another wave (+1400)')
+
+                            layout_code = _turf_wave_layout_code(selected_field_slot.turf_wave_id)
+                            utilization_before_components = wave_assigned + wave_proposed
+                            utilization_after_components = projected_assigned
+                            utilization_after_percent = int(round((utilization_after_components / max(wave_capacity, 1)) * 100)) if wave_capacity else 0
+                            remaining_after_candidate = _turf_wave_remaining_counts_after_candidate(selected_field_slot.turf_wave_id, normalized_required_size)
+                            same_division_lookahead = _compatible_current_division_lookahead_count(remaining_after_candidate, a, b, slot.slot_date, slot.start_time)
+                            if same_division_lookahead > 0:
+                                lookahead_bonus = same_division_lookahead * 25
+                                score += lookahead_bonus
+                                reason_bits.append(f'turf lookahead found compatible same-division game(s) for remaining components (+{lookahead_bonus})')
+
+                            if layout_code == 'ONE_MEDIUM_TWO_SMALL':
+                                if utilization_before_components == 2 and utilization_after_components == 3:
+                                    score += 40
+                                    reason_bits.append('fills final unused ONE_MEDIUM_TWO_SMALL component (+40)')
+                                elif utilization_before_components == 1 and utilization_after_components == 2:
+                                    score += 25
+                                    reason_bits.append('improves ONE_MEDIUM_TWO_SMALL utilization from 1/3 to 2/3 (+25)')
+                                elif utilization_before_components == 0 and utilization_after_components == 1:
+                                    score += 15
+                                    reason_bits.append('starts ONE_MEDIUM_TWO_SMALL utilization at 1/3 (+15)')
+                                if utilization_after_components == 1 and (packable_total >= 2 or same_division_lookahead > 0):
+                                    score -= 35
+                                    warning_bits.append('leaves ONE_MEDIUM_TWO_SMALL at 1/3 while compatible packing could reach at least 2/3 (-35)')
+                                elif utilization_after_components == 2 and (packable_total >= 3 or same_division_lookahead > 0):
+                                    score -= 20
+                                    warning_bits.append('leaves ONE_MEDIUM_TWO_SMALL at 2/3 while compatible packing could reach 3/3 (-20)')
+
+                            if layout_code == 'TWO_LARGE' and normalized_required_size == FIELD_SIZE_LARGE:
+                                if utilization_before_components == 1 and utilization_after_components == 2:
+                                    score += 40
+                                    reason_bits.append('fills second component of already-open TWO_LARGE wave (+40)')
+                                if selected_division_key == 'GIRLS_6_8' and utilization_after_components >= 2:
+                                    score += 25
+                                    reason_bits.append('pairs Girls 6-8 with another LARGE game in TWO_LARGE wave (+25)')
+                                if utilization_before_components == 1:
+                                    score += 35
+                                    reason_bits.append('reuses already-open TWO_LARGE wave with unused large component (+35)')
+                                same_day_partial_two_large_available = _has_same_day_partial_two_large_wave(selected_field_slot, exclude_wave_id=selected_field_slot.turf_wave_id)
+                                earlier_partial_two_large_available = _has_same_day_partial_two_large_wave(selected_field_slot, exclude_wave_id=selected_field_slot.turf_wave_id, earlier_only=True)
+                                if utilization_before_components == 0 and same_day_partial_two_large_available and selected_division_key == 'GIRLS_6_8':
+                                    score -= 35
+                                    warning_bits.append('Girls 6-8 opens new TWO_LARGE wave while compatible partial TWO_LARGE wave exists (-35)')
+                                if utilization_before_components == 0 and earlier_partial_two_large_available:
+                                    score -= 30
+                                    warning_bits.append('opens new TWO_LARGE wave while earlier compatible partial TWO_LARGE wave exists (-30)')
+                                    score -= 15
+                                    warning_bits.append('opens later TWO_LARGE wave while earlier partial TWO_LARGE wave is available (-15)')
+
+                            unused_component_penalty = max(wave_capacity - utilization_after_components, 0) * 10
+                            wave_utilization_score = utilization_after_percent - unused_component_penalty
+                            if utilization_after_components >= wave_capacity and wave_capacity > 0:
+                                wave_utilization_score += 40
+                            score += wave_utilization_score
+                            reason_bits.append(f'candidate turf wave utilization score {utilization_after_components}/{wave_capacity} components ({wave_utilization_score:+d})')
+
                             if wave_assigned + wave_proposed == 0:
                                 compatible_partial_wave_exists = _has_partially_used_compatible_turf_wave(normalized_required_size, exclude_wave_id=selected_field_slot.turf_wave_id)
                                 compatible_elsewhere = _remaining_compatible_turf_slots_for_wave(normalized_required_size, exclude_wave_id=selected_field_slot.turf_wave_id)
@@ -13085,21 +13199,44 @@ def _build_turf_stadium_utilization_diagnostics(db: Session, season_id: uuid.UUI
         optimization_warnings = []
         if capacity and 0 < assigned < capacity:
             optimization_warnings.append('Partial turf wave utilization: unused components remain available in this wave.')
+        layout_code = _normalize_configuration_name(wave.preferred_layout_code)
+        used_components = _component_count_items(placed_counts)
+        unused_components = _component_count_items(unused_counts)
+        optimization_note = 'FULLY_UTILIZED' if capacity and assigned == capacity else 'UNUSED_COMPONENTS_REMAIN'
+        if capacity and 0 < assigned < capacity:
+            if layout_code == 'ONE_MEDIUM_TWO_SMALL':
+                optimization_note = 'PARTIALLY_USED_ONE_MEDIUM_TWO_SMALL'
+            elif layout_code == 'TWO_LARGE':
+                optimization_note = 'PARTIALLY_USED_TWO_LARGE'
+            elif not unused_components:
+                optimization_note = 'NO_COMPATIBLE_GAME_AVAILABLE'
+        elif capacity and assigned == 0:
+            optimization_note = 'NO_COMPATIBLE_GAME_AVAILABLE'
+
         wave_row = {
             'wave_id': str(wave.id),
             'sequence_number': wave.sequence_number,
             'wave_intent': wave.wave_intent,
             'layout': wave.preferred_layout_code,
             'preferred_layout_code': wave.preferred_layout_code,
+            'host_location': host.name,
+            'date': wave.host_date.isoformat(),
             'start_time': str(wave.start_time),
             'end_time': str(wave.end_time),
+            'wave_name': f'Wave {wave.sequence_number}',
             'available_field_components': _component_count_items(available_counts),
+            'capacity_components': _component_count_items(available_counts),
+            'used_components': used_components,
             'games_placed': placed_games,
-            'unused_components': _component_count_items(unused_counts),
+            'assigned_games': placed_games,
+            'unused_components': unused_components,
+            'optimization_note': optimization_note,
             'optimization_warnings': optimization_warnings,
             'capacity_slots': capacity,
             'assigned_slots': assigned,
+            'used_component_count': assigned,
             'open_slots': max(capacity - assigned, 0),
+            'unused_component_count': max(capacity - assigned, 0),
             'utilization_percent': utilization,
             'status': _quality_status(assigned == capacity, warning=assigned > 0),
         }
@@ -13129,8 +13266,23 @@ def _build_turf_stadium_utilization_diagnostics(db: Session, season_id: uuid.UUI
         if len(wave_utilization) > 1:
             data['wave_2_utilization'] = wave_utilization[1]['utilization_percent']
         partial_wave_warnings = []
-        for wave_row in wave_utilization:
+        earlier_partial_two_large = False
+        for wave_row in sorted(wave_utilization, key=lambda row: (str(row.get('start_time') or ''), int(row.get('sequence_number') or 0))):
+            if (
+                wave_row.get('layout') == 'TWO_LARGE'
+                and int(wave_row.get('assigned_slots') or 0) > 0
+                and earlier_partial_two_large
+            ):
+                wave_row['optimization_note'] = 'OPENED_NEW_WAVE_WHILE_PARTIAL_AVAILABLE'
+                warnings = list(wave_row.get('optimization_warnings') or [])
+                warnings.append('A later TWO_LARGE wave has games while an earlier TWO_LARGE wave still has an unused large component.')
+                wave_row['optimization_warnings'] = warnings
             partial_wave_warnings.extend(wave_row.get('optimization_warnings') or [])
+            if (
+                wave_row.get('layout') == 'TWO_LARGE'
+                and 0 < int(wave_row.get('assigned_slots') or 0) < int(wave_row.get('capacity_slots') or 0)
+            ):
+                earlier_partial_two_large = True
         data['optimization_warnings'] = partial_wave_warnings
         has_partial_wave = any(0 < int(row.get('assigned_slots') or 0) < int(row.get('capacity_slots') or 0) for row in wave_utilization)
         data['status'] = _quality_status(
