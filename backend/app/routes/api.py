@@ -5617,6 +5617,354 @@ def build_schedule_quality_report(db: Session, season_id: uuid.UUID) -> dict[str
     return {'overall_health': overall_health, 'hard_errors': hard_errors, 'warnings': warnings, 'metrics': metrics}
 
 
+def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled: bool = True) -> dict[str, object]:
+    diagnostics: dict[str, object] = {
+        'section': 'Turf Wave Compaction',
+        'compaction_enabled': bool(enabled),
+        'moves_evaluated': 0,
+        'moves_accepted': 0,
+        'moves_rejected': 0,
+        'waves_fully_utilized_before': 0,
+        'waves_fully_utilized_after': 0,
+        'partially_used_one_medium_two_small_waves_before': 0,
+        'partially_used_one_medium_two_small_waves_after': 0,
+        'partially_used_two_large_waves_before': 0,
+        'partially_used_two_large_waves_after': 0,
+        'active_turf_waves_used_before': 0,
+        'active_turf_waves_used_after': 0,
+        'rollback_occurred': False,
+        'accepted_moves': [],
+        'rejected_moves': [],
+        'warnings': [],
+    }
+    if not enabled:
+        return diagnostics
+
+    def _division_label_for_game(game: Game | None) -> str | None:
+        division = game.home_team.division if game and game.home_team else None
+        return f'{division.division_group or ""} {division.name or ""}'.strip() if division else None
+
+    def _division_sort_for_game(game: Game | None) -> int:
+        division = game.home_team.division if game and game.home_team else None
+        order = {canonical_division_id(group, name): idx for idx, (group, name) in enumerate(_auto_schedule_division_order(db))}
+        return order.get(canonical_division_id_from_division(division), 999) if division else 999
+
+    def _is_girls_6_8(game: Game | None) -> bool:
+        division = game.home_team.division if game and game.home_team else None
+        return normalized_division_key(getattr(division, 'division_group', None), getattr(division, 'name', None)) in {'girls_6_8', 'girls_6th_7th_8th'}
+
+    def _wave_label(wave: TurfWave | None) -> str | None:
+        if not wave:
+            return None
+        return f'{wave.host_date.isoformat()} #{wave.sequence_number} {wave.preferred_layout_code}'
+
+    def _slot_label(slot: GameSlot | None) -> str | None:
+        return slot.field_instance.field_name if slot and slot.field_instance else None
+
+    def _game_teams(game: Game | None) -> str | None:
+        if not game:
+            return None
+        return f'{game.home_team.name if game.home_team else game.home_team_id} vs {game.away_team.name if game.away_team else game.away_team_id}'
+
+    def _wave_rows() -> tuple[dict[uuid.UUID, TurfWave], dict[uuid.UUID, list[GameSlot]]]:
+        wave_ids = [
+            row[0]
+            for row in db.query(GameSlot.turf_wave_id).filter(
+                GameSlot.season_id == season_id,
+                GameSlot.turf_wave_id.is_not(None),
+            ).distinct().all()
+        ]
+        waves = {wave.id: wave for wave in db.query(TurfWave).filter(TurfWave.id.in_(wave_ids)).all()} if wave_ids else {}
+        slots_by_wave = {wave_id: [] for wave_id in waves}
+        if waves:
+            for slot in db.query(GameSlot).filter(GameSlot.season_id == season_id, GameSlot.turf_wave_id.in_(list(waves))).all():
+                slots_by_wave.setdefault(slot.turf_wave_id, []).append(slot)
+        return waves, slots_by_wave
+
+    def _assigned_counts(slots: list[GameSlot]) -> dict[str, int]:
+        counts = {size: 0 for size in FIELD_SIZE_ORDER}
+        for slot in slots:
+            if slot.assigned_game_id:
+                size = _normalize_field_size(slot.field_type)
+                if size in counts:
+                    counts[size] += 1
+        return counts
+
+    def _layout_counts(wave: TurfWave) -> dict[str, int]:
+        metadata = _turf_configuration_metadata(wave.preferred_layout_code) or {}
+        return {size: int((metadata.get('counts') or {}).get(size, 0) or 0) for size in FIELD_SIZE_ORDER}
+
+    def _metrics() -> dict[str, int]:
+        waves, slots_by_wave = _wave_rows()
+        metrics = {
+            'waves_fully_utilized': 0,
+            'partially_used_one_medium_two_small_waves': 0,
+            'partially_used_two_large_waves': 0,
+            'active_turf_waves_used': 0,
+        }
+        for wave_id, wave in waves.items():
+            slots = slots_by_wave.get(wave_id, [])
+            assigned = _assigned_counts(slots)
+            total_assigned = sum(assigned.values())
+            capacity = _layout_counts(wave)
+            total_capacity = sum(capacity.values())
+            if total_assigned > 0:
+                metrics['active_turf_waves_used'] += 1
+            if total_capacity > 0 and total_assigned == total_capacity and all(assigned[size] == capacity[size] for size in FIELD_SIZE_ORDER):
+                metrics['waves_fully_utilized'] += 1
+            layout = _normalize_configuration_name(wave.preferred_layout_code)
+            if layout == 'ONE_MEDIUM_TWO_SMALL' and total_assigned > 0 and total_assigned < total_capacity:
+                metrics['partially_used_one_medium_two_small_waves'] += 1
+            if layout == 'TWO_LARGE' and total_assigned > 0 and total_assigned < total_capacity:
+                metrics['partially_used_two_large_waves'] += 1
+        return metrics
+
+    def _team_has_time_conflict(game: Game, target: GameSlot) -> bool:
+        team_ids = {game.home_team_id, game.away_team_id}
+        conflict = db.query(Game.id).join(Game.status).filter(
+            Game.season_id == season_id,
+            Game.id != game.id,
+            GameStatus.code != 'UNSCHEDULED',
+            Game.game_date == target.slot_date,
+            Game.kickoff_time == target.start_time,
+            or_(Game.home_team_id.in_(team_ids), Game.away_team_id.in_(team_ids)),
+        ).first()
+        return conflict is not None
+
+    def _field_has_time_conflict(game: Game, target: GameSlot) -> bool:
+        conflict = db.query(GameSlot.id).filter(
+            GameSlot.id != target.id,
+            GameSlot.assigned_game_id.is_not(None),
+            GameSlot.assigned_game_id != game.id,
+            GameSlot.field_instance_id == target.field_instance_id,
+            GameSlot.slot_date == target.slot_date,
+            GameSlot.start_time == target.start_time,
+        ).first()
+        return conflict is not None
+
+    def _host_owner_category(game: Game, slot: GameSlot | None) -> str:
+        host_org_id = slot.host_location.organization_id if slot and slot.host_location else None
+        if host_org_id and game.home_team and host_org_id == game.home_team.organization_id:
+            return 'HOME'
+        if host_org_id and game.away_team and host_org_id == game.away_team.organization_id:
+            return 'AWAY'
+        return 'NEUTRAL'
+
+    def _breaks_host_balance(game: Game, source: GameSlot, target: GameSlot) -> bool:
+        source_category = _host_owner_category(game, source)
+        target_category = _host_owner_category(game, target)
+        if source_category == 'HOME' and target_category != 'HOME':
+            return True
+        if source_category in {'HOME', 'AWAY'} and target_category == 'NEUTRAL':
+            return True
+        return False
+
+    def _breaks_doubleheader(game: Game, target: GameSlot) -> bool:
+        for team_id in (game.home_team_id, game.away_team_id):
+            games = db.query(Game).join(Game.status).filter(
+                Game.season_id == season_id,
+                GameStatus.code != 'UNSCHEDULED',
+                Game.game_date == game.game_date,
+                or_(Game.home_team_id == team_id, Game.away_team_id == team_id),
+            ).all()
+            if len(games) <= 1:
+                continue
+            starts = sorted(target.start_time if row.id == game.id else row.kickoff_time for row in games)
+            if any(starts[i] == starts[i - 1] for i in range(1, len(starts))):
+                return True
+            if len(starts) == 2:
+                delta = abs((datetime.combine(date.today(), starts[1]) - datetime.combine(date.today(), starts[0])).total_seconds())
+                if delta > 7200:
+                    return True
+        return False
+
+    def _reject(game: Game | None, source: GameSlot | None, target: GameSlot | None, reason: str) -> None:
+        diagnostics['moves_rejected'] = int(diagnostics['moves_rejected']) + 1
+        rejected = diagnostics['rejected_moves']
+        if isinstance(rejected, list) and len(rejected) < 100:
+            rejected.append({
+                'game_id': str(game.id) if game else None,
+                'division': _division_label_for_game(game),
+                'teams': _game_teams(game),
+                'original_host': source.host_location.name if source and source.host_location else None,
+                'original_time': source.start_time.isoformat() if source else None,
+                'original_field': _slot_label(source),
+                'original_wave': _wave_label(source.turf_wave if source else None),
+                'new_host': target.host_location.name if target and target.host_location else None,
+                'new_time': target.start_time.isoformat() if target else None,
+                'new_field': _slot_label(target),
+                'new_wave': _wave_label(target.turf_wave if target else None),
+                'reason': reason,
+            })
+
+    def _score_move(game: Game, source: GameSlot, target: GameSlot, target_wave: TurfWave, source_wave: TurfWave | None) -> tuple[int, list[str]]:
+        diagnostics['moves_evaluated'] = int(diagnostics['moves_evaluated']) + 1
+        if target.assigned_game_id or str(target.status or '').upper() != 'OPEN':
+            _reject(game, source, target, 'FIELD_TIME_CONFLICT'); return -10_000, []
+        if source.id == target.id or source.slot_date != target.slot_date or game.game_date != target.slot_date:
+            _reject(game, source, target, 'NO_NET_WAVE_IMPROVEMENT'); return -10_000, []
+        required_size = _required_field_type_for_division(game.home_team.division if game.home_team else None)
+        if _normalize_field_size(target.field_type) != required_size:
+            _reject(game, source, target, 'WRONG_FIELD_SIZE'); return -10_000, []
+        if _field_has_time_conflict(game, target):
+            _reject(game, source, target, 'FIELD_TIME_CONFLICT'); return -10_000, []
+        if _team_has_time_conflict(game, target):
+            _reject(game, source, target, 'TEAM_TIME_CONFLICT'); return -10_000, []
+        if _breaks_doubleheader(game, target):
+            _reject(game, source, target, 'BREAKS_DOUBLEHEADER_BACK_TO_BACK'); return -10_000, []
+        if target.start_time > source.start_time and _division_sort_for_game(game) <= 4:
+            _reject(game, source, target, 'YOUNGER_DIVISION_MOVED_TOO_LATE'); return -10_000, []
+        if _breaks_host_balance(game, source, target):
+            _reject(game, source, target, 'WORSENS_HOST_BALANCE'); return -10_000, []
+
+        waves, slots_by_wave = _wave_rows()
+        before_active = _metrics()['active_turf_waves_used']
+        target_slots = slots_by_wave.get(target_wave.id, [])
+        source_slots = slots_by_wave.get(source.turf_wave_id, []) if source.turf_wave_id else []
+        target_after_assigned = sum(1 for slot in target_slots if slot.assigned_game_id) + 1
+        target_capacity = sum(_layout_counts(target_wave).values())
+        source_after_assigned = max(0, sum(1 for slot in source_slots if slot.assigned_game_id) - 1) if source.turf_wave_id != target_wave.id else sum(1 for slot in source_slots if slot.assigned_game_id)
+        if target.start_time > source.start_time and source_after_assigned > 0:
+            _reject(game, source, target, 'NO_NET_WAVE_IMPROVEMENT'); return -10_000, []
+        score = 0
+        reasons: list[str] = []
+        layout = _normalize_configuration_name(target_wave.preferred_layout_code)
+        if layout == 'ONE_MEDIUM_TWO_SMALL' and target_after_assigned == target_capacity == 3:
+            score += 100; reasons.append('FILLED_ONE_MEDIUM_TWO_SMALL_TO_3_OF_3')
+        if layout == 'TWO_LARGE' and target_after_assigned == target_capacity == 2:
+            score += 100; reasons.append('FILLED_TWO_LARGE_TO_2_OF_2')
+            if source_wave and source_wave.start_time > target_wave.start_time:
+                reasons.append('REUSED_EARLIER_PARTIAL_TWO_LARGE')
+        if source_wave and source_after_assigned == 0 and source_wave.start_time >= target_wave.start_time:
+            score += 75; reasons.append('ELIMINATED_LATER_PARTIAL_WAVE')
+        if source_after_assigned == 0 and before_active > 0:
+            score += 50
+        if target.start_time < source.start_time:
+            score += 25
+        if target.start_time > source.start_time and _division_sort_for_game(game) <= 4:
+            score -= 50
+        if _breaks_host_balance(game, source, target):
+            score -= 75
+        if _breaks_doubleheader(game, target):
+            score -= 100
+        if score <= 0:
+            _reject(game, source, target, 'NO_NET_WAVE_IMPROVEMENT'); return -10_000, []
+        return score, reasons or ['NO_NET_WAVE_IMPROVEMENT']
+
+    before = _metrics()
+    for key, value in before.items():
+        diagnostics[f'{key}_before'] = value
+
+    snapshots: list[dict[str, object]] = []
+    max_moves = 50
+    while int(diagnostics['moves_accepted']) < max_moves:
+        waves, slots_by_wave = _wave_rows()
+        best: tuple[int, Game, GameSlot, GameSlot, TurfWave, TurfWave | None, list[str]] | None = None
+        ordered_waves = sorted(waves.values(), key=lambda w: (w.host_date, w.start_time, w.sequence_number, str(w.host_location_id)))
+        for target_wave in ordered_waves:
+            layout = _normalize_configuration_name(target_wave.preferred_layout_code)
+            target_slots = slots_by_wave.get(target_wave.id, [])
+            counts = _assigned_counts(target_slots)
+            target_size: str | None = None
+            if layout == 'ONE_MEDIUM_TWO_SMALL' and counts[FIELD_SIZE_MEDIUM] == 1 and counts[FIELD_SIZE_SMALL] == 1:
+                target_size = FIELD_SIZE_SMALL
+            elif layout == 'TWO_LARGE' and counts[FIELD_SIZE_LARGE] == 1:
+                target_size = FIELD_SIZE_LARGE
+            if not target_size:
+                continue
+            open_targets = [slot for slot in target_slots if not slot.assigned_game_id and str(slot.status or '').upper() == 'OPEN' and _normalize_field_size(slot.field_type) == target_size]
+            for target in open_targets:
+                assigned_sources = db.query(GameSlot).join(GameSlot.assigned_game).filter(
+                    GameSlot.season_id == season_id,
+                    GameSlot.id != target.id,
+                    GameSlot.slot_date == target.slot_date,
+                    GameSlot.assigned_game_id.is_not(None),
+                    GameSlot.field_type == target_size,
+                ).all()
+                for source in assigned_sources:
+                    game = source.assigned_game
+                    if not game or source.turf_wave_id == target_wave.id:
+                        continue
+                    source_wave = source.turf_wave
+                    score, reasons = _score_move(game, source, target, target_wave, source_wave)
+                    if score <= 0:
+                        continue
+                    if target_size == FIELD_SIZE_LARGE and _is_girls_6_8(game):
+                        score += 20
+                    if source_wave and source_wave.host_date == target_wave.host_date and source_wave.start_time > target_wave.start_time:
+                        score += 10
+                    candidate = (score, game, source, target, target_wave, source_wave, reasons)
+                    if best is None or candidate[0] > best[0]:
+                        best = candidate
+        if not best:
+            break
+        _score, game, source, target, target_wave, source_wave, reasons = best
+        snapshots.append({
+            'game': game,
+            'source': source,
+            'target': target,
+            'game_host_location_id': game.host_location_id,
+            'game_field_instance_id': game.field_instance_id,
+            'game_date': game.game_date,
+            'game_time': game.kickoff_time,
+            'source_assigned_game_id': source.assigned_game_id,
+            'source_status': source.status,
+            'target_assigned_game_id': target.assigned_game_id,
+            'target_status': target.status,
+        })
+        accepted = diagnostics['accepted_moves']
+        if isinstance(accepted, list):
+            accepted.append({
+                'game_id': str(game.id),
+                'division': _division_label_for_game(game),
+                'teams': _game_teams(game),
+                'original_host': source.host_location.name if source.host_location else None,
+                'original_time': source.start_time.isoformat(),
+                'original_field': _slot_label(source),
+                'original_wave': _wave_label(source_wave),
+                'new_host': target.host_location.name if target.host_location else None,
+                'new_time': target.start_time.isoformat(),
+                'new_field': _slot_label(target),
+                'new_wave': _wave_label(target_wave),
+                'reason': reasons[0],
+                'reasons': reasons,
+            })
+        target.assigned_game_id = game.id
+        target.status = 'BOOKED'
+        source.assigned_game_id = None
+        source.status = 'OPEN'
+        game.host_location_id = target.host_location_id
+        game.field_instance_id = target.field_instance_id
+        game.game_date = target.slot_date
+        game.kickoff_time = target.start_time
+        diagnostics['moves_accepted'] = int(diagnostics['moves_accepted']) + 1
+        db.flush()
+
+    validation = build_schedule_quality_report(db, season_id)
+    if snapshots and validation.get('hard_errors'):
+        for snapshot in reversed(snapshots):
+            game = snapshot['game']; source = snapshot['source']; target = snapshot['target']
+            game.host_location_id = snapshot['game_host_location_id']
+            game.field_instance_id = snapshot['game_field_instance_id']
+            game.game_date = snapshot['game_date']
+            game.kickoff_time = snapshot['game_time']
+            source.assigned_game_id = snapshot['source_assigned_game_id']
+            source.status = snapshot['source_status']
+            target.assigned_game_id = snapshot['target_assigned_game_id']
+            target.status = snapshot['target_status']
+        db.flush()
+        diagnostics['rollback_occurred'] = True
+        diagnostics['warnings'].append('Turf wave compaction attempted but rolled back because validation failed.')
+        diagnostics['validation_errors'] = validation.get('hard_errors')
+        diagnostics['accepted_moves'] = []
+        diagnostics['moves_accepted'] = 0
+
+    after = _metrics()
+    for key, value in after.items():
+        diagnostics[f'{key}_after'] = value
+    return diagnostics
+
+
 @router.post('/seasons/{season_id}/publish-schedule', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def publish_schedule(season_id: uuid.UUID, db: Session = Depends(get_db)):
     season = db.query(Season).filter(Season.id == season_id).first()
@@ -11460,8 +11808,35 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         required_games_missing = []
     _log_auto_schedule_result(auto_schedule_diagnostics, logging.WARNING if total_games_created == 0 else logging.INFO)
 
-    # Intentionally do not run post-schedule optimization automatically.
-    # Optimization is executed manually via /manual-schedule-builder/optimize-schedule.
+    pre_compaction_expected_games_total = int(auto_schedule_diagnostics.get('expected_games_total') or 0)
+    pre_compaction_committed_games_count = int(auto_schedule_diagnostics.get('committed_games_count') or 0)
+    pre_compaction_scheduled_games_count = int(auto_schedule_diagnostics.get('existing_scheduled_games_total') or 0)
+    pre_compaction_failed_validation_total = int(auto_schedule_diagnostics.get('failed_validation_count') or 0)
+    pre_compaction_required_missing_total = sum(int(row.get('missing_games') or 0) for row in required_games_missing)
+    pre_compaction_division_week_counts_complete = all(
+        int(row.get('generated_game_groups') or 0) == int(row.get('expected_games') or 0)
+        and int(row.get('existing_scheduled_games') or 0) == int(row.get('expected_games') or 0)
+        for row in (auto_schedule_diagnostics.get('generated_game_groups_by_division_week') or [])
+    )
+    pre_compaction_complete = (
+        pre_compaction_expected_games_total == pre_compaction_committed_games_count
+        and pre_compaction_expected_games_total == pre_compaction_scheduled_games_count
+        and pre_compaction_required_missing_total == 0
+        and pre_compaction_failed_validation_total == 0
+        and pre_compaction_division_week_counts_complete
+        and not validation_errors
+    )
+    turf_wave_compaction = _run_turf_wave_compaction_pass(
+        db,
+        season_id,
+        enabled=bool(pre_compaction_complete and not dry_run),
+    )
+    auto_schedule_diagnostics['turf_wave_compaction'] = turf_wave_compaction
+    if turf_wave_compaction.get('rollback_occurred'):
+        rollback_warning = 'Turf wave compaction attempted but rolled back because validation failed.'
+        warnings.append(rollback_warning)
+        validation_warnings.append({'code': 'turf_wave_compaction_rollback', 'message': rollback_warning})
+
     if dry_run:
         db.rollback()
     else:
