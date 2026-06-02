@@ -1,6 +1,6 @@
 import unittest
 import uuid
-from datetime import date, time
+from datetime import date, time, timedelta
 from types import SimpleNamespace
 
 from sqlalchemy import create_engine
@@ -320,7 +320,11 @@ class AutoFillPreviewTest(unittest.TestCase):
             host_location_id=self.host.id,
             hosting_availability_id=availability.id,
             week_id=self.week2.id,
-            host_date=self.week2.start_date,
+            # Deliberately mismatch the persisted TurfWave host_date from the
+            # committed scheduled game's date. Candidate discovery must scan by
+            # the detected partial wave date from the committed schedule/export
+            # collection, not by an isolated turf-wave row.
+            host_date=self.week2.start_date + timedelta(days=1),
             sequence_number=1,
             wave_intent='SMALL_MEDIUM',
             preferred_layout_code='ONE_MEDIUM_TWO_SMALL',
@@ -382,6 +386,7 @@ class AutoFillPreviewTest(unittest.TestCase):
 
         detail = compaction['partial_wave_details'][0]
         self.assertEqual(compaction['total_partial_waves_found'], 1)
+        self.assertEqual(compaction['committed_scheduled_games_collection_count'], 2)
         self.assertGreaterEqual(detail['same_date_games_scanned'], 2)
         self.assertEqual(detail['same_date_matching_field_size_games_found'], 1)
         self.assertEqual(detail['preliminary_candidates_created'], 1)
