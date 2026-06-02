@@ -55,6 +55,8 @@ export default function ManualScheduleBuilderPage() {
   const canSave = Boolean(seasonId && weekId && divisionId && homeTeamId && awayTeamId && slotId);
   const hostLocationVerification = autoScheduleDiagnostics?.host_location_vs_home_team_verification || autoScheduleDiagnostics?.auto_schedule_diagnostics?.host_location_vs_home_team_verification || null;
   const hostOwnerAwayGames = hostLocationVerification?.host_owner_is_away_games || [];
+  const turfWaveCompactionDiagnostics = autoScheduleDiagnostics?.turf_wave_compaction || autoScheduleDiagnostics?.auto_schedule_diagnostics?.turf_wave_compaction || null;
+  const turfWaveCompactionRejectedMoves = turfWaveCompactionDiagnostics?.rejected_moves || [];
 
   const getWeekOptionLabel = (week: any) => {
     const baseLabel = week.label || `Week ${week.week_number}`;
@@ -565,6 +567,70 @@ export default function ManualScheduleBuilderPage() {
                 </div>
               )}
             </div>
+          </section> : null}
+          {turfWaveCompactionDiagnostics ? <section className='rounded border border-slate-200 bg-white p-3'>
+            <h3 className='font-semibold'>Turf Wave Compaction Rejection Diagnostics</h3>
+            <div className='mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-3'>
+              <div>Enabled: <span className='font-semibold'>{String(turfWaveCompactionDiagnostics.compaction_enabled)}</span></div>
+              <div>Started: <span className='font-semibold'>{String(turfWaveCompactionDiagnostics.compaction_pass_started)}</span></div>
+              <div>Completed: <span className='font-semibold'>{String(turfWaveCompactionDiagnostics.compaction_pass_completed)}</span></div>
+              {turfWaveCompactionDiagnostics.compaction_skipped_reason ? <div>Skipped reason: <span className='font-semibold'>{turfWaveCompactionDiagnostics.compaction_skipped_reason}</span></div> : null}
+              <div>Partial waves found: <span className='font-semibold'>{turfWaveCompactionDiagnostics.total_partial_waves_found ?? 0}</span></div>
+              <div>ONE_MEDIUM_TWO_SMALL partials: <span className='font-semibold'>{turfWaveCompactionDiagnostics.partial_ONE_MEDIUM_TWO_SMALL_waves_found ?? 0}</span></div>
+              <div>TWO_LARGE partials: <span className='font-semibold'>{turfWaveCompactionDiagnostics.partial_TWO_LARGE_waves_found ?? 0}</span></div>
+              <div>Candidate moves evaluated: <span className='font-semibold'>{turfWaveCompactionDiagnostics.total_candidate_moves_evaluated ?? turfWaveCompactionDiagnostics.moves_evaluated ?? 0}</span></div>
+              <div>Accepted moves: <span className='font-semibold'>{turfWaveCompactionDiagnostics.accepted_moves_count ?? turfWaveCompactionDiagnostics.moves_accepted ?? 0}</span></div>
+              <div>Rejected moves: <span className='font-semibold'>{turfWaveCompactionDiagnostics.rejected_moves_count ?? turfWaveCompactionDiagnostics.moves_rejected ?? 0}</span></div>
+              <div>Waves improved: <span className='font-semibold'>{turfWaveCompactionDiagnostics.waves_improved_count ?? 0}</span></div>
+              <div>Rollback: <span className='font-semibold'>{String(turfWaveCompactionDiagnostics.rollback_occurred)}</span>{turfWaveCompactionDiagnostics.rollback_reason ? ` (${turfWaveCompactionDiagnostics.rollback_reason})` : ''}</div>
+            </div>
+            {Object.keys(turfWaveCompactionDiagnostics.rejected_moves_by_reason || {}).length ? <div className='mt-2'>
+              <div className='font-medium'>Rejected moves by reason</div>
+              <ul className='list-inside list-disc'>{Object.entries(turfWaveCompactionDiagnostics.rejected_moves_by_reason || {}).map(([reason, count]: any) => <li key={reason}>{reason}: {count}</li>)}</ul>
+            </div> : null}
+            {(turfWaveCompactionDiagnostics.partial_wave_details || turfWaveCompactionDiagnostics.partial_waves || []).length ? <details className='mt-3 rounded border border-slate-200 p-2' open>
+              <summary className='cursor-pointer font-medium'>Partial wave details</summary>
+              <div className='mt-2 overflow-x-auto'>
+                <table className='min-w-full border text-xs'>
+                  <thead><tr className='bg-slate-100'><th className='border p-1 text-left'>Date</th><th className='border p-1 text-left'>Host</th><th className='border p-1 text-left'>Start</th><th className='border p-1 text-left'>Wave</th><th className='border p-1 text-left'>Layout</th><th className='border p-1 text-left'>Used</th><th className='border p-1 text-left'>Unused</th><th className='border p-1 text-right'>Utilization</th><th className='border p-1 text-left'>Needed</th><th className='border p-1 text-right'>Candidates</th><th className='border p-1 text-right'>Accepted</th><th className='border p-1 text-right'>Rejected</th><th className='border p-1 text-left'>Pattern diagnostics</th><th className='border p-1 text-left'>No candidate reason</th></tr></thead>
+                  <tbody>{(turfWaveCompactionDiagnostics.partial_wave_details || turfWaveCompactionDiagnostics.partial_waves || []).map((wave: any) => <tr key={wave.wave_id || `${wave.date}-${wave.host_location}-${wave.start_time}`}>
+                    <td className='border p-1'>{wave.date ? formatDisplayDate(wave.date) : 'N/A'}</td>
+                    <td className='border p-1'>{wave.host_location || 'N/A'}</td>
+                    <td className='border p-1'>{wave.start_time ? formatDisplayTime(wave.start_time) : 'N/A'}</td>
+                    <td className='border p-1'>{wave.wave_name || 'N/A'}</td>
+                    <td className='border p-1'>{wave.layout || 'N/A'}</td>
+                    <td className='border p-1'>{(wave.used_components || []).map((c: any) => `${c.count} ${String(c.field_type || '').toLowerCase()}`).join(', ') || 'none'}</td>
+                    <td className='border p-1'>{(wave.unused_components || []).map((c: any) => `${c.count} ${String(c.field_type || '').toLowerCase()}`).join(', ') || 'none'}</td>
+                    <td className='border p-1 text-right'>{wave.utilization_percent ?? 0}%</td>
+                    <td className='border p-1'>{(wave.needed_field_sizes || []).join(', ') || 'N/A'}</td>
+                    <td className='border p-1 text-right'>{wave.candidate_games_found_count ?? 0}</td>
+                    <td className='border p-1 text-right'>{wave.accepted_candidate_game_count ?? 0}</td>
+                    <td className='border p-1 text-right'>{wave.rejected_candidate_game_count ?? 0}</td>
+                    <td className='border p-1'>Small exists: {String(wave.small_games_exist_elsewhere_same_date ?? 'n/a')}; small considered: {wave.small_games_considered ?? 0}; paired swap: {String(wave.paired_swap_considered)}; large exists: {String(wave.large_games_exist_elsewhere_same_date ?? 'n/a')}; large considered: {wave.large_games_considered ?? 0}; Girls 6-8 considered: {wave.girls_6_8_games_considered ?? 0}; eliminates later TWO_LARGE: {String(wave.moving_game_would_eliminate_later_partial_two_large_wave)}; doubleheader blocked: {String(wave.doubleheader_rules_blocked_move)}</td>
+                    <td className='border p-1'>{wave.no_candidate_reason || '—'}</td>
+                  </tr>)}</tbody>
+                </table>
+              </div>
+            </details> : null}
+            {turfWaveCompactionRejectedMoves.length ? <details className='mt-3 rounded border border-slate-200 p-2' open={turfWaveCompactionRejectedMoves.length <= 10}>
+              <summary className='cursor-pointer font-medium'>Rejected move details ({turfWaveCompactionRejectedMoves.length})</summary>
+              <div className='mt-2 overflow-x-auto'>
+                <table className='min-w-full border text-xs'>
+                  <thead><tr className='bg-slate-100'><th className='border p-1 text-left'>Game</th><th className='border p-1 text-left'>Division</th><th className='border p-1 text-left'>Current</th><th className='border p-1 text-left'>Target</th><th className='border p-1 text-left'>Needed size</th><th className='border p-1 text-left'>Reason</th><th className='border p-1 text-left'>Detail</th><th className='border p-1 text-left'>Hard?</th><th className='border p-1 text-left'>Score</th></tr></thead>
+                  <tbody>{turfWaveCompactionRejectedMoves.map((move: any, idx: number) => <tr key={`${move.candidate_game_id || move.game_id}-${idx}`}>
+                    <td className='border p-1'>{move.home_team || 'TBD'} vs {move.away_team || 'TBD'}<br />{move.candidate_game_id || move.game_id}</td>
+                    <td className='border p-1'>{move.division || 'N/A'}</td>
+                    <td className='border p-1'>{move.current_date ? formatDisplayDate(move.current_date) : 'N/A'} {move.current_start_time ? formatDisplayTime(move.current_start_time) : ''}<br />{move.current_host_location || move.original_host || 'N/A'} · {move.current_field || move.original_field || 'N/A'}<br />{move.current_wave || move.original_wave || 'N/A'}</td>
+                    <td className='border p-1'>{move.target_start_time ? formatDisplayTime(move.target_start_time) : 'N/A'}<br />{move.target_host_location || move.new_host || 'N/A'} · {move.target_field || move.new_field || 'N/A'}<br />{move.target_wave || move.new_wave || 'N/A'} · {move.target_layout || 'N/A'}</td>
+                    <td className='border p-1'>{move.needed_field_size || 'N/A'}</td>
+                    <td className='border p-1'>{move.rejection_reason || move.reason || 'UNKNOWN_REJECTION_REASON'}</td>
+                    <td className='border p-1'>{move.rejection_detail || '—'}</td>
+                    <td className='border p-1'>{String(move.hard_constraint_failure)}</td>
+                    <td className='border p-1'>Before {move.score_before ?? 'n/a'} / After {move.score_after ?? 'n/a'} / Δ {move.net_score_delta ?? 'n/a'}</td>
+                  </tr>)}</tbody>
+                </table>
+              </div>
+            </details> : null}
           </section> : null}
           <div>
             <div className='font-semibold'>3. Required games still missing: {(autoScheduleDiagnostics.required_games_still_missing || []).length}</div>

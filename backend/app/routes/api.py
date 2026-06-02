@@ -5619,11 +5619,25 @@ def build_schedule_quality_report(db: Session, season_id: uuid.UUID) -> dict[str
 
 def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled: bool = True) -> dict[str, object]:
     diagnostics: dict[str, object] = {
-        'section': 'Turf Wave Compaction',
+        'section': 'Turf Wave Compaction Rejection Diagnostics',
+        'legacy_section': 'Turf Wave Compaction',
         'compaction_enabled': bool(enabled),
+        'compaction_pass_started': False,
+        'compaction_pass_completed': False,
+        'compaction_skipped_reason': None,
         'moves_evaluated': 0,
         'moves_accepted': 0,
         'moves_rejected': 0,
+        'total_candidate_moves_evaluated': 0,
+        'accepted_moves_count': 0,
+        'rejected_moves_count': 0,
+        'rejected_moves_by_reason': {},
+        'total_partial_waves_found': 0,
+        'partial_ONE_MEDIUM_TWO_SMALL_waves_found': 0,
+        'partial_TWO_LARGE_waves_found': 0,
+        'waves_improved_count': 0,
+        'rollback_occurred': False,
+        'rollback_reason': None,
         'waves_fully_utilized_before': 0,
         'waves_fully_utilized_after': 0,
         'partially_used_one_medium_two_small_waves_before': 0,
@@ -5632,13 +5646,24 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         'partially_used_two_large_waves_after': 0,
         'active_turf_waves_used_before': 0,
         'active_turf_waves_used_after': 0,
-        'rollback_occurred': False,
+        'partial_waves': [],
+        'partial_wave_details': [],
         'accepted_moves': [],
         'rejected_moves': [],
         'warnings': [],
     }
     if not enabled:
+        diagnostics['compaction_skipped_reason'] = 'COMPACTION_DISABLED'
+        diagnostics['rejected_moves_by_reason'] = {'COMPACTION_DISABLED': 1}
+        logger.info(
+            'turf_wave_compaction_skipped season_id=%s enabled=%s reason=%s',
+            season_id,
+            enabled,
+            diagnostics['compaction_skipped_reason'],
+        )
         return diagnostics
+    diagnostics['compaction_pass_started'] = True
+    logger.info('turf_wave_compaction_start season_id=%s enabled=%s', season_id, enabled)
 
     def _division_label_for_game(game: Game | None) -> str | None:
         division = game.home_team.division if game and game.home_team else None
@@ -5693,6 +5718,48 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
     def _layout_counts(wave: TurfWave) -> dict[str, int]:
         metadata = _turf_configuration_metadata(wave.preferred_layout_code) or {}
         return {size: int((metadata.get('counts') or {}).get(size, 0) or 0) for size in FIELD_SIZE_ORDER}
+
+    def _component_rows(counts: dict[str, int]) -> list[dict[str, object]]:
+        return [
+            {'field_type': size, 'count': count}
+            for size in FIELD_SIZE_ORDER
+            if (count := int(counts.get(size) or 0)) > 0
+        ]
+
+    def _field_size_label(value: object) -> str | None:
+        normalized = _normalize_field_size(value)
+        return normalized if normalized in FIELD_SIZE_ORDER else None
+
+    def _wave_utilization_snapshot(wave: TurfWave | None, slots: list[GameSlot] | None = None, *, extra_assigned_delta: int = 0) -> dict[str, object] | None:
+        if not wave:
+            return None
+        if slots is None:
+            slots = db.query(GameSlot).filter(GameSlot.season_id == season_id, GameSlot.turf_wave_id == wave.id).all()
+        capacity = _layout_counts(wave)
+        used = _assigned_counts(slots)
+        total_capacity = sum(capacity.values())
+        total_used = max(0, sum(used.values()) + extra_assigned_delta)
+        utilization = round((total_used / total_capacity) * 100, 1) if total_capacity else 0
+        return {
+            'wave_id': str(wave.id),
+            'wave_name': _wave_label(wave),
+            'layout': _normalize_configuration_name(wave.preferred_layout_code),
+            'assigned_components': total_used,
+            'capacity_components': total_capacity,
+            'utilization_percent': utilization,
+        }
+
+    def _move_would_leave_source_wave_worse(source: GameSlot | None, target_wave: TurfWave | None) -> bool:
+        if not source or not source.turf_wave_id or (target_wave and source.turf_wave_id == target_wave.id):
+            return False
+        source_slots = db.query(GameSlot).filter(GameSlot.season_id == season_id, GameSlot.turf_wave_id == source.turf_wave_id).all()
+        return sum(1 for slot in source_slots if slot.assigned_game_id) > 1
+
+    def _move_would_eliminate_source_wave(source: GameSlot | None, target_wave: TurfWave | None) -> bool:
+        if not source or not source.turf_wave_id or (target_wave and source.turf_wave_id == target_wave.id):
+            return False
+        source_slots = db.query(GameSlot).filter(GameSlot.season_id == season_id, GameSlot.turf_wave_id == source.turf_wave_id).all()
+        return sum(1 for slot in source_slots if slot.assigned_game_id) == 1
 
     def _metrics() -> dict[str, int]:
         waves, slots_by_wave = _wave_rows()
@@ -5778,44 +5845,144 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
                     return True
         return False
 
-    def _reject(game: Game | None, source: GameSlot | None, target: GameSlot | None, reason: str) -> None:
+    def _record_rejection_reason(reason: str) -> None:
+        counts = diagnostics.get('rejected_moves_by_reason')
+        if isinstance(counts, dict):
+            counts[reason] = int(counts.get(reason) or 0) + 1
+
+    def _team_time_conflict_detail(game: Game, target: GameSlot) -> str:
+        team_ids = {game.home_team_id, game.away_team_id}
+        conflict = db.query(Game).join(Game.status).filter(
+            Game.season_id == season_id,
+            Game.id != game.id,
+            GameStatus.code != 'UNSCHEDULED',
+            Game.game_date == target.slot_date,
+            Game.kickoff_time == target.start_time,
+            or_(Game.home_team_id.in_(team_ids), Game.away_team_id.in_(team_ids)),
+        ).first()
+        if conflict and conflict.home_team and conflict.home_team_id in team_ids:
+            team_name = conflict.home_team.name
+        elif conflict and conflict.away_team and conflict.away_team_id in team_ids:
+            team_name = conflict.away_team.name
+        else:
+            team_name = _game_teams(game) or 'A selected team'
+        return f'{team_name} already plays at {target.start_time.isoformat()} on {target.slot_date.isoformat()}.'
+
+    def _doubleheader_detail(game: Game, source: GameSlot, target: GameSlot) -> str:
+        for team_id in (game.home_team_id, game.away_team_id):
+            games = db.query(Game).join(Game.status).filter(
+                Game.season_id == season_id,
+                GameStatus.code != 'UNSCHEDULED',
+                Game.game_date == game.game_date,
+                or_(Game.home_team_id == team_id, Game.away_team_id == team_id),
+            ).all()
+            if len(games) <= 1:
+                continue
+            before = sorted(row.kickoff_time for row in games if row.kickoff_time)
+            after = sorted(target.start_time if row.id == game.id else row.kickoff_time for row in games if row.kickoff_time)
+            if before != after:
+                team = db.get(Team, team_id)
+                return f'Moving this game to {target.start_time.isoformat()} would separate the selected doubleheader team {team.name if team else team_id} games from {"/".join(t.isoformat() for t in before)} to {"/".join(t.isoformat() for t in after)}.'
+        return f'Moving this game to {target.start_time.isoformat()} would break selected doubleheader spacing.'
+
+    def _score_detail(score_before: int | None, score_after: int | None, reason: str, source: GameSlot | None, target: GameSlot | None, target_wave: TurfWave | None = None) -> str:
+        if reason == 'NO_NET_WAVE_IMPROVEMENT' and source and target:
+            return 'Target wave improves by filling an unused component, but source wave utilization declines or the move does not improve the net active/filled wave score.'
+        return reason.replace('_', ' ').lower()
+
+    def _reject(
+        game: Game | None,
+        source: GameSlot | None,
+        target: GameSlot | None,
+        reason: str,
+        *,
+        detail: str | None = None,
+        hard_constraint_failure: bool = True,
+        score_before: int | None = None,
+        score_after: int | None = None,
+        target_wave: TurfWave | None = None,
+    ) -> None:
+        normalized_reason = reason if reason in {
+            'TEAM_TIME_CONFLICT', 'FIELD_TIME_CONFLICT', 'WRONG_FIELD_SIZE', 'BREAKS_DOUBLEHEADER_BACK_TO_BACK',
+            'BREAKS_DOUBLEHEADER_ORDER', 'MOVES_GAME_TO_DIFFERENT_DATE', 'MOVES_GAME_OUTSIDE_ALLOWED_WINDOW',
+            'MOVES_YOUNGER_DIVISION_TOO_LATE', 'WORSENS_HOST_COMMUNITY_BALANCE', 'VIOLATES_HOST_COMMUNITY_HARD_RULE',
+            'VIOLATES_HOME_SITE_REQUIREMENT', 'NO_NET_WAVE_IMPROVEMENT', 'TARGET_SLOT_NOT_AVAILABLE',
+            'TARGET_FIELD_INSTANCE_NOT_FOUND', 'TARGET_WAVE_NOT_FOUND', 'SOURCE_GAME_LOCKED', 'SOURCE_GAME_ALREADY_OPTIMAL',
+            'COMPACTION_DISABLED', 'UNKNOWN_REJECTION_REASON'
+        } else 'UNKNOWN_REJECTION_REASON'
         diagnostics['moves_rejected'] = int(diagnostics['moves_rejected']) + 1
+        diagnostics['rejected_moves_count'] = int(diagnostics.get('rejected_moves_count') or 0) + 1
+        _record_rejection_reason(normalized_reason)
+        source_wave = source.turf_wave if source else None
+        actual_target_wave = target_wave or (target.turf_wave if target else None)
+        net_score_delta = (score_after - score_before) if score_before is not None and score_after is not None else None
+        rejected_row = {
+            'candidate_game_id': str(game.id) if game else None,
+            'game_id': str(game.id) if game else None,
+            'division': _division_label_for_game(game),
+            'home_team': game.home_team.name if game and game.home_team else None,
+            'away_team': game.away_team.name if game and game.away_team else None,
+            'teams': _game_teams(game),
+            'current_date': source.slot_date.isoformat() if source and source.slot_date else None,
+            'current_host_location': source.host_location.name if source and source.host_location else None,
+            'current_start_time': source.start_time.isoformat() if source and source.start_time else None,
+            'current_field': _slot_label(source),
+            'current_wave': _wave_label(source_wave),
+            'original_host': source.host_location.name if source and source.host_location else None,
+            'original_time': source.start_time.isoformat() if source and source.start_time else None,
+            'original_field': _slot_label(source),
+            'original_wave': _wave_label(source_wave),
+            'target_host_location': target.host_location.name if target and target.host_location else None,
+            'target_start_time': target.start_time.isoformat() if target and target.start_time else None,
+            'target_field': _slot_label(target),
+            'target_wave': _wave_label(actual_target_wave),
+            'target_layout': _normalize_configuration_name(actual_target_wave.preferred_layout_code) if actual_target_wave else None,
+            'new_host': target.host_location.name if target and target.host_location else None,
+            'new_time': target.start_time.isoformat() if target and target.start_time else None,
+            'new_field': _slot_label(target),
+            'new_wave': _wave_label(actual_target_wave),
+            'needed_field_size': _field_size_label(target.field_type) if target else None,
+            'rejection_reason': normalized_reason,
+            'reason': normalized_reason,
+            'rejection_detail': detail or _score_detail(score_before, score_after, normalized_reason, source, target, actual_target_wave),
+            'hard_constraint_failure': bool(hard_constraint_failure),
+            'score_before': score_before,
+            'score_after': score_after,
+            'net_score_delta': net_score_delta,
+            'source_wave_utilization_before': _wave_utilization_snapshot(source_wave) if source_wave else None,
+            'source_wave_utilization_after': _wave_utilization_snapshot(source_wave, extra_assigned_delta=-1) if source_wave else None,
+            'target_wave_utilization_before': _wave_utilization_snapshot(actual_target_wave) if actual_target_wave else None,
+            'target_wave_utilization_after': _wave_utilization_snapshot(actual_target_wave, extra_assigned_delta=1) if actual_target_wave else None,
+            'moving_game_would_leave_source_wave_worse': _move_would_leave_source_wave_worse(source, actual_target_wave),
+            'moving_game_would_eliminate_later_partial_wave': _move_would_eliminate_source_wave(source, actual_target_wave),
+        }
         rejected = diagnostics['rejected_moves']
-        if isinstance(rejected, list) and len(rejected) < 100:
-            rejected.append({
-                'game_id': str(game.id) if game else None,
-                'division': _division_label_for_game(game),
-                'teams': _game_teams(game),
-                'original_host': source.host_location.name if source and source.host_location else None,
-                'original_time': source.start_time.isoformat() if source else None,
-                'original_field': _slot_label(source),
-                'original_wave': _wave_label(source.turf_wave if source else None),
-                'new_host': target.host_location.name if target and target.host_location else None,
-                'new_time': target.start_time.isoformat() if target else None,
-                'new_field': _slot_label(target),
-                'new_wave': _wave_label(target.turf_wave if target else None),
-                'reason': reason,
-            })
+        if isinstance(rejected, list):
+            rejected.append(rejected_row)
+        logger.debug('turf_wave_compaction_rejected_move season_id=%s detail=%s', season_id, rejected_row)
 
     def _score_move(game: Game, source: GameSlot, target: GameSlot, target_wave: TurfWave, source_wave: TurfWave | None) -> tuple[int, list[str]]:
         diagnostics['moves_evaluated'] = int(diagnostics['moves_evaluated']) + 1
+        diagnostics['total_candidate_moves_evaluated'] = int(diagnostics.get('total_candidate_moves_evaluated') or 0) + 1
         if target.assigned_game_id or str(target.status or '').upper() != 'OPEN':
-            _reject(game, source, target, 'FIELD_TIME_CONFLICT'); return -10_000, []
-        if source.id == target.id or source.slot_date != target.slot_date or game.game_date != target.slot_date:
-            _reject(game, source, target, 'NO_NET_WAVE_IMPROVEMENT'); return -10_000, []
+            _reject(game, source, target, 'TARGET_SLOT_NOT_AVAILABLE', detail='Target slot is not open or already has an assigned game.', target_wave=target_wave); return -10_000, []
+        if source.id == target.id:
+            _reject(game, source, target, 'SOURCE_GAME_ALREADY_OPTIMAL', detail='Source game is already in the target slot.', hard_constraint_failure=False, target_wave=target_wave); return -10_000, []
+        if source.slot_date != target.slot_date or game.game_date != target.slot_date:
+            _reject(game, source, target, 'MOVES_GAME_TO_DIFFERENT_DATE', detail=f'Move would change the game date from {game.game_date.isoformat() if game.game_date else source.slot_date.isoformat()} to {target.slot_date.isoformat()}.', target_wave=target_wave); return -10_000, []
         required_size = _required_field_type_for_division(game.home_team.division if game.home_team else None)
         if _normalize_field_size(target.field_type) != required_size:
-            _reject(game, source, target, 'WRONG_FIELD_SIZE'); return -10_000, []
+            _reject(game, source, target, 'WRONG_FIELD_SIZE', detail=f'Division requires {required_size}, but target field component is {_normalize_field_size(target.field_type)}.', target_wave=target_wave); return -10_000, []
         if _field_has_time_conflict(game, target):
-            _reject(game, source, target, 'FIELD_TIME_CONFLICT'); return -10_000, []
+            _reject(game, source, target, 'FIELD_TIME_CONFLICT', detail=f'Target field already has a game at {target.start_time.isoformat()} on {target.slot_date.isoformat()}.', target_wave=target_wave); return -10_000, []
         if _team_has_time_conflict(game, target):
-            _reject(game, source, target, 'TEAM_TIME_CONFLICT'); return -10_000, []
+            _reject(game, source, target, 'TEAM_TIME_CONFLICT', detail=_team_time_conflict_detail(game, target), target_wave=target_wave); return -10_000, []
         if _breaks_doubleheader(game, target):
-            _reject(game, source, target, 'BREAKS_DOUBLEHEADER_BACK_TO_BACK'); return -10_000, []
+            _reject(game, source, target, 'BREAKS_DOUBLEHEADER_BACK_TO_BACK', detail=_doubleheader_detail(game, source, target), target_wave=target_wave); return -10_000, []
         if target.start_time > source.start_time and _division_sort_for_game(game) <= 4:
-            _reject(game, source, target, 'YOUNGER_DIVISION_MOVED_TOO_LATE'); return -10_000, []
+            _reject(game, source, target, 'MOVES_YOUNGER_DIVISION_TOO_LATE', detail=f'Moving this younger division game from {source.start_time.isoformat()} to {target.start_time.isoformat()} would make it later in the day.', target_wave=target_wave); return -10_000, []
         if _breaks_host_balance(game, source, target):
-            _reject(game, source, target, 'WORSENS_HOST_BALANCE'); return -10_000, []
+            _reject(game, source, target, 'WORSENS_HOST_COMMUNITY_BALANCE', detail='Move would change a home/away community-hosted game to a less favorable host ownership category.', target_wave=target_wave); return -10_000, []
 
         waves, slots_by_wave = _wave_rows()
         before_active = _metrics()['active_turf_waves_used']
@@ -5825,7 +5992,7 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         target_capacity = sum(_layout_counts(target_wave).values())
         source_after_assigned = max(0, sum(1 for slot in source_slots if slot.assigned_game_id) - 1) if source.turf_wave_id != target_wave.id else sum(1 for slot in source_slots if slot.assigned_game_id)
         if target.start_time > source.start_time and source_after_assigned > 0:
-            _reject(game, source, target, 'NO_NET_WAVE_IMPROVEMENT'); return -10_000, []
+            _reject(game, source, target, 'NO_NET_WAVE_IMPROVEMENT', detail='Target wave improves, but moving to a later wave would leave the source wave partially used.', hard_constraint_failure=False, score_before=0, score_after=0, target_wave=target_wave); return -10_000, []
         score = 0
         reasons: list[str] = []
         layout = _normalize_configuration_name(target_wave.preferred_layout_code)
@@ -5847,13 +6014,91 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
             score -= 75
         if _breaks_doubleheader(game, target):
             score -= 100
+        logger.debug(
+            'turf_wave_compaction_score season_id=%s game_id=%s score=%s reasons=%s source_wave_before=%s source_wave_after=%s target_wave_before=%s target_wave_after=%s',
+            season_id,
+            game.id,
+            score,
+            reasons,
+            _wave_utilization_snapshot(source_wave) if source_wave else None,
+            _wave_utilization_snapshot(source_wave, extra_assigned_delta=-1) if source_wave else None,
+            _wave_utilization_snapshot(target_wave),
+            _wave_utilization_snapshot(target_wave, extra_assigned_delta=1),
+        )
         if score <= 0:
-            _reject(game, source, target, 'NO_NET_WAVE_IMPROVEMENT'); return -10_000, []
+            _reject(
+                game,
+                source,
+                target,
+                'NO_NET_WAVE_IMPROVEMENT',
+                detail='Target wave improves from its current utilization, but the source wave declines enough that the net compaction score is not positive.',
+                hard_constraint_failure=False,
+                score_before=0,
+                score_after=score,
+                target_wave=target_wave,
+            ); return -10_000, []
         return score, reasons or ['NO_NET_WAVE_IMPROVEMENT']
 
     before = _metrics()
     for key, value in before.items():
         diagnostics[f'{key}_before'] = value
+
+    partial_wave_detail_by_id: dict[str, dict[str, object]] = {}
+
+    def _initialize_partial_wave_details() -> None:
+        waves, slots_by_wave = _wave_rows()
+        details: list[dict[str, object]] = []
+        for wave in sorted(waves.values(), key=lambda w: (w.host_date, w.start_time, w.sequence_number, str(w.host_location_id))):
+            slots = slots_by_wave.get(wave.id, [])
+            capacity = _layout_counts(wave)
+            used = _assigned_counts(slots)
+            unused = {size: max(0, int(capacity.get(size) or 0) - int(used.get(size) or 0)) for size in FIELD_SIZE_ORDER}
+            total_capacity = sum(capacity.values())
+            total_used = sum(used.values())
+            if total_used <= 0 or total_used >= total_capacity:
+                continue
+            needed = [size for size in FIELD_SIZE_ORDER if unused.get(size, 0) > 0]
+            layout = _normalize_configuration_name(wave.preferred_layout_code)
+            row: dict[str, object] = {
+                'wave_id': str(wave.id),
+                'date': wave.host_date.isoformat() if wave.host_date else None,
+                'host_location': wave.host_location.name if wave.host_location else None,
+                'start_time': wave.start_time.isoformat() if wave.start_time else None,
+                'wave_name': _wave_label(wave),
+                'layout': layout,
+                'used_components': _component_rows(used),
+                'unused_components': _component_rows(unused),
+                'utilization_percent': round((total_used / total_capacity) * 100, 1) if total_capacity else 0,
+                'needed_field_sizes': needed,
+                'candidate_games_found_count': 0,
+                'accepted_candidate_game_count': 0,
+                'rejected_candidate_game_count': 0,
+                'no_candidate_reason': None,
+                'small_games_exist_elsewhere_same_date': None,
+                'small_games_considered': 0,
+                'paired_swap_considered': False,
+                'large_games_exist_elsewhere_same_date': None,
+                'large_games_considered': 0,
+                'girls_6_8_games_considered': 0,
+                'moving_game_would_eliminate_later_partial_two_large_wave': False,
+                'doubleheader_rules_blocked_move': False,
+            }
+            partial_wave_detail_by_id[str(wave.id)] = row
+            details.append(row)
+        diagnostics['partial_waves'] = details
+        diagnostics['partial_wave_details'] = details
+        diagnostics['total_partial_waves_found'] = len(details)
+        diagnostics['partial_ONE_MEDIUM_TWO_SMALL_waves_found'] = sum(1 for row in details if row.get('layout') == 'ONE_MEDIUM_TWO_SMALL')
+        diagnostics['partial_TWO_LARGE_waves_found'] = sum(1 for row in details if row.get('layout') == 'TWO_LARGE')
+
+    _initialize_partial_wave_details()
+    logger.info(
+        'turf_wave_compaction_partial_waves season_id=%s total=%s one_medium_two_small=%s two_large=%s',
+        season_id,
+        diagnostics.get('total_partial_waves_found'),
+        diagnostics.get('partial_ONE_MEDIUM_TWO_SMALL_waves_found'),
+        diagnostics.get('partial_TWO_LARGE_waves_found'),
+    )
 
     snapshots: list[dict[str, object]] = []
     max_moves = 50
@@ -5870,6 +6115,7 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
                 target_size = FIELD_SIZE_SMALL
             elif layout == 'TWO_LARGE' and counts[FIELD_SIZE_LARGE] == 1:
                 target_size = FIELD_SIZE_LARGE
+            target_detail = partial_wave_detail_by_id.get(str(target_wave.id))
             if not target_size:
                 continue
             open_targets = [slot for slot in target_slots if not slot.assigned_game_id and str(slot.status or '').upper() == 'OPEN' and _normalize_field_size(slot.field_type) == target_size]
@@ -5881,12 +6127,34 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
                     GameSlot.assigned_game_id.is_not(None),
                     GameSlot.field_type == target_size,
                 ).all()
+                if target_detail is not None:
+                    if target_size == FIELD_SIZE_SMALL:
+                        target_detail['small_games_exist_elsewhere_same_date'] = bool(assigned_sources)
+                    if target_size == FIELD_SIZE_LARGE:
+                        target_detail['large_games_exist_elsewhere_same_date'] = bool(assigned_sources)
                 for source in assigned_sources:
                     game = source.assigned_game
                     if not game or source.turf_wave_id == target_wave.id:
                         continue
+                    if target_detail is not None:
+                        target_detail['candidate_games_found_count'] = int(target_detail.get('candidate_games_found_count') or 0) + 1
+                        if target_size == FIELD_SIZE_SMALL:
+                            target_detail['small_games_considered'] = int(target_detail.get('small_games_considered') or 0) + 1
+                        if target_size == FIELD_SIZE_LARGE:
+                            target_detail['large_games_considered'] = int(target_detail.get('large_games_considered') or 0) + 1
+                            if _is_girls_6_8(game):
+                                target_detail['girls_6_8_games_considered'] = int(target_detail.get('girls_6_8_games_considered') or 0) + 1
+                            if _move_would_eliminate_source_wave(source, target_wave):
+                                target_detail['moving_game_would_eliminate_later_partial_two_large_wave'] = True
                     source_wave = source.turf_wave
+                    rejected_before = int(diagnostics.get('rejected_moves_count') or 0)
                     score, reasons = _score_move(game, source, target, target_wave, source_wave)
+                    if target_detail is not None and int(diagnostics.get('rejected_moves_count') or 0) > rejected_before:
+                        target_detail['rejected_candidate_game_count'] = int(target_detail.get('rejected_candidate_game_count') or 0) + 1
+                        rejected_moves = diagnostics.get('rejected_moves')
+                        last_rejection = rejected_moves[-1] if isinstance(rejected_moves, list) and rejected_moves else {}
+                        if isinstance(last_rejection, dict) and last_rejection.get('rejection_reason') == 'BREAKS_DOUBLEHEADER_BACK_TO_BACK':
+                            target_detail['doubleheader_rules_blocked_move'] = True
                     if score <= 0:
                         continue
                     if target_size == FIELD_SIZE_LARGE and _is_girls_6_8(game):
@@ -5899,6 +6167,9 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         if not best:
             break
         _score, game, source, target, target_wave, source_wave, reasons = best
+        accepted_wave_detail = partial_wave_detail_by_id.get(str(target_wave.id))
+        if accepted_wave_detail is not None:
+            accepted_wave_detail['accepted_candidate_game_count'] = int(accepted_wave_detail.get('accepted_candidate_game_count') or 0) + 1
         snapshots.append({
             'game': game,
             'source': source,
@@ -5940,6 +6211,16 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         diagnostics['moves_accepted'] = int(diagnostics['moves_accepted']) + 1
         db.flush()
 
+    for row in partial_wave_detail_by_id.values():
+        if int(row.get('candidate_games_found_count') or 0) == 0:
+            needed = ', '.join(row.get('needed_field_sizes') or []) or 'unknown size'
+            row['no_candidate_reason'] = f'No assigned {needed} games were found elsewhere on the same date for an open target component.'
+
+    diagnostics['accepted_moves_count'] = int(diagnostics.get('moves_accepted') or 0)
+    diagnostics['rejected_moves_count'] = int(diagnostics.get('moves_rejected') or diagnostics.get('rejected_moves_count') or 0)
+    diagnostics['total_candidate_moves_evaluated'] = int(diagnostics.get('moves_evaluated') or 0)
+    diagnostics['waves_improved_count'] = int(diagnostics.get('moves_accepted') or 0)
+
     validation = build_schedule_quality_report(db, season_id)
     if snapshots and validation.get('hard_errors'):
         for snapshot in reversed(snapshots):
@@ -5954,14 +6235,32 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
             target.status = snapshot['target_status']
         db.flush()
         diagnostics['rollback_occurred'] = True
+        diagnostics['rollback_reason'] = 'VALIDATION_FAILED_AFTER_COMPACTION'
         diagnostics['warnings'].append('Turf wave compaction attempted but rolled back because validation failed.')
         diagnostics['validation_errors'] = validation.get('hard_errors')
         diagnostics['accepted_moves'] = []
         diagnostics['moves_accepted'] = 0
+        diagnostics['accepted_moves_count'] = 0
+        diagnostics['waves_improved_count'] = 0
 
     after = _metrics()
     for key, value in after.items():
         diagnostics[f'{key}_after'] = value
+    diagnostics['compaction_pass_completed'] = True
+    diagnostics['accepted_moves_count'] = int(diagnostics.get('moves_accepted') or 0)
+    diagnostics['rejected_moves_count'] = int(diagnostics.get('moves_rejected') or 0)
+    diagnostics['total_candidate_moves_evaluated'] = int(diagnostics.get('moves_evaluated') or 0)
+    diagnostics['waves_improved_count'] = int(diagnostics.get('moves_accepted') or 0)
+    logger.info(
+        'turf_wave_compaction_complete season_id=%s partial_waves=%s candidates_evaluated=%s accepted=%s rejected=%s top_rejection_reasons=%s rollback=%s',
+        season_id,
+        diagnostics.get('total_partial_waves_found'),
+        diagnostics.get('total_candidate_moves_evaluated'),
+        diagnostics.get('accepted_moves_count'),
+        diagnostics.get('rejected_moves_count'),
+        sorted((diagnostics.get('rejected_moves_by_reason') or {}).items(), key=lambda item: int(item[1]), reverse=True)[:5],
+        diagnostics.get('rollback_occurred'),
+    )
     return diagnostics
 
 
