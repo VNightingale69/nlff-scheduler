@@ -290,10 +290,108 @@ class AutoFillPreviewTest(unittest.TestCase):
         self.assertEqual(detail['assigned_slot_ids'], [str(self.slot.id)])
         self.assertEqual(detail['assigned_field_instance_ids'], [str(self.slot.field_instance_id)])
         self.assertTrue(detail['medium_games_exist_elsewhere_same_date'])
+        self.assertGreaterEqual(detail['same_date_games_scanned'], 2)
+        self.assertEqual(detail['same_date_matching_field_size_games_found'], 1)
+        self.assertEqual(detail['preliminary_candidates_created'], 1)
         self.assertEqual(detail['medium_games_considered'], 1)
         self.assertEqual(detail['candidate_games_found_count'], 1)
+        self.assertGreaterEqual(compaction['same_date_games_scanned'], detail['same_date_games_scanned'])
+        self.assertEqual(compaction['same_date_matching_field_size_games_found'], 1)
+        self.assertEqual(compaction['preliminary_candidates_created'], 1)
         self.assertGreater(compaction['total_candidate_moves_evaluated'], 0)
-        self.assertNotIn('no_candidate_reason', detail)
+        self.assertIsNone(detail.get('no_candidate_reason'))
+
+    def test_turf_wave_compaction_discovers_candidates_from_committed_games_without_source_slot(self):
+        self.host.surface_type = 'TURF_STADIUM'
+        availability = HostingAvailability(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week2.id,
+            organization_id=self.org_w.id,
+            host_location_id=self.host.id,
+            available_date=self.week2.start_date,
+            primary_game_date=self.week2.start_date,
+            start_time=time(9, 0),
+            end_time=time(11, 0),
+            is_available=True,
+        )
+        wave = TurfWave(
+            id=uuid.uuid4(),
+            host_location_id=self.host.id,
+            hosting_availability_id=availability.id,
+            week_id=self.week2.id,
+            host_date=self.week2.start_date,
+            sequence_number=1,
+            wave_intent='SMALL_MEDIUM',
+            preferred_layout_code='ONE_MEDIUM_TWO_SMALL',
+            start_time=time(9, 0),
+            end_time=time(10, 0),
+        )
+        assigned_game = Game(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week2.id,
+            home_team_id=self.wg.id,
+            away_team_id=self.as_.id,
+            game_status_id=self.status.id,
+            game_date=self.week2.start_date,
+            kickoff_time=time(9, 0),
+            field_instance_id=self.fi.id,
+            host_location_id=self.host.id,
+        )
+        self.slot.turf_wave_id = wave.id
+        self.slot.assigned_game_id = assigned_game.id
+        self.slot.status = 'BOOKED'
+        source_host = HostLocation(id=uuid.uuid4(), organization_id=self.org_a.id, name='Antioch Grass Park', surface_type='GRASS', is_active=True)
+        source_availability = HostingAvailability(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week2.id,
+            organization_id=self.org_a.id,
+            host_location_id=source_host.id,
+            available_date=self.week2.start_date,
+            primary_game_date=self.week2.start_date,
+            start_time=time(10, 0),
+            end_time=time(11, 0),
+            is_available=True,
+        )
+        committed_source_field = FieldInstance(id=uuid.uuid4(), host_location_id=source_host.id, hosting_availability_id=source_availability.id, instance_date=self.week2.start_date, field_name='Committed Small Grass Field', field_type='SMALL', is_active=True)
+        committed_source_game = Game(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week2.id,
+            home_team_id=self.wm.id,
+            away_team_id=self.ab.id,
+            game_status_id=self.status.id,
+            game_date=self.week2.start_date,
+            kickoff_time=time(10, 0),
+            host_location_id=source_host.id,
+            field_instance_id=committed_source_field.id,
+        )
+        open_small_field = FieldInstance(id=uuid.uuid4(), host_location_id=self.host.id, hosting_availability_id=availability.id, instance_date=self.week2.start_date, field_name='Wave Small 2', field_type='SMALL', is_active=True)
+        medium_field = FieldInstance(id=uuid.uuid4(), host_location_id=self.host.id, hosting_availability_id=availability.id, instance_date=self.week2.start_date, field_name='Wave Medium', field_type='MEDIUM', is_active=True)
+        open_small_slot = GameSlot(id=uuid.uuid4(), field_instance_id=open_small_field.id, host_location_id=self.host.id, season_id=self.season.id, week_id=self.week2.id, slot_date=self.week2.start_date, start_time=time(9, 0), end_time=time(10, 0), field_type='SMALL', status='OPEN', turf_wave_id=wave.id)
+        medium_slot = GameSlot(id=uuid.uuid4(), field_instance_id=medium_field.id, host_location_id=self.host.id, season_id=self.season.id, week_id=self.week2.id, slot_date=self.week2.start_date, start_time=time(9, 0), end_time=time(10, 0), field_type='MEDIUM', status='OPEN', turf_wave_id=wave.id)
+        self.db.add_all([
+            availability, wave, assigned_game, source_host, source_availability, committed_source_field,
+            committed_source_game, open_small_field, medium_field, open_small_slot, medium_slot,
+        ])
+        self.db.commit()
+
+        compaction = _run_turf_wave_compaction_pass(self.db, self.season.id)
+
+        detail = compaction['partial_wave_details'][0]
+        self.assertEqual(compaction['total_partial_waves_found'], 1)
+        self.assertGreaterEqual(detail['same_date_games_scanned'], 2)
+        self.assertEqual(detail['same_date_matching_field_size_games_found'], 1)
+        self.assertEqual(detail['preliminary_candidates_created'], 1)
+        self.assertEqual(detail['candidates_rejected_by_precheck'], 1)
+        self.assertEqual(compaction['same_date_matching_field_size_games_found'], 1)
+        self.assertEqual(compaction['preliminary_candidates_created'], 1)
+        self.assertEqual(compaction['candidates_rejected_by_precheck'], 1)
+        self.assertGreater(compaction['total_candidate_moves_evaluated'], 0)
+        self.assertGreater(compaction['rejected_moves_count'], 0)
+        self.assertNotIn('No assigned SMALL', detail.get('no_candidate_reason') or '')
 
     def test_turf_wave_compaction_details_are_grouped_by_start_time(self):
         self.host.surface_type = 'TURF_STADIUM'
