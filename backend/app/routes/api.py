@@ -6053,72 +6053,112 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
             _normalize_configuration_name(wave.preferred_layout_code),
         )
 
+    def _compact_size_counts(counts: dict[str, int]) -> dict[str, int]:
+        return {size: int(counts.get(size) or 0) for size in FIELD_SIZE_ORDER if int(counts.get(size) or 0) > 0}
+
+    def _partial_wave_collection_is_empty() -> bool:
+        partial_waves = diagnostics.get('partial_waves')
+        return not isinstance(partial_waves, list) or len(partial_waves) == 0
+
+    def _warn_if_counted_partial_waves_missing_from_collection(*, phase: str) -> None:
+        counted_partial_waves = (
+            int(diagnostics.get(f'partially_used_one_medium_two_small_waves_{phase}') or 0)
+            + int(diagnostics.get(f'partially_used_two_large_waves_{phase}') or 0)
+        )
+        if counted_partial_waves > 0 and _partial_wave_collection_is_empty():
+            warning = 'Partial turf waves were counted but not added to the compaction candidate collection.'
+            warnings = diagnostics.get('warnings')
+            if isinstance(warnings, list) and warning not in warnings:
+                warnings.append(warning)
+
+    def _partial_wave_row(wave: TurfWave, group_waves: list[TurfWave], slots: list[GameSlot]) -> dict[str, object] | None:
+        expected = _wave_capacity_counts(wave, slots)
+        raw_assigned = _assigned_counts(slots)
+        assigned = {size: min(int(raw_assigned.get(size) or 0), int(expected.get(size) or 0)) for size in FIELD_SIZE_ORDER}
+        unused = {size: max(0, int(expected.get(size) or 0) - int(assigned.get(size) or 0)) for size in FIELD_SIZE_ORDER}
+        expected_total_components = sum(int(expected.get(size) or 0) for size in FIELD_SIZE_ORDER)
+        assigned_total_components = sum(int(assigned.get(size) or 0) for size in FIELD_SIZE_ORDER)
+        if assigned_total_components <= 0 or assigned_total_components >= expected_total_components:
+            return None
+
+        needed = [size for size in FIELD_SIZE_ORDER if unused.get(size, 0) > 0]
+        layout = _normalize_configuration_name(wave.preferred_layout_code)
+        assigned_slots = [slot for slot in slots if slot.assigned_game_id]
+        assigned_game_ids = [str(slot.assigned_game_id) for slot in assigned_slots if slot.assigned_game_id]
+        assigned_slot_ids = [str(slot.id) for slot in assigned_slots if slot.id]
+        assigned_field_instance_ids = [str(slot.field_instance_id) for slot in assigned_slots if slot.field_instance_id]
+        expected_components_by_size = _compact_size_counts(expected)
+        assigned_components_by_size = _compact_size_counts(assigned)
+        unused_components_by_size = _compact_size_counts(unused)
+        return {
+            'wave_id': str(wave.id),
+            'wave_ids': [str(group_wave.id) for group_wave in sorted(group_waves, key=lambda w: str(w.id))],
+            'date': wave.host_date.isoformat() if wave.host_date else None,
+            'host_location_id': str(wave.host_location_id) if wave.host_location_id else None,
+            'host_location_name': wave.host_location.name if wave.host_location else None,
+            'host_location': wave.host_location.name if wave.host_location else None,
+            'start_time': wave.start_time.isoformat() if wave.start_time else None,
+            'wave_number': wave.sequence_number,
+            'wave_name': _wave_label(wave),
+            'layout': layout,
+            'wave_layout': layout,
+            'expected_components_by_size': expected_components_by_size,
+            'assigned_components_by_size': assigned_components_by_size,
+            'unused_components_by_size': unused_components_by_size,
+            'expected_capacity_by_size': expected_components_by_size,
+            'assigned_by_size': assigned_components_by_size,
+            'unused_by_size': unused_components_by_size,
+            'used_components': _component_rows(assigned),
+            'unused_components': _component_rows(unused),
+            'utilization_percent': round((assigned_total_components / expected_total_components) * 100, 1) if expected_total_components else 0,
+            'needed_field_sizes': needed,
+            'assigned_game_ids': assigned_game_ids,
+            'assigned_slot_ids': assigned_slot_ids,
+            'assigned_field_instance_ids': assigned_field_instance_ids,
+            'candidate_games_found_count': 0,
+            'accepted_candidate_game_count': 0,
+            'rejected_candidate_game_count': 0,
+            'no_candidate_reason': None,
+            'small_games_exist_elsewhere_same_date': None,
+            'small_games_considered': 0,
+            'medium_games_exist_elsewhere_same_date': None,
+            'medium_games_considered': 0,
+            'paired_swap_considered': False,
+            'large_games_exist_elsewhere_same_date': None,
+            'large_games_considered': 0,
+            'girls_6_8_games_considered': 0,
+            'moving_game_would_eliminate_later_partial_two_large_wave': False,
+            'doubleheader_rules_blocked_move': False,
+        }
+
     def _initialize_partial_wave_details() -> None:
         waves, slots_by_wave = _wave_rows()
         grouped_waves: dict[tuple[date | None, uuid.UUID | None, time | None, int | None, str], list[TurfWave]] = {}
         for wave in waves.values():
             grouped_waves.setdefault(_logical_wave_group_key(wave), []).append(wave)
 
-        details: list[dict[str, object]] = []
+        partial_waves: list[dict[str, object]] = []
         for _key, group_waves in sorted(
             grouped_waves.items(),
             key=lambda item: (item[0][0] or date.min, item[0][2] or time.min, item[0][3] or 0, str(item[0][1])),
         ):
             wave = sorted(group_waves, key=lambda w: str(w.id))[0]
             slots = [slot for group_wave in group_waves for slot in slots_by_wave.get(group_wave.id, [])]
-            capacity = _wave_capacity_counts(wave, slots)
-            raw_used = _assigned_counts(slots)
-            used = {size: min(int(raw_used.get(size) or 0), int(capacity.get(size) or 0)) for size in FIELD_SIZE_ORDER}
-            unused = {size: max(0, int(capacity.get(size) or 0) - int(used.get(size) or 0)) for size in FIELD_SIZE_ORDER}
-            total_capacity = sum(capacity.values())
-            total_used = sum(used.values())
-            if total_used <= 0 or total_used >= total_capacity:
+            row = _partial_wave_row(wave, group_waves, slots)
+            if row is None:
                 continue
-            needed = [size for size in FIELD_SIZE_ORDER if unused.get(size, 0) > 0]
-            layout = _normalize_configuration_name(wave.preferred_layout_code)
-            row: dict[str, object] = {
-                'wave_id': str(wave.id),
-                'wave_ids': [str(group_wave.id) for group_wave in sorted(group_waves, key=lambda w: str(w.id))],
-                'date': wave.host_date.isoformat() if wave.host_date else None,
-                'host_location_id': str(wave.host_location_id) if wave.host_location_id else None,
-                'host_location': wave.host_location.name if wave.host_location else None,
-                'start_time': wave.start_time.isoformat() if wave.start_time else None,
-                'wave_number': wave.sequence_number,
-                'wave_name': _wave_label(wave),
-                'layout': layout,
-                'wave_layout': layout,
-                'expected_capacity_by_size': {size: int(capacity.get(size) or 0) for size in FIELD_SIZE_ORDER if int(capacity.get(size) or 0) > 0},
-                'assigned_by_size': {size: int(used.get(size) or 0) for size in FIELD_SIZE_ORDER if int(used.get(size) or 0) > 0},
-                'unused_by_size': {size: int(unused.get(size) or 0) for size in FIELD_SIZE_ORDER if int(unused.get(size) or 0) > 0},
-                'used_components': _component_rows(used),
-                'unused_components': _component_rows(unused),
-                'utilization_percent': round((total_used / total_capacity) * 100, 1) if total_capacity else 0,
-                'needed_field_sizes': needed,
-                'candidate_games_found_count': 0,
-                'accepted_candidate_game_count': 0,
-                'rejected_candidate_game_count': 0,
-                'no_candidate_reason': None,
-                'small_games_exist_elsewhere_same_date': None,
-                'small_games_considered': 0,
-                'medium_games_exist_elsewhere_same_date': None,
-                'medium_games_considered': 0,
-                'paired_swap_considered': False,
-                'large_games_exist_elsewhere_same_date': None,
-                'large_games_considered': 0,
-                'girls_6_8_games_considered': 0,
-                'moving_game_would_eliminate_later_partial_two_large_wave': False,
-                'doubleheader_rules_blocked_move': False,
-            }
             for group_wave in group_waves:
                 partial_wave_detail_by_id[str(group_wave.id)] = row
-            details.append(row)
-        diagnostics['partial_waves'] = details
-        diagnostics['partial_wave_details'] = details
-        diagnostics['total_partial_waves_found'] = len(details)
-        diagnostics['partial_ONE_MEDIUM_TWO_SMALL_waves_found'] = sum(1 for row in details if row.get('layout') == 'ONE_MEDIUM_TWO_SMALL')
-        diagnostics['partial_TWO_LARGE_waves_found'] = sum(1 for row in details if row.get('layout') == 'TWO_LARGE')
+            partial_waves.append(row)
+
+        diagnostics['partial_waves'] = partial_waves
+        diagnostics['partial_wave_details'] = partial_waves
+        diagnostics['total_partial_waves_found'] = len(partial_waves)
+        diagnostics['partial_ONE_MEDIUM_TWO_SMALL_waves_found'] = sum(1 for row in partial_waves if row.get('wave_layout') == 'ONE_MEDIUM_TWO_SMALL')
+        diagnostics['partial_TWO_LARGE_waves_found'] = sum(1 for row in partial_waves if row.get('wave_layout') == 'TWO_LARGE')
 
     _initialize_partial_wave_details()
+    _warn_if_counted_partial_waves_missing_from_collection(phase='before')
     logger.info(
         'turf_wave_compaction_partial_waves season_id=%s total=%s one_medium_two_small=%s two_large=%s',
         season_id,
@@ -6132,20 +6172,38 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
     while int(diagnostics['moves_accepted']) < max_moves:
         waves, slots_by_wave = _wave_rows()
         best: tuple[int, Game, GameSlot, GameSlot, TurfWave, TurfWave | None, list[str]] | None = None
-        ordered_waves = sorted(waves.values(), key=lambda w: (w.host_date, w.start_time, w.sequence_number, str(w.host_location_id)))
-        for target_wave in ordered_waves:
-            layout = _normalize_configuration_name(target_wave.preferred_layout_code)
-            target_slots = slots_by_wave.get(target_wave.id, [])
+        partial_waves = diagnostics.get('partial_waves')
+        target_partial_waves = partial_waves if isinstance(partial_waves, list) else []
+        for target_detail in target_partial_waves:
+            if not isinstance(target_detail, dict):
+                continue
+            wave_ids = target_detail.get('wave_ids')
+            if not isinstance(wave_ids, list) or not wave_ids:
+                wave_ids = [target_detail.get('wave_id')]
+            target_waves: list[TurfWave] = []
+            for wave_id in wave_ids:
+                try:
+                    parsed_wave_id = uuid.UUID(str(wave_id))
+                except (TypeError, ValueError):
+                    continue
+                wave = waves.get(parsed_wave_id)
+                if wave:
+                    target_waves.append(wave)
+            if not target_waves:
+                continue
+            target_waves = sorted(target_waves, key=lambda w: (w.host_date, w.start_time, w.sequence_number, str(w.host_location_id)))
+            primary_target_wave = target_waves[0]
+            layout = str(target_detail.get('wave_layout') or _normalize_configuration_name(primary_target_wave.preferred_layout_code))
+            target_slots = [slot for wave in target_waves for slot in slots_by_wave.get(wave.id, [])]
             counts = _assigned_counts(target_slots)
-            capacity = _wave_capacity_counts(target_wave, target_slots)
+            capacity = _wave_capacity_counts(primary_target_wave, target_slots)
             unused = {size: max(0, int(capacity.get(size) or 0) - int(counts.get(size) or 0)) for size in FIELD_SIZE_ORDER}
             total_assigned = sum(counts.values())
-            total_capacity = len(target_slots) or sum(capacity.values())
-            target_detail = partial_wave_detail_by_id.get(str(target_wave.id))
+            total_capacity = sum(int(capacity.get(size) or 0) for size in FIELD_SIZE_ORDER)
             if total_assigned <= 0 or total_assigned >= total_capacity:
                 continue
             target_sizes = [
-                size for size in (target_detail.get('needed_field_sizes') if target_detail else [])
+                size for size in (target_detail.get('needed_field_sizes') or [])
                 if _field_size_label(size)
             ]
             if not target_sizes:
@@ -6158,6 +6216,7 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
             for target_size in target_sizes:
                 open_targets = [slot for slot in target_slots if not slot.assigned_game_id and str(slot.status or '').upper() == 'OPEN' and _normalize_field_size(slot.field_type) == target_size]
                 for target in open_targets:
+                    target_wave = target.turf_wave or primary_target_wave
                     assigned_sources = db.query(GameSlot).join(GameSlot.assigned_game).filter(
                         GameSlot.season_id == season_id,
                         GameSlot.id != target.id,
@@ -6288,6 +6347,7 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
     after = _metrics()
     for key, value in after.items():
         diagnostics[f'{key}_after'] = value
+    _warn_if_counted_partial_waves_missing_from_collection(phase='after')
     diagnostics['compaction_pass_completed'] = True
     diagnostics['accepted_moves_count'] = int(diagnostics.get('moves_accepted') or 0)
     diagnostics['rejected_moves_count'] = int(diagnostics.get('moves_rejected') or 0)
