@@ -5661,7 +5661,9 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         'partial_wave_details_created_count': 0,
         'partial_waves_candidate_discovery_input_count': 0,
         'candidate_discovery_input_count': 0,
+        'candidate_discovery_input_game_count': 0,
         'committed_scheduled_games_collection_count': 0,
+        'compaction_scheduled_games_count': 0,
         'candidate_discovery_started': False,
         'candidate_discovery_skipped_reason': None,
         'candidate_moves_zero_evaluation_reason': None,
@@ -6340,27 +6342,62 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         except ValueError:
             return None
 
-    def _committed_scheduled_game_rows() -> tuple[list[tuple[Game, GameSlot | None]], dict[uuid.UUID, GameSlot]]:
-        """Return the same committed scheduled games collection used by schedule exports.
+    def _build_compaction_scheduled_games() -> list[dict[str, object]]:
+        """Build canonical scheduled games for turf-wave candidate discovery.
 
-        Candidate discovery must scan the committed schedule after generation/commit,
-        not the unscheduled game groups, generated slot inventory, or partial-wave rows.
-        `_schedule_management_rows` is the schedule export/quality-report source of
-        truth, so using it here keeps compaction aligned with export, validation,
-        and host/home verification.
+        This mirrors the committed scheduled-game source used by schedule export,
+        quality validation, and host-location/home-team verification: scheduled
+        `Game` rows for the season plus their currently assigned `GameSlot` when
+        one exists. Candidate discovery must scan these scheduled assignments, not
+        generated slots, unscheduled game groups, or partial-wave detail rows.
         """
-        rows = _schedule_management_rows(db, {'season_id': season_id})
-        committed_rows: list[tuple[Game, GameSlot | None]] = []
-        source_slot_by_game_id: dict[uuid.UUID, GameSlot] = {}
-        seen_game_ids: set[uuid.UUID] = set()
-        for game, slot, _field_instance, _host, _home, _away, _division, _organization, _status in rows:
-            if game.id not in seen_game_ids:
-                committed_rows.append((game, slot))
-                seen_game_ids.add(game.id)
-            if slot and slot.assigned_game_id and slot.assigned_game_id not in source_slot_by_game_id:
-                source_slot_by_game_id[slot.assigned_game_id] = slot
-        diagnostics['committed_scheduled_games_collection_count'] = len(committed_rows)
-        return committed_rows, source_slot_by_game_id
+        scheduled_games = db.query(Game).join(Game.status).filter(
+            Game.season_id == season_id,
+            GameStatus.code != 'UNSCHEDULED',
+        ).order_by(Game.game_date.asc(), Game.kickoff_time.asc(), Game.id.asc()).all()
+        slots_by_game_id: dict[uuid.UUID, GameSlot] = {}
+        game_ids = [game.id for game in scheduled_games]
+        if game_ids:
+            for slot in db.query(GameSlot).filter(GameSlot.assigned_game_id.in_(game_ids)).all():
+                if slot.assigned_game_id and slot.assigned_game_id not in slots_by_game_id:
+                    slots_by_game_id[slot.assigned_game_id] = slot
+
+        compaction_games: list[dict[str, object]] = []
+        for game in scheduled_games:
+            source_slot = slots_by_game_id.get(game.id)
+            host_location = game.host_location or (source_slot.host_location if source_slot else None)
+            field_instance = game.field_instance or (source_slot.field_instance if source_slot else None)
+            home_team = game.home_team
+            away_team = game.away_team
+            division = home_team.division if home_team else None
+            field_type = (
+                _normalize_field_size(source_slot.field_type if source_slot else None)
+                or _normalize_field_size(field_instance.field_type if field_instance else None)
+                or _normalize_field_size(_game_required_field_type(game))
+            )
+            compaction_games.append({
+                'game_id': game.id,
+                'date': game.game_date,
+                'start_time': game.kickoff_time,
+                'host_location_id': host_location.id if host_location else game.host_location_id,
+                'host_location_name': host_location.name if host_location else None,
+                'field_instance_id': field_instance.id if field_instance else game.field_instance_id,
+                'field_name': field_instance.field_name if field_instance else (game.field.name if game.field else None),
+                'field_type': field_type,
+                'division_id': division.id if division else None,
+                'division_name': f'{division.division_group or ""} {division.name or ""}'.strip() if division else None,
+                'home_team_id': home_team.id if home_team else game.home_team_id,
+                'home_team_name': home_team.name if home_team else None,
+                'away_team_id': away_team.id if away_team else game.away_team_id,
+                'away_team_name': away_team.name if away_team else None,
+                'generated_slot_id': source_slot.id if source_slot else None,
+                '_game': game,
+                '_source_slot': source_slot,
+            })
+        diagnostics['committed_scheduled_games_collection_count'] = len(compaction_games)
+        diagnostics['compaction_scheduled_games_count'] = len(compaction_games)
+        diagnostics['candidate_discovery_input_game_count'] = len(compaction_games)
+        return compaction_games
 
     def _candidate_game_field_size(game: Game, source_slot: GameSlot | None) -> str | None:
         game_field_size = _normalize_field_size(game.field_instance.field_type if game.field_instance else None)
@@ -6378,6 +6415,11 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         diagnostics['moves_evaluated'] = int(diagnostics.get('moves_evaluated') or 0) + 1
         diagnostics['candidate_moves_evaluated'] = int(diagnostics.get('candidate_moves_evaluated') or 0) + 1
         diagnostics['total_candidate_moves_evaluated'] = int(diagnostics.get('total_candidate_moves_evaluated') or 0) + 1
+
+    compaction_scheduled_games = _build_compaction_scheduled_games()
+    if target_partial_waves and int(diagnostics.get('compaction_scheduled_games_count') or 0) == 0:
+        _add_diagnostics_warning('BUG: partial waves exist but candidate discovery received zero scheduled games.', error=True)
+
     while int(diagnostics['moves_accepted']) < max_moves and target_partial_waves:
         waves, slots_by_wave = _wave_rows()
         best: tuple[int, Game, GameSlot, GameSlot, TurfWave, TurfWave | None, list[str]] | None = None
@@ -6427,29 +6469,30 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
                 target_detail['candidate_discovery_exclusion_reason'] = 'NO_NEEDED_FIELD_SIZES'
                 continue
             target_date = _coerce_compaction_date(target_detail.get('date')) or primary_target_wave.host_date
-            committed_scheduled_games, source_slot_by_game_id = _committed_scheduled_game_rows()
-            same_date_games = [
-                game
-                for game, _source_slot in committed_scheduled_games
-                if game.game_date == target_date
-            ]
             target_wave_ids = {wave.id for wave in target_waves}
             target_wave_assigned_game_ids = {
                 slot.assigned_game_id for slot in target_slots if slot.assigned_game_id
             }
             same_date_games_by_size: dict[str, list[tuple[Game, GameSlot | None]]] = {size: [] for size in target_sizes}
-            scanned_count = len(same_date_games)
+            scanned_count = 0
+            for scheduled_game in compaction_scheduled_games:
+                if _coerce_compaction_date(scheduled_game.get('date')) != target_date:
+                    continue
+                scanned_count += 1
+                game = scheduled_game.get('_game')
+                if not isinstance(game, Game):
+                    continue
+                source_slot = scheduled_game.get('_source_slot')
+                source_slot = source_slot if isinstance(source_slot, GameSlot) else None
+                if game.id in target_wave_assigned_game_ids or (source_slot and source_slot.turf_wave_id in target_wave_ids):
+                    candidate_games_already_in_target_wave = True
+                    continue
+                game_size = _normalize_field_size(scheduled_game.get('field_type')) or _candidate_game_field_size(game, source_slot)
+                if game_size in target_sizes:
+                    same_date_games_by_size.setdefault(game_size, []).append((game, source_slot))
             diagnostics['same_date_games_scanned'] = int(diagnostics.get('same_date_games_scanned') or 0) + scanned_count
             if target_detail is not None:
                 target_detail['same_date_games_scanned'] = int(target_detail.get('same_date_games_scanned') or 0) + scanned_count
-            for game in same_date_games:
-                source_slot = source_slot_by_game_id.get(game.id)
-                if game.id in target_wave_assigned_game_ids:
-                    candidate_games_already_in_target_wave = True
-                    continue
-                game_size = _candidate_game_field_size(game, source_slot)
-                if game_size in target_sizes:
-                    same_date_games_by_size.setdefault(game_size, []).append((game, source_slot))
             if target_detail is not None:
                 same_date_needed_count = sum(len(rows) for rows in same_date_games_by_size.values())
                 target_detail['same_date_needed_field_size_games_found_count'] = same_date_needed_count
@@ -6565,6 +6608,18 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         game.field_instance_id = target.field_instance_id
         game.game_date = target.slot_date
         game.kickoff_time = target.start_time
+        for scheduled_game in compaction_scheduled_games:
+            if scheduled_game.get('game_id') == game.id:
+                scheduled_game['date'] = game.game_date
+                scheduled_game['start_time'] = game.kickoff_time
+                scheduled_game['host_location_id'] = target.host_location_id
+                scheduled_game['host_location_name'] = target.host_location.name if target.host_location else None
+                scheduled_game['field_instance_id'] = target.field_instance_id
+                scheduled_game['field_name'] = target.field_instance.field_name if target.field_instance else None
+                scheduled_game['field_type'] = _normalize_field_size(target.field_type)
+                scheduled_game['generated_slot_id'] = target.id
+                scheduled_game['_source_slot'] = target
+                break
         diagnostics['moves_accepted'] = int(diagnostics['moves_accepted']) + 1
         db.flush()
 
@@ -6625,6 +6680,10 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         _add_diagnostics_warning('BUG: candidate discovery input count does not match partial_waves length.', error=True)
     if final_partial_waves and not diagnostics.get('candidate_discovery_started'):
         _add_diagnostics_warning('BUG: partial waves exist but candidate discovery did not start.', error=True)
+    if final_partial_waves and int(diagnostics.get('compaction_scheduled_games_count') or 0) == 0:
+        _add_diagnostics_warning('BUG: partial waves exist but candidate discovery received zero scheduled games.', error=True)
+    if final_partial_waves and int(diagnostics.get('same_date_games_scanned') or 0) == 0:
+        _add_diagnostics_warning('BUG: candidate discovery did not scan any same-date scheduled games.', error=True)
     if final_partial_waves and int(diagnostics.get('total_partial_waves_found') or 0) == 0 and int(diagnostics.get('candidate_moves_evaluated') or 0) == 0 and not diagnostics.get('candidate_discovery_started'):
         _add_diagnostics_warning('BUG: detected_turf_wave_groups contains partial turf waves, but the partial_waves source-of-truth collection is empty for candidate discovery.', error=True)
     diagnostics['compaction_pass_completed'] = True
