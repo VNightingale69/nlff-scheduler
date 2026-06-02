@@ -276,6 +276,99 @@ class AutoFillPreviewTest(unittest.TestCase):
         self.assertEqual(detail['medium_games_considered'], 1)
         self.assertEqual(detail['candidate_games_found_count'], 1)
 
+    def test_turf_wave_compaction_details_are_grouped_by_start_time(self):
+        self.host.surface_type = 'TURF_STADIUM'
+        self.slot.status = 'BOOKED'
+        availability = HostingAvailability(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week2.id,
+            organization_id=self.org_w.id,
+            host_location_id=self.host.id,
+            available_date=self.week2.start_date,
+            primary_game_date=self.week2.start_date,
+            start_time=time(9, 0),
+            end_time=time(12, 0),
+            is_available=True,
+        )
+        self.db.add(availability)
+        source_game = Game(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week2.id,
+            home_team_id=self.wm.id,
+            away_team_id=self.ab.id,
+            game_status_id=self.status.id,
+            game_date=self.week2.start_date,
+            kickoff_time=time(11, 0),
+        )
+        for idx, start in enumerate((time(9, 0), time(10, 0))):
+            wave = TurfWave(
+                id=uuid.uuid4(),
+                host_location_id=self.host.id,
+                hosting_availability_id=availability.id,
+                week_id=self.week2.id,
+                host_date=self.week2.start_date,
+                sequence_number=1,
+                wave_intent='SMALL_MEDIUM',
+                preferred_layout_code='ONE_MEDIUM_TWO_SMALL',
+                start_time=start,
+                end_time=time(start.hour + 1, 0),
+            )
+            small_game = Game(
+                id=uuid.uuid4(),
+                season_id=self.season.id,
+                week_id=self.week2.id,
+                home_team_id=self.wg.id if idx == 0 else self.wm.id,
+                away_team_id=self.as_.id if idx == 0 else self.ab.id,
+                game_status_id=self.status.id,
+                game_date=self.week2.start_date,
+                kickoff_time=start,
+            )
+            medium_division = Division(id=uuid.uuid4(), division_group='COED', name=f'Medium {idx}', required_field_layout_type='MEDIUM', is_active=True)
+            medium_home = Team(id=uuid.uuid4(), organization_id=self.org_w.id, division_id=medium_division.id, name=f'Westosha Medium {idx}', is_active=True)
+            medium_away = Team(id=uuid.uuid4(), organization_id=self.org_a.id, division_id=medium_division.id, name=f'Antioch Medium {idx}', is_active=True)
+            medium_game = Game(
+                id=uuid.uuid4(),
+                season_id=self.season.id,
+                week_id=self.week2.id,
+                home_team_id=medium_home.id,
+                away_team_id=medium_away.id,
+                game_status_id=self.status.id,
+                game_date=self.week2.start_date,
+                kickoff_time=start,
+            )
+            small_field = FieldInstance(id=uuid.uuid4(), host_location_id=self.host.id, hosting_availability_id=availability.id, instance_date=self.week2.start_date, field_name=f'Wave {idx} Small 1', field_type='SMALL', is_active=True)
+            open_small_field = FieldInstance(id=uuid.uuid4(), host_location_id=self.host.id, hosting_availability_id=availability.id, instance_date=self.week2.start_date, field_name=f'Wave {idx} Small 2', field_type='SMALL', is_active=True)
+            medium_field = FieldInstance(id=uuid.uuid4(), host_location_id=self.host.id, hosting_availability_id=availability.id, instance_date=self.week2.start_date, field_name=f'Wave {idx} Medium', field_type='MEDIUM', is_active=True)
+            self.db.add_all([
+                wave, medium_division, medium_home, medium_away, small_game, medium_game,
+                small_field, open_small_field, medium_field,
+                GameSlot(id=uuid.uuid4(), field_instance_id=small_field.id, host_location_id=self.host.id, season_id=self.season.id, week_id=self.week2.id, slot_date=self.week2.start_date, start_time=start, end_time=time(start.hour + 1, 0), field_type='SMALL', status='BOOKED', turf_wave_id=wave.id, assigned_game_id=small_game.id),
+                GameSlot(id=uuid.uuid4(), field_instance_id=open_small_field.id, host_location_id=self.host.id, season_id=self.season.id, week_id=self.week2.id, slot_date=self.week2.start_date, start_time=start, end_time=time(start.hour + 1, 0), field_type='SMALL', status='OPEN', turf_wave_id=wave.id),
+                GameSlot(id=uuid.uuid4(), field_instance_id=medium_field.id, host_location_id=self.host.id, season_id=self.season.id, week_id=self.week2.id, slot_date=self.week2.start_date, start_time=start, end_time=time(start.hour + 1, 0), field_type='MEDIUM', status='BOOKED', turf_wave_id=wave.id, assigned_game_id=medium_game.id),
+            ])
+        source_field = FieldInstance(id=uuid.uuid4(), host_location_id=self.host.id, hosting_availability_id=availability.id, instance_date=self.week2.start_date, field_name='Source Small', field_type='SMALL', is_active=True)
+        self.db.add_all([
+            source_game,
+            source_field,
+            GameSlot(id=uuid.uuid4(), field_instance_id=source_field.id, host_location_id=self.host.id, season_id=self.season.id, week_id=self.week2.id, slot_date=self.week2.start_date, start_time=time(11, 0), end_time=time(12, 0), field_type='SMALL', status='BOOKED', assigned_game_id=source_game.id),
+        ])
+        self.db.commit()
+
+        compaction = _run_turf_wave_compaction_pass(self.db, self.season.id)
+
+        details = sorted(compaction['partial_wave_details'], key=lambda row: row['start_time'])
+        self.assertEqual(len(details), 2)
+        self.assertEqual([row['start_time'] for row in details], ['09:00:00', '10:00:00'])
+        for detail in details:
+            self.assertEqual(detail['expected_capacity_by_size'], {'SMALL': 2, 'MEDIUM': 1})
+            self.assertEqual(detail['assigned_by_size'], {'SMALL': 1, 'MEDIUM': 1})
+            self.assertEqual(detail['unused_by_size'], {'SMALL': 1})
+            self.assertEqual(detail['needed_field_sizes'], ['SMALL'])
+            self.assertEqual(detail['utilization_percent'], 66.7)
+        self.assertGreater(compaction['total_candidate_moves_evaluated'], 0)
+
     def test_auto_fill_preview_prefers_packable_partial_turf_wave_over_earlier_empty_wave(self):
         self.host.surface_type = 'TURF_STADIUM'
         self.slot.status = 'CLOSED'
