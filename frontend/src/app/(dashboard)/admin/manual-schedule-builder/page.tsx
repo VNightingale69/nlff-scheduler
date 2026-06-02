@@ -579,6 +579,11 @@ export default function ManualScheduleBuilderPage() {
               <div>ONE_MEDIUM_TWO_SMALL partials: <span className='font-semibold'>{turfWaveCompactionDiagnostics.partial_ONE_MEDIUM_TWO_SMALL_waves_found ?? 0}</span></div>
               <div>TWO_LARGE partials: <span className='font-semibold'>{turfWaveCompactionDiagnostics.partial_TWO_LARGE_waves_found ?? 0}</span></div>
               <div>Candidate moves evaluated: <span className='font-semibold'>{turfWaveCompactionDiagnostics.total_candidate_moves_evaluated ?? turfWaveCompactionDiagnostics.moves_evaluated ?? 0}</span></div>
+              <div>Same-date games scanned: <span className='font-semibold'>{turfWaveCompactionDiagnostics.same_date_games_scanned ?? 0}</span></div>
+              <div>Matching field-size games: <span className='font-semibold'>{turfWaveCompactionDiagnostics.same_date_matching_field_size_games_found ?? 0}</span></div>
+              <div>Preliminary candidates: <span className='font-semibold'>{turfWaveCompactionDiagnostics.preliminary_candidates_created ?? 0}</span></div>
+              <div>Precheck rejections: <span className='font-semibold'>{turfWaveCompactionDiagnostics.candidates_rejected_by_precheck ?? 0}</span></div>
+              <div>Hard-constraint rejections: <span className='font-semibold'>{turfWaveCompactionDiagnostics.candidates_rejected_by_hard_constraint ?? 0}</span></div>
               <div>Accepted moves: <span className='font-semibold'>{turfWaveCompactionDiagnostics.accepted_moves_count ?? turfWaveCompactionDiagnostics.moves_accepted ?? 0}</span></div>
               <div>Rejected moves: <span className='font-semibold'>{turfWaveCompactionDiagnostics.rejected_moves_count ?? turfWaveCompactionDiagnostics.moves_rejected ?? 0}</span></div>
               <div>Waves improved: <span className='font-semibold'>{turfWaveCompactionDiagnostics.waves_improved_count ?? 0}</span></div>
@@ -606,7 +611,7 @@ export default function ManualScheduleBuilderPage() {
                     <td className='border p-1 text-right'>{wave.candidate_games_found_count ?? 0}</td>
                     <td className='border p-1 text-right'>{wave.accepted_candidate_game_count ?? 0}</td>
                     <td className='border p-1 text-right'>{wave.rejected_candidate_game_count ?? 0}</td>
-                    <td className='border p-1'>Small exists: {String(wave.small_games_exist_elsewhere_same_date ?? 'n/a')}; small considered: {wave.small_games_considered ?? 0}; paired swap: {String(wave.paired_swap_considered)}; large exists: {String(wave.large_games_exist_elsewhere_same_date ?? 'n/a')}; large considered: {wave.large_games_considered ?? 0}; Girls 6-8 considered: {wave.girls_6_8_games_considered ?? 0}; eliminates later TWO_LARGE: {String(wave.moving_game_would_eliminate_later_partial_two_large_wave)}; doubleheader blocked: {String(wave.doubleheader_rules_blocked_move)}</td>
+                    <td className='border p-1'>Scanned: {wave.same_date_games_scanned ?? 0}; matching size: {wave.same_date_matching_field_size_games_found ?? wave.same_date_needed_field_size_games_found_count ?? 0}; preliminary: {wave.preliminary_candidates_created ?? 0}; precheck rejected: {wave.candidates_rejected_by_precheck ?? 0}; hard rejected: {wave.candidates_rejected_by_hard_constraint ?? 0}; Small exists: {String(wave.small_games_exist_elsewhere_same_date ?? 'n/a')}; small considered: {wave.small_games_considered ?? 0}; paired swap: {String(wave.paired_swap_considered)}; large exists: {String(wave.large_games_exist_elsewhere_same_date ?? 'n/a')}; large considered: {wave.large_games_considered ?? 0}; Girls 6-8 considered: {wave.girls_6_8_games_considered ?? 0}; eliminates later TWO_LARGE: {String(wave.moving_game_would_eliminate_later_partial_two_large_wave)}; doubleheader blocked: {String(wave.doubleheader_rules_blocked_move)}</td>
                     <td className='border p-1'>{wave.no_candidate_reason || '—'}</td>
                   </tr>)}</tbody>
                 </table>
