@@ -6367,6 +6367,32 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
                 candidate_games_failed_preliminary_filters = True
                 target_detail['candidate_discovery_exclusion_reason'] = 'NO_NEEDED_FIELD_SIZES'
                 continue
+            same_date_sources = db.query(GameSlot).join(
+                Game, Game.id == GameSlot.assigned_game_id
+            ).join(Game.status).outerjoin(
+                FieldInstance, FieldInstance.id == GameSlot.field_instance_id
+            ).filter(
+                Game.season_id == season_id,
+                GameStatus.code != 'UNSCHEDULED',
+                Game.game_date == primary_target_wave.host_date,
+                GameSlot.assigned_game_id.is_not(None),
+                or_(GameSlot.field_type.in_(target_sizes), FieldInstance.field_type.in_(target_sizes)),
+            ).all()
+            same_date_sources_by_size: dict[str, list[GameSlot]] = {size: [] for size in target_sizes}
+            for source in same_date_sources:
+                source_sizes = {
+                    _normalize_field_size(source.field_type),
+                    _normalize_field_size(source.field_instance.field_type if source.field_instance else None),
+                }
+                for size in target_sizes:
+                    if size in source_sizes:
+                        same_date_sources_by_size.setdefault(size, []).append(source)
+            if target_detail is not None:
+                same_date_needed_count = sum(len(rows) for rows in same_date_sources_by_size.values())
+                target_detail['same_date_needed_field_size_games_found_count'] = same_date_needed_count
+                target_detail['small_games_exist_elsewhere_same_date'] = bool(same_date_sources_by_size.get(FIELD_SIZE_SMALL))
+                target_detail['medium_games_exist_elsewhere_same_date'] = bool(same_date_sources_by_size.get(FIELD_SIZE_MEDIUM))
+                target_detail['large_games_exist_elsewhere_same_date'] = bool(same_date_sources_by_size.get(FIELD_SIZE_LARGE))
             for target_size in target_sizes:
                 open_targets = [slot for slot in target_slots if not slot.assigned_game_id and str(slot.status or '').upper() == 'OPEN' and _normalize_field_size(slot.field_type) == target_size]
                 if not open_targets:
@@ -6374,27 +6400,15 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
                     target_detail['candidate_discovery_exclusion_reason'] = 'NO_OPEN_TARGET_COMPONENTS'
                 for target in open_targets:
                     target_wave = target.turf_wave or primary_target_wave
-                    assigned_sources = db.query(GameSlot).join(GameSlot.assigned_game).filter(
-                        GameSlot.season_id == season_id,
-                        GameSlot.id != target.id,
-                        GameSlot.slot_date == target.slot_date,
-                        GameSlot.assigned_game_id.is_not(None),
-                        GameSlot.field_type == target_size,
-                    ).all()
-                    if target_detail is not None:
-                        if target_size == FIELD_SIZE_SMALL:
-                            target_detail['small_games_exist_elsewhere_same_date'] = bool(assigned_sources)
-                        if target_size == FIELD_SIZE_MEDIUM:
-                            target_detail['medium_games_exist_elsewhere_same_date'] = bool(assigned_sources)
-                        if target_size == FIELD_SIZE_LARGE:
-                            target_detail['large_games_exist_elsewhere_same_date'] = bool(assigned_sources)
-                    for source in assigned_sources:
+                    for source in same_date_sources_by_size.get(target_size, []):
+                        if source.id == target.id:
+                            continue
                         candidate_same_date_games_found = True
                         game = source.assigned_game
                         if not game:
                             candidate_games_failed_preliminary_filters = True
                             continue
-                        if source.turf_wave_id == target_wave.id:
+                        if source.turf_wave_id and source.turf_wave_id in {wave.id for wave in target_waves}:
                             candidate_games_already_in_target_wave = True
                             continue
                         if target_detail is not None:
@@ -6475,7 +6489,7 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         db.flush()
 
     for row in partial_wave_detail_by_id.values():
-        if int(row.get('candidate_games_found_count') or 0) == 0:
+        if int(row.get('candidate_games_found_count') or 0) == 0 and int(row.get('same_date_needed_field_size_games_found_count') or 0) == 0:
             needed = ', '.join(row.get('needed_field_sizes') or []) or 'unknown size'
             row['no_candidate_reason'] = f'No assigned {needed} games were found elsewhere on the same date for an open target component.'
 
