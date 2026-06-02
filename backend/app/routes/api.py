@@ -5688,9 +5688,12 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         'warnings': [],
         'error_warnings': [],
         'younger_division_late_penalty_candidates': [],
+        'younger_division_late_penalty_candidates_count': 0,
         'younger_division_late_penalty_accepted': 0,
         'younger_division_late_penalty_rejected_after_scoring': 0,
         'younger_division_late_penalty_rejected_for_hard_constraints': 0,
+        'younger_division_late_penalty_rejected_by_reason': {},
+        'younger_division_late_penalty_rejection_summary_line': 'Former younger-division-late candidates now rejected by: none',
         'accepted_moves_with_younger_division_late_penalty': [],
         'accepted_moves_with_younger_division_late_penalty_count': 0,
         'soft_scoring_diagnostics_by_reason': {},
@@ -6121,6 +6124,24 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         if isinstance(counts, dict):
             counts[reason] = int(counts.get(reason) or 0) + 1
 
+    def _record_younger_division_late_penalty_rejection_reason(reason: str | None) -> None:
+        if not reason:
+            return
+        counts = diagnostics.get('younger_division_late_penalty_rejected_by_reason')
+        if isinstance(counts, dict):
+            counts[reason] = int(counts.get(reason) or 0) + 1
+
+    def _decrement_younger_division_late_penalty_rejection_reason(reason: str | None) -> None:
+        if not reason:
+            return
+        counts = diagnostics.get('younger_division_late_penalty_rejected_by_reason')
+        if isinstance(counts, dict) and reason in counts:
+            remaining = int(counts.get(reason) or 0) - 1
+            if remaining > 0:
+                counts[reason] = remaining
+            else:
+                counts.pop(reason, None)
+
     def _record_younger_division_late_penalty_candidate(
         game: Game,
         source: GameSlot,
@@ -6138,10 +6159,12 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         diagnostics['younger_division_late_penalty_candidates_count'] = int(diagnostics.get('younger_division_late_penalty_candidates_count') or 0) + 1
         if hard_constraint_failure:
             diagnostics['younger_division_late_penalty_rejected_for_hard_constraints'] = int(diagnostics.get('younger_division_late_penalty_rejected_for_hard_constraints') or 0) + 1
+            _record_younger_division_late_penalty_rejection_reason(final_rejection_reason)
         elif accepted:
             diagnostics['younger_division_late_penalty_accepted'] = int(diagnostics.get('younger_division_late_penalty_accepted') or 0) + 1
         elif final_rejection_reason:
             diagnostics['younger_division_late_penalty_rejected_after_scoring'] = int(diagnostics.get('younger_division_late_penalty_rejected_after_scoring') or 0) + 1
+            _record_younger_division_late_penalty_rejection_reason(final_rejection_reason)
         _record_soft_scoring_reason('YOUNGER_DIVISION_LATE_PENALTY_APPLIED')
         source_wave = source.turf_wave if source else None
         row = {
@@ -6160,6 +6183,9 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
             'score_after_penalty': score_after_penalty,
             'accepted': bool(accepted),
             'final_rejection_reason': final_rejection_reason,
+            'previous_hard_rejection_reason': 'MOVES_YOUNGER_DIVISION_TOO_LATE',
+            'previously_would_have_been_hard_rejected': True,
+            'now_rejected_for_host_community_balance': final_rejection_reason == 'WORSENS_HOST_COMMUNITY_BALANCE',
             'hard_constraint_failure': bool(hard_constraint_failure),
             'source_wave_utilization_before': _wave_utilization_snapshot(source_wave) if source_wave else None,
             'source_wave_utilization_after': _wave_utilization_snapshot(source_wave, extra_assigned_delta=-1) if source_wave else None,
@@ -6923,11 +6949,13 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         })
         home_away_plan = _compaction_home_away_plan(game, target)
         if isinstance(younger_late_penalty_row, dict):
-            if younger_late_penalty_row.get('final_rejection_reason') == 'NOT_SELECTED_BEST_SCORE':
+            pending_rejection_reason = younger_late_penalty_row.get('final_rejection_reason')
+            if pending_rejection_reason == 'NOT_SELECTED_BEST_SCORE':
                 diagnostics['younger_division_late_penalty_rejected_after_scoring'] = max(
                     0,
                     int(diagnostics.get('younger_division_late_penalty_rejected_after_scoring') or 0) - 1,
                 )
+                _decrement_younger_division_late_penalty_rejection_reason(pending_rejection_reason if isinstance(pending_rejection_reason, str) else None)
             younger_late_penalty_row['accepted'] = True
             younger_late_penalty_row['final_rejection_reason'] = None
             diagnostics['younger_division_late_penalty_accepted'] = int(diagnostics.get('younger_division_late_penalty_accepted') or 0) + 1
@@ -6938,6 +6966,10 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
                     'division': _division_label_for_game(game),
                     'original_start_time': source.start_time.isoformat() if source.start_time else None,
                     'proposed_start_time': target.start_time.isoformat() if target.start_time else None,
+                    'original_host_location': source.host_location.name if source.host_location else None,
+                    'proposed_host_location': target.host_location.name if target.host_location else None,
+                    'original_field': _slot_label(source),
+                    'proposed_field': _slot_label(target),
                     'age_timing_penalty_applied': younger_late_penalty_row.get('age_timing_penalty_applied'),
                     'wave_improvement_gained': younger_late_penalty_row.get('wave_improvement_gained'),
                     'score_before_penalty': younger_late_penalty_row.get('score_before_penalty'),
@@ -7096,8 +7128,23 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
     )
     diagnostics['post_compaction_host_location_vs_home_team_verification'] = final_host_verification
     diagnostics['host_owner_as_away_after_compaction'] = int(final_host_verification.get('host_owner_is_away_team') or 0)
+    younger_late_rejected_by_reason = diagnostics.get('younger_division_late_penalty_rejected_by_reason')
+    if isinstance(younger_late_rejected_by_reason, dict) and younger_late_rejected_by_reason:
+        younger_late_rejection_summary = ', '.join(
+            f'{reason}: {count}'
+            for reason, count in sorted(
+                younger_late_rejected_by_reason.items(),
+                key=lambda item: (-int(item[1] or 0), str(item[0])),
+            )
+        )
+    else:
+        younger_late_rejection_summary = 'none'
+    diagnostics['younger_division_late_penalty_rejection_summary_line'] = (
+        f'Former younger-division-late candidates now rejected by: {younger_late_rejection_summary}'
+    )
     diagnostics['turf_wave_optimization_summary'] = {
         'section': 'Turf Wave Optimization Summary',
+        'younger_division_late_penalty_rejection_summary_line': diagnostics.get('younger_division_late_penalty_rejection_summary_line'),
         'partial_waves_before': int(diagnostics.get('partial_waves_before') or 0),
         'partial_waves_after': int(diagnostics.get('partial_waves_after') or 0),
         'waves_improved': int(diagnostics.get('waves_improved_count') or 0),

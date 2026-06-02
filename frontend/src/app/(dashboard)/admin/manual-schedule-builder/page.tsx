@@ -57,6 +57,7 @@ export default function ManualScheduleBuilderPage() {
   const hostOwnerAwayGames = hostLocationVerification?.host_owner_is_away_games || [];
   const turfWaveCompactionDiagnostics = autoScheduleDiagnostics?.turf_wave_compaction || autoScheduleDiagnostics?.auto_schedule_diagnostics?.turf_wave_compaction || null;
   const turfWaveCompactionRejectedMoves = turfWaveCompactionDiagnostics?.rejected_moves || [];
+  const youngerDivisionLatePenaltyCandidates = turfWaveCompactionDiagnostics?.younger_division_late_penalty_candidates || [];
 
   const getWeekOptionLabel = (week: any) => {
     const baseLabel = week.label || `Week ${week.week_number}`;
@@ -615,6 +616,40 @@ export default function ManualScheduleBuilderPage() {
               <div className='font-medium'>Rejected moves by reason</div>
               <ul className='list-inside list-disc'>{Object.entries(turfWaveCompactionDiagnostics.rejected_moves_by_reason || {}).map(([reason, count]: any) => <li key={reason}>{reason}: {count}</li>)}</ul>
             </div> : null}
+            <div className='mt-3 rounded border border-amber-200 bg-amber-50 p-2 text-sm'>
+              <div className='font-medium'>Younger-division-late soft penalty diagnostics</div>
+              <div>{turfWaveCompactionDiagnostics.younger_division_late_penalty_rejection_summary_line || 'Former younger-division-late candidates now rejected by: none'}</div>
+              <div className='mt-1 grid gap-2 sm:grid-cols-2 lg:grid-cols-3'>
+                <div>Penalty candidates: <span className='font-semibold'>{turfWaveCompactionDiagnostics.younger_division_late_penalty_candidates_count ?? youngerDivisionLatePenaltyCandidates.length}</span></div>
+                <div>Penalty accepted: <span className='font-semibold'>{turfWaveCompactionDiagnostics.younger_division_late_penalty_accepted ?? 0}</span></div>
+                <div>Accepted moves with penalty: <span className='font-semibold'>{turfWaveCompactionDiagnostics.accepted_moves_with_younger_division_late_penalty_count ?? (turfWaveCompactionDiagnostics.accepted_moves_with_younger_division_late_penalty || []).length}</span></div>
+                <div>Rejected after scoring: <span className='font-semibold'>{turfWaveCompactionDiagnostics.younger_division_late_penalty_rejected_after_scoring ?? 0}</span></div>
+                <div>Rejected for hard constraints: <span className='font-semibold'>{turfWaveCompactionDiagnostics.younger_division_late_penalty_rejected_for_hard_constraints ?? 0}</span></div>
+                <div>Soft scoring marker: <span className='font-semibold'>{turfWaveCompactionDiagnostics.soft_scoring_diagnostics_by_reason?.YOUNGER_DIVISION_LATE_PENALTY_APPLIED ?? 0}</span></div>
+              </div>
+              {Object.keys(turfWaveCompactionDiagnostics.younger_division_late_penalty_rejected_by_reason || {}).length ? <div className='mt-2'>
+                <div className='font-medium'>Former younger-division-late candidates now rejected by:</div>
+                <ul className='list-inside list-disc'>{Object.entries(turfWaveCompactionDiagnostics.younger_division_late_penalty_rejected_by_reason || {}).map(([reason, count]: any) => <li key={reason}>{reason}: {count}</li>)}</ul>
+              </div> : null}
+            </div>
+            {youngerDivisionLatePenaltyCandidates.length ? <details className='mt-3 rounded border border-amber-200 p-2'>
+              <summary className='cursor-pointer font-medium'>Younger-division-late penalty candidate details ({youngerDivisionLatePenaltyCandidates.length})</summary>
+              <div className='mt-2 overflow-x-auto'>
+                <table className='min-w-full border text-xs'>
+                  <thead><tr className='bg-amber-100'><th className='border p-1 text-left'>Game</th><th className='border p-1 text-left'>Division</th><th className='border p-1 text-left'>Original</th><th className='border p-1 text-left'>Proposed</th><th className='border p-1 text-left'>Penalty</th><th className='border p-1 text-left'>Score</th><th className='border p-1 text-left'>Accepted?</th><th className='border p-1 text-left'>Final rejection</th></tr></thead>
+                  <tbody>{youngerDivisionLatePenaltyCandidates.map((candidate: any, idx: number) => <tr key={`${candidate.candidate_game_id}-${idx}`} className={candidate.now_rejected_for_host_community_balance ? 'bg-amber-50' : ''}>
+                    <td className='border p-1'>{candidate.candidate_game_id}<br />{candidate.diagnostic || 'YOUNGER_DIVISION_LATE_PENALTY_APPLIED'}</td>
+                    <td className='border p-1'>{candidate.division || 'N/A'}</td>
+                    <td className='border p-1'>{candidate.original_start_time ? formatDisplayTime(candidate.original_start_time) : 'N/A'}<br />{candidate.original_host_location || 'N/A'} · {candidate.original_field || 'N/A'}</td>
+                    <td className='border p-1'>{candidate.proposed_start_time ? formatDisplayTime(candidate.proposed_start_time) : 'N/A'}<br />{candidate.proposed_host_location || 'N/A'} · {candidate.proposed_field || 'N/A'}</td>
+                    <td className='border p-1'>{candidate.age_timing_penalty_applied ?? 'n/a'}<br />Wave gain {candidate.wave_improvement_gained ?? 'n/a'}</td>
+                    <td className='border p-1'>Before {candidate.score_before_penalty ?? 'n/a'}<br />After {candidate.score_after_penalty ?? 'n/a'}</td>
+                    <td className='border p-1'>{String(candidate.accepted)}</td>
+                    <td className='border p-1'>{candidate.final_rejection_reason || '—'}{candidate.now_rejected_for_host_community_balance ? <><br /><span className='font-semibold text-amber-700'>Previously hard-blocked as MOVES_YOUNGER_DIVISION_TOO_LATE; now WORSENS_HOST_COMMUNITY_BALANCE.</span></> : null}</td>
+                  </tr>)}</tbody>
+                </table>
+              </div>
+            </details> : null}
             {(turfWaveCompactionDiagnostics.partial_wave_details || turfWaveCompactionDiagnostics.partial_waves || []).length ? <details className='mt-3 rounded border border-slate-200 p-2' open>
               <summary className='cursor-pointer font-medium'>Partial wave details</summary>
               <div className='mt-2 overflow-x-auto'>
