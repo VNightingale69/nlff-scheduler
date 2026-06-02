@@ -5697,6 +5697,15 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         'accepted_moves_with_younger_division_late_penalty': [],
         'accepted_moves_with_younger_division_late_penalty_count': 0,
         'soft_scoring_diagnostics_by_reason': {},
+        'neutral_site_to_neutral_site_candidates': 0,
+        'neutral_site_to_neutral_site_accepted': 0,
+        'neutral_site_to_neutral_site_rejected_by_reason': {},
+        'host_balance_applied_true_home_game_count': 0,
+        'host_balance_skipped_neutral_site_count': 0,
+        'host_balance_rejected_true_home_game_count': 0,
+        'unknown_host_ownership_candidate_count': 0,
+        'formerly_host_balance_rejected_now_allowed_count': 0,
+        'host_balance_candidate_details': [],
     }
     if not enabled:
         diagnostics['compaction_skipped_reason'] = 'COMPACTION_DISABLED'
@@ -5891,6 +5900,81 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
             return 'AWAY'
         return 'NEUTRAL'
 
+    def _host_balance_match_context(game: Game, source: GameSlot | None, target: GameSlot | None) -> dict[str, object]:
+        home_team = game.home_team if game else None
+        away_team = game.away_team if game else None
+        source_host = source.host_location if source and source.host_location else None
+        target_host = target.host_location if target and target.host_location else None
+        home_community_id = getattr(home_team, 'organization_id', None) if home_team else None
+        away_community_id = getattr(away_team, 'organization_id', None) if away_team else None
+        current_owner_id = getattr(source_host, 'organization_id', None) if source_host else None
+        target_owner_id = getattr(target_host, 'organization_id', None) if target_host else None
+        current_matches_home = bool(current_owner_id is not None and home_community_id is not None and current_owner_id == home_community_id)
+        current_matches_away = bool(current_owner_id is not None and away_community_id is not None and current_owner_id == away_community_id)
+        target_matches_home = bool(target_owner_id is not None and home_community_id is not None and target_owner_id == home_community_id)
+        target_matches_away = bool(target_owner_id is not None and away_community_id is not None and target_owner_id == away_community_id)
+        missing_required = any(value is None for value in (home_community_id, away_community_id, current_owner_id, target_owner_id))
+        same_community = bool(home_community_id is not None and home_community_id == away_community_id)
+        current_true_home = current_matches_home or current_matches_away
+        target_true_home = target_matches_home or target_matches_away
+        if missing_required:
+            classification = 'UNKNOWN_HOST_OWNERSHIP'
+        elif same_community:
+            classification = 'SAME_COMMUNITY_TRUE_HOME' if target_true_home else 'SAME_COMMUNITY_NEUTRAL'
+        elif not current_true_home and not target_true_home:
+            classification = 'NEUTRAL_TO_NEUTRAL'
+        elif not current_true_home and target_true_home:
+            classification = 'NEUTRAL_TO_TRUE_HOME'
+        elif current_true_home and not target_true_home:
+            classification = 'TRUE_HOME_TO_NEUTRAL'
+        else:
+            classification = 'TRUE_HOME_TO_TRUE_HOME'
+        host_balance_applies = bool(classification != 'UNKNOWN_HOST_OWNERSHIP' and (current_true_home or target_true_home))
+        return {
+            'game_id': str(game.id) if game else None,
+            'division': _division_label_for_game(game),
+            'current_host_location_id': str(source_host.id) if source_host else None,
+            'current_host_location_name': source_host.name if source_host else None,
+            'current_host_owner_community_id': str(current_owner_id) if current_owner_id is not None else None,
+            'target_host_location_id': str(target_host.id) if target_host else None,
+            'target_host_location_name': target_host.name if target_host else None,
+            'target_host_owner_community_id': str(target_owner_id) if target_owner_id is not None else None,
+            'home_team_id': str(home_team.id) if home_team else None,
+            'home_team_name': home_team.name if home_team else None,
+            'home_team_community_id': str(home_community_id) if home_community_id is not None else None,
+            'away_team_id': str(away_team.id) if away_team else None,
+            'away_team_name': away_team.name if away_team else None,
+            'away_team_community_id': str(away_community_id) if away_community_id is not None else None,
+            'current_host_matches_home_team': current_matches_home,
+            'current_host_matches_away_team': current_matches_away,
+            'target_host_matches_home_team': target_matches_home,
+            'target_host_matches_away_team': target_matches_away,
+            'move_classification': classification,
+            'host_balance_applied': host_balance_applies,
+            'host_balance_skipped_reason': None if host_balance_applies else ('UNKNOWN_HOST_OWNERSHIP' if missing_required else 'NEUTRAL_SITE_TO_NEUTRAL_SITE'),
+            'final_rejection_reason': None,
+            'accepted': False,
+        }
+
+    def _record_neutral_rejection_reason(reason: str) -> None:
+        counts = diagnostics.get('neutral_site_to_neutral_site_rejected_by_reason')
+        if isinstance(counts, dict):
+            counts[reason] = int(counts.get(reason) or 0) + 1
+
+    def _record_host_balance_candidate_context(row: dict[str, object]) -> None:
+        details = diagnostics.get('host_balance_candidate_details')
+        if isinstance(details, list):
+            details.append(row)
+        classification = row.get('move_classification')
+        if classification == 'NEUTRAL_TO_NEUTRAL':
+            diagnostics['neutral_site_to_neutral_site_candidates'] = int(diagnostics.get('neutral_site_to_neutral_site_candidates') or 0) + 1
+            diagnostics['host_balance_skipped_neutral_site_count'] = int(diagnostics.get('host_balance_skipped_neutral_site_count') or 0) + 1
+        elif classification == 'UNKNOWN_HOST_OWNERSHIP':
+            diagnostics['unknown_host_ownership_candidate_count'] = int(diagnostics.get('unknown_host_ownership_candidate_count') or 0) + 1
+            _add_diagnostics_warning(f"UNKNOWN_HOST_OWNERSHIP for compaction candidate game_id={row.get('game_id')} current_host_location_id={row.get('current_host_location_id')} target_host_location_id={row.get('target_host_location_id')}")
+        elif row.get('host_balance_applied'):
+            diagnostics['host_balance_applied_true_home_game_count'] = int(diagnostics.get('host_balance_applied_true_home_game_count') or 0) + 1
+
     def _compaction_home_away_plan(game: Game, target: GameSlot) -> dict[str, object]:
         original_home = game.home_team
         original_away = game.away_team
@@ -6045,7 +6129,7 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
             'MOVES_YOUNGER_DIVISION_TOO_LATE', 'WORSENS_HOST_COMMUNITY_BALANCE', 'VIOLATES_HOST_COMMUNITY_HARD_RULE',
             'VIOLATES_HOME_SITE_REQUIREMENT', 'NO_NET_WAVE_IMPROVEMENT', 'TARGET_SLOT_NOT_AVAILABLE',
             'TARGET_FIELD_INSTANCE_NOT_FOUND', 'TARGET_WAVE_NOT_FOUND', 'SOURCE_GAME_LOCKED', 'SOURCE_GAME_ALREADY_OPTIMAL',
-            'COMPACTION_DISABLED', 'SOURCE_SLOT_NOT_FOUND', 'WOULD_CREATE_HOST_OWNER_AS_AWAY', 'UNKNOWN_REJECTION_REASON'
+            'COMPACTION_DISABLED', 'SOURCE_SLOT_NOT_FOUND', 'WOULD_CREATE_HOST_OWNER_AS_AWAY', 'UNKNOWN_HOST_OWNERSHIP', 'UNKNOWN_REJECTION_REASON'
         } else 'UNKNOWN_REJECTION_REASON'
         diagnostics['moves_rejected'] = int(diagnostics['moves_rejected']) + 1
         diagnostics['rejected_moves_count'] = int(diagnostics.get('rejected_moves_count') or 0) + 1
@@ -6095,6 +6179,10 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
             'moving_game_would_leave_source_wave_worse': _move_would_leave_source_wave_worse(source, actual_target_wave),
             'moving_game_would_eliminate_later_partial_wave': _move_would_eliminate_source_wave(source, actual_target_wave),
         }
+        if game and source and target:
+            rejected_row.update(_host_balance_match_context(game, source, target))
+            rejected_row['final_rejection_reason'] = normalized_reason
+            rejected_row['accepted'] = False
         rejected = diagnostics['rejected_moves']
         if isinstance(rejected, list):
             rejected.append(rejected_row)
@@ -6198,11 +6286,17 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
             return row
         return None
 
-    def _score_move(game: Game, source: GameSlot, target: GameSlot, target_wave: TurfWave, source_wave: TurfWave | None) -> tuple[int, list[str], dict[str, object] | None]:
+    def _score_move(game: Game, source: GameSlot, target: GameSlot, target_wave: TurfWave, source_wave: TurfWave | None) -> tuple[int, list[str], dict[str, object] | None, dict[str, object] | None]:
         younger_late_penalty = _younger_division_late_penalty(game, source, target, target_wave)
+        host_balance_row: dict[str, object] | None = None
 
-        def reject_move(reason: str, *, detail: str | None = None, hard_constraint_failure: bool = True, score_before: int | None = None, score_after: int | None = None) -> tuple[int, list[str], dict[str, object] | None]:
+        def reject_move(reason: str, *, detail: str | None = None, hard_constraint_failure: bool = True, score_before: int | None = None, score_after: int | None = None) -> tuple[int, list[str], dict[str, object] | None, dict[str, object] | None]:
             penalty_row = None
+            if isinstance(host_balance_row, dict):
+                host_balance_row['final_rejection_reason'] = reason
+                host_balance_row['accepted'] = False
+                if host_balance_row.get('move_classification') == 'NEUTRAL_TO_NEUTRAL':
+                    _record_neutral_rejection_reason(reason)
             if younger_late_penalty > 0:
                 penalty_row = _record_younger_division_late_penalty_candidate(
                     game,
@@ -6218,7 +6312,7 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
                     hard_constraint_failure=hard_constraint_failure,
                 )
             _reject(game, source, target, reason, detail=detail, hard_constraint_failure=hard_constraint_failure, score_before=score_before, score_after=score_after, target_wave=target_wave)
-            return -10_000, [], penalty_row
+            return -10_000, [], penalty_row, host_balance_row
 
         if target.assigned_game_id or str(target.status or '').upper() != 'OPEN':
             return reject_move('TARGET_SLOT_NOT_AVAILABLE', detail='Target slot is not open or already has an assigned game.')
@@ -6227,6 +6321,10 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         if source.slot_date != target.slot_date or game.game_date != target.slot_date:
             return reject_move('MOVES_GAME_TO_DIFFERENT_DATE', detail=f'Move would change the game date from {game.game_date.isoformat() if game.game_date else source.slot_date.isoformat()} to {target.slot_date.isoformat()}.')
         home_away_plan = _compaction_home_away_plan(game, target)
+        host_balance_row = _host_balance_match_context(game, source, target)
+        _record_host_balance_candidate_context(host_balance_row)
+        if host_balance_row.get('move_classification') == 'UNKNOWN_HOST_OWNERSHIP':
+            return reject_move('UNKNOWN_HOST_OWNERSHIP', detail='Candidate move is missing required team community or host-location owner data; compaction will not guess or bypass host-community balance.')
         if home_away_plan.get('would_create_host_owner_as_away'):
             return reject_move('WOULD_CREATE_HOST_OWNER_AS_AWAY', detail='Candidate move would leave the target host-location owner assigned as the away team after applying compaction home/away rules.')
         final_home_team = home_away_plan.get('final_home_team_obj')
@@ -6240,8 +6338,10 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
             return reject_move('TEAM_TIME_CONFLICT', detail=_team_time_conflict_detail(game, target))
         if _breaks_doubleheader(game, target):
             return reject_move('BREAKS_DOUBLEHEADER_BACK_TO_BACK', detail=_doubleheader_detail(game, source, target))
-        if _breaks_host_balance(game, source, target, home_away_plan):
-            return reject_move('WORSENS_HOST_COMMUNITY_BALANCE', detail='Move would change a home/away community-hosted game to a less favorable host ownership category after applying compaction home/away rules.')
+        host_balance_would_break = bool(host_balance_row.get('host_balance_applied')) and _breaks_host_balance(game, source, target, home_away_plan)
+        if host_balance_would_break:
+            diagnostics['host_balance_rejected_true_home_game_count'] = int(diagnostics.get('host_balance_rejected_true_home_game_count') or 0) + 1
+            return reject_move('WORSENS_HOST_COMMUNITY_BALANCE', detail='Move would change a true home-host relationship to a less favorable host ownership category after applying compaction home/away rules.')
 
         waves, slots_by_wave = _wave_rows()
         before_active = _metrics()['active_turf_waves_used']
@@ -6267,7 +6367,7 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
             score += 50
         if target.start_time < source.start_time:
             score += 25
-        if _breaks_host_balance(game, source, target, home_away_plan):
+        if host_balance_would_break:
             score -= 75
         if _breaks_doubleheader(game, target):
             score -= 100
@@ -6309,7 +6409,9 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
                 score_before=score_before_penalty,
                 score_after=score,
             )
-        return score, reasons or ['NO_NET_WAVE_IMPROVEMENT'], penalty_row
+        if host_balance_row.get('move_classification') == 'NEUTRAL_TO_NEUTRAL' and _breaks_host_balance(game, source, target, home_away_plan):
+            diagnostics['formerly_host_balance_rejected_now_allowed_count'] = int(diagnostics.get('formerly_host_balance_rejected_now_allowed_count') or 0) + 1
+        return score, reasons or ['NO_NET_WAVE_IMPROVEMENT'], penalty_row, host_balance_row
 
     def _record_utilization_metrics(phase: str, metrics: dict[str, int]) -> None:
         for key, value in metrics.items():
@@ -6753,7 +6855,7 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
 
     while int(diagnostics['moves_accepted']) < max_moves and target_partial_waves:
         waves, slots_by_wave = _wave_rows()
-        best: tuple[int, Game, GameSlot, GameSlot, TurfWave, TurfWave | None, list[str]] | None = None
+        best: tuple[int, Game, GameSlot, GameSlot, TurfWave, TurfWave | None, list[str], dict[str, object] | None, dict[str, object] | None] | None = None
         for target_detail in target_partial_waves:
             if not isinstance(target_detail, dict):
                 continue
@@ -6908,7 +7010,7 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
                         source_wave = source.turf_wave
                         rejected_before = int(diagnostics.get('rejected_moves_count') or 0)
                         hard_rejected_before = int(diagnostics.get('candidates_rejected_by_hard_constraint') or 0)
-                        score, reasons, younger_late_penalty_row = _score_move(game, source, target, target_wave, source_wave)
+                        score, reasons, younger_late_penalty_row, host_balance_row = _score_move(game, source, target, target_wave, source_wave)
                         if target_detail is not None and int(diagnostics.get('rejected_moves_count') or 0) > rejected_before:
                             target_detail['rejected_candidate_game_count'] = int(target_detail.get('rejected_candidate_game_count') or 0) + 1
                             if int(diagnostics.get('candidates_rejected_by_hard_constraint') or 0) > hard_rejected_before:
@@ -6923,12 +7025,12 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
                             score += 20
                         if source_wave and source_wave.host_date == target_wave.host_date and source_wave.start_time > target_wave.start_time:
                             score += 10
-                        candidate = (score, game, source, target, target_wave, source_wave, reasons, younger_late_penalty_row)
+                        candidate = (score, game, source, target, target_wave, source_wave, reasons, younger_late_penalty_row, host_balance_row)
                         if best is None or candidate[0] > best[0]:
                             best = candidate
         if not best:
             break
-        _score, game, source, target, target_wave, source_wave, reasons, younger_late_penalty_row = best
+        _score, game, source, target, target_wave, source_wave, reasons, younger_late_penalty_row, host_balance_row = best
         accepted_wave_detail = partial_wave_detail_by_id.get(str(target_wave.id))
         if accepted_wave_detail is not None:
             accepted_wave_detail['accepted_candidate_game_count'] = int(accepted_wave_detail.get('accepted_candidate_game_count') or 0) + 1
@@ -6948,6 +7050,11 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
             'target_status': target.status,
         })
         home_away_plan = _compaction_home_away_plan(game, target)
+        if isinstance(host_balance_row, dict):
+            host_balance_row['accepted'] = True
+            host_balance_row['final_rejection_reason'] = None
+            if host_balance_row.get('move_classification') == 'NEUTRAL_TO_NEUTRAL':
+                diagnostics['neutral_site_to_neutral_site_accepted'] = int(diagnostics.get('neutral_site_to_neutral_site_accepted') or 0) + 1
         if isinstance(younger_late_penalty_row, dict):
             pending_rejection_reason = younger_late_penalty_row.get('final_rejection_reason')
             if pending_rejection_reason == 'NOT_SELECTED_BEST_SCORE':
@@ -7008,6 +7115,7 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
                 'new_wave': _wave_label(target_wave),
                 'reason': reasons[0],
                 'reasons': reasons,
+                **(host_balance_row if isinstance(host_balance_row, dict) else {}),
             })
         target.assigned_game_id = game.id
         target.status = 'BOOKED'
@@ -7101,6 +7209,14 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         diagnostics['moves_accepted'] = 0
         diagnostics['accepted_moves_count'] = 0
         diagnostics['waves_improved_count'] = 0
+        diagnostics['neutral_site_to_neutral_site_accepted'] = 0
+        host_balance_details = diagnostics.get('host_balance_candidate_details')
+        if isinstance(host_balance_details, list):
+            for row in host_balance_details:
+                if isinstance(row, dict) and row.get('accepted'):
+                    row['accepted'] = False
+                    row['final_rejection_reason'] = 'VALIDATION_FAILED_AFTER_COMPACTION_ROLLBACK'
+                    row['rollback_reason'] = diagnostics['rollback_reason']
 
     after = _metrics()
     _record_utilization_metrics('after', after)
