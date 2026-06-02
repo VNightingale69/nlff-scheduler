@@ -5645,6 +5645,22 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         'waves_improved_count': 0,
         'rollback_occurred': False,
         'rollback_reason': None,
+        'turf_waves_before_total': 0,
+        'full_turf_waves_before': 0,
+        'partial_turf_waves_before': 0,
+        'partial_waves_before': 0,
+        'empty_turf_waves_before': 0,
+        'one_medium_two_small_partials_before': 0,
+        'two_large_partials_before': 0,
+        'turf_waves_after_total': 0,
+        'full_turf_waves_after': 0,
+        'partial_turf_waves_after': 0,
+        'partial_waves_after': 0,
+        'empty_turf_waves_after': 0,
+        'one_medium_two_small_partials_after': 0,
+        'two_large_partials_after': 0,
+        'host_owner_as_away_after_compaction': 0,
+        'turf_wave_optimization_summary': {},
         'waves_fully_utilized_before': 0,
         'waves_fully_utilized_after': 0,
         'partially_used_one_medium_two_small_waves_before': 0,
@@ -5783,6 +5799,12 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
     def _metrics() -> dict[str, int]:
         waves, slots_by_wave = _wave_rows()
         metrics = {
+            'turf_waves_total': len(waves),
+            'full_turf_waves': 0,
+            'partial_turf_waves': 0,
+            'empty_turf_waves': 0,
+            'one_medium_two_small_partials': 0,
+            'two_large_partials': 0,
             'waves_fully_utilized': 0,
             'partially_used_one_medium_two_small_waves': 0,
             'partially_used_two_large_waves': 0,
@@ -5794,15 +5816,25 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
             total_assigned = sum(assigned.values())
             capacity = _wave_capacity_counts(wave, slots)
             total_capacity = len(slots) or sum(capacity.values())
+            layout = _normalize_configuration_name(wave.preferred_layout_code)
+            is_full = total_capacity > 0 and total_assigned == total_capacity and all(assigned[size] == capacity[size] for size in FIELD_SIZE_ORDER)
+            is_partial = total_capacity > 0 and total_assigned > 0 and total_assigned < total_capacity
+            is_empty = total_capacity > 0 and total_assigned == 0
             if total_assigned > 0:
                 metrics['active_turf_waves_used'] += 1
-            if total_capacity > 0 and total_assigned == total_capacity and all(assigned[size] == capacity[size] for size in FIELD_SIZE_ORDER):
+            if is_full:
+                metrics['full_turf_waves'] += 1
                 metrics['waves_fully_utilized'] += 1
-            layout = _normalize_configuration_name(wave.preferred_layout_code)
-            if layout == 'ONE_MEDIUM_TWO_SMALL' and total_assigned > 0 and total_assigned < total_capacity:
-                metrics['partially_used_one_medium_two_small_waves'] += 1
-            if layout == 'TWO_LARGE' and total_assigned > 0 and total_assigned < total_capacity:
-                metrics['partially_used_two_large_waves'] += 1
+            if is_partial:
+                metrics['partial_turf_waves'] += 1
+                if layout == 'ONE_MEDIUM_TWO_SMALL':
+                    metrics['one_medium_two_small_partials'] += 1
+                    metrics['partially_used_one_medium_two_small_waves'] += 1
+                if layout == 'TWO_LARGE':
+                    metrics['two_large_partials'] += 1
+                    metrics['partially_used_two_large_waves'] += 1
+            if is_empty:
+                metrics['empty_turf_waves'] += 1
         return metrics
 
     def _team_has_time_conflict(game: Game, target: GameSlot) -> bool:
@@ -6128,9 +6160,19 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
             ); return -10_000, []
         return score, reasons or ['NO_NET_WAVE_IMPROVEMENT']
 
+    def _record_utilization_metrics(phase: str, metrics: dict[str, int]) -> None:
+        for key, value in metrics.items():
+            diagnostics[f'{key}_{phase}'] = value
+        diagnostics[f'turf_waves_{phase}_total'] = int(metrics.get('turf_waves_total') or 0)
+        diagnostics[f'full_turf_waves_{phase}'] = int(metrics.get('full_turf_waves') or 0)
+        diagnostics[f'partial_turf_waves_{phase}'] = int(metrics.get('partial_turf_waves') or 0)
+        diagnostics[f'partial_waves_{phase}'] = int(metrics.get('partial_turf_waves') or 0)
+        diagnostics[f'empty_turf_waves_{phase}'] = int(metrics.get('empty_turf_waves') or 0)
+        diagnostics[f'one_medium_two_small_partials_{phase}'] = int(metrics.get('one_medium_two_small_partials') or 0)
+        diagnostics[f'two_large_partials_{phase}'] = int(metrics.get('two_large_partials') or 0)
+
     before = _metrics()
-    for key, value in before.items():
-        diagnostics[f'{key}_before'] = value
+    _record_utilization_metrics('before', before)
 
     partial_wave_detail_by_id: dict[str, dict[str, object]] = {}
 
@@ -6292,7 +6334,7 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
             row['reason'] = 'ASSIGNED_LESS_THAN_EXPECTED_CAPACITY'
         return row
 
-    def _initialize_partial_wave_details() -> None:
+    def _initialize_partial_wave_details(*, phase: str = 'before', update_current_collections: bool = True) -> None:
         assigned_slots = db.query(GameSlot).join(GameSlot.assigned_game).join(GameSlot.field_instance).filter(
             Game.season_id == season_id,
             GameSlot.assigned_game_id.is_not(None),
@@ -6354,20 +6396,29 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         ]
         partial_waves = [row for row in detected_turf_wave_groups if row.get('status') == 'PARTIAL']
 
-        partial_wave_detail_by_id.clear()
-        for row in partial_waves:
-            for wave_id in row.get('wave_ids') or []:
-                partial_wave_detail_by_id[str(wave_id)] = row
+        if update_current_collections:
+            partial_wave_detail_by_id.clear()
+            for row in partial_waves:
+                for wave_id in row.get('wave_ids') or []:
+                    partial_wave_detail_by_id[str(wave_id)] = row
 
-        diagnostics['detected_turf_wave_groups'] = detected_turf_wave_groups
-        diagnostics['Detected Turf Wave Groups'] = detected_turf_wave_groups
-        diagnostics['partial_waves'] = partial_waves
-        diagnostics['partial_wave_details'] = partial_waves
-        diagnostics['partial_waves_created_count'] = len(partial_waves)
-        diagnostics['partial_wave_details_created_count'] = len(partial_waves)
-        diagnostics['total_partial_waves_found'] = len(partial_waves)
-        diagnostics['partial_ONE_MEDIUM_TWO_SMALL_waves_found'] = sum(1 for row in partial_waves if row.get('wave_layout') == 'ONE_MEDIUM_TWO_SMALL')
-        diagnostics['partial_TWO_LARGE_waves_found'] = sum(1 for row in partial_waves if row.get('wave_layout') == 'TWO_LARGE')
+        diagnostics[f'detected_turf_wave_groups_{phase}'] = detected_turf_wave_groups
+        diagnostics[f'partial_wave_details_{phase}'] = partial_waves
+        diagnostics[f'partial_waves_{phase}_details'] = partial_waves
+        diagnostics[f'partial_turf_waves_{phase}'] = len(partial_waves)
+        diagnostics[f'partial_waves_{phase}'] = len(partial_waves)
+        diagnostics[f'one_medium_two_small_partials_{phase}'] = sum(1 for row in partial_waves if row.get('wave_layout') == 'ONE_MEDIUM_TWO_SMALL')
+        diagnostics[f'two_large_partials_{phase}'] = sum(1 for row in partial_waves if row.get('wave_layout') == 'TWO_LARGE')
+        if update_current_collections:
+            diagnostics['detected_turf_wave_groups'] = detected_turf_wave_groups
+            diagnostics['Detected Turf Wave Groups'] = detected_turf_wave_groups
+            diagnostics['partial_waves'] = partial_waves
+            diagnostics['partial_wave_details'] = partial_waves
+            diagnostics['partial_waves_created_count'] = len(partial_waves)
+            diagnostics['partial_wave_details_created_count'] = len(partial_waves)
+            diagnostics['total_partial_waves_found'] = len(partial_waves)
+            diagnostics['partial_ONE_MEDIUM_TWO_SMALL_waves_found'] = sum(1 for row in partial_waves if row.get('wave_layout') == 'ONE_MEDIUM_TWO_SMALL')
+            diagnostics['partial_TWO_LARGE_waves_found'] = sum(1 for row in partial_waves if row.get('wave_layout') == 'TWO_LARGE')
 
         detected_partial_count = sum(1 for row in detected_turf_wave_groups if row.get('status') == 'PARTIAL')
         if detected_partial_count > 0 and len(partial_waves) == 0:
@@ -6377,7 +6428,7 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         if len(diagnostics.get('partial_wave_details') or []) != len(partial_waves):
             _add_diagnostics_warning('BUG: partial_wave_details length does not match partial_waves length.', error=True)
 
-    _initialize_partial_wave_details()
+    _initialize_partial_wave_details(phase='before')
     _warn_if_counted_partial_waves_missing_from_collection(phase='before')
     logger.info(
         'turf_wave_compaction_partial_waves season_id=%s total=%s one_medium_two_small=%s two_large=%s',
@@ -6838,6 +6889,7 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         require_host_owner_as_home_team=True,
     )
     diagnostics['post_compaction_host_location_vs_home_team_verification'] = post_compaction_host_verification
+    diagnostics['host_owner_as_away_after_compaction'] = int(post_compaction_host_verification.get('host_owner_is_away_team') or 0)
     post_compaction_errors = list(validation.get('hard_errors') or [])
     post_compaction_errors.extend(post_compaction_host_verification.get('validation_failures') or [])
     if snapshots and post_compaction_errors:
@@ -6864,16 +6916,16 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         diagnostics['waves_improved_count'] = 0
 
     after = _metrics()
-    for key, value in after.items():
-        diagnostics[f'{key}_after'] = value
+    _record_utilization_metrics('after', after)
+    _initialize_partial_wave_details(phase='after')
     _warn_if_counted_partial_waves_missing_from_collection(phase='after')
     final_partial_waves = diagnostics.get('partial_waves') if isinstance(diagnostics.get('partial_waves'), list) else []
     if int(diagnostics.get('total_partial_waves_found') or 0) != len(final_partial_waves):
         _add_diagnostics_warning('BUG: total_partial_waves_found does not match partial_waves length.', error=True)
     if len(diagnostics.get('partial_wave_details') or []) != len(final_partial_waves):
         _add_diagnostics_warning('BUG: partial_wave_details length does not match partial_waves length.', error=True)
-    if int(diagnostics.get('candidate_discovery_input_count') or 0) != len(final_partial_waves):
-        _add_diagnostics_warning('BUG: candidate discovery input count does not match partial_waves length.', error=True)
+    if int(diagnostics.get('candidate_discovery_input_count') or 0) != int(diagnostics.get('partial_waves_before') or 0):
+        _add_diagnostics_warning('BUG: candidate discovery input count does not match pre-compaction partial_waves length.', error=True)
     if final_partial_waves and not diagnostics.get('candidate_discovery_started'):
         _add_diagnostics_warning('BUG: partial waves exist but candidate discovery did not start.', error=True)
     if final_partial_waves and int(diagnostics.get('compaction_scheduled_games_count') or 0) == 0:
@@ -6882,6 +6934,30 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         _add_diagnostics_warning('BUG: candidate discovery did not scan any same-date scheduled games.', error=True)
     if final_partial_waves and int(diagnostics.get('total_partial_waves_found') or 0) == 0 and int(diagnostics.get('candidate_moves_evaluated') or 0) == 0 and not diagnostics.get('candidate_discovery_started'):
         _add_diagnostics_warning('BUG: detected_turf_wave_groups contains partial turf waves, but the partial_waves source-of-truth collection is empty for candidate discovery.', error=True)
+    final_host_verification = _build_host_location_vs_home_team_verification(
+        db,
+        season_id,
+        require_host_owner_as_home_team=True,
+    )
+    diagnostics['post_compaction_host_location_vs_home_team_verification'] = final_host_verification
+    diagnostics['host_owner_as_away_after_compaction'] = int(final_host_verification.get('host_owner_is_away_team') or 0)
+    diagnostics['turf_wave_optimization_summary'] = {
+        'section': 'Turf Wave Optimization Summary',
+        'partial_waves_before': int(diagnostics.get('partial_waves_before') or 0),
+        'partial_waves_after': int(diagnostics.get('partial_waves_after') or 0),
+        'waves_improved': int(diagnostics.get('waves_improved_count') or 0),
+        'accepted_moves': int(diagnostics.get('accepted_moves_count') or diagnostics.get('moves_accepted') or 0),
+        'rejected_moves': int(diagnostics.get('rejected_moves_count') or diagnostics.get('moves_rejected') or 0),
+        'rollback_occurred': bool(diagnostics.get('rollback_occurred')),
+        'host_owner_as_away_after_compaction': int(diagnostics.get('host_owner_as_away_after_compaction') or 0),
+        'home_away_violations_created': int(diagnostics.get('host_owner_as_away_after_compaction') or 0) > 0,
+        'summary': (
+            f"Partial turf waves before compaction: {int(diagnostics.get('partial_waves_before') or 0)}; "
+            f"remaining after compaction: {int(diagnostics.get('partial_waves_after') or 0)}; "
+            f"waves improved: {int(diagnostics.get('waves_improved_count') or 0)}; "
+            f"host-owner-as-away violations after compaction: {int(diagnostics.get('host_owner_as_away_after_compaction') or 0)}."
+        ),
+    }
     diagnostics['compaction_pass_completed'] = True
     diagnostics['accepted_moves_count'] = int(diagnostics.get('moves_accepted') or 0)
     diagnostics['rejected_moves_count'] = int(diagnostics.get('moves_rejected') or 0)
