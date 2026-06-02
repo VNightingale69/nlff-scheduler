@@ -5661,6 +5661,7 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         'partial_wave_details_created_count': 0,
         'partial_waves_candidate_discovery_input_count': 0,
         'candidate_discovery_input_count': 0,
+        'committed_scheduled_games_collection_count': 0,
         'candidate_discovery_started': False,
         'candidate_discovery_skipped_reason': None,
         'candidate_moves_zero_evaluation_reason': None,
@@ -6329,6 +6330,38 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
     candidate_games_already_in_target_wave = False
     candidate_games_failed_preliminary_filters = False
 
+    def _coerce_compaction_date(value: object) -> date | None:
+        if isinstance(value, date):
+            return value
+        if value in (None, ''):
+            return None
+        try:
+            return date.fromisoformat(str(value))
+        except ValueError:
+            return None
+
+    def _committed_scheduled_game_rows() -> tuple[list[tuple[Game, GameSlot | None]], dict[uuid.UUID, GameSlot]]:
+        """Return the same committed scheduled games collection used by schedule exports.
+
+        Candidate discovery must scan the committed schedule after generation/commit,
+        not the unscheduled game groups, generated slot inventory, or partial-wave rows.
+        `_schedule_management_rows` is the schedule export/quality-report source of
+        truth, so using it here keeps compaction aligned with export, validation,
+        and host/home verification.
+        """
+        rows = _schedule_management_rows(db, {'season_id': season_id})
+        committed_rows: list[tuple[Game, GameSlot | None]] = []
+        source_slot_by_game_id: dict[uuid.UUID, GameSlot] = {}
+        seen_game_ids: set[uuid.UUID] = set()
+        for game, slot, _field_instance, _host, _home, _away, _division, _organization, _status in rows:
+            if game.id not in seen_game_ids:
+                committed_rows.append((game, slot))
+                seen_game_ids.add(game.id)
+            if slot and slot.assigned_game_id and slot.assigned_game_id not in source_slot_by_game_id:
+                source_slot_by_game_id[slot.assigned_game_id] = slot
+        diagnostics['committed_scheduled_games_collection_count'] = len(committed_rows)
+        return committed_rows, source_slot_by_game_id
+
     def _candidate_game_field_size(game: Game, source_slot: GameSlot | None) -> str | None:
         game_field_size = _normalize_field_size(game.field_instance.field_type if game.field_instance else None)
         if game_field_size:
@@ -6393,18 +6426,13 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
                 candidate_games_failed_preliminary_filters = True
                 target_detail['candidate_discovery_exclusion_reason'] = 'NO_NEEDED_FIELD_SIZES'
                 continue
-            same_date_games = db.query(Game).join(Game.status).filter(
-                Game.season_id == season_id,
-                GameStatus.code != 'UNSCHEDULED',
-                Game.game_date == primary_target_wave.host_date,
-            ).all()
-            same_date_source_slots = db.query(GameSlot).filter(
-                GameSlot.assigned_game_id.in_([game.id for game in same_date_games])
-            ).all() if same_date_games else []
-            source_slot_by_game_id: dict[uuid.UUID, GameSlot] = {}
-            for source_slot in same_date_source_slots:
-                if source_slot.assigned_game_id and source_slot.assigned_game_id not in source_slot_by_game_id:
-                    source_slot_by_game_id[source_slot.assigned_game_id] = source_slot
+            target_date = _coerce_compaction_date(target_detail.get('date')) or primary_target_wave.host_date
+            committed_scheduled_games, source_slot_by_game_id = _committed_scheduled_game_rows()
+            same_date_games = [
+                game
+                for game, _source_slot in committed_scheduled_games
+                if game.game_date == target_date
+            ]
             target_wave_ids = {wave.id for wave in target_waves}
             target_wave_assigned_game_ids = {
                 slot.assigned_game_id for slot in target_slots if slot.assigned_game_id
