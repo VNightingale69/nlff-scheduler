@@ -6213,6 +6213,10 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
             'preliminary_candidates_created': 0,
             'candidates_rejected_by_precheck': 0,
             'candidates_rejected_by_hard_constraint': 0,
+            'candidate_discovery_received_status': status,
+            'candidate_discovery_computed_is_partial': status == 'PARTIAL',
+            'candidate_discovery_eligibility_reason': 'STATUS_PARTIAL' if status == 'PARTIAL' else None,
+            'candidate_discovery_exclusion_reason': None,
         }
         if status == 'PARTIAL':
             row['reason'] = 'ASSIGNED_LESS_THAN_EXPECTED_CAPACITY'
@@ -6342,6 +6346,61 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         except ValueError:
             return None
 
+    def _coerce_compaction_time(value: object) -> time | None:
+        if isinstance(value, time):
+            return value
+        if value in (None, ''):
+            return None
+        try:
+            return time.fromisoformat(str(value))
+        except ValueError:
+            return None
+
+    def _coerce_positive_int(value: object) -> int:
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def _partial_wave_eligibility(target_detail: dict[str, object]) -> tuple[bool, str | None]:
+        """Classify the candidate discovery input row without stale wave lookups."""
+        status = str(target_detail.get('status') or '').upper()
+        expected_total = _coerce_positive_int(target_detail.get('expected_total_components'))
+        assigned_total = _coerce_positive_int(target_detail.get('assigned_total_components'))
+        unused_total = _coerce_positive_int(target_detail.get('unused_total_components'))
+        needed_sizes = [size for size in (target_detail.get('needed_field_sizes') or []) if _field_size_label(size)]
+
+        if unused_total > 0 and needed_sizes:
+            return True, 'HAS_UNUSED_COMPONENTS_AND_NEEDED_FIELD_SIZE'
+        if expected_total > 0 and assigned_total > 0 and assigned_total < expected_total:
+            return True, 'ASSIGNED_COMPONENTS_BETWEEN_ZERO_AND_EXPECTED'
+        if status == 'PARTIAL':
+            return True, 'STATUS_PARTIAL'
+        return False, None
+
+    def _target_wave_group_key(target_detail: dict[str, object]) -> tuple[date | None, str | None, time | None, int | None, str | None]:
+        wave_number = target_detail.get('wave_number')
+        try:
+            parsed_wave_number = int(wave_number) if wave_number not in (None, '') else None
+        except (TypeError, ValueError):
+            parsed_wave_number = None
+        return (
+            _coerce_compaction_date(target_detail.get('date')),
+            str(target_detail.get('host_location_id')) if target_detail.get('host_location_id') else None,
+            _coerce_compaction_time(target_detail.get('start_time')),
+            parsed_wave_number,
+            _normalize_configuration_name(target_detail.get('wave_layout') or target_detail.get('layout')),
+        )
+
+    def _wave_group_key(wave: TurfWave) -> tuple[date | None, str | None, time | None, int | None, str | None]:
+        return (
+            wave.host_date,
+            str(wave.host_location_id) if wave.host_location_id else None,
+            wave.start_time,
+            wave.sequence_number,
+            _normalize_configuration_name(wave.preferred_layout_code),
+        )
+
     def _build_compaction_scheduled_games() -> list[dict[str, object]]:
         """Build canonical scheduled games for turf-wave candidate discovery.
 
@@ -6426,6 +6485,17 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         for target_detail in target_partial_waves:
             if not isinstance(target_detail, dict):
                 continue
+            received_status = str(target_detail.get('status') or '').upper()
+            computed_is_partial, eligibility_reason = _partial_wave_eligibility(target_detail)
+            target_detail['candidate_discovery_received_status'] = received_status or None
+            target_detail['candidate_discovery_computed_is_partial'] = computed_is_partial
+            target_detail['candidate_discovery_eligibility_reason'] = eligibility_reason
+            target_detail['candidate_discovery_exclusion_reason'] = None
+            if not computed_is_partial:
+                candidate_games_failed_preliminary_filters = True
+                target_detail['candidate_discovery_exclusion_reason'] = 'TARGET_WAVE_NOT_PARTIAL'
+                continue
+
             wave_ids = target_detail.get('wave_ids')
             if not isinstance(wave_ids, list) or not wave_ids:
                 wave_ids = [target_detail.get('wave_id')]
@@ -6438,6 +6508,23 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
                 wave = waves.get(parsed_wave_id)
                 if wave:
                     target_waves.append(wave)
+
+            target_group_key = _target_wave_group_key(target_detail)
+            if not target_waves:
+                target_waves = [
+                    wave
+                    for wave in waves.values()
+                    if _wave_group_key(wave) == target_group_key
+                ]
+            else:
+                grouped_target_waves = [
+                    wave
+                    for wave in target_waves
+                    if _wave_group_key(wave) == target_group_key
+                ]
+                if grouped_target_waves:
+                    target_waves = grouped_target_waves
+
             if not target_waves:
                 candidate_games_failed_preliminary_filters = True
                 target_detail['candidate_discovery_exclusion_reason'] = 'TARGET_WAVE_NOT_FOUND'
@@ -6451,10 +6538,13 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
             unused = {size: max(0, int(capacity.get(size) or 0) - int(counts.get(size) or 0)) for size in FIELD_SIZE_ORDER}
             total_assigned = sum(counts.values())
             total_capacity = sum(int(capacity.get(size) or 0) for size in FIELD_SIZE_ORDER)
-            if total_assigned <= 0 or total_assigned >= total_capacity:
-                candidate_games_failed_preliminary_filters = True
-                target_detail['candidate_discovery_exclusion_reason'] = 'TARGET_WAVE_NOT_PARTIAL'
-                continue
+            if total_capacity > 0 and (total_assigned <= 0 or total_assigned >= total_capacity):
+                detail_needed_sizes = [size for size in (target_detail.get('needed_field_sizes') or []) if _field_size_label(size)]
+                detail_unused_total = _coerce_positive_int(target_detail.get('unused_total_components'))
+                if received_status != 'PARTIAL' and detail_unused_total == 0 and not detail_needed_sizes:
+                    candidate_games_failed_preliminary_filters = True
+                    target_detail['candidate_discovery_exclusion_reason'] = 'TARGET_WAVE_NOT_PARTIAL'
+                    continue
             target_sizes = [
                 size for size in (target_detail.get('needed_field_sizes') or [])
                 if _field_size_label(size)
