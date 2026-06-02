@@ -5687,6 +5687,13 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         'rejected_moves': [],
         'warnings': [],
         'error_warnings': [],
+        'younger_division_late_penalty_candidates': [],
+        'younger_division_late_penalty_accepted': 0,
+        'younger_division_late_penalty_rejected_after_scoring': 0,
+        'younger_division_late_penalty_rejected_for_hard_constraints': 0,
+        'accepted_moves_with_younger_division_late_penalty': [],
+        'accepted_moves_with_younger_division_late_penalty_count': 0,
+        'soft_scoring_diagnostics_by_reason': {},
     }
     if not enabled:
         diagnostics['compaction_skipped_reason'] = 'COMPACTION_DISABLED'
@@ -5709,6 +5716,17 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         division = game.home_team.division if game and game.home_team else None
         order = {canonical_division_id(group, name): idx for idx, (group, name) in enumerate(_auto_schedule_division_order(db))}
         return order.get(canonical_division_id_from_division(division), 999) if division else 999
+
+    younger_division_timing_preference_keys = {
+        canonical_division_id('COED', 'K-1'),
+        canonical_division_id('COED', '2-3'),
+        canonical_division_id('GIRLS', 'K-2'),
+        canonical_division_id('GIRLS', '3-5'),
+    }
+
+    def _is_younger_division_for_timing_preference(game: Game | None) -> bool:
+        division = game.home_team.division if game and game.home_team else None
+        return canonical_division_id_from_division(division) in younger_division_timing_preference_keys if division else False
 
     def _is_girls_6_8(game: Game | None) -> bool:
         division = game.home_team.division if game and game.home_team else None
@@ -6079,31 +6097,125 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
             rejected.append(rejected_row)
         logger.debug('turf_wave_compaction_rejected_move season_id=%s detail=%s', season_id, rejected_row)
 
-    def _score_move(game: Game, source: GameSlot, target: GameSlot, target_wave: TurfWave, source_wave: TurfWave | None) -> tuple[int, list[str]]:
+    def _younger_division_late_penalty(game: Game, source: GameSlot, target: GameSlot, target_wave: TurfWave | None) -> int:
+        if not _is_younger_division_for_timing_preference(game) or not source.start_time or not target.start_time:
+            return 0
+        if target.start_time <= source.start_time:
+            return 0
+        minutes_later = int((datetime.combine(date.today(), target.start_time) - datetime.combine(date.today(), source.start_time)).total_seconds() // 60)
+        penalty = max(10, (minutes_later // 60) * 15)
+        if minutes_later % 60:
+            penalty += 5
+        if target.start_time >= time(12, 0):
+            penalty += 20
+        if target.start_time >= time(14, 0):
+            penalty += 30
+        if target_wave:
+            wave_slot_times = [row[0] for row in db.query(GameSlot.start_time).filter(GameSlot.turf_wave_id == target_wave.id).all() if row[0]]
+            if wave_slot_times and target.start_time >= max(wave_slot_times):
+                penalty += 20
+        return penalty
+
+    def _record_soft_scoring_reason(reason: str) -> None:
+        counts = diagnostics.get('soft_scoring_diagnostics_by_reason')
+        if isinstance(counts, dict):
+            counts[reason] = int(counts.get(reason) or 0) + 1
+
+    def _record_younger_division_late_penalty_candidate(
+        game: Game,
+        source: GameSlot,
+        target: GameSlot,
+        target_wave: TurfWave | None,
+        *,
+        age_timing_penalty_applied: int,
+        wave_improvement_gained: int | None,
+        score_before_penalty: int | None,
+        score_after_penalty: int | None,
+        accepted: bool,
+        final_rejection_reason: str | None = None,
+        hard_constraint_failure: bool = False,
+    ) -> dict[str, object] | None:
+        diagnostics['younger_division_late_penalty_candidates_count'] = int(diagnostics.get('younger_division_late_penalty_candidates_count') or 0) + 1
+        if hard_constraint_failure:
+            diagnostics['younger_division_late_penalty_rejected_for_hard_constraints'] = int(diagnostics.get('younger_division_late_penalty_rejected_for_hard_constraints') or 0) + 1
+        elif accepted:
+            diagnostics['younger_division_late_penalty_accepted'] = int(diagnostics.get('younger_division_late_penalty_accepted') or 0) + 1
+        elif final_rejection_reason:
+            diagnostics['younger_division_late_penalty_rejected_after_scoring'] = int(diagnostics.get('younger_division_late_penalty_rejected_after_scoring') or 0) + 1
+        _record_soft_scoring_reason('YOUNGER_DIVISION_LATE_PENALTY_APPLIED')
+        source_wave = source.turf_wave if source else None
+        row = {
+            'diagnostic': 'YOUNGER_DIVISION_LATE_PENALTY_APPLIED',
+            'candidate_game_id': str(game.id),
+            'division': _division_label_for_game(game),
+            'original_start_time': source.start_time.isoformat() if source and source.start_time else None,
+            'proposed_start_time': target.start_time.isoformat() if target and target.start_time else None,
+            'original_host_location': source.host_location.name if source and source.host_location else None,
+            'proposed_host_location': target.host_location.name if target and target.host_location else None,
+            'original_field': _slot_label(source),
+            'proposed_field': _slot_label(target),
+            'age_timing_penalty_applied': age_timing_penalty_applied,
+            'wave_improvement_gained': wave_improvement_gained,
+            'score_before_penalty': score_before_penalty,
+            'score_after_penalty': score_after_penalty,
+            'accepted': bool(accepted),
+            'final_rejection_reason': final_rejection_reason,
+            'hard_constraint_failure': bool(hard_constraint_failure),
+            'source_wave_utilization_before': _wave_utilization_snapshot(source_wave) if source_wave else None,
+            'source_wave_utilization_after': _wave_utilization_snapshot(source_wave, extra_assigned_delta=-1) if source_wave else None,
+            'target_wave_utilization_before': _wave_utilization_snapshot(target_wave) if target_wave else None,
+            'target_wave_utilization_after': _wave_utilization_snapshot(target_wave, extra_assigned_delta=1) if target_wave else None,
+        }
+        candidates = diagnostics.get('younger_division_late_penalty_candidates')
+        if isinstance(candidates, list):
+            candidates.append(row)
+            return row
+        return None
+
+    def _score_move(game: Game, source: GameSlot, target: GameSlot, target_wave: TurfWave, source_wave: TurfWave | None) -> tuple[int, list[str], dict[str, object] | None]:
+        younger_late_penalty = _younger_division_late_penalty(game, source, target, target_wave)
+
+        def reject_move(reason: str, *, detail: str | None = None, hard_constraint_failure: bool = True, score_before: int | None = None, score_after: int | None = None) -> tuple[int, list[str], dict[str, object] | None]:
+            penalty_row = None
+            if younger_late_penalty > 0:
+                penalty_row = _record_younger_division_late_penalty_candidate(
+                    game,
+                    source,
+                    target,
+                    target_wave,
+                    age_timing_penalty_applied=younger_late_penalty,
+                    wave_improvement_gained=score_before,
+                    score_before_penalty=score_before,
+                    score_after_penalty=score_after,
+                    accepted=False,
+                    final_rejection_reason=reason,
+                    hard_constraint_failure=hard_constraint_failure,
+                )
+            _reject(game, source, target, reason, detail=detail, hard_constraint_failure=hard_constraint_failure, score_before=score_before, score_after=score_after, target_wave=target_wave)
+            return -10_000, [], penalty_row
+
         if target.assigned_game_id or str(target.status or '').upper() != 'OPEN':
-            _reject(game, source, target, 'TARGET_SLOT_NOT_AVAILABLE', detail='Target slot is not open or already has an assigned game.', target_wave=target_wave); return -10_000, []
+            return reject_move('TARGET_SLOT_NOT_AVAILABLE', detail='Target slot is not open or already has an assigned game.')
         if source.id == target.id:
-            _reject(game, source, target, 'SOURCE_GAME_ALREADY_OPTIMAL', detail='Source game is already in the target slot.', hard_constraint_failure=False, target_wave=target_wave); return -10_000, []
+            return reject_move('SOURCE_GAME_ALREADY_OPTIMAL', detail='Source game is already in the target slot.', hard_constraint_failure=False)
         if source.slot_date != target.slot_date or game.game_date != target.slot_date:
-            _reject(game, source, target, 'MOVES_GAME_TO_DIFFERENT_DATE', detail=f'Move would change the game date from {game.game_date.isoformat() if game.game_date else source.slot_date.isoformat()} to {target.slot_date.isoformat()}.', target_wave=target_wave); return -10_000, []
+            return reject_move('MOVES_GAME_TO_DIFFERENT_DATE', detail=f'Move would change the game date from {game.game_date.isoformat() if game.game_date else source.slot_date.isoformat()} to {target.slot_date.isoformat()}.')
         home_away_plan = _compaction_home_away_plan(game, target)
         if home_away_plan.get('would_create_host_owner_as_away'):
-            _reject(game, source, target, 'WOULD_CREATE_HOST_OWNER_AS_AWAY', detail='Candidate move would leave the target host-location owner assigned as the away team after applying compaction home/away rules.', target_wave=target_wave); return -10_000, []
+            return reject_move('WOULD_CREATE_HOST_OWNER_AS_AWAY', detail='Candidate move would leave the target host-location owner assigned as the away team after applying compaction home/away rules.')
         final_home_team = home_away_plan.get('final_home_team_obj')
         final_home_team = final_home_team if isinstance(final_home_team, Team) else game.home_team
         required_size = _required_field_type_for_division(final_home_team.division if final_home_team else None)
         if _normalize_field_size(target.field_type) != required_size:
-            _reject(game, source, target, 'WRONG_FIELD_SIZE', detail=f'Division requires {required_size}, but target field component is {_normalize_field_size(target.field_type)}.', target_wave=target_wave); return -10_000, []
+            return reject_move('WRONG_FIELD_SIZE', detail=f'Division requires {required_size}, but target field component is {_normalize_field_size(target.field_type)}.')
         if _field_has_time_conflict(game, target):
-            _reject(game, source, target, 'FIELD_TIME_CONFLICT', detail=f'Target field already has a game at {target.start_time.isoformat()} on {target.slot_date.isoformat()}.', target_wave=target_wave); return -10_000, []
+            return reject_move('FIELD_TIME_CONFLICT', detail=f'Target field already has a game at {target.start_time.isoformat()} on {target.slot_date.isoformat()}.')
         if _team_has_time_conflict(game, target):
-            _reject(game, source, target, 'TEAM_TIME_CONFLICT', detail=_team_time_conflict_detail(game, target), target_wave=target_wave); return -10_000, []
+            return reject_move('TEAM_TIME_CONFLICT', detail=_team_time_conflict_detail(game, target))
         if _breaks_doubleheader(game, target):
-            _reject(game, source, target, 'BREAKS_DOUBLEHEADER_BACK_TO_BACK', detail=_doubleheader_detail(game, source, target), target_wave=target_wave); return -10_000, []
-        if target.start_time > source.start_time and _division_sort_for_game(game) <= 4:
-            _reject(game, source, target, 'MOVES_YOUNGER_DIVISION_TOO_LATE', detail=f'Moving this younger division game from {source.start_time.isoformat()} to {target.start_time.isoformat()} would make it later in the day.', target_wave=target_wave); return -10_000, []
+            return reject_move('BREAKS_DOUBLEHEADER_BACK_TO_BACK', detail=_doubleheader_detail(game, source, target))
         if _breaks_host_balance(game, source, target, home_away_plan):
-            _reject(game, source, target, 'WORSENS_HOST_COMMUNITY_BALANCE', detail='Move would change a home/away community-hosted game to a less favorable host ownership category after applying compaction home/away rules.', target_wave=target_wave); return -10_000, []
+            return reject_move('WORSENS_HOST_COMMUNITY_BALANCE', detail='Move would change a home/away community-hosted game to a less favorable host ownership category after applying compaction home/away rules.')
 
         waves, slots_by_wave = _wave_rows()
         before_active = _metrics()['active_turf_waves_used']
@@ -6113,7 +6225,7 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         target_capacity = len(target_slots) or sum(_layout_counts(target_wave, target_slots).values())
         source_after_assigned = max(0, sum(1 for slot in source_slots if slot.assigned_game_id) - 1) if source.turf_wave_id != target_wave.id else sum(1 for slot in source_slots if slot.assigned_game_id)
         if target.start_time > source.start_time and source_after_assigned > 0:
-            _reject(game, source, target, 'NO_NET_WAVE_IMPROVEMENT', detail='Target wave improves, but moving to a later wave would leave the source wave partially used.', hard_constraint_failure=False, score_before=0, score_after=0, target_wave=target_wave); return -10_000, []
+            return reject_move('NO_NET_WAVE_IMPROVEMENT', detail='Target wave improves, but moving to a later wave would leave the source wave partially used.', hard_constraint_failure=False, score_before=0, score_after=0)
         score = 0
         reasons: list[str] = []
         layout = _normalize_configuration_name(target_wave.preferred_layout_code)
@@ -6129,12 +6241,29 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
             score += 50
         if target.start_time < source.start_time:
             score += 25
-        if target.start_time > source.start_time and _division_sort_for_game(game) <= 4:
-            score -= 50
         if _breaks_host_balance(game, source, target, home_away_plan):
             score -= 75
         if _breaks_doubleheader(game, target):
             score -= 100
+        score_before_penalty = score
+        penalty_row = None
+        if younger_late_penalty > 0:
+            score -= younger_late_penalty
+            reasons.append('YOUNGER_DIVISION_LATE_PENALTY_APPLIED')
+            if score > 0:
+                penalty_row = _record_younger_division_late_penalty_candidate(
+                    game,
+                    source,
+                    target,
+                    target_wave,
+                    age_timing_penalty_applied=younger_late_penalty,
+                    wave_improvement_gained=score_before_penalty,
+                    score_before_penalty=score_before_penalty,
+                    score_after_penalty=score,
+                    accepted=False,
+                    final_rejection_reason='NOT_SELECTED_BEST_SCORE',
+                    hard_constraint_failure=False,
+                )
         logger.debug(
             'turf_wave_compaction_score season_id=%s game_id=%s score=%s reasons=%s source_wave_before=%s source_wave_after=%s target_wave_before=%s target_wave_after=%s',
             season_id,
@@ -6147,18 +6276,14 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
             _wave_utilization_snapshot(target_wave, extra_assigned_delta=1),
         )
         if score <= 0:
-            _reject(
-                game,
-                source,
-                target,
+            return reject_move(
                 'NO_NET_WAVE_IMPROVEMENT',
-                detail='Target wave improves from its current utilization, but the source wave declines enough that the net compaction score is not positive.',
+                detail='Target wave improves from its current utilization, but the source wave declines enough that the net compaction score is not positive after soft timing penalties.',
                 hard_constraint_failure=False,
-                score_before=0,
+                score_before=score_before_penalty,
                 score_after=score,
-                target_wave=target_wave,
-            ); return -10_000, []
-        return score, reasons or ['NO_NET_WAVE_IMPROVEMENT']
+            )
+        return score, reasons or ['NO_NET_WAVE_IMPROVEMENT'], penalty_row
 
     def _record_utilization_metrics(phase: str, metrics: dict[str, int]) -> None:
         for key, value in metrics.items():
@@ -6757,7 +6882,7 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
                         source_wave = source.turf_wave
                         rejected_before = int(diagnostics.get('rejected_moves_count') or 0)
                         hard_rejected_before = int(diagnostics.get('candidates_rejected_by_hard_constraint') or 0)
-                        score, reasons = _score_move(game, source, target, target_wave, source_wave)
+                        score, reasons, younger_late_penalty_row = _score_move(game, source, target, target_wave, source_wave)
                         if target_detail is not None and int(diagnostics.get('rejected_moves_count') or 0) > rejected_before:
                             target_detail['rejected_candidate_game_count'] = int(target_detail.get('rejected_candidate_game_count') or 0) + 1
                             if int(diagnostics.get('candidates_rejected_by_hard_constraint') or 0) > hard_rejected_before:
@@ -6772,12 +6897,12 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
                             score += 20
                         if source_wave and source_wave.host_date == target_wave.host_date and source_wave.start_time > target_wave.start_time:
                             score += 10
-                        candidate = (score, game, source, target, target_wave, source_wave, reasons)
+                        candidate = (score, game, source, target, target_wave, source_wave, reasons, younger_late_penalty_row)
                         if best is None or candidate[0] > best[0]:
                             best = candidate
         if not best:
             break
-        _score, game, source, target, target_wave, source_wave, reasons = best
+        _score, game, source, target, target_wave, source_wave, reasons, younger_late_penalty_row = best
         accepted_wave_detail = partial_wave_detail_by_id.get(str(target_wave.id))
         if accepted_wave_detail is not None:
             accepted_wave_detail['accepted_candidate_game_count'] = int(accepted_wave_detail.get('accepted_candidate_game_count') or 0) + 1
@@ -6797,6 +6922,36 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
             'target_status': target.status,
         })
         home_away_plan = _compaction_home_away_plan(game, target)
+        if isinstance(younger_late_penalty_row, dict):
+            if younger_late_penalty_row.get('final_rejection_reason') == 'NOT_SELECTED_BEST_SCORE':
+                diagnostics['younger_division_late_penalty_rejected_after_scoring'] = max(
+                    0,
+                    int(diagnostics.get('younger_division_late_penalty_rejected_after_scoring') or 0) - 1,
+                )
+            younger_late_penalty_row['accepted'] = True
+            younger_late_penalty_row['final_rejection_reason'] = None
+            diagnostics['younger_division_late_penalty_accepted'] = int(diagnostics.get('younger_division_late_penalty_accepted') or 0) + 1
+            accepted_with_penalty = diagnostics.get('accepted_moves_with_younger_division_late_penalty')
+            if isinstance(accepted_with_penalty, list):
+                accepted_with_penalty.append({
+                    'candidate_game_id': str(game.id),
+                    'division': _division_label_for_game(game),
+                    'original_start_time': source.start_time.isoformat() if source.start_time else None,
+                    'proposed_start_time': target.start_time.isoformat() if target.start_time else None,
+                    'age_timing_penalty_applied': younger_late_penalty_row.get('age_timing_penalty_applied'),
+                    'wave_improvement_gained': younger_late_penalty_row.get('wave_improvement_gained'),
+                    'score_before_penalty': younger_late_penalty_row.get('score_before_penalty'),
+                    'score_after_penalty': younger_late_penalty_row.get('score_after_penalty'),
+                    'original_home_team': home_away_plan.get('original_home_team'),
+                    'original_away_team': home_away_plan.get('original_away_team'),
+                    'final_home_team': home_away_plan.get('final_home_team'),
+                    'final_away_team': home_away_plan.get('final_away_team'),
+                    'home_away_swapped_by_compaction': bool(home_away_plan.get('home_away_swapped_by_compaction')),
+                    'target_host_location': home_away_plan.get('target_host_location'),
+                    'target_host_owner': home_away_plan.get('target_host_owner'),
+                    'host_owner_as_away_after_move': False,
+                })
+                diagnostics['accepted_moves_with_younger_division_late_penalty_count'] = len(accepted_with_penalty)
         accepted = diagnostics['accepted_moves']
         if isinstance(accepted, list):
             accepted.append({
