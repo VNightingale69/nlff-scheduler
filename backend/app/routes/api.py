@@ -5626,6 +5626,7 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         'compaction_pass_completed': False,
         'compaction_skipped_reason': None,
         'moves_evaluated': 0,
+        'candidate_moves_evaluated': 0,
         'moves_accepted': 0,
         'moves_rejected': 0,
         'total_candidate_moves_evaluated': 0,
@@ -5648,9 +5649,16 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         'active_turf_waves_used_after': 0,
         'partial_waves': [],
         'partial_wave_details': [],
+        'partial_waves_created_count': 0,
+        'partial_wave_details_created_count': 0,
+        'partial_waves_candidate_discovery_input_count': 0,
+        'candidate_discovery_started': False,
+        'candidate_discovery_skipped_reason': None,
+        'candidate_moves_zero_evaluation_reason': None,
         'accepted_moves': [],
         'rejected_moves': [],
         'warnings': [],
+        'error_warnings': [],
     }
     if not enabled:
         diagnostics['compaction_skipped_reason'] = 'COMPACTION_DISABLED'
@@ -5962,6 +5970,7 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
 
     def _score_move(game: Game, source: GameSlot, target: GameSlot, target_wave: TurfWave, source_wave: TurfWave | None) -> tuple[int, list[str]]:
         diagnostics['moves_evaluated'] = int(diagnostics['moves_evaluated']) + 1
+        diagnostics['candidate_moves_evaluated'] = int(diagnostics.get('candidate_moves_evaluated') or 0) + 1
         diagnostics['total_candidate_moves_evaluated'] = int(diagnostics.get('total_candidate_moves_evaluated') or 0) + 1
         if target.assigned_game_id or str(target.status or '').upper() != 'OPEN':
             _reject(game, source, target, 'TARGET_SLOT_NOT_AVAILABLE', detail='Target slot is not open or already has an assigned game.', target_wave=target_wave); return -10_000, []
@@ -6070,6 +6079,9 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
             warnings = diagnostics.get('warnings')
             if isinstance(warnings, list) and warning not in warnings:
                 warnings.append(warning)
+            error_warnings = diagnostics.get('error_warnings')
+            if isinstance(error_warnings, list) and warning not in error_warnings:
+                error_warnings.append(warning)
 
     def _partial_wave_row(wave: TurfWave, group_waves: list[TurfWave], slots: list[GameSlot]) -> dict[str, object] | None:
         expected = _wave_capacity_counts(wave, slots)
@@ -6111,6 +6123,7 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
             'used_components': _component_rows(assigned),
             'unused_components': _component_rows(unused),
             'utilization_percent': round((assigned_total_components / expected_total_components) * 100, 1) if expected_total_components else 0,
+            'status': 'PARTIAL',
             'needed_field_sizes': needed,
             'assigned_game_ids': assigned_game_ids,
             'assigned_slot_ids': assigned_slot_ids,
@@ -6153,6 +6166,8 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
 
         diagnostics['partial_waves'] = partial_waves
         diagnostics['partial_wave_details'] = partial_waves
+        diagnostics['partial_waves_created_count'] = len(partial_waves)
+        diagnostics['partial_wave_details_created_count'] = len(partial_waves)
         diagnostics['total_partial_waves_found'] = len(partial_waves)
         diagnostics['partial_ONE_MEDIUM_TWO_SMALL_waves_found'] = sum(1 for row in partial_waves if row.get('wave_layout') == 'ONE_MEDIUM_TWO_SMALL')
         diagnostics['partial_TWO_LARGE_waves_found'] = sum(1 for row in partial_waves if row.get('wave_layout') == 'TWO_LARGE')
@@ -6169,11 +6184,20 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
 
     snapshots: list[dict[str, object]] = []
     max_moves = 50
-    while int(diagnostics['moves_accepted']) < max_moves:
+    partial_waves_for_candidate_discovery = diagnostics.get('partial_waves')
+    target_partial_waves = partial_waves_for_candidate_discovery if isinstance(partial_waves_for_candidate_discovery, list) else []
+    diagnostics['partial_waves_candidate_discovery_input_count'] = len(target_partial_waves)
+    diagnostics['candidate_discovery_started'] = len(target_partial_waves) > 0
+    if not target_partial_waves:
+        diagnostics['candidate_discovery_skipped_reason'] = 'NO_PARTIAL_WAVES'
+        diagnostics['candidate_moves_zero_evaluation_reason'] = 'candidate discovery was skipped'
+
+    candidate_same_date_games_found = False
+    candidate_games_already_in_target_wave = False
+    candidate_games_failed_preliminary_filters = False
+    while int(diagnostics['moves_accepted']) < max_moves and target_partial_waves:
         waves, slots_by_wave = _wave_rows()
         best: tuple[int, Game, GameSlot, GameSlot, TurfWave, TurfWave | None, list[str]] | None = None
-        partial_waves = diagnostics.get('partial_waves')
-        target_partial_waves = partial_waves if isinstance(partial_waves, list) else []
         for target_detail in target_partial_waves:
             if not isinstance(target_detail, dict):
                 continue
@@ -6190,6 +6214,8 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
                 if wave:
                     target_waves.append(wave)
             if not target_waves:
+                candidate_games_failed_preliminary_filters = True
+                target_detail['candidate_discovery_exclusion_reason'] = 'TARGET_WAVE_NOT_FOUND'
                 continue
             target_waves = sorted(target_waves, key=lambda w: (w.host_date, w.start_time, w.sequence_number, str(w.host_location_id)))
             primary_target_wave = target_waves[0]
@@ -6201,6 +6227,8 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
             total_assigned = sum(counts.values())
             total_capacity = sum(int(capacity.get(size) or 0) for size in FIELD_SIZE_ORDER)
             if total_assigned <= 0 or total_assigned >= total_capacity:
+                candidate_games_failed_preliminary_filters = True
+                target_detail['candidate_discovery_exclusion_reason'] = 'TARGET_WAVE_NOT_PARTIAL'
                 continue
             target_sizes = [
                 size for size in (target_detail.get('needed_field_sizes') or [])
@@ -6212,9 +6240,14 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
                 elif layout == 'TWO_LARGE' and unused.get(FIELD_SIZE_LARGE, 0) > 0:
                     target_sizes = [FIELD_SIZE_LARGE]
             if not target_sizes:
+                candidate_games_failed_preliminary_filters = True
+                target_detail['candidate_discovery_exclusion_reason'] = 'NO_NEEDED_FIELD_SIZES'
                 continue
             for target_size in target_sizes:
                 open_targets = [slot for slot in target_slots if not slot.assigned_game_id and str(slot.status or '').upper() == 'OPEN' and _normalize_field_size(slot.field_type) == target_size]
+                if not open_targets:
+                    candidate_games_failed_preliminary_filters = True
+                    target_detail['candidate_discovery_exclusion_reason'] = 'NO_OPEN_TARGET_COMPONENTS'
                 for target in open_targets:
                     target_wave = target.turf_wave or primary_target_wave
                     assigned_sources = db.query(GameSlot).join(GameSlot.assigned_game).filter(
@@ -6232,8 +6265,13 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
                         if target_size == FIELD_SIZE_LARGE:
                             target_detail['large_games_exist_elsewhere_same_date'] = bool(assigned_sources)
                     for source in assigned_sources:
+                        candidate_same_date_games_found = True
                         game = source.assigned_game
-                        if not game or source.turf_wave_id == target_wave.id:
+                        if not game:
+                            candidate_games_failed_preliminary_filters = True
+                            continue
+                        if source.turf_wave_id == target_wave.id:
+                            candidate_games_already_in_target_wave = True
                             continue
                         if target_detail is not None:
                             target_detail['candidate_games_found_count'] = int(target_detail.get('candidate_games_found_count') or 0) + 1
@@ -6319,7 +6357,19 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
 
     diagnostics['accepted_moves_count'] = int(diagnostics.get('moves_accepted') or 0)
     diagnostics['rejected_moves_count'] = int(diagnostics.get('moves_rejected') or diagnostics.get('rejected_moves_count') or 0)
+    diagnostics['candidate_moves_evaluated'] = int(diagnostics.get('moves_evaluated') or 0)
     diagnostics['total_candidate_moves_evaluated'] = int(diagnostics.get('moves_evaluated') or 0)
+    if target_partial_waves and int(diagnostics.get('moves_evaluated') or 0) == 0:
+        if not candidate_same_date_games_found:
+            diagnostics['candidate_moves_zero_evaluation_reason'] = 'no same-date candidate games existed'
+        elif candidate_games_already_in_target_wave and not candidate_games_failed_preliminary_filters:
+            diagnostics['candidate_moves_zero_evaluation_reason'] = 'all candidate games were already in the target wave'
+        elif candidate_games_failed_preliminary_filters:
+            diagnostics['candidate_moves_zero_evaluation_reason'] = 'all candidate games failed preliminary filters'
+        elif diagnostics.get('candidate_discovery_skipped_reason'):
+            diagnostics['candidate_moves_zero_evaluation_reason'] = 'candidate discovery was skipped'
+        else:
+            diagnostics['candidate_moves_zero_evaluation_reason'] = 'unknown reason'
     diagnostics['waves_improved_count'] = int(diagnostics.get('moves_accepted') or 0)
 
     validation = build_schedule_quality_report(db, season_id)
@@ -6351,6 +6401,7 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
     diagnostics['compaction_pass_completed'] = True
     diagnostics['accepted_moves_count'] = int(diagnostics.get('moves_accepted') or 0)
     diagnostics['rejected_moves_count'] = int(diagnostics.get('moves_rejected') or 0)
+    diagnostics['candidate_moves_evaluated'] = int(diagnostics.get('moves_evaluated') or 0)
     diagnostics['total_candidate_moves_evaluated'] = int(diagnostics.get('moves_evaluated') or 0)
     diagnostics['waves_improved_count'] = int(diagnostics.get('moves_accepted') or 0)
     logger.info(
