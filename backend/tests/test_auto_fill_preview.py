@@ -500,9 +500,109 @@ class AutoFillPreviewTest(unittest.TestCase):
         self.assertTrue(penalty_row['accepted'])
         self.assertGreater(penalty_row['score_after_penalty'], 0)
         self.assertEqual(compaction['soft_scoring_diagnostics_by_reason']['YOUNGER_DIVISION_LATE_PENALTY_APPLIED'], 1)
+        self.assertEqual(compaction['younger_division_late_penalty_candidates_count'], len(compaction['younger_division_late_penalty_candidates']))
+        self.assertEqual(compaction['younger_division_late_penalty_rejected_by_reason'], {})
+        self.assertIn('Former younger-division-late candidates now rejected by:', compaction['younger_division_late_penalty_rejection_summary_line'])
         accepted_penalty_move = compaction['accepted_moves_with_younger_division_late_penalty'][0]
+        self.assertEqual(accepted_penalty_move['original_host_location'], penalty_row['original_host_location'])
+        self.assertEqual(accepted_penalty_move['proposed_host_location'], penalty_row['proposed_host_location'])
         self.assertFalse(accepted_penalty_move['host_owner_as_away_after_move'])
         self.assertFalse(accepted_penalty_move['home_away_swapped_by_compaction'])
+
+
+    def test_turf_wave_compaction_reports_younger_late_penalty_rejected_for_host_balance(self):
+        self.week2.primary_game_date = self.week2.start_date
+        neutral_org = Organization(id=uuid.uuid4(), name='Neutral', is_active=True)
+        neutral_host = HostLocation(id=uuid.uuid4(), organization_id=neutral_org.id, name='Neutral Turf', surface_type='TURF_STADIUM', is_active=True)
+        young_division = Division(id=uuid.uuid4(), division_group='COED', name='K-1', required_field_layout_type='SMALL', is_active=True)
+        young_home = Team(id=uuid.uuid4(), organization_id=self.org_w.id, division_id=young_division.id, name='Westosha Young', is_active=True)
+        young_away = Team(id=uuid.uuid4(), organization_id=self.org_a.id, division_id=young_division.id, name='Antioch Young', is_active=True)
+        wave_availability = HostingAvailability(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week2.id,
+            organization_id=neutral_org.id,
+            host_location_id=neutral_host.id,
+            available_date=self.week2.start_date,
+            primary_game_date=self.week2.start_date,
+            start_time=time(11, 0),
+            end_time=time(12, 0),
+            is_available=True,
+        )
+        target_wave = TurfWave(
+            id=uuid.uuid4(),
+            host_location_id=neutral_host.id,
+            hosting_availability_id=wave_availability.id,
+            week_id=self.week2.id,
+            host_date=self.week2.start_date,
+            sequence_number=1,
+            wave_intent='SMALL_MEDIUM',
+            preferred_layout_code='ONE_MEDIUM_TWO_SMALL',
+            start_time=time(11, 0),
+            end_time=time(12, 0),
+        )
+        occupied_field = FieldInstance(id=uuid.uuid4(), host_location_id=neutral_host.id, hosting_availability_id=wave_availability.id, instance_date=self.week2.start_date, field_name='Neutral Small Occupied', field_type='SMALL', is_active=True)
+        open_field = FieldInstance(id=uuid.uuid4(), host_location_id=neutral_host.id, hosting_availability_id=wave_availability.id, instance_date=self.week2.start_date, field_name='Neutral Small Open', field_type='SMALL', is_active=True)
+        medium_field = FieldInstance(id=uuid.uuid4(), host_location_id=neutral_host.id, hosting_availability_id=wave_availability.id, instance_date=self.week2.start_date, field_name='Neutral Medium Open', field_type='MEDIUM', is_active=True)
+        occupied_game = Game(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week2.id,
+            home_team_id=self.wg.id,
+            away_team_id=self.as_.id,
+            game_status_id=self.status.id,
+            game_date=self.week2.start_date,
+            kickoff_time=time(11, 0),
+            host_location_id=neutral_host.id,
+            field_instance_id=occupied_field.id,
+        )
+        occupied_slot = GameSlot(id=uuid.uuid4(), field_instance_id=occupied_field.id, host_location_id=neutral_host.id, season_id=self.season.id, week_id=self.week2.id, slot_date=self.week2.start_date, start_time=time(11, 0), end_time=time(12, 0), field_type='SMALL', status='BOOKED', assigned_game_id=occupied_game.id, turf_wave_id=target_wave.id)
+        open_slot = GameSlot(id=uuid.uuid4(), field_instance_id=open_field.id, host_location_id=neutral_host.id, season_id=self.season.id, week_id=self.week2.id, slot_date=self.week2.start_date, start_time=time(11, 0), end_time=time(12, 0), field_type='SMALL', status='OPEN', turf_wave_id=target_wave.id)
+        medium_slot = GameSlot(id=uuid.uuid4(), field_instance_id=medium_field.id, host_location_id=neutral_host.id, season_id=self.season.id, week_id=self.week2.id, slot_date=self.week2.start_date, start_time=time(11, 0), end_time=time(12, 0), field_type='MEDIUM', status='OPEN', turf_wave_id=target_wave.id)
+        source_host = HostLocation(id=uuid.uuid4(), organization_id=self.org_w.id, name='Westosha Early Park', surface_type='GRASS', is_active=True)
+        source_availability = HostingAvailability(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week2.id,
+            organization_id=self.org_w.id,
+            host_location_id=source_host.id,
+            available_date=self.week2.start_date,
+            primary_game_date=self.week2.start_date,
+            start_time=time(9, 0),
+            end_time=time(10, 0),
+            is_available=True,
+        )
+        source_field = FieldInstance(id=uuid.uuid4(), host_location_id=source_host.id, hosting_availability_id=source_availability.id, instance_date=self.week2.start_date, field_name='Early Small Field', field_type='SMALL', is_active=True)
+        candidate_game = Game(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week2.id,
+            home_team_id=young_home.id,
+            away_team_id=young_away.id,
+            game_status_id=self.status.id,
+            game_date=self.week2.start_date,
+            kickoff_time=time(9, 0),
+            host_location_id=source_host.id,
+            field_instance_id=source_field.id,
+        )
+        source_slot = GameSlot(id=uuid.uuid4(), field_instance_id=source_field.id, host_location_id=source_host.id, season_id=self.season.id, week_id=self.week2.id, slot_date=self.week2.start_date, start_time=time(9, 0), end_time=time(10, 0), field_type='SMALL', status='BOOKED', assigned_game_id=candidate_game.id)
+        self.db.add_all([
+            neutral_org, neutral_host, young_division, young_home, young_away, wave_availability, target_wave,
+            occupied_field, open_field, medium_field, occupied_game, occupied_slot, open_slot, medium_slot,
+            source_host, source_availability, source_field, candidate_game, source_slot,
+        ])
+        self.db.commit()
+
+        compaction = _run_turf_wave_compaction_pass(self.db, self.season.id)
+
+        self.assertNotIn('MOVES_YOUNGER_DIVISION_TOO_LATE', compaction['rejected_moves_by_reason'])
+        self.assertEqual(compaction['younger_division_late_penalty_rejected_by_reason']['WORSENS_HOST_COMMUNITY_BALANCE'], 1)
+        self.assertIn('WORSENS_HOST_COMMUNITY_BALANCE: 1', compaction['younger_division_late_penalty_rejection_summary_line'])
+        penalty_row = compaction['younger_division_late_penalty_candidates'][0]
+        self.assertFalse(penalty_row['accepted'])
+        self.assertEqual(penalty_row['final_rejection_reason'], 'WORSENS_HOST_COMMUNITY_BALANCE')
+        self.assertTrue(penalty_row['now_rejected_for_host_community_balance'])
+        self.assertEqual(penalty_row['previous_hard_rejection_reason'], 'MOVES_YOUNGER_DIVISION_TOO_LATE')
 
     def test_turf_wave_compaction_details_are_grouped_by_start_time(self):
         self.host.surface_type = 'TURF_STADIUM'
