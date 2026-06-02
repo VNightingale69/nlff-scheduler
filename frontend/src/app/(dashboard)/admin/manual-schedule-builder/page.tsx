@@ -569,15 +569,37 @@ export default function ManualScheduleBuilderPage() {
             </div>
           </section> : null}
           {turfWaveCompactionDiagnostics ? <section className='rounded border border-slate-200 bg-white p-3'>
-            <h3 className='font-semibold'>Turf Wave Compaction Rejection Diagnostics</h3>
+            <h3 className='font-semibold'>Turf Wave Optimization Summary</h3>
+            {turfWaveCompactionDiagnostics.turf_wave_optimization_summary?.summary ? <p className='mt-1 text-sm text-slate-700'>{turfWaveCompactionDiagnostics.turf_wave_optimization_summary.summary}</p> : null}
+            <div className='mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-3'>
+              <div>Partial waves before compaction: <span className='font-semibold'>{turfWaveCompactionDiagnostics.partial_waves_before ?? turfWaveCompactionDiagnostics.partial_turf_waves_before ?? 0}</span></div>
+              <div>Partial waves after compaction: <span className='font-semibold'>{turfWaveCompactionDiagnostics.partial_waves_after ?? turfWaveCompactionDiagnostics.partial_turf_waves_after ?? 0}</span></div>
+              <div>Waves improved: <span className='font-semibold'>{turfWaveCompactionDiagnostics.waves_improved_count ?? 0}</span></div>
+              <div>Accepted moves: <span className='font-semibold'>{turfWaveCompactionDiagnostics.accepted_moves_count ?? turfWaveCompactionDiagnostics.moves_accepted ?? 0}</span></div>
+              <div>Rejected moves: <span className='font-semibold'>{turfWaveCompactionDiagnostics.rejected_moves_count ?? turfWaveCompactionDiagnostics.moves_rejected ?? 0}</span></div>
+              <div>Rollback occurred: <span className='font-semibold'>{String(turfWaveCompactionDiagnostics.rollback_occurred)}</span>{turfWaveCompactionDiagnostics.rollback_reason ? ` (${turfWaveCompactionDiagnostics.rollback_reason})` : ''}</div>
+              <div>Home/away violations after compaction: <span className='font-semibold'>{turfWaveCompactionDiagnostics.host_owner_as_away_after_compaction ?? 0}</span></div>
+              <div>Total turf waves before: <span className='font-semibold'>{turfWaveCompactionDiagnostics.turf_waves_before_total ?? 0}</span></div>
+              <div>Total turf waves after: <span className='font-semibold'>{turfWaveCompactionDiagnostics.turf_waves_after_total ?? 0}</span></div>
+              <div>Full turf waves before: <span className='font-semibold'>{turfWaveCompactionDiagnostics.full_turf_waves_before ?? 0}</span></div>
+              <div>Full turf waves after: <span className='font-semibold'>{turfWaveCompactionDiagnostics.full_turf_waves_after ?? 0}</span></div>
+              <div>Empty turf waves before: <span className='font-semibold'>{turfWaveCompactionDiagnostics.empty_turf_waves_before ?? 0}</span></div>
+              <div>Empty turf waves after: <span className='font-semibold'>{turfWaveCompactionDiagnostics.empty_turf_waves_after ?? 0}</span></div>
+              <div>ONE_MEDIUM_TWO_SMALL partials before: <span className='font-semibold'>{turfWaveCompactionDiagnostics.one_medium_two_small_partials_before ?? 0}</span></div>
+              <div>ONE_MEDIUM_TWO_SMALL partials after: <span className='font-semibold'>{turfWaveCompactionDiagnostics.one_medium_two_small_partials_after ?? 0}</span></div>
+              <div>TWO_LARGE partials before: <span className='font-semibold'>{turfWaveCompactionDiagnostics.two_large_partials_before ?? 0}</span></div>
+              <div>TWO_LARGE partials after: <span className='font-semibold'>{turfWaveCompactionDiagnostics.two_large_partials_after ?? 0}</span></div>
+            </div>
+            <h3 className='mt-4 font-semibold'>Turf Wave Compaction Rejection Diagnostics</h3>
             <div className='mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-3'>
               <div>Enabled: <span className='font-semibold'>{String(turfWaveCompactionDiagnostics.compaction_enabled)}</span></div>
               <div>Started: <span className='font-semibold'>{String(turfWaveCompactionDiagnostics.compaction_pass_started)}</span></div>
               <div>Completed: <span className='font-semibold'>{String(turfWaveCompactionDiagnostics.compaction_pass_completed)}</span></div>
               {turfWaveCompactionDiagnostics.compaction_skipped_reason ? <div>Skipped reason: <span className='font-semibold'>{turfWaveCompactionDiagnostics.compaction_skipped_reason}</span></div> : null}
-              <div>Partial waves found: <span className='font-semibold'>{turfWaveCompactionDiagnostics.total_partial_waves_found ?? 0}</span></div>
-              <div>ONE_MEDIUM_TWO_SMALL partials: <span className='font-semibold'>{turfWaveCompactionDiagnostics.partial_ONE_MEDIUM_TWO_SMALL_waves_found ?? 0}</span></div>
-              <div>TWO_LARGE partials: <span className='font-semibold'>{turfWaveCompactionDiagnostics.partial_TWO_LARGE_waves_found ?? 0}</span></div>
+              <div>Partial waves before: <span className='font-semibold'>{turfWaveCompactionDiagnostics.partial_waves_before ?? turfWaveCompactionDiagnostics.partial_turf_waves_before ?? 0}</span></div>
+              <div>Partial waves after: <span className='font-semibold'>{turfWaveCompactionDiagnostics.partial_waves_after ?? turfWaveCompactionDiagnostics.partial_turf_waves_after ?? 0}</span></div>
+              <div>ONE_MEDIUM_TWO_SMALL partials after: <span className='font-semibold'>{turfWaveCompactionDiagnostics.one_medium_two_small_partials_after ?? turfWaveCompactionDiagnostics.partial_ONE_MEDIUM_TWO_SMALL_waves_found ?? 0}</span></div>
+              <div>TWO_LARGE partials after: <span className='font-semibold'>{turfWaveCompactionDiagnostics.two_large_partials_after ?? turfWaveCompactionDiagnostics.partial_TWO_LARGE_waves_found ?? 0}</span></div>
               <div>Candidate moves evaluated: <span className='font-semibold'>{turfWaveCompactionDiagnostics.total_candidate_moves_evaluated ?? turfWaveCompactionDiagnostics.moves_evaluated ?? 0}</span></div>
               <div>Same-date games scanned: <span className='font-semibold'>{turfWaveCompactionDiagnostics.same_date_games_scanned ?? 0}</span></div>
               <div>Matching field-size games: <span className='font-semibold'>{turfWaveCompactionDiagnostics.same_date_matching_field_size_games_found ?? 0}</span></div>
