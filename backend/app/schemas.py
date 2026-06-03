@@ -128,6 +128,11 @@ class HostLocationCreate(BaseModel):
     max_medium_fields: int = 0
     max_large_fields: int = 0
     max_total_fields: int = 0
+    host_role: str | None = None
+    minimum_games_to_activate_overflow_host: int = 2
+    preferred_minimum_games_per_active_host: int = 2
+    maximum_games_per_host_per_date: int | None = None
+    overflow_activation_allowed: bool = True
     address_line1: str | None = None
     address_line2: str | None = None
     city: str | None = None
