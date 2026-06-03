@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import Base
 from app.models import Division, FieldInstance, Game, GameSlot, GameStatus, HostLocation, HostPlanSelection, HostingAvailability, Organization, Season, Team, TurfWave, Week
-from app.routes.api import _build_host_location_vs_home_team_verification, _build_turf_stadium_utilization_diagnostics, _diagnostic_active_teams_expected_to_play, _diagnostic_expected_games_for_team_count, _diagnostic_field_size_diff, _host_availability_matrix_response, _run_turf_wave_compaction_pass, auto_fill_apply, auto_fill_preview, auto_schedule_entire_season, generate_suggested_host_plan
+from app.routes.api import _build_host_location_vs_home_team_verification, _build_revised_scheduling_hierarchy_diagnostics, _build_turf_stadium_utilization_diagnostics, _diagnostic_active_teams_expected_to_play, _diagnostic_expected_games_for_team_count, _diagnostic_field_size_diff, _host_availability_matrix_response, _run_turf_wave_compaction_pass, auto_fill_apply, auto_fill_preview, auto_schedule_entire_season, generate_suggested_host_plan
 
 
 class AutoFillPreviewTest(unittest.TestCase):
@@ -120,6 +120,51 @@ class AutoFillPreviewTest(unittest.TestCase):
 
         self.assertEqual(diagnostics['host_owner_is_away_team'], 0)
         self.assertEqual(diagnostics['validation_failure_count'], 0)
+
+    def test_revised_hierarchy_diagnostics_uses_generated_slot_duration_for_doubleheaders(self):
+        first_game = Game(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week2.id,
+            home_team_id=self.wm.id,
+            away_team_id=self.ab.id,
+            game_status_id=self.status.id,
+            game_date=self.week2.start_date,
+            kickoff_time=time(9, 0),
+        )
+        second_game = Game(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week2.id,
+            home_team_id=self.wm.id,
+            away_team_id=self.as_.id,
+            game_status_id=self.status.id,
+            game_date=self.week2.start_date,
+            kickoff_time=time(10, 0),
+        )
+        second_slot = GameSlot(
+            id=uuid.uuid4(),
+            field_instance_id=self.fi.id,
+            host_location_id=self.host.id,
+            slot_date=self.week2.start_date,
+            start_time=time(10, 0),
+            end_time=time(11, 0),
+            field_type='SMALL',
+            status='OPEN',
+        )
+        self.db.add_all([first_game, second_game, second_slot])
+        self.db.flush()
+        self.slot.assigned_game_id = first_game.id
+        self.slot.status = 'BOOKED'
+        second_slot.assigned_game_id = second_game.id
+        second_slot.status = 'BOOKED'
+        self.db.commit()
+
+        diagnostics = _build_revised_scheduling_hierarchy_diagnostics(self.db, self.season.id)
+
+        self.assertEqual(diagnostics['doubleheader_diagnostics']['doubleheader_back_to_back_success_count'], 1)
+        self.assertEqual(diagnostics['doubleheader_diagnostics']['doubleheader_back_to_back_failure_count'], 0)
+        self.assertEqual(diagnostics['schedule_health_summary']['doubleheader_back_to_back_failures'], 0)
 
 
     def test_turf_wave_diagnostics_report_partial_component_utilization(self):

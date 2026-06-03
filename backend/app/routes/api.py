@@ -40,6 +40,8 @@ RULEBOOK_STORAGE_WARNING = (
     'TODO: Configure RULEBOOK_UPLOAD_DIR to use a Railway volume or replace local rulebook storage '
     'with S3-compatible storage, Supabase Storage, or Cloudinary before relying on uploads in production.'
 )
+GAME_DURATION_MINUTES = 60
+GAME_DURATION = timedelta(minutes=GAME_DURATION_MINUTES)
 
 
 HOST_LOCATION_VERIFICATION_CATEGORIES = (
@@ -2031,7 +2033,7 @@ def _regenerate_generated_slots(
             db.flush()
             slot_start_dt = block_start_dt
             while slot_start_dt < block_end_dt:
-                next_dt = min(slot_start_dt + timedelta(hours=1), block_end_dt)
+                next_dt = min(slot_start_dt + GAME_DURATION, block_end_dt)
                 slot_counts = {size: sum(1 for instance in block_instances if _normalize_field_size(instance.field_type) == size) for size in FIELD_SIZE_ORDER}
                 if not _is_approved_turf_slot_counts(slot_counts):
                     logger.warning('Skipping unsupported turf slot-level configuration %s for wave_id=%s', slot_counts, wave.id)
@@ -2052,7 +2054,7 @@ def _regenerate_generated_slots(
         db.flush()
         slot_start_dt = start_dt
         while slot_start_dt < end_dt:
-            next_dt = min(slot_start_dt + timedelta(hours=1), end_dt)
+            next_dt = min(slot_start_dt + GAME_DURATION, end_dt)
             for instance in instances:
                 db.add(GameSlot(field_instance_id=instance.id, host_location_id=host_location_id, season_id=availability.season_id, week_id=availability.week_id, slot_date=slot_date, start_time=slot_start_dt.time(), end_time=next_dt.time(), field_type=instance.field_type, status='OPEN'))
                 created_slots += 1
@@ -3904,7 +3906,7 @@ def _dynamic_turf_capacity_for_availability(db: Session, host: HostLocation, ava
                 'game_date': str(availability.available_date),
                 'wave_number': wave_index + 1,
                 'start_time': cursor.time().isoformat(),
-                'end_time': (cursor + timedelta(hours=1)).time().isoformat(),
+                'end_time': (cursor + GAME_DURATION).time().isoformat(),
                 'wave_configuration': None,
                 'approved_configurations_considered': sorted(active_names),
                 'candidate_configuration_scores': candidate_diagnostics,
@@ -3913,7 +3915,7 @@ def _dynamic_turf_capacity_for_availability(db: Session, host: HostLocation, ava
                 'expected_components_by_size': _empty_field_size_counts(),
                 'selected_configuration_reason': 'no approved turf configuration metadata was available for this wave',
             })
-            cursor += timedelta(hours=1)
+            cursor += GAME_DURATION
             continue
         metadata = _turf_configuration_metadata(selected) or {'counts': _empty_field_size_counts()}
         counts = {size: int(metadata['counts'].get(size, 0) or 0) for size in FIELD_SIZE_ORDER}
@@ -3927,7 +3929,7 @@ def _dynamic_turf_capacity_for_availability(db: Session, host: HostLocation, ava
             'game_date': str(availability.available_date),
             'wave_number': wave_index + 1,
             'start_time': cursor.time().isoformat(),
-            'end_time': (cursor + timedelta(hours=1)).time().isoformat(),
+            'end_time': (cursor + GAME_DURATION).time().isoformat(),
             'wave_configuration': selected,
             'approved_configurations_considered': sorted(active_names),
             'candidate_configuration_scores': candidate_diagnostics,
@@ -3937,7 +3939,7 @@ def _dynamic_turf_capacity_for_availability(db: Session, host: HostLocation, ava
             'expected_components_by_size': counts,
             'selected_configuration_reason': 'highest scoring dynamic fit for remaining same-date demand',
         })
-        cursor += timedelta(hours=1)
+        cursor += GAME_DURATION
     return capacity, waves
 
 
