@@ -3762,6 +3762,41 @@ def _host_activation_plan_for_date(db: Session, season_id: uuid.UUID | str | Non
     }
 
 
+def _default_host_activation_summary() -> dict[str, object]:
+    return {
+        'available_hosts': [],
+        'active_hosts': [],
+        'primary_hosts_available': [],
+        'primary_hosts_used': [],
+        'overflow_hosts_available': [],
+        'overflow_hosts_used': [],
+        'overflow_required': False,
+        'overflow_required_reason': None,
+        'overflow_avoided': None,
+        'overflow_avoided_reason': None,
+        'games_assigned_by_host': {},
+        'games_assigned_by_host_and_field_size': {},
+        'capacity_used_by_host': {},
+        'capacity_remaining_by_host': {},
+        'reason_each_available_host_was_used_or_not_used': {},
+        'diagnostics_available': False,
+        'diagnostics_warning': 'host_activation_summary was not provided to auto_fill_apply; default empty diagnostics used',
+    }
+
+
+def _host_activation_summary_from_payload(payload: dict) -> tuple[dict[str, object], list[str]]:
+    host_activation_summary = payload.get('host_activation_summary')
+    if isinstance(host_activation_summary, dict):
+        return host_activation_summary, []
+    if host_activation_summary is None:
+        default_summary = _default_host_activation_summary()
+        return default_summary, [str(default_summary['diagnostics_warning'])]
+    default_summary = _default_host_activation_summary()
+    warning = 'host_activation_summary provided to auto_fill_apply was not a diagnostics object; default empty diagnostics used'
+    default_summary['diagnostics_warning'] = warning
+    return default_summary, [warning]
+
+
 def _is_playoff_or_championship_week(week: Week) -> bool:
     if _week_date_type(week) == PLAYOFF_DATE_TYPE:
         return True
@@ -11778,6 +11813,7 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
     week_id = payload.get('week_id')
     division_id = payload.get('division_id')
     proposals = payload.get('proposals') or []
+    host_activation_summary, host_activation_diagnostics_warnings = _host_activation_summary_from_payload(payload)
     two_location_rule_relaxed = False
     for proposal in proposals or []:
         reason = (proposal.get('reason') or '').lower()
@@ -11802,6 +11838,12 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
             'created_games': 0,
             'assigned_slots': 0,
             'skipped': [],
+            'diagnostics': {
+                'weekly_host_planning_report': {
+                    'host_activation_summary': host_activation_summary,
+                },
+                'diagnostics_warnings': host_activation_diagnostics_warnings,
+            },
         }
     season = db.query(Season).filter(Season.id == season_id).first()
     if not season:
@@ -12872,6 +12914,7 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
                 'host_capacities': [],
                 'host_activation_summary': host_activation_summary,
             },
+            'diagnostics_warnings': host_activation_diagnostics_warnings,
             'teams_evaluated': len(teams),
             'slots_evaluated': open_slots_count,
             'valid_matchups_found': len(proposals),
@@ -12974,6 +13017,7 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
     }
     post_run_validation: list[dict[str, object]] = []
     validation_warnings: list[dict[str, object]] = []
+    auto_schedule_diagnostics_warnings: list[str] = []
     weekly_diagnostics_by_week_id: dict[uuid.UUID, dict[str, object]] = {}
     division_week_diagnostics: list[dict[str, object]] = []
 
@@ -13410,6 +13454,7 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
             'all_required_games_already_scheduled': sum(expected_games_by_week.values()) > 0 and existing_scheduled_games_total >= sum(expected_games_by_week.values()),
             'skipped_count': sum(skipped_attempts_by_reason.values()),
             'skipped_reasons': dict(skipped_attempts_by_reason),
+            'diagnostics_warnings': auto_schedule_diagnostics_warnings,
         }
         diagnostics['root_cause_categories'] = _build_root_cause_categories(diagnostics)
         return diagnostics
@@ -13547,13 +13592,25 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
                         host_count = _host_count_for_week(division.id, week.id)
                     else:
                         try:
-                            applied = auto_fill_apply({'season_id': season_id, 'week_id': week.id, 'division_id': division.id, 'proposals': proposals}, db)
+                            preview_host_activation_summary = (
+                                ((preview.get('diagnostics') or {}).get('division_week_placement') or {}).get('host_activation_summary')
+                                or ((preview.get('diagnostics') or {}).get('weekly_host_planning_report') or {}).get('host_activation_summary')
+                            )
+                            apply_payload = {'season_id': season_id, 'week_id': week.id, 'division_id': division.id, 'proposals': proposals}
+                            if preview_host_activation_summary is not None:
+                                apply_payload['host_activation_summary'] = preview_host_activation_summary
+                            applied = auto_fill_apply(apply_payload, db)
                             created_count = int(applied.get('created_count') or 0)
                             skipped_count = int(applied.get('skipped_count') or 0)
                             division_created += created_count
                             total_games_created += created_count
                             committed_assignments_count += created_count
                             apply_skipped = list(applied.get('skipped') or [])
+                            for diagnostic_warning in (applied.get('diagnostics') or {}).get('diagnostics_warnings') or []:
+                                diagnostic_warning = str(diagnostic_warning)
+                                if diagnostic_warning not in auto_schedule_diagnostics_warnings:
+                                    auto_schedule_diagnostics_warnings.append(diagnostic_warning)
+                                    warnings.append(diagnostic_warning)
                             failed_validation_count += skipped_count
                             _record_skipped(apply_skipped)
                             host_count = _host_count_for_week(division.id, week.id)
