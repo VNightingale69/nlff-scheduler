@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import Base
 from app.models import Division, FieldInstance, Game, GameSlot, GameStatus, HostLocation, HostPlanSelection, HostingAvailability, Organization, Season, Team, TurfWave, Week
-from app.routes.api import _build_host_location_vs_home_team_verification, _build_revised_scheduling_hierarchy_diagnostics, _build_turf_stadium_utilization_diagnostics, _classify_host_for_date, _diagnostic_active_teams_expected_to_play, _diagnostic_expected_games_for_team_count, _diagnostic_field_size_diff, _host_availability_matrix_response, _run_turf_wave_compaction_pass, auto_fill_apply, auto_fill_preview, auto_schedule_entire_season, generate_suggested_host_plan
+from app.routes.api import _build_host_location_vs_home_team_verification, _build_revised_scheduling_hierarchy_diagnostics, _build_turf_stadium_utilization_diagnostics, _classify_host_for_date, _diagnostic_active_teams_expected_to_play, _diagnostic_expected_games_for_team_count, _diagnostic_field_size_diff, _host_availability_matrix_response, _run_turf_wave_compaction_pass, _renumber_turf_waves_for_host_date, auto_fill_apply, auto_fill_preview, auto_schedule_entire_season, generate_suggested_host_plan
 
 
 class AutoFillPreviewTest(unittest.TestCase):
@@ -70,6 +70,72 @@ class AutoFillPreviewTest(unittest.TestCase):
         self.assertEqual(community_row['highest_priority_active_host_role'], 'TURF_STADIUM')
         self.assertTrue(game_row['scheduled_at_turf_stadium'])
         self.assertTrue(game_row['scheduled_at_highest_priority_owned_host'])
+
+
+    def test_turf_wave_numbers_are_chronological_per_host_date_not_configuration(self):
+        self.host.surface_type = 'TURF_STADIUM'
+        self.host.host_role = 'TURF_STADIUM'
+        availability_id = uuid.uuid4()
+        self.db.add(HostingAvailability(
+            id=availability_id,
+            season_id=self.season.id,
+            week_id=self.week2.id,
+            organization_id=self.org_w.id,
+            host_location_id=self.host.id,
+            available_date=self.week2.start_date,
+            primary_game_date=self.week2.start_date,
+            start_time=time(9, 0),
+            end_time=time(12, 0),
+            active=True,
+            is_available=True,
+        ))
+        wave_10 = TurfWave(
+            id=uuid.uuid4(),
+            host_location_id=self.host.id,
+            hosting_availability_id=availability_id,
+            week_id=self.week2.id,
+            host_date=self.week2.start_date,
+            sequence_number=1,
+            preferred_layout_code='THREE_SMALL',
+            start_time=time(10, 0),
+            end_time=time(11, 0),
+        )
+        wave_9 = TurfWave(
+            id=uuid.uuid4(),
+            host_location_id=self.host.id,
+            hosting_availability_id=availability_id,
+            week_id=self.week2.id,
+            host_date=self.week2.start_date,
+            sequence_number=1,
+            preferred_layout_code='ONE_MEDIUM_TWO_SMALL',
+            start_time=time(9, 0),
+            end_time=time(10, 0),
+        )
+        small = FieldInstance(id=uuid.uuid4(), host_location_id=self.host.id, hosting_availability_id=availability_id, instance_date=self.week2.start_date, field_name='old small', field_type='SMALL', is_active=True)
+        medium = FieldInstance(id=uuid.uuid4(), host_location_id=self.host.id, hosting_availability_id=availability_id, instance_date=self.week2.start_date, field_name='old medium', field_type='MEDIUM', is_active=True)
+        later_small = FieldInstance(id=uuid.uuid4(), host_location_id=self.host.id, hosting_availability_id=availability_id, instance_date=self.week2.start_date, field_name='old later small', field_type='SMALL', is_active=True)
+        self.db.add_all([wave_10, wave_9, small, medium, later_small])
+        self.db.flush()
+        self.db.add_all([
+            GameSlot(id=uuid.uuid4(), field_instance_id=small.id, host_location_id=self.host.id, season_id=self.season.id, week_id=self.week2.id, slot_date=self.week2.start_date, start_time=time(9, 0), end_time=time(10, 0), field_type='SMALL', status='OPEN', turf_wave_id=wave_9.id),
+            GameSlot(id=uuid.uuid4(), field_instance_id=medium.id, host_location_id=self.host.id, season_id=self.season.id, week_id=self.week2.id, slot_date=self.week2.start_date, start_time=time(9, 0), end_time=time(10, 0), field_type='MEDIUM', status='OPEN', turf_wave_id=wave_9.id),
+            GameSlot(id=uuid.uuid4(), field_instance_id=later_small.id, host_location_id=self.host.id, season_id=self.season.id, week_id=self.week2.id, slot_date=self.week2.start_date, start_time=time(10, 0), end_time=time(11, 0), field_type='SMALL', status='OPEN', turf_wave_id=wave_10.id),
+        ])
+        self.db.commit()
+
+        _renumber_turf_waves_for_host_date(self.db, self.host.id, self.week2.start_date)
+        self.db.commit()
+
+        self.db.refresh(wave_9)
+        self.db.refresh(wave_10)
+        self.db.refresh(small)
+        self.db.refresh(medium)
+        self.db.refresh(later_small)
+        self.assertEqual(1, wave_9.sequence_number)
+        self.assertEqual(2, wave_10.sequence_number)
+        self.assertEqual('Wave 1 ONE_MEDIUM_TWO_SMALL Small Field 1', small.field_name)
+        self.assertEqual('Wave 1 ONE_MEDIUM_TWO_SMALL Medium Field 1', medium.field_name)
+        self.assertEqual('Wave 2 THREE_SMALL Small Field 1', later_small.field_name)
 
     def test_host_location_vs_home_team_verification_reports_away_owned_host(self):
         game = Game(

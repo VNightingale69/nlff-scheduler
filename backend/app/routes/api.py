@@ -827,12 +827,16 @@ def _build_revised_scheduling_hierarchy_diagnostics(db: Session, season_id: uuid
     wave_number_by_id: dict[uuid.UUID, int] = {}
     waves_by_host_date_for_numbering: dict[tuple[uuid.UUID, date], list[TurfWave]] = {}
     for numbering_wave in waves:
-        if numbering_wave.host_location_id and numbering_wave.host_date:
+        if numbering_wave.host_location_id and numbering_wave.host_date and _is_turf_stadium_host(numbering_wave.host_location):
             waves_by_host_date_for_numbering.setdefault((numbering_wave.host_location_id, numbering_wave.host_date), []).append(numbering_wave)
     for (_host_id, _host_date), grouped_waves in waves_by_host_date_for_numbering.items():
         for computed_index, grouped_wave in enumerate(sorted(grouped_waves, key=lambda item: (item.start_time, item.id)), start=1):
             wave_number_by_id[grouped_wave.id] = computed_index
     for wave in waves:
+        host = wave.host_location
+        if not _is_turf_stadium_host(host):
+            bug_warnings.append('BUG: grass field included in turf wave numbering.')
+            continue
         slots = db.query(GameSlot).filter(GameSlot.turf_wave_id == wave.id).all()
         total = _turf_wave_layout_counts(wave.preferred_layout_code, slots)
         used = _turf_slot_counts_from_slots(slots, assigned_only=True)
@@ -840,7 +844,6 @@ def _build_revised_scheduling_hierarchy_diagnostics(db: Session, season_id: uuid
         total_components = sum(total.values())
         used_components = sum(used.values())
         status = 'EMPTY' if used_components == 0 else ('FULL' if total_components and used_components >= total_components else 'PARTIAL')
-        host = wave.host_location
         compatible_later_by_size = _empty_field_size_counts()
         compatible_grass_overflow_by_size = _empty_field_size_counts()
         assigned_game_ids_in_wave = {slot.assigned_game_id for slot in slots if slot.assigned_game_id}
@@ -852,7 +855,7 @@ def _build_revised_scheduling_hierarchy_diagnostics(db: Session, season_id: uuid
                 continue
             if g.kickoff_time and wave.start_time and g.kickoff_time > wave.start_time:
                 compatible_later_by_size[size] += 1
-            if g_host and str(g_host.surface_type or '').upper() != 'TURF_STADIUM':
+            if g_host and not _is_turf_stadium_host(g_host):
                 compatible_grass_overflow_by_size[size] += 1
         unused_component_details = []
         for size in FIELD_SIZE_ORDER:
@@ -917,7 +920,7 @@ def _build_revised_scheduling_hierarchy_diagnostics(db: Session, season_id: uuid
 
     turf_games_by_date: dict[str, list[tuple[Game, GameSlot | None, FieldInstance | None, HostLocation | None, Team, Team, Division, object, object]]] = {}
     for game_date, game_rows in games_by_date.items():
-        turf_rows = [row for row in game_rows if row[3] and str(row[3].surface_type or '').upper() == 'TURF_STADIUM']
+        turf_rows = [row for row in game_rows if row[3] and _is_turf_stadium_host(row[3])]
         if turf_rows:
             turf_games_by_date[game_date.isoformat()] = turf_rows
     turf_stadium_schedule_summary: list[dict[str, object]] = []
@@ -2075,7 +2078,7 @@ def _apply_turf_configuration_metadata(obj, configuration_name: str) -> None:
 
 
 def _ensure_approved_turf_configurations(db: Session, host: HostLocation) -> bool:
-    if (host.surface_type or 'GRASS_FIELD') != 'TURF_STADIUM':
+    if not _is_turf_stadium_host(host):
         return False
     existing = {
         _normalize_configuration_name(config.configuration_name): config
@@ -2156,7 +2159,7 @@ def _regenerate_generated_slots(
     host_configuration = availability.selected_configuration
     field = availability.field
     host = availability.host_location or (field.host_location if field else None) or (availability.physical_field_area.host_location if availability.physical_field_area else None)
-    surface_type = (host.surface_type if host else None) or 'GRASS_FIELD'
+    surface_type = 'TURF_STADIUM' if _is_turf_stadium_host(host) else ((host.surface_type if host else None) or 'GRASS_FIELD')
     templates: list[tuple[str, str]] = []
     turf_layout_blocks: list[tuple[str, int]] = []
     if surface_type == 'TURF_STADIUM':
@@ -2290,6 +2293,8 @@ def _regenerate_generated_slots(
                 db.add(GameSlot(field_instance_id=instance.id, host_location_id=host_location_id, season_id=availability.season_id, week_id=availability.week_id, slot_date=slot_date, start_time=slot_start_dt.time(), end_time=next_dt.time(), field_type=instance.field_type, status='OPEN'))
                 created_slots += 1
             slot_start_dt = next_dt
+    if surface_type == 'TURF_STADIUM':
+        _renumber_turf_waves_for_host_date(db, host_location_id, slot_date)
     logger.info('Generated %s field instances for availability_id=%s host_location_id=%s', len(instances), availability.id, host_location_id)
     logger.info('Generated %s game slots for availability_id=%s host_location_id=%s', created_slots, availability.id, host_location_id)
     return {
@@ -2339,6 +2344,7 @@ def _regenerate_hosting_day(
             result.locked_slots_skipped += slot_metrics['locked_slots_skipped']
             result.new_slots_created += slot_metrics['new_slots_created']
             result.obsolete_unused_slots_removed += slot_metrics['obsolete_unused_slots_removed']
+            _renumber_turf_waves_for_host_date(db, host.id, availability.primary_game_date or availability.available_date)
             logger.info('Host %s (%s): availability %s regenerated, field_instances=%s slots=%s', host.name, host.id, availability.id, after_instances, after_slots)
         except HTTPException as exc:
             detail = str(exc.detail)
@@ -4091,8 +4097,14 @@ def _host_role_value(host: HostLocation | None) -> str | None:
     return role or None
 
 
+def _is_turf_stadium_host(host: HostLocation | None) -> bool:
+    if not host:
+        return False
+    return _host_role_value(host) == HOST_ROLE_TURF_STADIUM or str(getattr(host, 'surface_type', '') or '').strip().upper() == 'TURF_STADIUM'
+
+
 def _host_supports_turf_waves(db: Session, host: HostLocation | None) -> bool:
-    if not host or str(host.surface_type or '').upper() != 'TURF_STADIUM':
+    if not _is_turf_stadium_host(host):
         return False
     _ensure_approved_turf_configurations(db, host)
     db.flush()
@@ -4113,7 +4125,7 @@ def _classify_host_for_date(db: Session, host: HostLocation, availability: Hosti
         return HOST_ROLE_TURF_STADIUM
     surface = str(host.surface_type or 'GRASS_FIELD').upper()
     is_primary = bool(getattr(host, 'is_primary', False))
-    if surface == 'TURF_STADIUM' and _host_supports_turf_waves(db, host):
+    if _is_turf_stadium_host(host) and _host_supports_turf_waves(db, host):
         return HOST_ROLE_TURF_STADIUM
     if surface == 'GRASS_FIELD':
         if is_primary:
@@ -4138,6 +4150,39 @@ def _highest_priority_host_ids_for_org(host_ids: set[uuid.UUID], host_role_by_id
         return set()
     best_rank = min(rank for _host_id, rank in ranked)
     return {host_id for host_id, rank in ranked if rank == best_rank}
+
+
+def _renumber_turf_waves_for_host_date(db: Session, host_location_id: uuid.UUID | None, host_date: date | None) -> None:
+    """Keep turf wave identity scoped to one host location and one game date.
+
+    Wave numbers are chronological time-block numbers. They intentionally do not
+    encode or reset by turf configuration. Grass/non-turf hosts are ignored.
+    """
+    if not host_location_id or not host_date:
+        return
+    host = db.query(HostLocation).filter(HostLocation.id == host_location_id).first()
+    if not _is_turf_stadium_host(host):
+        return
+    waves = db.query(TurfWave).filter(
+        TurfWave.host_location_id == host_location_id,
+        TurfWave.host_date == host_date,
+    ).order_by(TurfWave.start_time.asc(), TurfWave.id.asc()).all()
+    for index, wave in enumerate(waves, start=1):
+        layout = _normalize_configuration_name(wave.preferred_layout_code)
+        if wave.sequence_number != index:
+            wave.sequence_number = index
+        wave_slots = db.query(GameSlot).filter(GameSlot.turf_wave_id == wave.id).all()
+        instances = sorted(
+            {slot.field_instance for slot in wave_slots if slot.field_instance is not None},
+            key=lambda instance: (_field_size_sequence_rank(instance.field_type), str(instance.id)),
+        )
+        component_counts = {size: 0 for size in FIELD_SIZE_ORDER}
+        for instance in instances:
+            size = _normalize_field_size(instance.field_type)
+            if size not in component_counts:
+                continue
+            component_counts[size] += 1
+            instance.field_name = f'Wave {index} {layout} {size.title()} Field {component_counts[size]}'
 
 
 def _date_host_availabilities(db: Session, season_id: uuid.UUID | str | None, week_id: uuid.UUID | str | None, game_date: date | None, allowed_host_ids: set[uuid.UUID] | None = None) -> list[tuple[HostLocation, HostingAvailability]]:
@@ -9947,7 +9992,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     host_rows_by_id: dict[uuid.UUID, HostLocation] = {}
     for host_obj in db.query(HostLocation).filter(HostLocation.id.in_(list(weekly_slots_by_host.keys()))).all() if weekly_slots_by_host else []:
         host_rows_by_id[host_obj.id] = host_obj
-        host_surface_by_id[host_obj.id] = host_obj.surface_type or 'GRASS_FIELD'
+        host_surface_by_id[host_obj.id] = 'TURF_STADIUM' if _is_turf_stadium_host(host_obj) else (host_obj.surface_type or 'GRASS_FIELD')
         if host_obj.organization_id:
             host_org_by_id[host_obj.id] = host_obj.organization_id
             host_name_by_id[host_obj.id] = host_obj.name or ''
@@ -10646,17 +10691,32 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
 
     def _compatible_current_division_lookahead_count(remaining_counts: dict[str, int], candidate_home_id: uuid.UUID, candidate_away_id: uuid.UUID, slot_date, slot_time) -> int:
         # The scheduler applies hard constraints when the later game is actually placed.
-        # This conservative same-division lookahead only awards small soft bonuses when
-        # enough currently unscheduled teams could legally share this exact kickoff.
-        needed_same_size = int(remaining_counts.get(_normalize_field_size(required_field_type), 0) or 0)
-        if needed_same_size <= 0:
+        # This lookahead is intentionally scoped by same-date required field size rather
+        # than by the current division so turf wave-fill can prefer components that any
+        # compatible same-date division can use.
+        needed_by_size = {size: int(remaining_counts.get(size, 0) or 0) for size in FIELD_SIZE_ORDER}
+        if not any(needed_by_size.values()):
             return 0
-        available_for_same_time = [
-            team_id for team_id in available_team_ids
-            if team_id not in {candidate_home_id, candidate_away_id}
-            and (str(team_id), slot_date, slot_time) not in team_time_occupied
-        ]
-        return min(needed_same_size, len(available_for_same_time) // 2)
+        candidate_team_ids = {str(candidate_home_id), str(candidate_away_id)}
+        teams_by_size: dict[str, list[uuid.UUID]] = {size: [] for size in FIELD_SIZE_ORDER}
+        active_same_date_teams = db.query(Team).join(Division, Team.division_id == Division.id).filter(
+            Team.is_active.is_(True),
+            Division.is_active.is_(True),
+        ).all()
+        for team in active_same_date_teams:
+            if str(team.id) in candidate_team_ids:
+                continue
+            if (str(team.id), slot_date, slot_time) in team_time_occupied:
+                continue
+            size = _required_field_type_for_division(team.division)
+            if size in teams_by_size:
+                teams_by_size[size].append(team.id)
+        compatible_games = 0
+        for size, needed in needed_by_size.items():
+            if needed <= 0:
+                continue
+            compatible_games += min(needed, len(teams_by_size.get(size, [])) // 2)
+        return compatible_games
 
     def _remaining_compatible_turf_slots_for_wave(required_size: str | None, exclude_wave_id: uuid.UUID | None = None) -> int:
         normalized_size = _normalize_field_size(required_size)
@@ -10941,6 +11001,22 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                             compatible_owned_candidate = _first_compatible_open_slot_by_field_order(owned_host_id, owned_candidate_slot.slot_date, owned_candidate_slot.start_time)
                             if not compatible_owned_candidate:
                                 continue
+                            compatible_field_key = (
+                                str(compatible_owned_candidate.host_location_id),
+                                str(compatible_owned_candidate.field_instance_id),
+                                compatible_owned_candidate.slot_date,
+                                compatible_owned_candidate.start_time,
+                            )
+                            if compatible_field_key in field_time_occupied:
+                                continue
+                            if (str(a), compatible_owned_candidate.slot_date, compatible_owned_candidate.start_time) in team_time_occupied:
+                                continue
+                            if (str(b), compatible_owned_candidate.slot_date, compatible_owned_candidate.start_time) in team_time_occupied:
+                                continue
+                            if no_simultaneous_games_same_host:
+                                compatible_host_key = (str(compatible_owned_candidate.host_location_id), compatible_owned_candidate.slot_date, compatible_owned_candidate.start_time)
+                                if compatible_host_key in host_time_occupied:
+                                    continue
                             owned_rank = host_priority_rank_by_id.get(owned_host_id, len(OWNED_HOST_PRIORITY_ORDER))
                             owned_candidate_slots_by_rank.setdefault(owned_rank, []).append(compatible_owned_candidate)
                         best_owned_host_priority_rank = min(owned_candidate_slots_by_rank, default=len(OWNED_HOST_PRIORITY_ORDER) + 1)
@@ -10962,7 +11038,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                             s.host_location_id for s in remaining_slots
                             if s.host_location_id
                             and s.host_location
-                            and str(s.host_location.surface_type or '').upper() == 'TURF_STADIUM'
+                            and _is_turf_stadium_host(s.host_location)
                         }
                         turf_host_capacity_by_id = {
                             host_id: sum(
@@ -16857,12 +16933,14 @@ def _build_turf_stadium_utilization_diagnostics(db: Session, season_id: uuid.UUI
         HostLocation, HostLocation.id == TurfWave.host_location_id
     ).join(
         HostingAvailability, HostingAvailability.id == TurfWave.hosting_availability_id
-    ).filter(HostLocation.surface_type == 'TURF_STADIUM')
+    )
     if season_id:
         query = query.filter(HostingAvailability.season_id == season_id)
     rows = query.order_by(TurfWave.host_date, HostLocation.name, TurfWave.sequence_number, TurfWave.start_time).all()
     waves_by_site_date: dict[tuple[uuid.UUID, date], dict[str, object]] = {}
     for wave, host, availability in rows:
+        if not _is_turf_stadium_host(host):
+            continue
         key = (host.id, wave.host_date)
         data = waves_by_site_date.setdefault(key, {
             'host_location_id': str(host.id),
