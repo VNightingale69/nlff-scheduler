@@ -105,6 +105,7 @@ class HostLocation(Base, TimestampMixin):
     max_large_fields: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     max_total_fields: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     host_role: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    is_primary: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     minimum_games_to_activate_overflow_host: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
     preferred_minimum_games_per_active_host: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
     maximum_games_per_host_per_date: Mapped[int | None] = mapped_column(Integer, nullable=True)
