@@ -328,7 +328,7 @@ def _build_revised_scheduling_hierarchy_diagnostics(db: Session, season_id: uuid
     for game_date in sorted(set([*games_by_date.keys(), *[key[0] for key in slots_by_date_host.keys()]])):
         date_host_ids = {host_id for d, host_id in slots_by_date_host if d == game_date}
         active_host_ids = {host.id for _g, _slot, _fi, host, *_rest in games_by_date.get(game_date, []) if host}
-        primary_available = [str(hid) for hid in sorted(date_host_ids, key=str) if _classify_host_for_date(db, hosts_by_id.get(hid)) in {HOST_ROLE_PRIMARY_TURF, HOST_ROLE_SECONDARY_TURF, HOST_ROLE_PRIMARY_GRASS, HOST_ROLE_STANDARD_GRASS}]
+        primary_available = [str(hid) for hid in sorted(date_host_ids, key=str) if _classify_host_for_date(db, hosts_by_id.get(hid)) in {HOST_ROLE_TURF_STADIUM, HOST_ROLE_PRIMARY_TURF, HOST_ROLE_SECONDARY_TURF, HOST_ROLE_PRIMARY_GRASS, HOST_ROLE_STANDARD_GRASS}]
         overflow_available = [str(hid) for hid in sorted(date_host_ids, key=str) if _classify_host_for_date(db, hosts_by_id.get(hid)) == HOST_ROLE_OVERFLOW_GRASS]
         overflow_used = [str(hid) for hid in sorted(active_host_ids, key=str) if _classify_host_for_date(db, hosts_by_id.get(hid)) == HOST_ROLE_OVERFLOW_GRASS]
         games_assigned_by_host: dict[str, int] = {}
@@ -456,13 +456,16 @@ def _build_revised_scheduling_hierarchy_diagnostics(db: Session, season_id: uuid
                 'community_name': community_name,
                 'owned_active_host_location_ids': [str(host.id) for host in owned_hosts],
                 'owned_active_host_location_names': [host.name for host in owned_hosts],
+                'owns_active_turf_stadium': any(host_role_by_id.get(host.id) == HOST_ROLE_TURF_STADIUM for host in owned_hosts),
                 'owns_active_turf_location': any(str(host.surface_type or '').upper() == 'TURF_STADIUM' for host in owned_hosts),
                 'owns_active_grass_location': any(str(host.surface_type or '').upper() == 'GRASS_FIELD' for host in owned_hosts),
                 'highest_priority_active_host_role': min((host_role_by_id.get(host.id) for host in owned_hosts), key=_host_priority_rank, default=None),
                 'active_owned_host_locations': [{'host_location_id': str(host.id), 'host_location_name': host.name, 'host_role': host_role_by_id.get(host.id), 'surface_type': host.surface_type} for host in owned_hosts],
                 'active_owned_host_locations_by_role': {role: [str(host_id) for host_id in sorted(hosts_by_role_by_org.get(org_id, {}).get(role, []), key=str)] for role in OWNED_HOST_PRIORITY_ORDER},
                 'games_at_highest_priority_owned_host': 0,
+                'games_at_turf_stadium': 0,
                 'games_at_primary_turf_host': 0,
+                'games_at_owned_non_turf': 0,
                 'games_at_owned_grass_or_overflow': 0,
                 'games_at_other_community_host': 0,
                 'teams_with_games_on_date': [],
@@ -490,9 +493,11 @@ def _build_revised_scheduling_hierarchy_diagnostics(db: Session, season_id: uuid
                 expected_host_ids = active_host_ids_by_org.get(hosting_org_id, set())
                 expected_hosts = [hosts_by_id.get(host_id) for host_id in sorted(expected_host_ids, key=str) if hosts_by_id.get(host_id)]
                 expected_highest_priority_ids = highest_priority_host_ids_by_org.get(hosting_org_id, set())
-                expected_primary_turf_ids = set(hosts_by_role_by_org.get(hosting_org_id, {}).get(HOST_ROLE_PRIMARY_TURF, []))
+                expected_turf_stadium_ids = set(hosts_by_role_by_org.get(hosting_org_id, {}).get(HOST_ROLE_TURF_STADIUM, []))
+                expected_primary_turf_ids = expected_turf_stadium_ids | set(hosts_by_role_by_org.get(hosting_org_id, {}).get(HOST_ROLE_PRIMARY_TURF, []))
                 actual_host_role = host_role_by_id.get(actual_host_id) if actual_host_id else None
                 scheduled_at_highest_priority = bool(actual_host_id in expected_highest_priority_ids)
+                scheduled_at_turf_stadium = bool(actual_host_id in expected_turf_stadium_ids)
                 scheduled_at_primary_turf = bool(actual_host_id in expected_primary_turf_ids)
                 scheduled_at_lower_priority_owned = bool(actual_host_id in expected_host_ids and actual_host_id not in expected_highest_priority_ids)
                 scheduled_at_owned_grass_or_overflow = bool(scheduled_at_lower_priority_owned and str(getattr(actual_host, 'surface_type', '') or '').upper() == 'GRASS_FIELD')
@@ -566,8 +571,12 @@ def _build_revised_scheduling_hierarchy_diagnostics(db: Session, season_id: uuid
                         community_row['games_scheduled_at_owned_host'] = int(community_row.get('games_scheduled_at_owned_host') or 0) + 1
                         if scheduled_at_highest_priority:
                             community_row['games_at_highest_priority_owned_host'] = int(community_row.get('games_at_highest_priority_owned_host') or 0) + 1
+                        if scheduled_at_turf_stadium:
+                            community_row['games_at_turf_stadium'] = int(community_row.get('games_at_turf_stadium') or 0) + 1
                         if scheduled_at_primary_turf:
                             community_row['games_at_primary_turf_host'] = int(community_row.get('games_at_primary_turf_host') or 0) + 1
+                        if scheduled_at_owned and actual_host_role != HOST_ROLE_TURF_STADIUM:
+                            community_row['games_at_owned_non_turf'] = int(community_row.get('games_at_owned_non_turf') or 0) + 1
                         if scheduled_at_owned_grass_or_overflow:
                             community_row['games_at_owned_grass_or_overflow'] = int(community_row.get('games_at_owned_grass_or_overflow') or 0) + 1
                 else:
@@ -590,7 +599,7 @@ def _build_revised_scheduling_hierarchy_diagnostics(db: Session, season_id: uuid
                         date_home_host_violations += 1
                         bug_warnings.append('BUG: hosting-community game assigned to owned lower-priority host while higher-priority owned host had valid capacity.')
                         if expected_primary_turf_ids and str(getattr(actual_host, 'surface_type', '') or '').upper() == 'GRASS_FIELD':
-                            bug_warnings.append('BUG: hosting-community game assigned to owned grass or overflow while primary owned turf had valid capacity.')
+                            bug_warnings.append('BUG: hosting-community game assigned to owned non-turf host while owned TURF_STADIUM had valid capacity.')
                 if scheduled_at_owned_grass_or_overflow and expected_primary_turf_ids:
                     primary_rows = [row for row in candidate_rejections if row.get('candidate_host_location_id') in {str(host_id) for host_id in expected_primary_turf_ids}]
                     grass_overflow_prevention_diagnostics.append({
@@ -600,7 +609,12 @@ def _build_revised_scheduling_hierarchy_diagnostics(db: Session, season_id: uuid
                         'actual_host_location': actual_host.name if actual_host else None,
                         'actual_host_role': actual_host_role,
                         'actual_host_surface_type': actual_host.surface_type if actual_host else None,
+                        'expected_turf_stadium_locations': [str(host_id) for host_id in sorted(expected_turf_stadium_ids, key=str)],
                         'expected_primary_turf_host_locations': [str(host_id) for host_id in sorted(expected_primary_turf_ids, key=str)],
+                        'turf_stadium_candidates_considered': len(primary_rows),
+                        'turf_stadium_candidates_considered_sample': _diagnostic_sample(primary_rows),
+                        'turf_stadium_candidate_rejection_reasons': _diagnostic_reason_counts(primary_rows),
+                        'valid_turf_stadium_slot_exists': bool(primary_rows and any(not row.get('rejected') for row in primary_rows)),
                         'primary_turf_candidates_considered_count': len(primary_rows),
                         'primary_turf_candidates_considered_sample': _diagnostic_sample(primary_rows),
                         'primary_turf_candidate_rejection_reasons': _diagnostic_reason_counts(primary_rows),
@@ -609,7 +623,7 @@ def _build_revised_scheduling_hierarchy_diagnostics(db: Session, season_id: uuid
                         'hard_exception_reason': exception_reason,
                     })
                     if not rejection_reasons:
-                        bug_warnings.append('BUG: hosting-community game assigned to overflow or grass without primary turf rejection reason.')
+                        bug_warnings.append('BUG: hosting-community game assigned to grass/overflow without TURF_STADIUM rejection reason.')
                 if scheduled_at_other_active_host and not exception_used:
                     date_home_host_violations += 1
                     bug_warnings.append('BUG: hosting-community team scheduled at another community host without all owned host candidates failing hard constraints.')
@@ -641,6 +655,8 @@ def _build_revised_scheduling_hierarchy_diagnostics(db: Session, season_id: uuid
                     'expected_owned_host_location_names': [host.name for host in expected_hosts],
                     'expected_owned_host_surface_types': [host.surface_type for host in expected_hosts],
                     'expected_highest_priority_owned_host_location_ids': [str(host_id) for host_id in sorted(expected_highest_priority_ids, key=str)],
+                    'expected_turf_stadium_host_location_ids': [str(host_id) for host_id in sorted(expected_turf_stadium_ids, key=str)],
+                    'expected_turf_stadium_location_ids': [str(host_id) for host_id in sorted(expected_turf_stadium_ids, key=str)],
                     'expected_primary_turf_host_location_ids': [str(host_id) for host_id in sorted(expected_primary_turf_ids, key=str)],
                     'actual_host_location_id': str(actual_host.id) if actual_host else None,
                     'actual_host_location_name': actual_host.name if actual_host else None,
@@ -648,6 +664,8 @@ def _build_revised_scheduling_hierarchy_diagnostics(db: Session, season_id: uuid
                     'actual_host_surface_type': actual_host.surface_type if actual_host else None,
                     'actual_host_role': actual_host_role,
                     'scheduled_at_highest_priority_owned_host': scheduled_at_highest_priority,
+                    'scheduled_at_turf_stadium': scheduled_at_turf_stadium,
+                    'scheduled_at_owned_non_turf': bool(scheduled_at_owned and not scheduled_at_turf_stadium),
                     'scheduled_at_primary_owned_turf_host': scheduled_at_primary_turf,
                     'scheduled_at_lower_priority_owned_host': scheduled_at_lower_priority_owned,
                     'scheduled_at_other_community_host': scheduled_at_other_active_host,
@@ -682,23 +700,33 @@ def _build_revised_scheduling_hierarchy_diagnostics(db: Session, season_id: uuid
             'active_hosting_community_ids': [str(org_id) for org_id in sorted(active_hosting_community_ids, key=str)],
             'active_hosting_communities': [str(org_id) for org_id in sorted(active_hosting_community_ids, key=str)],
             'active_host_locations': [
-                {'host_location_id': str(host.id), 'host_location_name': host.name, 'owner_community_id': str(host.organization_id) if host.organization_id else None, 'surface_type': host.surface_type}
+                {'host_location_id': str(host.id), 'host_location_name': host.name, 'owner_community_id': str(host.organization_id) if host.organization_id else None, 'surface_type': host.surface_type, 'host_role': host_role_by_id.get(host.id), 'host_role_source': 'configured' if _host_role_value(host) else 'defaulted'}
                 for host in active_host_location_rows
             ],
             'owned_active_hosts_by_community': owned_active_hosts_by_community,
             'host_priority_order_by_community': host_priority_order_by_community,
             'owned_host_priority_order': list(OWNED_HOST_PRIORITY_ORDER),
+            'host_role_source': {str(host.id): ('configured' if _host_role_value(host) else 'defaulted') for host in active_host_location_rows},
+            'active_turf_stadiums_by_community': {str(org_id): [str(host_id) for host_id in sorted(hosts_by_role_by_org.get(org_id, {}).get(HOST_ROLE_TURF_STADIUM, []), key=str)] for org_id in active_host_ids_by_org},
+            'active_non_turf_hosts_by_community': {str(org_id): [str(host_id) for host_id in sorted(host_ids - set(hosts_by_role_by_org.get(org_id, {}).get(HOST_ROLE_TURF_STADIUM, [])), key=str)] for org_id, host_ids in active_host_ids_by_org.items()},
             'primary_turf_hosts_by_community': {str(org_id): [str(host_id) for host_id in sorted(hosts_by_role_by_org.get(org_id, {}).get(HOST_ROLE_PRIMARY_TURF, []), key=str)] for org_id in active_host_ids_by_org},
             'secondary_turf_hosts_by_community': {str(org_id): [str(host_id) for host_id in sorted(hosts_by_role_by_org.get(org_id, {}).get(HOST_ROLE_SECONDARY_TURF, []), key=str)] for org_id in active_host_ids_by_org},
             'primary_grass_hosts_by_community': {str(org_id): [str(host_id) for host_id in sorted(hosts_by_role_by_org.get(org_id, {}).get(HOST_ROLE_PRIMARY_GRASS, []), key=str)] for org_id in active_host_ids_by_org},
             'standard_grass_hosts_by_community': {str(org_id): [str(host_id) for host_id in sorted(hosts_by_role_by_org.get(org_id, {}).get(HOST_ROLE_STANDARD_GRASS, []), key=str)] for org_id in active_host_ids_by_org},
             'overflow_grass_hosts_by_community': {str(org_id): [str(host_id) for host_id in sorted(hosts_by_role_by_org.get(org_id, {}).get(HOST_ROLE_OVERFLOW_GRASS, []), key=str)] for org_id in active_host_ids_by_org},
+            'communities_with_only_turf': [str(org_id) for org_id, host_ids in active_host_ids_by_org.items() if host_ids and all(host_role_by_id.get(host_id) == HOST_ROLE_TURF_STADIUM for host_id in host_ids)],
+            'communities_with_only_grass': [str(org_id) for org_id, host_ids in active_host_ids_by_org.items() if host_ids and all(host_role_by_id.get(host_id) not in {HOST_ROLE_TURF_STADIUM, HOST_ROLE_PRIMARY_TURF, HOST_ROLE_SECONDARY_TURF} for host_id in host_ids)],
+            'communities_with_turf_and_grass': [str(org_id) for org_id, host_ids in active_host_ids_by_org.items() if any(host_role_by_id.get(host_id) in {HOST_ROLE_TURF_STADIUM, HOST_ROLE_PRIMARY_TURF, HOST_ROLE_SECONDARY_TURF} for host_id in host_ids) and any(host_role_by_id.get(host_id) in {HOST_ROLE_PRIMARY_GRASS, HOST_ROLE_STANDARD_GRASS, HOST_ROLE_OVERFLOW_GRASS} for host_id in host_ids)],
+            'communities_with_multiple_hosts_same_priority': {str(org_id): {role: [str(host_id) for host_id in ids] for role, ids in roles.items() if len(ids) > 1} for org_id, roles in hosts_by_role_by_org.items() if any(len(ids) > 1 for ids in roles.values())},
             'games_scheduled_at_highest_priority_owned_host': sum(1 for row in hosting_community_game_rows if row.get('scheduled_at_highest_priority_owned_host')),
+            'games_scheduled_at_turf_stadium': sum(1 for row in hosting_community_game_rows if row.get('scheduled_at_turf_stadium')),
             'games_scheduled_at_primary_turf_owned_host': sum(1 for row in hosting_community_game_rows if row.get('scheduled_at_primary_owned_turf_host')),
             'games_scheduled_at_lower_priority_owned_host': sum(1 for row in hosting_community_game_rows if row.get('scheduled_at_lower_priority_owned_host')),
             'games_scheduled_at_other_community_host': total_other_host,
             'games_assigned_to_highest_priority_owned_host_by_community': {str(org_id): int(row.get('games_at_highest_priority_owned_host') or 0) for org_id, row in community_enforcement.items()},
+            'games_assigned_to_turf_stadium_by_community': {str(org_id): int(row.get('games_at_turf_stadium') or 0) for org_id, row in community_enforcement.items()},
             'games_assigned_to_primary_turf_by_community': {str(org_id): int(row.get('games_at_primary_turf_host') or 0) for org_id, row in community_enforcement.items()},
+            'games_assigned_to_owned_non_turf_by_community': {str(org_id): int(row.get('games_at_owned_non_turf') or 0) for org_id, row in community_enforcement.items()},
             'games_assigned_to_lower_priority_owned_host_by_community': {str(org_id): int(sum(1 for game_row in hosting_community_game_rows if game_row.get('hosting_community_id') == str(org_id) and game_row.get('scheduled_at_lower_priority_owned_host'))) for org_id in community_enforcement},
             'games_assigned_to_other_community_host_by_community': {str(org_id): int(sum(1 for game_row in hosting_community_game_rows if game_row.get('hosting_community_id') == str(org_id) and game_row.get('scheduled_at_other_community_host'))) for org_id in community_enforcement},
             'lower_priority_owned_host_exception_count': sum(1 for row in hosting_community_game_rows if row.get('scheduled_at_lower_priority_owned_host') and row.get('exception_used')),
@@ -779,7 +807,7 @@ def _build_revised_scheduling_hierarchy_diagnostics(db: Session, season_id: uuid
         bug_warnings.append('BUG: hosting-community team playing at owned active host but not assigned as home team.')
     if doubleheader_failures:
         bug_warnings.append('BUG: doubleheader rule violated.')
-        bug_warnings.append('BUG: hosting-community doubleheader placed at lower-priority host while primary owned host had valid back-to-back capacity.')
+        bug_warnings.append('BUG: hosting-community doubleheader placed at lower-priority host while TURF_STADIUM had valid back-to-back capacity.')
 
     neutral_games_by_host_and_field_size: dict[str, dict[str, int]] = {}
     for _game_date, game_rows in games_by_date.items():
@@ -796,6 +824,14 @@ def _build_revised_scheduling_hierarchy_diagnostics(db: Session, season_id: uuid
     turf_wave_rows: list[dict[str, object]] = []
     turf_summary_by_date: dict[str, dict[str, object]] = {}
     waves = db.query(TurfWave).join(HostingAvailability, HostingAvailability.id == TurfWave.hosting_availability_id).filter(HostingAvailability.season_id == season_id).all() if season_id else []
+    wave_number_by_id: dict[uuid.UUID, int] = {}
+    waves_by_host_date_for_numbering: dict[tuple[uuid.UUID, date], list[TurfWave]] = {}
+    for numbering_wave in waves:
+        if numbering_wave.host_location_id and numbering_wave.host_date:
+            waves_by_host_date_for_numbering.setdefault((numbering_wave.host_location_id, numbering_wave.host_date), []).append(numbering_wave)
+    for (_host_id, _host_date), grouped_waves in waves_by_host_date_for_numbering.items():
+        for computed_index, grouped_wave in enumerate(sorted(grouped_waves, key=lambda item: (item.start_time, item.id)), start=1):
+            wave_number_by_id[grouped_wave.id] = computed_index
     for wave in waves:
         slots = db.query(GameSlot).filter(GameSlot.turf_wave_id == wave.id).all()
         total = _turf_wave_layout_counts(wave.preferred_layout_code, slots)
@@ -845,7 +881,9 @@ def _build_revised_scheduling_hierarchy_diagnostics(db: Session, season_id: uuid
             'host_location_id': str(wave.host_location_id),
             'host_location_name': host.name if host else None,
             'game_date': wave.host_date.isoformat() if wave.host_date else None,
-            'wave_number': wave.sequence_number,
+            'wave_number': wave_number_by_id.get(wave.id, wave.sequence_number),
+            'stored_sequence_number': wave.sequence_number,
+            'wave_numbering_scope': 'game_date+host_location_id',
             'start_time': wave.start_time.isoformat() if wave.start_time else None,
             'end_time_or_duration': wave.end_time.isoformat() if wave.end_time else None,
             'selected_wave_configuration': _normalize_configuration_name(wave.preferred_layout_code),
@@ -953,6 +991,7 @@ def _build_revised_scheduling_hierarchy_diagnostics(db: Session, season_id: uuid
             'true_home_host_priority_preserved': not any('true home-host priority' in str(w).lower() and 'violated' in str(w).lower() for w in bug_warnings),
             'moves_rejected_would_violate_true_home_host_priority': int((compaction_diagnostics or {}).get('moves_rejected_would_violate_true_home_host_priority') or 0),
             'hosting_community_games_moved_from_owned_host': int((compaction_diagnostics or {}).get('hosting_community_games_moved_from_owned_host') or 0),
+            'hosting_community_games_moved_from_turf_stadium_to_lower_priority_host': int((compaction_diagnostics or {}).get('hosting_community_games_moved_from_turf_stadium_to_lower_priority_host') or (compaction_diagnostics or {}).get('hosting_community_games_moved_from_primary_turf_to_lower_priority_host') or 0),
             'hosting_community_games_moved_from_primary_turf_to_lower_priority_host': int((compaction_diagnostics or {}).get('hosting_community_games_moved_from_primary_turf_to_lower_priority_host') or 0),
             'hosting_community_games_moved_to_other_community_host': int((compaction_diagnostics or {}).get('hosting_community_games_moved_to_other_community_host') or 0),
             'hard_exceptions_used_for_true_home_host_priority': int((compaction_diagnostics or {}).get('hard_exceptions_used_for_true_home_host_priority') or 0),
@@ -961,6 +1000,7 @@ def _build_revised_scheduling_hierarchy_diagnostics(db: Session, season_id: uuid
             'true_home_host_priority_preserved': not any('true home-host priority' in str(w).lower() and 'violated' in str(w).lower() for w in bug_warnings),
             'moves_rejected_would_violate_true_home_host_priority': int((compaction_diagnostics or {}).get('moves_rejected_would_violate_true_home_host_priority') or 0),
             'hosting_community_games_moved_from_owned_host': int((compaction_diagnostics or {}).get('hosting_community_games_moved_from_owned_host') or 0),
+            'hosting_community_games_moved_from_turf_stadium_to_lower_priority_host': int((compaction_diagnostics or {}).get('hosting_community_games_moved_from_turf_stadium_to_lower_priority_host') or (compaction_diagnostics or {}).get('hosting_community_games_moved_from_primary_turf_to_lower_priority_host') or 0),
             'hosting_community_games_moved_from_primary_turf_to_lower_priority_host': int((compaction_diagnostics or {}).get('hosting_community_games_moved_from_primary_turf_to_lower_priority_host') or 0),
             'hosting_community_games_moved_to_other_community_host': int((compaction_diagnostics or {}).get('hosting_community_games_moved_to_other_community_host') or 0),
             'hard_exceptions_used_for_true_home_host_priority': int((compaction_diagnostics or {}).get('hard_exceptions_used_for_true_home_host_priority') or 0),
@@ -4012,6 +4052,7 @@ def _apply_host_plan_filter_to_slots(query, db: Session, season_id: uuid.UUID | 
     return query.filter(GameSlot.host_location_id.in_(allowed_host_ids))
 
 
+HOST_ROLE_TURF_STADIUM = 'TURF_STADIUM'
 HOST_ROLE_PRIMARY_TURF = 'PRIMARY_TURF'
 HOST_ROLE_SECONDARY_TURF = 'SECONDARY_TURF'
 HOST_ROLE_PRIMARY_GRASS = 'PRIMARY_GRASS'
@@ -4019,6 +4060,7 @@ HOST_ROLE_STANDARD_GRASS = 'STANDARD_GRASS'
 HOST_ROLE_OVERFLOW_GRASS = 'OVERFLOW_GRASS'
 HOST_ROLE_UNAVAILABLE = 'UNAVAILABLE'
 OWNED_HOST_PRIORITY_ORDER = (
+    HOST_ROLE_TURF_STADIUM,
     HOST_ROLE_PRIMARY_TURF,
     HOST_ROLE_SECONDARY_TURF,
     HOST_ROLE_PRIMARY_GRASS,
@@ -4029,6 +4071,7 @@ OWNED_HOST_PRIORITY_RANK = {role: index for index, role in enumerate(OWNED_HOST_
 DIAGNOSTIC_SAMPLE_LIMIT = 50
 TRUE_HOME_PRIORITY_REJECTION = 'WOULD_VIOLATE_TRUE_HOME_HOST_PRIORITY'
 PRIMARY_OWNED_HOST_REJECTION = 'WOULD_MOVE_HOSTING_COMMUNITY_TEAM_AWAY_FROM_PRIMARY_OWNED_HOST'
+TURF_STADIUM_REJECTION = 'WOULD_MOVE_HOSTING_COMMUNITY_TEAM_AWAY_FROM_TURF_STADIUM'
 
 
 def _diagnostic_sample(rows: list[object], limit: int = DIAGNOSTIC_SAMPLE_LIMIT) -> list[object]:
@@ -4066,10 +4109,12 @@ def _classify_host_for_date(db: Session, host: HostLocation, availability: Hosti
     configured_role = _host_role_value(host)
     if configured_role in set(OWNED_HOST_PRIORITY_ORDER):
         return configured_role
+    if configured_role == 'TURF_STADIUM':
+        return HOST_ROLE_TURF_STADIUM
     surface = str(host.surface_type or 'GRASS_FIELD').upper()
     is_primary = bool(getattr(host, 'is_primary', False))
     if surface == 'TURF_STADIUM' and _host_supports_turf_waves(db, host):
-        return HOST_ROLE_PRIMARY_TURF if is_primary else HOST_ROLE_SECONDARY_TURF
+        return HOST_ROLE_TURF_STADIUM
     if surface == 'GRASS_FIELD':
         if is_primary:
             return HOST_ROLE_PRIMARY_GRASS
@@ -4185,14 +4230,14 @@ def _capacity_by_size_from_slots(slots: list[GameSlot]) -> dict[str, int]:
 def _host_activation_plan_for_date(db: Session, season_id: uuid.UUID | str | None, week_id: uuid.UUID | str | None, game_date: date | None, demand_by_size: dict[str, int], allowed_host_ids: set[uuid.UUID] | None = None) -> dict[str, object]:
     host_rows = _date_host_availabilities(db, season_id, week_id, game_date, allowed_host_ids)
     classified: dict[str, list[tuple[HostLocation, HostingAvailability]]] = {
-        HOST_ROLE_PRIMARY_TURF: [], HOST_ROLE_SECONDARY_TURF: [], HOST_ROLE_PRIMARY_GRASS: [], HOST_ROLE_OVERFLOW_GRASS: [], HOST_ROLE_STANDARD_GRASS: [], HOST_ROLE_UNAVAILABLE: []
+        HOST_ROLE_TURF_STADIUM: [], HOST_ROLE_PRIMARY_TURF: [], HOST_ROLE_SECONDARY_TURF: [], HOST_ROLE_PRIMARY_GRASS: [], HOST_ROLE_OVERFLOW_GRASS: [], HOST_ROLE_STANDARD_GRASS: [], HOST_ROLE_UNAVAILABLE: []
     }
     for host, availability in host_rows:
         classified.setdefault(_classify_host_for_date(db, host, availability), []).append((host, availability))
     primary_capacity = _empty_field_size_counts()
     wave_definitions: list[dict[str, object]] = []
     primary_turf_host_capacity_diagnostics: list[dict[str, object]] = []
-    for host, availability in classified.get(HOST_ROLE_PRIMARY_TURF, []):
+    for host, availability in classified.get(HOST_ROLE_TURF_STADIUM, []) + classified.get(HOST_ROLE_PRIMARY_TURF, []) + classified.get(HOST_ROLE_SECONDARY_TURF, []):
         capacity, waves = _dynamic_turf_capacity_for_availability(db, host, availability, demand_by_size)
         host_can_fit, host_reasons = _host_plan_capacity_sufficiency(capacity, demand_by_size)
         primary_turf_host_capacity_diagnostics.append({
@@ -4242,16 +4287,19 @@ def _host_activation_plan_for_date(db: Session, season_id: uuid.UUID | str | Non
             'primary_grass_host_can_fit_all_demand_individually': host_can_fit,
             'capacity_shortfall_reasons': host_reasons,
         })
+    turf_can_fit, turf_reasons = _host_plan_capacity_sufficiency(primary_capacity, demand_by_size)
     primary_combined_capacity = {
         size: int(primary_capacity.get(size, 0) or 0) + int(primary_grass_capacity.get(size, 0) or 0)
         for size in FIELD_SIZE_ORDER
     }
     primary_can_fit, primary_reasons = _host_plan_capacity_sufficiency(primary_combined_capacity, demand_by_size)
     standard_grass_ids = {host.id for host, _ in classified.get(HOST_ROLE_STANDARD_GRASS, [])}
+    turf_stadium_ids = {host.id for host, _ in classified.get(HOST_ROLE_TURF_STADIUM, [])}
     secondary_turf_ids = {host.id for host, _ in classified.get(HOST_ROLE_SECONDARY_TURF, [])}
     primary_turf_ids = {host.id for host, _ in classified.get(HOST_ROLE_PRIMARY_TURF, [])}
     primary_grass_ids = {host.id for host, _ in classified.get(HOST_ROLE_PRIMARY_GRASS, [])}
-    primary_host_ids = primary_turf_ids | secondary_turf_ids | primary_grass_ids
+    turf_host_ids = turf_stadium_ids | primary_turf_ids | secondary_turf_ids
+    primary_host_ids = turf_host_ids | primary_grass_ids
     overflow_grass_ids = {host.id for host, _ in classified.get(HOST_ROLE_OVERFLOW_GRASS, []) if bool(getattr(host, 'overflow_activation_allowed', True))}
     overflow_grass_host_diagnostics = [
         {
@@ -4267,7 +4315,10 @@ def _host_activation_plan_for_date(db: Session, season_id: uuid.UUID | str | Non
     selected_host_ids: set[uuid.UUID] = set()
     activated_overflow_ids: set[uuid.UUID] = set()
     activation_reason = 'NO_PRIMARY_TURF_HOSTS'
-    if primary_host_ids:
+    if turf_host_ids and turf_can_fit:
+        selected_host_ids.update(turf_host_ids)
+        activation_reason = 'TURF_STADIUM_COMPATIBLE_CAPACITY_CAN_FIT_ALL_REQUIRED_GAMES' if turf_stadium_ids else 'TURF_COMPATIBLE_CAPACITY_CAN_FIT_ALL_REQUIRED_GAMES'
+    elif primary_host_ids:
         selected_host_ids.update(primary_host_ids)
         if primary_can_fit:
             activation_reason = 'PRIMARY_HOST_COMPATIBLE_CAPACITY_CAN_FIT_ALL_REQUIRED_GAMES'
@@ -4298,14 +4349,18 @@ def _host_activation_plan_for_date(db: Session, season_id: uuid.UUID | str | Non
     return {
         'scheduling_date': str(game_date) if game_date else None,
         'hosts_available': len(host_rows),
+        'turf_stadium_hosts_considered': [str(host.id) for host, _ in classified.get(HOST_ROLE_TURF_STADIUM, [])],
         'primary_turf_hosts_considered': [str(host.id) for host, _ in classified.get(HOST_ROLE_PRIMARY_TURF, [])],
         'secondary_turf_hosts_considered': [str(host.id) for host, _ in classified.get(HOST_ROLE_SECONDARY_TURF, [])],
         'primary_grass_hosts_considered': [str(host.id) for host, _ in classified.get(HOST_ROLE_PRIMARY_GRASS, [])],
-        'primary_hosts_available': [str(host.id) for host, _ in classified.get(HOST_ROLE_PRIMARY_TURF, []) + classified.get(HOST_ROLE_SECONDARY_TURF, []) + classified.get(HOST_ROLE_PRIMARY_GRASS, [])],
+        'primary_hosts_available': [str(host.id) for host, _ in classified.get(HOST_ROLE_TURF_STADIUM, []) + classified.get(HOST_ROLE_PRIMARY_TURF, []) + classified.get(HOST_ROLE_SECONDARY_TURF, []) + classified.get(HOST_ROLE_PRIMARY_GRASS, [])],
         'primary_hosts_used': [str(host_id) for host_id in sorted(primary_host_ids & selected_host_ids, key=str)],
         'primary_turf_capacity_diagnostics': {
             'diagnostic_label': 'Primary Host Compatible Capacity',
             'demand_by_field_size': _normalized_demand_counts(demand_by_size),
+            'combined_dynamic_turf_wave_capacity_by_field_size': primary_capacity,
+            'turf_capacity_can_fit_all_required_games': turf_can_fit,
+            'turf_capacity_shortfall_reasons': turf_reasons,
             'combined_dynamic_wave_capacity_by_field_size': primary_combined_capacity,
             'primary_host_capacity_can_fit_all_required_games': primary_can_fit,
             'capacity_shortfall_reasons': primary_reasons,
@@ -7628,7 +7683,7 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
 
     def _active_owned_hosts_for_date(slot_date: date | None, org_id: uuid.UUID | None) -> dict[str, object]:
         if not slot_date or not org_id:
-            return {'host_ids': set(), 'role_by_host': {}, 'highest_host_ids': set(), 'primary_turf_ids': set()}
+            return {'host_ids': set(), 'role_by_host': {}, 'highest_host_ids': set(), 'primary_turf_ids': set(), 'turf_stadium_ids': set()}
         host_rows = db.query(HostLocation).join(GameSlot, GameSlot.host_location_id == HostLocation.id).filter(
             GameSlot.season_id == season_id,
             GameSlot.slot_date == slot_date,
@@ -7641,7 +7696,8 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
             'host_ids': host_ids,
             'role_by_host': role_by_host,
             'highest_host_ids': _highest_priority_host_ids_for_org(host_ids, role_by_host),
-            'primary_turf_ids': {host.id for host in host_rows if role_by_host.get(host.id) == HOST_ROLE_PRIMARY_TURF},
+            'primary_turf_ids': {host.id for host in host_rows if role_by_host.get(host.id) in {HOST_ROLE_TURF_STADIUM, HOST_ROLE_PRIMARY_TURF}},
+            'turf_stadium_ids': {host.id for host in host_rows if role_by_host.get(host.id) == HOST_ROLE_TURF_STADIUM},
         }
 
     def _compatible_open_owned_slots(slot_date: date | None, org_id: uuid.UUID | None, required_size: str | None, host_ids: set[uuid.UUID]) -> list[GameSlot]:
@@ -7673,8 +7729,10 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
             role_by_host = model['role_by_host'] if isinstance(model.get('role_by_host'), dict) else {}
             highest_host_ids = model['highest_host_ids'] if isinstance(model.get('highest_host_ids'), set) else set()
             primary_turf_ids = model['primary_turf_ids'] if isinstance(model.get('primary_turf_ids'), set) else set()
+            turf_stadium_ids = model['turf_stadium_ids'] if isinstance(model.get('turf_stadium_ids'), set) else set()
             highest_open = [slot for slot in _compatible_open_owned_slots(target.slot_date, org_id, required_size, highest_host_ids) if slot.id == target.id or (not _field_has_time_conflict(game, slot) and not _team_has_time_conflict(game, slot))]
             primary_turf_open = [slot for slot in _compatible_open_owned_slots(target.slot_date, org_id, required_size, primary_turf_ids) if slot.id == target.id or (not _field_has_time_conflict(game, slot) and not _team_has_time_conflict(game, slot))]
+            turf_stadium_open = [slot for slot in _compatible_open_owned_slots(target.slot_date, org_id, required_size, turf_stadium_ids) if slot.id == target.id or (not _field_has_time_conflict(game, slot) and not _team_has_time_conflict(game, slot))]
             source_role = role_by_host.get(source_host_id)
             target_role = role_by_host.get(target_host_id)
             source_rank = _host_priority_rank(source_role)
@@ -7686,10 +7744,14 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
                 return TRUE_HOME_PRIORITY_REJECTION, 'Optimization would move a hosting-community game away from its owned active host location.'
             if source_is_owned and target_is_owned and target_rank > source_rank:
                 return TRUE_HOME_PRIORITY_REJECTION, 'Optimization would move a hosting-community game from a higher-priority owned host to a lower-priority owned host.'
+            if source_host_id in turf_stadium_ids and target_is_owned and target_host_id not in turf_stadium_ids:
+                return TURF_STADIUM_REJECTION, 'Optimization would move a hosting-community game from TURF_STADIUM to owned grass/overflow.'
             if source_host_id in primary_turf_ids and target_is_owned and target_host_id not in primary_turf_ids:
                 return PRIMARY_OWNED_HOST_REJECTION, 'Optimization would move a hosting-community game from primary owned turf to owned grass/overflow.'
             if highest_open and (not target_is_owned or target_host_id not in highest_host_ids):
                 return TRUE_HOME_PRIORITY_REJECTION, 'A valid highest-priority owned active host slot exists; optimization cannot use a lower-priority or other-community host.'
+            if turf_stadium_open and target_is_owned and target_host_id not in turf_stadium_ids:
+                return TURF_STADIUM_REJECTION, 'A valid TURF_STADIUM slot exists; optimization cannot use owned grass or overflow.'
             if primary_turf_open and target_is_owned and target_host_id not in primary_turf_ids:
                 return PRIMARY_OWNED_HOST_REJECTION, 'A valid primary owned turf slot exists; optimization cannot use owned grass or overflow.'
             if target_is_owned and target_rank > best_rank and highest_open:
@@ -7802,7 +7864,7 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         away_org_id = game.away_team.organization_id if game and game.away_team else None
         source_host_role = _classify_host_for_date(db, source.host_location) if source and source.host_location else None
         source_is_true_home_host = bool(source_owner_id and source_owner_id == home_org_id)
-        source_is_primary_owned_host = bool(source_is_true_home_host and source_host_role in {HOST_ROLE_PRIMARY_TURF, HOST_ROLE_SECONDARY_TURF, HOST_ROLE_PRIMARY_GRASS})
+        source_is_primary_owned_host = bool(source_is_true_home_host and source_host_role in {HOST_ROLE_TURF_STADIUM, HOST_ROLE_PRIMARY_TURF, HOST_ROLE_SECONDARY_TURF, HOST_ROLE_PRIMARY_GRASS})
         if source_is_primary_owned_host and target_owner_id != source_owner_id:
             active_owned_target_ids = {
                 row[0]
@@ -7819,7 +7881,7 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
             }
             if source.host_location_id in active_owned_target_ids:
                 diagnostics['true_home_host_protected_move_rejections'] = int(diagnostics.get('true_home_host_protected_move_rejections') or 0) + 1
-                return reject_move('WOULD_MOVE_HOSTING_COMMUNITY_TEAM_AWAY_FROM_PRIMARY_OWNED_HOST', detail='Optimization move would remove a hosting-community team from its highest-priority primary owned host location for compaction/utilization rather than to avoid a hard validation failure.', hard_constraint_failure=False)
+                return reject_move(TURF_STADIUM_REJECTION if source_host_role == HOST_ROLE_TURF_STADIUM else 'WOULD_MOVE_HOSTING_COMMUNITY_TEAM_AWAY_FROM_PRIMARY_OWNED_HOST', detail='Optimization move would remove a hosting-community team from its highest-priority owned host location for compaction/utilization rather than to avoid a hard validation failure.', hard_constraint_failure=False)
         final_home_team = home_away_plan.get('final_home_team_obj')
         final_home_team = final_home_team if isinstance(final_home_team, Team) else game.home_team
         required_size = _required_field_type_for_division(final_home_team.division if final_home_team else None)
@@ -16913,14 +16975,20 @@ def _build_turf_stadium_utilization_diagnostics(db: Session, season_id: uuid.UUI
         data['idle_hours'] = round(max(availability_hours - wave_hours, 0.0), 2)
         total = int(data['assigned_slots']) + int(data['open_slots'])
         data['utilization_percent'] = round((int(data['assigned_slots']) / total * 100) if total else 0, 1)
-        wave_utilization = data.get('wave_utilization') or []
+        wave_utilization = sorted(data.get('wave_utilization') or [], key=lambda row: (str(row.get('start_time') or ''), int(row.get('sequence_number') or 0)))
+        data['wave_utilization'] = wave_utilization
         if wave_utilization:
             data['wave_1_utilization'] = wave_utilization[0]['utilization_percent']
         if len(wave_utilization) > 1:
             data['wave_2_utilization'] = wave_utilization[1]['utilization_percent']
         partial_wave_warnings = []
         earlier_partial_two_large = False
-        for wave_row in sorted(wave_utilization, key=lambda row: (str(row.get('start_time') or ''), int(row.get('sequence_number') or 0))):
+        for computed_wave_number, wave_row in enumerate(wave_utilization, start=1):
+            wave_row['stored_sequence_number'] = wave_row.get('sequence_number')
+            wave_row['sequence_number'] = computed_wave_number
+            wave_row['wave_number'] = computed_wave_number
+            wave_row['wave_name'] = f'Wave {computed_wave_number}'
+            wave_row['wave_numbering_scope'] = 'game_date+host_location_id'
             if (
                 wave_row.get('layout') == 'TWO_LARGE'
                 and int(wave_row.get('assigned_slots') or 0) > 0
@@ -16936,6 +17004,14 @@ def _build_turf_stadium_utilization_diagnostics(db: Session, season_id: uuid.UUI
                 and 0 < int(wave_row.get('assigned_slots') or 0) < int(wave_row.get('capacity_slots') or 0)
             ):
                 earlier_partial_two_large = True
+        wave_numbers_present = [int(row.get('sequence_number') or 0) for row in sorted(wave_utilization, key=lambda row: int(row.get('sequence_number') or 0))]
+        wave_numbers_expected = list(range(1, len(wave_numbers_present) + 1))
+        data['wave_numbers_present'] = wave_numbers_present
+        data['wave_numbers_expected'] = wave_numbers_expected
+        data['wave_numbering_consecutive'] = wave_numbers_present == wave_numbers_expected
+        data['wave_numbering_scope'] = 'game_date+host_location_id'
+        data['first_wave_start_time'] = wave_utilization[0].get('start_time') if wave_utilization else None
+        data['last_wave_start_time'] = wave_utilization[-1].get('start_time') if wave_utilization else None
         data['optimization_warnings'] = partial_wave_warnings
         has_partial_wave = any(0 < int(row.get('assigned_slots') or 0) < int(row.get('capacity_slots') or 0) for row in wave_utilization)
         data['status'] = _quality_status(

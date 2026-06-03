@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import Base
 from app.models import Division, FieldInstance, Game, GameSlot, GameStatus, HostLocation, HostPlanSelection, HostingAvailability, Organization, Season, Team, TurfWave, Week
-from app.routes.api import _build_host_location_vs_home_team_verification, _build_revised_scheduling_hierarchy_diagnostics, _build_turf_stadium_utilization_diagnostics, _diagnostic_active_teams_expected_to_play, _diagnostic_expected_games_for_team_count, _diagnostic_field_size_diff, _host_availability_matrix_response, _run_turf_wave_compaction_pass, auto_fill_apply, auto_fill_preview, auto_schedule_entire_season, generate_suggested_host_plan
+from app.routes.api import _build_host_location_vs_home_team_verification, _build_revised_scheduling_hierarchy_diagnostics, _build_turf_stadium_utilization_diagnostics, _classify_host_for_date, _diagnostic_active_teams_expected_to_play, _diagnostic_expected_games_for_team_count, _diagnostic_field_size_diff, _host_availability_matrix_response, _run_turf_wave_compaction_pass, auto_fill_apply, auto_fill_preview, auto_schedule_entire_season, generate_suggested_host_plan
 
 
 class AutoFillPreviewTest(unittest.TestCase):
@@ -42,6 +42,34 @@ class AutoFillPreviewTest(unittest.TestCase):
             kickoff_time=time(10, 0),
         ))
         self.db.commit()
+
+
+    def test_turf_stadium_role_outprioritizes_owned_grass_in_global_diagnostics(self):
+        self.host.surface_type = 'TURF_STADIUM'
+        self.host.host_role = 'TURF_STADIUM'
+        self.slot.season_id = self.season.id
+        self.slot.week_id = self.week2.id
+        grass_host = HostLocation(id=uuid.uuid4(), organization_id=self.org_w.id, name='Owned Grass', surface_type='GRASS_FIELD', host_role='PRIMARY_GRASS', is_active=True)
+        grass_fi = FieldInstance(id=uuid.uuid4(), host_location_id=grass_host.id, hosting_availability_id=uuid.uuid4(), instance_date=self.week2.start_date, field_name='Grass Small', field_type='SMALL', is_active=True)
+        grass_slot = GameSlot(id=uuid.uuid4(), field_instance_id=grass_fi.id, host_location_id=grass_host.id, season_id=self.season.id, week_id=self.week2.id, slot_date=self.week2.start_date, start_time=time(9, 0), end_time=time(10, 0), field_type='SMALL', status='OPEN')
+        game = Game(id=uuid.uuid4(), season_id=self.season.id, week_id=self.week2.id, home_team_id=self.wm.id, away_team_id=self.ab.id, game_status_id=self.status.id, game_date=self.week2.start_date, kickoff_time=time(9, 0))
+        self.db.add_all([grass_host, grass_fi, grass_slot, game])
+        self.db.flush()
+        self.slot.assigned_game_id = game.id
+        self.slot.status = 'BOOKED'
+        self.db.commit()
+
+        diagnostics = _build_revised_scheduling_hierarchy_diagnostics(self.db, self.season.id)
+        date_row = next(row for row in diagnostics['true_home_host_enforcement_by_date'] if row['scheduling_date'] == self.week2.start_date.isoformat())
+        community_row = date_row['communities'][0]
+        game_row = date_row['hosting_community_games'][0]
+
+        self.assertEqual(_classify_host_for_date(self.db, self.host), 'TURF_STADIUM')
+        self.assertEqual(date_row['owned_host_priority_order'][0], 'TURF_STADIUM')
+        self.assertEqual(date_row['active_turf_stadiums_by_community'][str(self.org_w.id)], [str(self.host.id)])
+        self.assertEqual(community_row['highest_priority_active_host_role'], 'TURF_STADIUM')
+        self.assertTrue(game_row['scheduled_at_turf_stadium'])
+        self.assertTrue(game_row['scheduled_at_highest_priority_owned_host'])
 
     def test_host_location_vs_home_team_verification_reports_away_owned_host(self):
         game = Game(
