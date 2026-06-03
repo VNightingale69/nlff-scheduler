@@ -129,6 +129,7 @@ class HostLocationCreate(BaseModel):
     max_large_fields: int = 0
     max_total_fields: int = 0
     host_role: str | None = None
+    is_primary: bool = False
     minimum_games_to_activate_overflow_host: int = 2
     preferred_minimum_games_per_active_host: int = 2
     maximum_games_per_host_per_date: int | None = None
