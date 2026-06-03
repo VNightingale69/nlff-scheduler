@@ -7,6 +7,160 @@ import { getToken } from '@/lib/auth';
 import { getDivisionLabel } from '@/lib/divisionLabel';
 import { formatDisplayDate, formatDisplayDateTime, formatDisplayTime } from '@/lib/displayFormat';
 
+type AutoScheduleDiagnosticsSummary = {
+  status: string;
+  message: string;
+  rootCauses: string[];
+  dryRun: boolean;
+  gamesCommitted: number;
+  previewGames: number;
+  requiredGamesMissing: number;
+  validationFailures: number;
+  teamTimeConflicts: number;
+  fieldTimeConflicts: number;
+  doubleheaderBackToBackFailures: number;
+  hostOwnerAsAwayGames: number;
+  trueHomeHostHardRulePassed: string;
+  totalHomeHostViolations: number;
+  totalHomeHostExceptions: number;
+  overflowLocationsUsed: number;
+  latestStartTime: string;
+  activeTimeWindow: string;
+  pullForwardStarted: string;
+  pullForwardCompleted: string;
+  gamesMovedEarlier: number;
+  skippedAttemptsByReason: Record<string, unknown>;
+  failedValidationReasons: Record<string, unknown>;
+  trueHomeHost: Record<string, unknown>;
+  turfWave: Record<string, unknown>;
+  pullForward: Record<string, unknown>;
+  rejectionReasons: Record<string, unknown>;
+  preview: string;
+  downloadUrl: string | null;
+  downloadFilename: string;
+};
+
+function safeStringify(value: unknown, maxLength = 20000): string {
+  try {
+    const text = JSON.stringify(value, null, 2);
+    if (text.length > maxLength) {
+      return `${text.slice(0, maxLength)}\n... diagnostics truncated in UI ...`;
+    }
+    return text;
+  } catch (error) {
+    return 'Diagnostics payload too large to display. Use backend logs or export diagnostics instead.';
+  }
+}
+
+function toNumber(value: unknown): number {
+  return Number(value ?? 0) || 0;
+}
+
+function itemCount(value: unknown): number {
+  if (Array.isArray(value)) return value.length;
+  if (value && typeof value === 'object') return Object.keys(value as Record<string, unknown>).length;
+  return toNumber(value);
+}
+
+function booleanLabel(value: unknown): string {
+  if (value === true) return 'Yes';
+  if (value === false) return 'No';
+  if (value === null || value === undefined || value === '') return 'Unknown';
+  return String(value);
+}
+
+function toStringArray(value: unknown, fallback: string[] = []): string[] {
+  if (Array.isArray(value)) return value.map((item) => String(item));
+  if (typeof value === 'string' && value) return [value];
+  return fallback;
+}
+
+function compactRecord(value: unknown, maxEntries = 20): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>).slice(0, maxEntries));
+}
+
+function createDiagnosticsDownload(value: unknown): string | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const blob = new Blob([safeStringify(value, Number.MAX_SAFE_INTEGER)], { type: 'application/json' });
+    return URL.createObjectURL(blob);
+  } catch (error) {
+    return null;
+  }
+}
+
+function summarizeAutoScheduleDiagnostics(value: any): AutoScheduleDiagnosticsSummary {
+  const diagnostics = value?.auto_schedule_diagnostics || {};
+  const hostVerification = value?.host_location_vs_home_team_verification || diagnostics?.host_location_vs_home_team_verification || {};
+  const trueHomeHost = value?.true_home_host_diagnostics || diagnostics?.true_home_host_diagnostics || hostVerification;
+  const turfWave = value?.turf_wave_compaction || diagnostics?.turf_wave_compaction || {};
+  const pullForward = value?.pull_forward_diagnostics || diagnostics?.pull_forward_diagnostics || value?.pull_forward || diagnostics?.pull_forward || {};
+  const skippedAttemptsByReason = compactRecord(value?.skipped_attempts_by_reason || diagnostics?.skipped_attempts_by_reason || {});
+  const failedValidationReasons = compactRecord(value?.failed_validation_reasons || diagnostics?.failed_validation_reasons || {});
+  const rejectionReasons = compactRecord(value?.rejection_diagnostics?.by_reason || diagnostics?.rejection_diagnostics?.by_reason || value?.rejections_by_reason || diagnostics?.rejections_by_reason || skippedAttemptsByReason);
+  const requiredGamesMissing = itemCount(value?.required_games_still_missing ?? value?.required_games_missing ?? diagnostics?.required_games_still_missing ?? diagnostics?.required_games_missing);
+  const validationFailures = itemCount(value?.validation_failures ?? value?.validation_errors ?? diagnostics?.validation_failures) + toNumber(value?.failed_validation_count ?? diagnostics?.failed_validation_count);
+  const hostOwnerAwayGames = hostVerification?.host_owner_is_away_games ?? value?.host_owner_as_away_games ?? diagnostics?.host_owner_as_away_games;
+  const filename = `auto-schedule-diagnostics-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+
+  return {
+    status: value?.status || 'unknown',
+    message: value?.message || 'No message returned.',
+    rootCauses: toStringArray(value?.root_cause_categories || diagnostics?.root_cause_categories, ['unknown']),
+    dryRun: Boolean(value?.dry_run),
+    gamesCommitted: toNumber(value?.committed_games_count ?? value?.total_games_created),
+    previewGames: toNumber(value?.preview_games_count ?? diagnostics?.preview_games_count),
+    requiredGamesMissing,
+    validationFailures,
+    teamTimeConflicts: itemCount(value?.team_time_conflicts ?? diagnostics?.team_time_conflicts),
+    fieldTimeConflicts: itemCount(value?.field_time_conflicts ?? diagnostics?.field_time_conflicts),
+    doubleheaderBackToBackFailures: itemCount(value?.doubleheader_back_to_back_failures ?? diagnostics?.doubleheader_back_to_back_failures),
+    hostOwnerAsAwayGames: itemCount(hostOwnerAwayGames),
+    trueHomeHostHardRulePassed: booleanLabel(value?.true_home_host_hard_rule_passed ?? diagnostics?.true_home_host_hard_rule_passed ?? trueHomeHost?.hard_rule_passed ?? trueHomeHost?.true_home_host_hard_rule_passed),
+    totalHomeHostViolations: toNumber(value?.total_home_host_violations ?? diagnostics?.total_home_host_violations ?? trueHomeHost?.total_home_host_violations ?? trueHomeHost?.host_owner_is_away_team),
+    totalHomeHostExceptions: toNumber(value?.total_home_host_exceptions ?? diagnostics?.total_home_host_exceptions ?? trueHomeHost?.total_home_host_exceptions),
+    overflowLocationsUsed: itemCount(value?.overflow_locations_used ?? diagnostics?.overflow_locations_used),
+    latestStartTime: String(value?.latest_start_time ?? diagnostics?.latest_start_time ?? 'Unknown'),
+    activeTimeWindow: String(value?.active_time_window ?? diagnostics?.active_time_window ?? 'Unknown'),
+    pullForwardStarted: booleanLabel(value?.pull_forward_started ?? diagnostics?.pull_forward_started ?? pullForward?.started),
+    pullForwardCompleted: booleanLabel(value?.pull_forward_completed ?? diagnostics?.pull_forward_completed ?? pullForward?.completed),
+    gamesMovedEarlier: toNumber(value?.games_moved_earlier ?? diagnostics?.games_moved_earlier ?? pullForward?.games_moved_earlier),
+    skippedAttemptsByReason,
+    failedValidationReasons,
+    trueHomeHost: {
+      total_games_checked: trueHomeHost?.total_games_checked ?? 0,
+      violations: itemCount(trueHomeHost?.violations ?? trueHomeHost?.host_owner_is_away_games),
+      exceptions: itemCount(trueHomeHost?.exceptions),
+      hard_rule_passed: booleanLabel(trueHomeHost?.hard_rule_passed ?? trueHomeHost?.true_home_host_hard_rule_passed),
+      host_owner_is_away_team: trueHomeHost?.host_owner_is_away_team ?? itemCount(trueHomeHost?.host_owner_is_away_games),
+    },
+    turfWave: {
+      full_waves: turfWave?.full_waves ?? turfWave?.full_wave_count ?? turfWave?.wave_counts?.full ?? 0,
+      partial_waves: turfWave?.partial_waves ?? turfWave?.partial_wave_count ?? turfWave?.wave_counts?.partial ?? 0,
+      empty_waves: turfWave?.empty_waves ?? turfWave?.empty_wave_count ?? turfWave?.wave_counts?.empty ?? 0,
+      rejected_moves: itemCount(turfWave?.rejected_moves),
+      younger_division_late_penalty_candidates: itemCount(turfWave?.younger_division_late_penalty_candidates),
+    },
+    pullForward: {
+      candidates_considered: itemCount(pullForward?.candidates ?? pullForward?.candidate_games),
+      candidates_accepted: toNumber(pullForward?.candidates_accepted ?? pullForward?.accepted_count),
+      candidates_rejected: toNumber(pullForward?.candidates_rejected ?? pullForward?.rejected_count),
+      games_moved_earlier: toNumber(pullForward?.games_moved_earlier),
+    },
+    rejectionReasons,
+    preview: safeStringify({
+      status: value?.status,
+      message: value?.message,
+      root_cause_categories: value?.root_cause_categories || diagnostics?.root_cause_categories,
+      skipped_attempts_by_reason: skippedAttemptsByReason,
+      failed_validation_reasons: failedValidationReasons,
+    }),
+    downloadUrl: createDiagnosticsDownload(value),
+    downloadFilename: filename,
+  };
+}
+
 export default function ManualScheduleBuilderPage() {
   const token = getToken();
   const searchParams = useSearchParams();
@@ -40,7 +194,7 @@ export default function ManualScheduleBuilderPage() {
   const [clearExistingBeforeAutoSchedule, setClearExistingBeforeAutoSchedule] = useState(false);
   const [autoScheduleDryRun, setAutoScheduleDryRun] = useState(true);
   const [autoScheduleSeasonLoading, setAutoScheduleSeasonLoading] = useState(false);
-  const [autoScheduleDiagnostics, setAutoScheduleDiagnostics] = useState<any | null>(null);
+  const [autoScheduleDiagnostics, setAutoScheduleDiagnostics] = useState<AutoScheduleDiagnosticsSummary | null>(null);
   const [optimizeSameCommunityHome, setOptimizeSameCommunityHome] = useState(true);
   const [repairDoubleHeaders, setRepairDoubleHeaders] = useState(true);
   const [reduceRepeatMatchups, setReduceRepeatMatchups] = useState(false);
@@ -49,15 +203,14 @@ export default function ManualScheduleBuilderPage() {
   const [optimizerLoading, setOptimizerLoading] = useState(false);
   const [optimizerDiagnostics, setOptimizerDiagnostics] = useState<any | null>(null);
 
+  useEffect(() => () => {
+    if (autoScheduleDiagnostics?.downloadUrl) URL.revokeObjectURL(autoScheduleDiagnostics.downloadUrl);
+  }, [autoScheduleDiagnostics?.downloadUrl]);
+
   const division = useMemo(() => options.divisions.find((d: any) => d.id === divisionId), [options, divisionId]);
   const divisionTeams = useMemo(() => options.teams.filter((t: any) => t.division_id === divisionId && t.is_active), [options, divisionId]);
   const seasonWeeks = useMemo(() => options.weeks.filter((w: any) => w.season_id === seasonId), [options, seasonId]);
   const canSave = Boolean(seasonId && weekId && divisionId && homeTeamId && awayTeamId && slotId);
-  const hostLocationVerification = autoScheduleDiagnostics?.host_location_vs_home_team_verification || autoScheduleDiagnostics?.auto_schedule_diagnostics?.host_location_vs_home_team_verification || null;
-  const hostOwnerAwayGames = hostLocationVerification?.host_owner_is_away_games || [];
-  const turfWaveCompactionDiagnostics = autoScheduleDiagnostics?.turf_wave_compaction || autoScheduleDiagnostics?.auto_schedule_diagnostics?.turf_wave_compaction || null;
-  const turfWaveCompactionRejectedMoves = turfWaveCompactionDiagnostics?.rejected_moves || [];
-  const youngerDivisionLatePenaltyCandidates = turfWaveCompactionDiagnostics?.younger_division_late_penalty_candidates || [];
 
   const getWeekOptionLabel = (week: any) => {
     const baseLabel = week.label || `Week ${week.week_number}`;
@@ -479,7 +632,7 @@ export default function ManualScheduleBuilderPage() {
                   setShowAutoScheduleSeasonModal(false);
                   await load();
                   await loadRecommendations();
-                  setAutoScheduleDiagnostics(res);
+                  setAutoScheduleDiagnostics(summarizeAutoScheduleDiagnostics(res));
                   const missing = (res.required_games_still_missing || []).length;
                   const warningCount = (res.warnings || []).length + (res.validation_errors || []).length;
                   const rootCauses = (res.root_cause_categories || res.auto_schedule_diagnostics?.root_cause_categories || []).join(', ');
@@ -505,275 +658,80 @@ export default function ManualScheduleBuilderPage() {
       </div> : null}
       {autoScheduleDiagnostics ? <details className='rounded border border-slate-300 bg-slate-50 p-3'>
         <summary className='cursor-pointer font-semibold text-slate-800'>Scheduling Diagnostics</summary>
-        <div className='mt-3 space-y-3 text-sm'>
-          <div><span className='font-semibold'>Status:</span> {autoScheduleDiagnostics.status || 'unknown'} — {autoScheduleDiagnostics.message || 'No message returned.'}</div>
-          <div><span className='font-semibold'>Root causes:</span> {(autoScheduleDiagnostics.root_cause_categories || autoScheduleDiagnostics.auto_schedule_diagnostics?.root_cause_categories || ['unknown']).join(', ')}</div>
-          <div><span className='font-semibold'>Dry run:</span> {autoScheduleDiagnostics.dry_run ? 'Yes' : 'No'}</div>
-          <div><span className='font-semibold'>1. Games committed:</span> {Number(autoScheduleDiagnostics.committed_games_count ?? autoScheduleDiagnostics.total_games_created ?? 0)}</div>
-          <div><span className='font-semibold'>Preview games:</span> {Number(autoScheduleDiagnostics.preview_games_count ?? autoScheduleDiagnostics.auto_schedule_diagnostics?.preview_games_count ?? 0)}</div>
-          <div>
-            <div className='font-semibold'>2. Placement attempts skipped: {Number(autoScheduleDiagnostics.games_skipped || 0)}</div>
-            <ul className='list-inside list-disc'>
-              {Object.entries(autoScheduleDiagnostics.skipped_attempts_by_reason || {}).map(([reason, count]: any) => <li key={reason}>{reason}: {count}</li>)}
-            </ul>
-          </div>
-          {hostLocationVerification ? <section className='rounded border border-slate-200 bg-white p-3'>
-            <h3 className='font-semibold'>Host Location vs Home Team Verification</h3>
-            <div className='mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-3'>
-              <div>Total games checked: <span className='font-semibold'>{hostLocationVerification.total_games_checked ?? 0}</span></div>
-              <div>Same-community games: <span className='font-semibold'>{hostLocationVerification.same_community_games ?? 0}</span></div>
-              <div>Unknown location owner: <span className='font-semibold'>{hostLocationVerification.unknown_location_owner ?? 0}</span></div>
-              <div>Host owner is home team: <span className='font-semibold'>{hostLocationVerification.host_owner_is_home_team ?? 0}</span></div>
-              <div>Host owner is away team: <span className='font-semibold'>{hostLocationVerification.host_owner_is_away_team ?? 0}</span></div>
-              <div>Neutral-site games: <span className='font-semibold'>{hostLocationVerification.neutral_site_games ?? 0}</span></div>
-            </div>
-            <div className='mt-3'>
-              <div className='font-medium'>HOST_OWNER_IS_AWAY games</div>
-              {hostOwnerAwayGames.length === 0 ? (
-                <p className='mt-1 text-slate-700'>No host-owner-as-away games found.</p>
-              ) : (
-                <div className='mt-2 overflow-x-auto'>
-                  <table className='min-w-full border text-xs'>
-                    <thead>
-                      <tr className='bg-slate-100'>
-                        <th className='border p-1 text-left'>Date</th>
-                        <th className='border p-1 text-left'>Time</th>
-                        <th className='border p-1 text-left'>Division</th>
-                        <th className='border p-1 text-left'>Location</th>
-                        <th className='border p-1 text-left'>Field</th>
-                        <th className='border p-1 text-left'>Location Owner</th>
-                        <th className='border p-1 text-left'>Home Team</th>
-                        <th className='border p-1 text-left'>Home Team Community</th>
-                        <th className='border p-1 text-left'>Away Team</th>
-                        <th className='border p-1 text-left'>Away Team Community</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {hostOwnerAwayGames.map((game: any) => (
-                        <tr key={game.game_id}>
-                          <td className='border p-1'>{game.date ? formatDisplayDate(game.date) : 'N/A'}</td>
-                          <td className='border p-1'>{game.start_time ? formatDisplayTime(game.start_time) : 'N/A'}</td>
-                          <td className='border p-1'>{game.division || 'N/A'}</td>
-                          <td className='border p-1'>{game.location || 'Unassigned'}</td>
-                          <td className='border p-1'>{game.field || 'Unassigned'}</td>
-                          <td className='border p-1'>{game.host_location_owner_community_name || 'Unknown'}</td>
-                          <td className='border p-1'>{game.home_team || 'TBD'}</td>
-                          <td className='border p-1'>{game.home_team_community_name || 'Unknown'}</td>
-                          <td className='border p-1'>{game.away_team || 'TBD'}</td>
-                          <td className='border p-1'>{game.away_team_community_name || 'Unknown'}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
-          </section> : null}
-          {turfWaveCompactionDiagnostics ? <section className='rounded border border-slate-200 bg-white p-3'>
-            <h3 className='font-semibold'>Turf Wave Optimization Summary</h3>
-            {turfWaveCompactionDiagnostics.turf_wave_optimization_summary?.summary ? <p className='mt-1 text-sm text-slate-700'>{turfWaveCompactionDiagnostics.turf_wave_optimization_summary.summary}</p> : null}
-            <div className='mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-3'>
-              <div>Partial waves before compaction: <span className='font-semibold'>{turfWaveCompactionDiagnostics.partial_waves_before ?? turfWaveCompactionDiagnostics.partial_turf_waves_before ?? 0}</span></div>
-              <div>Partial waves after compaction: <span className='font-semibold'>{turfWaveCompactionDiagnostics.partial_waves_after ?? turfWaveCompactionDiagnostics.partial_turf_waves_after ?? 0}</span></div>
-              <div>Waves improved: <span className='font-semibold'>{turfWaveCompactionDiagnostics.waves_improved_count ?? 0}</span></div>
-              <div>Accepted moves: <span className='font-semibold'>{turfWaveCompactionDiagnostics.accepted_moves_count ?? turfWaveCompactionDiagnostics.moves_accepted ?? 0}</span></div>
-              <div>Rejected moves: <span className='font-semibold'>{turfWaveCompactionDiagnostics.rejected_moves_count ?? turfWaveCompactionDiagnostics.moves_rejected ?? 0}</span></div>
-              <div>Rollback occurred: <span className='font-semibold'>{String(turfWaveCompactionDiagnostics.rollback_occurred)}</span>{turfWaveCompactionDiagnostics.rollback_reason ? ` (${turfWaveCompactionDiagnostics.rollback_reason})` : ''}</div>
-              <div>Home/away violations after compaction: <span className='font-semibold'>{turfWaveCompactionDiagnostics.host_owner_as_away_after_compaction ?? 0}</span></div>
-              <div>Total turf waves before: <span className='font-semibold'>{turfWaveCompactionDiagnostics.turf_waves_before_total ?? 0}</span></div>
-              <div>Total turf waves after: <span className='font-semibold'>{turfWaveCompactionDiagnostics.turf_waves_after_total ?? 0}</span></div>
-              <div>Full turf waves before: <span className='font-semibold'>{turfWaveCompactionDiagnostics.full_turf_waves_before ?? 0}</span></div>
-              <div>Full turf waves after: <span className='font-semibold'>{turfWaveCompactionDiagnostics.full_turf_waves_after ?? 0}</span></div>
-              <div>Empty turf waves before: <span className='font-semibold'>{turfWaveCompactionDiagnostics.empty_turf_waves_before ?? 0}</span></div>
-              <div>Empty turf waves after: <span className='font-semibold'>{turfWaveCompactionDiagnostics.empty_turf_waves_after ?? 0}</span></div>
-              <div>ONE_MEDIUM_TWO_SMALL partials before: <span className='font-semibold'>{turfWaveCompactionDiagnostics.one_medium_two_small_partials_before ?? 0}</span></div>
-              <div>ONE_MEDIUM_TWO_SMALL partials after: <span className='font-semibold'>{turfWaveCompactionDiagnostics.one_medium_two_small_partials_after ?? 0}</span></div>
-              <div>TWO_LARGE partials before: <span className='font-semibold'>{turfWaveCompactionDiagnostics.two_large_partials_before ?? 0}</span></div>
-              <div>TWO_LARGE partials after: <span className='font-semibold'>{turfWaveCompactionDiagnostics.two_large_partials_after ?? 0}</span></div>
-            </div>
-            <h3 className='mt-4 font-semibold'>Turf Wave Compaction Rejection Diagnostics</h3>
-            <div className='mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-3'>
-              <div>Enabled: <span className='font-semibold'>{String(turfWaveCompactionDiagnostics.compaction_enabled)}</span></div>
-              <div>Started: <span className='font-semibold'>{String(turfWaveCompactionDiagnostics.compaction_pass_started)}</span></div>
-              <div>Completed: <span className='font-semibold'>{String(turfWaveCompactionDiagnostics.compaction_pass_completed)}</span></div>
-              {turfWaveCompactionDiagnostics.compaction_skipped_reason ? <div>Skipped reason: <span className='font-semibold'>{turfWaveCompactionDiagnostics.compaction_skipped_reason}</span></div> : null}
-              <div>Partial waves before: <span className='font-semibold'>{turfWaveCompactionDiagnostics.partial_waves_before ?? turfWaveCompactionDiagnostics.partial_turf_waves_before ?? 0}</span></div>
-              <div>Partial waves after: <span className='font-semibold'>{turfWaveCompactionDiagnostics.partial_waves_after ?? turfWaveCompactionDiagnostics.partial_turf_waves_after ?? 0}</span></div>
-              <div>ONE_MEDIUM_TWO_SMALL partials after: <span className='font-semibold'>{turfWaveCompactionDiagnostics.one_medium_two_small_partials_after ?? turfWaveCompactionDiagnostics.partial_ONE_MEDIUM_TWO_SMALL_waves_found ?? 0}</span></div>
-              <div>TWO_LARGE partials after: <span className='font-semibold'>{turfWaveCompactionDiagnostics.two_large_partials_after ?? turfWaveCompactionDiagnostics.partial_TWO_LARGE_waves_found ?? 0}</span></div>
-              <div>Candidate moves evaluated: <span className='font-semibold'>{turfWaveCompactionDiagnostics.total_candidate_moves_evaluated ?? turfWaveCompactionDiagnostics.moves_evaluated ?? 0}</span></div>
-              <div>Same-date games scanned: <span className='font-semibold'>{turfWaveCompactionDiagnostics.same_date_games_scanned ?? 0}</span></div>
-              <div>Matching field-size games: <span className='font-semibold'>{turfWaveCompactionDiagnostics.same_date_matching_field_size_games_found ?? 0}</span></div>
-              <div>Preliminary candidates: <span className='font-semibold'>{turfWaveCompactionDiagnostics.preliminary_candidates_created ?? 0}</span></div>
-              <div>Precheck rejections: <span className='font-semibold'>{turfWaveCompactionDiagnostics.candidates_rejected_by_precheck ?? 0}</span></div>
-              <div>Hard-constraint rejections: <span className='font-semibold'>{turfWaveCompactionDiagnostics.candidates_rejected_by_hard_constraint ?? 0}</span></div>
-              <div>Accepted moves: <span className='font-semibold'>{turfWaveCompactionDiagnostics.accepted_moves_count ?? turfWaveCompactionDiagnostics.moves_accepted ?? 0}</span></div>
-              <div>Rejected moves: <span className='font-semibold'>{turfWaveCompactionDiagnostics.rejected_moves_count ?? turfWaveCompactionDiagnostics.moves_rejected ?? 0}</span></div>
-              <div>Waves improved: <span className='font-semibold'>{turfWaveCompactionDiagnostics.waves_improved_count ?? 0}</span></div>
-              <div>Rollback: <span className='font-semibold'>{String(turfWaveCompactionDiagnostics.rollback_occurred)}</span>{turfWaveCompactionDiagnostics.rollback_reason ? ` (${turfWaveCompactionDiagnostics.rollback_reason})` : ''}</div>
-            </div>
-            {Object.keys(turfWaveCompactionDiagnostics.rejected_moves_by_reason || {}).length ? <div className='mt-2'>
-              <div className='font-medium'>Rejected moves by reason</div>
-              <ul className='list-inside list-disc'>{Object.entries(turfWaveCompactionDiagnostics.rejected_moves_by_reason || {}).map(([reason, count]: any) => <li key={reason}>{reason}: {count}</li>)}</ul>
-            </div> : null}
-            <div className='mt-3 rounded border border-amber-200 bg-amber-50 p-2 text-sm'>
-              <div className='font-medium'>Younger-division-late soft penalty diagnostics</div>
-              <div>{turfWaveCompactionDiagnostics.younger_division_late_penalty_rejection_summary_line || 'Former younger-division-late candidates now rejected by: none'}</div>
-              <div className='mt-1 grid gap-2 sm:grid-cols-2 lg:grid-cols-3'>
-                <div>Penalty candidates: <span className='font-semibold'>{turfWaveCompactionDiagnostics.younger_division_late_penalty_candidates_count ?? youngerDivisionLatePenaltyCandidates.length}</span></div>
-                <div>Penalty accepted: <span className='font-semibold'>{turfWaveCompactionDiagnostics.younger_division_late_penalty_accepted ?? 0}</span></div>
-                <div>Accepted moves with penalty: <span className='font-semibold'>{turfWaveCompactionDiagnostics.accepted_moves_with_younger_division_late_penalty_count ?? (turfWaveCompactionDiagnostics.accepted_moves_with_younger_division_late_penalty || []).length}</span></div>
-                <div>Rejected after scoring: <span className='font-semibold'>{turfWaveCompactionDiagnostics.younger_division_late_penalty_rejected_after_scoring ?? 0}</span></div>
-                <div>Rejected for hard constraints: <span className='font-semibold'>{turfWaveCompactionDiagnostics.younger_division_late_penalty_rejected_for_hard_constraints ?? 0}</span></div>
-                <div>Soft scoring marker: <span className='font-semibold'>{turfWaveCompactionDiagnostics.soft_scoring_diagnostics_by_reason?.YOUNGER_DIVISION_LATE_PENALTY_APPLIED ?? 0}</span></div>
+        <div className='mt-3 space-y-4 text-sm'>
+          <section className='rounded border border-slate-200 bg-white p-3'>
+            <div className='flex flex-wrap items-start justify-between gap-3'>
+              <div>
+                <div><span className='font-semibold'>Status:</span> {autoScheduleDiagnostics.status} — {autoScheduleDiagnostics.message}</div>
+                <div><span className='font-semibold'>Root causes:</span> {autoScheduleDiagnostics.rootCauses.join(', ')}</div>
+                <div><span className='font-semibold'>Dry run:</span> {autoScheduleDiagnostics.dryRun ? 'Yes' : 'No'}</div>
               </div>
-              {Object.keys(turfWaveCompactionDiagnostics.younger_division_late_penalty_rejected_by_reason || {}).length ? <div className='mt-2'>
-                <div className='font-medium'>Former younger-division-late candidates now rejected by:</div>
-                <ul className='list-inside list-disc'>{Object.entries(turfWaveCompactionDiagnostics.younger_division_late_penalty_rejected_by_reason || {}).map(([reason, count]: any) => <li key={reason}>{reason}: {count}</li>)}</ul>
-              </div> : null}
+              {autoScheduleDiagnostics.downloadUrl ? <a className='rounded border border-indigo-700 px-3 py-2 text-xs font-semibold text-indigo-700 hover:bg-indigo-50' href={autoScheduleDiagnostics.downloadUrl} download={autoScheduleDiagnostics.downloadFilename}>Download full diagnostics JSON</a> : null}
             </div>
-            {youngerDivisionLatePenaltyCandidates.length ? <details className='mt-3 rounded border border-amber-200 p-2'>
-              <summary className='cursor-pointer font-medium'>Younger-division-late penalty candidate details ({youngerDivisionLatePenaltyCandidates.length})</summary>
-              <div className='mt-2 overflow-x-auto'>
-                <table className='min-w-full border text-xs'>
-                  <thead><tr className='bg-amber-100'><th className='border p-1 text-left'>Game</th><th className='border p-1 text-left'>Division</th><th className='border p-1 text-left'>Original</th><th className='border p-1 text-left'>Proposed</th><th className='border p-1 text-left'>Penalty</th><th className='border p-1 text-left'>Score</th><th className='border p-1 text-left'>Accepted?</th><th className='border p-1 text-left'>Final rejection</th></tr></thead>
-                  <tbody>{youngerDivisionLatePenaltyCandidates.map((candidate: any, idx: number) => <tr key={`${candidate.candidate_game_id}-${idx}`} className={candidate.now_rejected_for_host_community_balance ? 'bg-amber-50' : ''}>
-                    <td className='border p-1'>{candidate.candidate_game_id}<br />{candidate.diagnostic || 'YOUNGER_DIVISION_LATE_PENALTY_APPLIED'}</td>
-                    <td className='border p-1'>{candidate.division || 'N/A'}</td>
-                    <td className='border p-1'>{candidate.original_start_time ? formatDisplayTime(candidate.original_start_time) : 'N/A'}<br />{candidate.original_host_location || 'N/A'} · {candidate.original_field || 'N/A'}</td>
-                    <td className='border p-1'>{candidate.proposed_start_time ? formatDisplayTime(candidate.proposed_start_time) : 'N/A'}<br />{candidate.proposed_host_location || 'N/A'} · {candidate.proposed_field || 'N/A'}</td>
-                    <td className='border p-1'>{candidate.age_timing_penalty_applied ?? 'n/a'}<br />Wave gain {candidate.wave_improvement_gained ?? 'n/a'}</td>
-                    <td className='border p-1'>Before {candidate.score_before_penalty ?? 'n/a'}<br />After {candidate.score_after_penalty ?? 'n/a'}</td>
-                    <td className='border p-1'>{String(candidate.accepted)}</td>
-                    <td className='border p-1'>{candidate.final_rejection_reason || '—'}{candidate.now_rejected_for_host_community_balance ? <><br /><span className='font-semibold text-amber-700'>Previously hard-blocked as MOVES_YOUNGER_DIVISION_TOO_LATE; now WORSENS_HOST_COMMUNITY_BALANCE.</span></> : null}</td>
-                  </tr>)}</tbody>
-                </table>
-              </div>
-            </details> : null}
-            {(turfWaveCompactionDiagnostics.partial_wave_details || turfWaveCompactionDiagnostics.partial_waves || []).length ? <details className='mt-3 rounded border border-slate-200 p-2' open>
-              <summary className='cursor-pointer font-medium'>Partial wave details</summary>
-              <div className='mt-2 overflow-x-auto'>
-                <table className='min-w-full border text-xs'>
-                  <thead><tr className='bg-slate-100'><th className='border p-1 text-left'>Date</th><th className='border p-1 text-left'>Host</th><th className='border p-1 text-left'>Start</th><th className='border p-1 text-left'>Wave</th><th className='border p-1 text-left'>Layout</th><th className='border p-1 text-left'>Used</th><th className='border p-1 text-left'>Unused</th><th className='border p-1 text-right'>Utilization</th><th className='border p-1 text-left'>Needed</th><th className='border p-1 text-right'>Candidates</th><th className='border p-1 text-right'>Accepted</th><th className='border p-1 text-right'>Rejected</th><th className='border p-1 text-left'>Pattern diagnostics</th><th className='border p-1 text-left'>No candidate reason</th></tr></thead>
-                  <tbody>{(turfWaveCompactionDiagnostics.partial_wave_details || turfWaveCompactionDiagnostics.partial_waves || []).map((wave: any) => <tr key={wave.wave_id || `${wave.date}-${wave.host_location}-${wave.start_time}`}>
-                    <td className='border p-1'>{wave.date ? formatDisplayDate(wave.date) : 'N/A'}</td>
-                    <td className='border p-1'>{wave.host_location || 'N/A'}</td>
-                    <td className='border p-1'>{wave.start_time ? formatDisplayTime(wave.start_time) : 'N/A'}</td>
-                    <td className='border p-1'>{wave.wave_name || 'N/A'}</td>
-                    <td className='border p-1'>{wave.layout || 'N/A'}</td>
-                    <td className='border p-1'>{(wave.used_components || []).map((c: any) => `${c.count} ${String(c.field_type || '').toLowerCase()}`).join(', ') || 'none'}</td>
-                    <td className='border p-1'>{(wave.unused_components || []).map((c: any) => `${c.count} ${String(c.field_type || '').toLowerCase()}`).join(', ') || 'none'}</td>
-                    <td className='border p-1 text-right'>{wave.utilization_percent ?? 0}%</td>
-                    <td className='border p-1'>{(wave.needed_field_sizes || []).join(', ') || 'N/A'}</td>
-                    <td className='border p-1 text-right'>{wave.candidate_games_found_count ?? 0}</td>
-                    <td className='border p-1 text-right'>{wave.accepted_candidate_game_count ?? 0}</td>
-                    <td className='border p-1 text-right'>{wave.rejected_candidate_game_count ?? 0}</td>
-                    <td className='border p-1'>Scanned: {wave.same_date_games_scanned ?? 0}; matching size: {wave.same_date_matching_field_size_games_found ?? wave.same_date_needed_field_size_games_found_count ?? 0}; preliminary: {wave.preliminary_candidates_created ?? 0}; precheck rejected: {wave.candidates_rejected_by_precheck ?? 0}; hard rejected: {wave.candidates_rejected_by_hard_constraint ?? 0}; Small exists: {String(wave.small_games_exist_elsewhere_same_date ?? 'n/a')}; small considered: {wave.small_games_considered ?? 0}; paired swap: {String(wave.paired_swap_considered)}; large exists: {String(wave.large_games_exist_elsewhere_same_date ?? 'n/a')}; large considered: {wave.large_games_considered ?? 0}; Girls 6-8 considered: {wave.girls_6_8_games_considered ?? 0}; eliminates later TWO_LARGE: {String(wave.moving_game_would_eliminate_later_partial_two_large_wave)}; doubleheader blocked: {String(wave.doubleheader_rules_blocked_move)}</td>
-                    <td className='border p-1'>{wave.no_candidate_reason || '—'}</td>
-                  </tr>)}</tbody>
-                </table>
-              </div>
-            </details> : null}
-            {turfWaveCompactionRejectedMoves.length ? <details className='mt-3 rounded border border-slate-200 p-2' open={turfWaveCompactionRejectedMoves.length <= 10}>
-              <summary className='cursor-pointer font-medium'>Rejected move details ({turfWaveCompactionRejectedMoves.length})</summary>
-              <div className='mt-2 overflow-x-auto'>
-                <table className='min-w-full border text-xs'>
-                  <thead><tr className='bg-slate-100'><th className='border p-1 text-left'>Game</th><th className='border p-1 text-left'>Division</th><th className='border p-1 text-left'>Current</th><th className='border p-1 text-left'>Target</th><th className='border p-1 text-left'>Needed size</th><th className='border p-1 text-left'>Reason</th><th className='border p-1 text-left'>Detail</th><th className='border p-1 text-left'>Hard?</th><th className='border p-1 text-left'>Score</th></tr></thead>
-                  <tbody>{turfWaveCompactionRejectedMoves.map((move: any, idx: number) => <tr key={`${move.candidate_game_id || move.game_id}-${idx}`}>
-                    <td className='border p-1'>{move.home_team || 'TBD'} vs {move.away_team || 'TBD'}<br />{move.candidate_game_id || move.game_id}</td>
-                    <td className='border p-1'>{move.division || 'N/A'}</td>
-                    <td className='border p-1'>{move.current_date ? formatDisplayDate(move.current_date) : 'N/A'} {move.current_start_time ? formatDisplayTime(move.current_start_time) : ''}<br />{move.current_host_location || move.original_host || 'N/A'} · {move.current_field || move.original_field || 'N/A'}<br />{move.current_wave || move.original_wave || 'N/A'}</td>
-                    <td className='border p-1'>{move.target_start_time ? formatDisplayTime(move.target_start_time) : 'N/A'}<br />{move.target_host_location || move.new_host || 'N/A'} · {move.target_field || move.new_field || 'N/A'}<br />{move.target_wave || move.new_wave || 'N/A'} · {move.target_layout || 'N/A'}</td>
-                    <td className='border p-1'>{move.needed_field_size || 'N/A'}</td>
-                    <td className='border p-1'>{move.rejection_reason || move.reason || 'UNKNOWN_REJECTION_REASON'}</td>
-                    <td className='border p-1'>{move.rejection_detail || '—'}</td>
-                    <td className='border p-1'>{String(move.hard_constraint_failure)}</td>
-                    <td className='border p-1'>Before {move.score_before ?? 'n/a'} / After {move.score_after ?? 'n/a'} / Δ {move.net_score_delta ?? 'n/a'}</td>
-                  </tr>)}</tbody>
-                </table>
-              </div>
-            </details> : null}
-          </section> : null}
-          <div>
-            <div className='font-semibold'>3. Required games still missing: {(autoScheduleDiagnostics.required_games_still_missing || []).length}</div>
-            {(autoScheduleDiagnostics.required_games_still_missing || []).map((row: any, idx: number) => <div key={`${row.division}-${row.week}-${idx}`} className='ml-3'>{row.division} Week {row.week} — Required: {row.required_games}, Created: {row.created_games}, Missing: {row.missing_games}</div>)}
-          </div>
-          <div>
-            <div className='font-semibold'>4. Warnings</div>
-            <ul className='list-inside list-disc'>{(autoScheduleDiagnostics.warnings || []).map((w: string, i: number) => <li key={i}>{w}</li>)}</ul>
-          </div>
-          <div>
-            <div className='font-semibold'>5. Validation failures</div>
-            <ul className='list-inside list-disc'>{(autoScheduleDiagnostics.validation_errors || []).map((w: string, i: number) => <li key={i}>{w}</li>)}</ul>
-          </div>
-          {autoScheduleDiagnostics.auto_schedule_diagnostics ? <div>
-            <div className='font-semibold'>6. Zero-game diagnostics</div>
-            <div>Season: {autoScheduleDiagnostics.auto_schedule_diagnostics.season_name || 'Unknown'} ({autoScheduleDiagnostics.auto_schedule_diagnostics.season_id || 'no season id'})</div>
-            <div>Weeks found: {autoScheduleDiagnostics.auto_schedule_diagnostics.weeks_found ?? 0}</div>
-            <div>Regular season weeks found: {autoScheduleDiagnostics.auto_schedule_diagnostics.regular_season_weeks_found ?? autoScheduleDiagnostics.auto_schedule_diagnostics.weeks_evaluated ?? 0}</div>
-            <div>Divisions evaluated: {autoScheduleDiagnostics.auto_schedule_diagnostics.divisions_evaluated ?? 0}</div>
-            <div>Active teams: {autoScheduleDiagnostics.auto_schedule_diagnostics.active_teams_total ?? 0}</div>
-            <div>Expected games: {autoScheduleDiagnostics.auto_schedule_diagnostics.expected_games_total ?? 0}</div>
-            <div>Generated game groups: {autoScheduleDiagnostics.auto_schedule_diagnostics.generated_game_groups_total ?? 0}</div>
-            <div>Placement attempts: {autoScheduleDiagnostics.auto_schedule_diagnostics.placement_attempts ?? 0}</div>
-            <div>Attempted game groups: {autoScheduleDiagnostics.auto_schedule_diagnostics.attempted_game_groups ?? 0}</div>
-            <div>Valid assignments found: {autoScheduleDiagnostics.auto_schedule_diagnostics.valid_assignments_found ?? 0}</div>
-            <div>Preview assignments: {autoScheduleDiagnostics.auto_schedule_diagnostics.preview_assignments_count ?? 0}</div>
-            <div>Committed assignments: {autoScheduleDiagnostics.auto_schedule_diagnostics.committed_assignments_count ?? 0}</div>
-            <div>Failed validation count: {autoScheduleDiagnostics.auto_schedule_diagnostics.failed_validation_count ?? 0}</div>
-            <div>Host availability count: {autoScheduleDiagnostics.auto_schedule_diagnostics.host_availability_total ?? 0}</div>
-            <div>Generated slots by size: Small {autoScheduleDiagnostics.auto_schedule_diagnostics.generated_slots_by_field_size?.SMALL ?? 0}, Medium {autoScheduleDiagnostics.auto_schedule_diagnostics.generated_slots_by_field_size?.MEDIUM ?? 0}, Large {autoScheduleDiagnostics.auto_schedule_diagnostics.generated_slots_by_field_size?.LARGE ?? 0}</div>
-            {autoScheduleDiagnostics.auto_schedule_diagnostics.missing_generated_slot_field_sizes?.length ? <div className='font-semibold text-rose-700'>Missing generated slot sizes: {autoScheduleDiagnostics.auto_schedule_diagnostics.missing_generated_slot_field_sizes.join(', ')}</div> : null}
-            {Object.keys(autoScheduleDiagnostics.auto_schedule_diagnostics.failed_validation_reasons || {}).length ? <div>Failed validation reasons: {Object.entries(autoScheduleDiagnostics.auto_schedule_diagnostics.failed_validation_reasons || {}).map(([reason, count]: any) => `${reason}: ${count}`).join(', ')}</div> : null}
-            {autoScheduleDiagnostics.auto_schedule_diagnostics.active_teams_by_division?.length ? <div className='mt-2'>
-              <div className='font-semibold'>Active teams by division</div>
-              <ul className='list-inside list-disc'>{autoScheduleDiagnostics.auto_schedule_diagnostics.active_teams_by_division.map((row: any) => <li key={row.division_id}>{row.division_name}: {row.active_team_count} teams</li>)}</ul>
-            </div> : null}
-            {autoScheduleDiagnostics.auto_schedule_diagnostics.generated_game_groups_by_division_week?.length ? <div className='mt-2 overflow-x-auto'>
-              <div className='font-semibold'>Expected games vs generated game groups</div>
-              <table className='mt-1 min-w-full border text-xs'>
-                <thead><tr className='bg-slate-100'><th className='border p-1 text-left'>Division</th><th className='border p-1 text-left'>Week</th><th className='border p-1 text-right'>Expected</th><th className='border p-1 text-right'>Generated</th><th className='border p-1 text-right'>Existing scheduled</th></tr></thead>
-                <tbody>{autoScheduleDiagnostics.auto_schedule_diagnostics.generated_game_groups_by_division_week.map((row: any) => <tr key={`${row.division_id}-${row.week}`}><td className='border p-1'>{row.division_name}</td><td className='border p-1'>{row.week}</td><td className='border p-1 text-right'>{row.expected_games ?? 0}</td><td className='border p-1 text-right'>{row.generated_game_groups ?? 0}</td><td className='border p-1 text-right'>{row.existing_scheduled_games ?? 0}</td></tr>)}</tbody>
-              </table>
-            </div> : null}
-            {autoScheduleDiagnostics.auto_schedule_diagnostics.skipped_game_groups?.length ? <div className='mt-1'>Skipped game groups: {autoScheduleDiagnostics.auto_schedule_diagnostics.skipped_game_groups.map((row: any) => `${row.division_name} Week ${row.week} (${row.reason})`).join('; ')}</div> : null}
-            {autoScheduleDiagnostics.auto_schedule_diagnostics.missing_division_week_generation?.length ? <div className='mt-1'>Missing division/week generation: {autoScheduleDiagnostics.auto_schedule_diagnostics.missing_division_week_generation.map((row: any) => `${row.division_name} Week ${row.week} (${row.reason})`).join('; ')}</div> : null}
-          </div> : null}
-          {(autoScheduleDiagnostics.division_week_schedule_diagnostics || autoScheduleDiagnostics.auto_schedule_diagnostics?.division_week_placement_diagnostics)?.length ? <div className='mt-3 overflow-x-auto'>
-            <div className='font-semibold'>7. Division/week placement diagnostics</div>
-            <table className='mt-1 min-w-full border text-xs'>
-              <thead><tr className='bg-slate-100'><th className='border p-1 text-left'>Week</th><th className='border p-1 text-left'>Date</th><th className='border p-1 text-left'>Division</th><th className='border p-1 text-left'>Field size</th><th className='border p-1 text-right'>Teams</th><th className='border p-1 text-right'>Expected</th><th className='border p-1 text-right'>Generated</th><th className='border p-1 text-right'>Attempts</th><th className='border p-1 text-right'>Valid</th><th className='border p-1 text-right'>Scheduled</th><th className='border p-1 text-right'>Missing</th><th className='border p-1 text-left'>Doubleheader</th><th className='border p-1 text-right'>Compatible slots</th><th className='border p-1 text-left'>Skipped/rejected reasons</th></tr></thead>
-              <tbody>{(autoScheduleDiagnostics.division_week_schedule_diagnostics || autoScheduleDiagnostics.auto_schedule_diagnostics?.division_week_placement_diagnostics || []).map((row: any, idx: number) => <tr key={`${row.division_id || row.division_name}-${row.week}-${idx}`} className={Number(row.missing_games || 0) > 0 ? 'bg-rose-50' : ''}><td className='border p-1'>{row.week}</td><td className='border p-1'>{row.week_start_date || row.date || ''}</td><td className='border p-1'>{row.division_name}</td><td className='border p-1'>{row.required_field_size}</td><td className='border p-1 text-right'>{row.active_team_count ?? (Array.isArray(row.active_teams) ? row.active_teams.length : row.active_teams ?? 0)}</td><td className='border p-1 text-right'>{row.expected_games ?? 0}</td><td className='border p-1 text-right'>{row.generated_game_groups ?? 0}</td><td className='border p-1 text-right'>{row.placement_attempts ?? 0}</td><td className='border p-1 text-right'>{row.valid_assignments_found ?? 0}</td><td className='border p-1 text-right'>{row.scheduled_games ?? 0}</td><td className='border p-1 text-right font-semibold'>{row.missing_games ?? 0}</td><td className='border p-1'>{row.doubleheader_team_selected || 'None'}</td><td className='border p-1 text-right'>{row.compatible_slot_count ?? row.compatible_slots_found ?? 0}</td><td className='border p-1'>{[...(row.skipped_placement_reasons || []), ...(row.rejected_placement_reasons || [])].slice(0, 4).join('; ')}</td></tr>)}</tbody>
-            </table>
-            {(autoScheduleDiagnostics.division_week_schedule_diagnostics || []).filter((row: any) => Number(row.missing_games || 0) > 0).map((row: any, idx: number) => <details key={`${row.division_id || row.division_name}-${row.week}-details-${idx}`} className='mt-2 rounded border border-rose-200 bg-white p-2'>
-              <summary className='cursor-pointer font-medium text-rose-800'>{row.division_name} Week {row.week}: expected {row.expected_games ?? 0}, scheduled {row.scheduled_games ?? 0}</summary>
-              <div className='mt-1'>Active teams: {Array.isArray(row.active_teams) ? row.active_teams.join(', ') : row.active_teams}</div>
-              <div>Required matchups generated: {(row.required_matchups_generated || []).join('; ') || 'None'}</div>
-              <div>Missing teams: {(row.missing_teams || []).join(', ') || 'None'}</div>
-              <div>Compatible LARGE slots available: {row.compatible_large_slots_available ?? 'n/a'}</div>
-              <ul className='mt-1 list-inside list-disc'>{(row.placement_attempt_details || []).slice(0, 50).map((attempt: any) => <li key={attempt.attempt_number}>{attempt.status}: {attempt.matchup || 'slot'} at {attempt.slot_date || ''} {attempt.start_time || ''} {attempt.host_location || ''} {attempt.field || ''} — {attempt.reason}</li>)}</ul>
-            </details>)}
-          </div> : null}
-          {autoScheduleDiagnostics.slot_capacity_validation ? <div>
-            <div className='font-semibold'>8. Generated slot capacity preflight</div>
-            <div className='mt-1 text-slate-700'>Hosts evaluated and field-size slot counts before placement.</div>
-            <div className='mt-2 space-y-2'>
-              {(autoScheduleDiagnostics.slot_capacity_validation.validation_rows || []).map((row: any, idx: number) => <div key={`${row.week_start_date}-${idx}`} className='rounded border border-slate-200 bg-white p-2'>
-                <div className='font-medium'>Week {row.week} ({row.week_start_date})</div>
-                <div>Required games by size: Small {row.required_games_by_size?.SMALL ?? 0}, Medium {row.required_games_by_size?.MEDIUM ?? 0}, Large {row.required_games_by_size?.LARGE ?? 0}</div>
-                <div>League-wide demand by size: Small {row.league_wide_demand_by_size?.SMALL ?? row.required_games_by_size?.SMALL ?? 0}, Medium {row.league_wide_demand_by_size?.MEDIUM ?? row.required_games_by_size?.MEDIUM ?? 0}, Large {row.league_wide_demand_by_size?.LARGE ?? row.required_games_by_size?.LARGE ?? 0}</div>
-                <div>Generated slots by size: Small {row.generated_slots_by_size?.SMALL ?? 0}, Medium {row.generated_slots_by_size?.MEDIUM ?? 0}, Large {row.generated_slots_by_size?.LARGE ?? 0}</div>
-                {row.active_divisions_included?.length ? <details className='mt-1'><summary className='cursor-pointer font-medium'>Generated Slots Demand Summary</summary><table className='mt-1 min-w-full border text-xs'><thead><tr className='bg-slate-100'><th className='border p-1 text-left'>Division</th><th className='border p-1 text-right'>Teams</th><th className='border p-1 text-right'>Expected</th><th className='border p-1 text-left'>Field size</th></tr></thead><tbody>{row.active_divisions_included.map((division: any) => <tr key={division.division_id}><td className='border p-1'>{division.division_name}</td><td className='border p-1 text-right'>{division.team_count ?? 0}</td><td className='border p-1 text-right'>{division.expected_games ?? 0}</td><td className='border p-1'>{division.field_size}</td></tr>)}</tbody></table></details> : null}
-                {row.missing_field_sizes?.length ? <div className='font-semibold text-rose-700'>Missing slot sizes: {row.missing_field_sizes.join(', ')}</div> : null}
-                <div>Selected hosts: {(row.selected_hosts || row.host_locations_evaluated)?.length ? (row.selected_hosts || row.host_locations_evaluated).join(', ') : 'None'}</div>
-                {row.zero_slot_reason ? <div className='font-semibold text-rose-700'>Zero-slot reason: {row.zero_slot_reason}</div> : null}
-                {row.generation_reasons?.length ? <ul className='mt-1 list-inside list-disc text-slate-600'>{row.generation_reasons.map((reason: string, reasonIdx: number) => <li key={reasonIdx}>{reason}</li>)}</ul> : null}
-              </div>)}
+            <div className='mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3'>
+              <div>Games committed: <span className='font-semibold'>{autoScheduleDiagnostics.gamesCommitted}</span></div>
+              <div>Preview games: <span className='font-semibold'>{autoScheduleDiagnostics.previewGames}</span></div>
+              <div>Required games missing: <span className='font-semibold'>{autoScheduleDiagnostics.requiredGamesMissing}</span></div>
+              <div>Validation failures: <span className='font-semibold'>{autoScheduleDiagnostics.validationFailures}</span></div>
+              <div>Team time conflicts: <span className='font-semibold'>{autoScheduleDiagnostics.teamTimeConflicts}</span></div>
+              <div>Field time conflicts: <span className='font-semibold'>{autoScheduleDiagnostics.fieldTimeConflicts}</span></div>
+              <div>Back-to-back doubleheader failures: <span className='font-semibold'>{autoScheduleDiagnostics.doubleheaderBackToBackFailures}</span></div>
+              <div>Host owner as away games: <span className='font-semibold'>{autoScheduleDiagnostics.hostOwnerAsAwayGames}</span></div>
+              <div>True home-host rule passed: <span className='font-semibold'>{autoScheduleDiagnostics.trueHomeHostHardRulePassed}</span></div>
+              <div>Total home-host violations: <span className='font-semibold'>{autoScheduleDiagnostics.totalHomeHostViolations}</span></div>
+              <div>Total home-host exceptions: <span className='font-semibold'>{autoScheduleDiagnostics.totalHomeHostExceptions}</span></div>
+              <div>Overflow locations used: <span className='font-semibold'>{autoScheduleDiagnostics.overflowLocationsUsed}</span></div>
+              <div>Latest start time: <span className='font-semibold'>{autoScheduleDiagnostics.latestStartTime}</span></div>
+              <div>Active time window: <span className='font-semibold'>{autoScheduleDiagnostics.activeTimeWindow}</span></div>
+              <div>Pull-forward started: <span className='font-semibold'>{autoScheduleDiagnostics.pullForwardStarted}</span></div>
+              <div>Pull-forward completed: <span className='font-semibold'>{autoScheduleDiagnostics.pullForwardCompleted}</span></div>
+              <div>Games moved earlier: <span className='font-semibold'>{autoScheduleDiagnostics.gamesMovedEarlier}</span></div>
             </div>
-          </div> : null}
+          </section>
+
+          <section className='grid gap-3 lg:grid-cols-2'>
+            <div className='rounded border border-slate-200 bg-white p-3'>
+              <h3 className='font-semibold'>True Home-Host Diagnostics</h3>
+              <dl className='mt-2 grid grid-cols-2 gap-2'>
+                {Object.entries(autoScheduleDiagnostics.trueHomeHost).map(([label, count]) => <div key={label}><dt className='text-slate-600'>{label.replaceAll('_', ' ')}</dt><dd className='font-semibold'>{String(count)}</dd></div>)}
+              </dl>
+            </div>
+            <div className='rounded border border-slate-200 bg-white p-3'>
+              <h3 className='font-semibold'>Turf Wave Diagnostics</h3>
+              <dl className='mt-2 grid grid-cols-2 gap-2'>
+                {Object.entries(autoScheduleDiagnostics.turfWave).map(([label, count]) => <div key={label}><dt className='text-slate-600'>{label.replaceAll('_', ' ')}</dt><dd className='font-semibold'>{String(count)}</dd></div>)}
+              </dl>
+            </div>
+            <div className='rounded border border-slate-200 bg-white p-3'>
+              <h3 className='font-semibold'>Pull-Forward Diagnostics</h3>
+              <dl className='mt-2 grid grid-cols-2 gap-2'>
+                {Object.entries(autoScheduleDiagnostics.pullForward).map(([label, count]) => <div key={label}><dt className='text-slate-600'>{label.replaceAll('_', ' ')}</dt><dd className='font-semibold'>{String(count)}</dd></div>)}
+              </dl>
+            </div>
+            <div className='rounded border border-slate-200 bg-white p-3'>
+              <h3 className='font-semibold'>Rejection Diagnostics</h3>
+              {Object.keys(autoScheduleDiagnostics.rejectionReasons).length ? <ul className='mt-2 list-inside list-disc'>{Object.entries(autoScheduleDiagnostics.rejectionReasons).map(([reason, count]) => <li key={reason}>{reason}: {String(count)}</li>)}</ul> : <p className='mt-2 text-slate-700'>No rejection counts returned.</p>}
+            </div>
+          </section>
+
+          <section className='rounded border border-slate-200 bg-white p-3'>
+            <h3 className='font-semibold'>Validation and placement rejection counts</h3>
+            <div className='mt-2 grid gap-3 lg:grid-cols-2'>
+              <div>
+                <div className='font-medium'>Skipped attempts by reason</div>
+                {Object.keys(autoScheduleDiagnostics.skippedAttemptsByReason).length ? <ul className='mt-1 list-inside list-disc'>{Object.entries(autoScheduleDiagnostics.skippedAttemptsByReason).map(([reason, count]) => <li key={reason}>{reason}: {String(count)}</li>)}</ul> : <p className='mt-1 text-slate-700'>None returned.</p>}
+              </div>
+              <div>
+                <div className='font-medium'>Failed validation reasons</div>
+                {Object.keys(autoScheduleDiagnostics.failedValidationReasons).length ? <ul className='mt-1 list-inside list-disc'>{Object.entries(autoScheduleDiagnostics.failedValidationReasons).map(([reason, count]) => <li key={reason}>{reason}: {String(count)}</li>)}</ul> : <p className='mt-1 text-slate-700'>None returned.</p>}
+              </div>
+            </div>
+          </section>
+
           <details className='rounded border border-slate-200 bg-white p-2'>
-            <summary className='cursor-pointer font-semibold'>Raw auto-schedule diagnostics payload</summary>
-            <pre className='mt-2 max-h-96 overflow-auto whitespace-pre-wrap text-xs'>{JSON.stringify(autoScheduleDiagnostics, null, 2)}</pre>
+            <summary className='cursor-pointer font-semibold'>Safe compact diagnostics preview</summary>
+            <p className='mt-2 text-xs text-slate-600'>The full diagnostics payload is not rendered in the page to prevent browser crashes. Download the JSON file for complete details.</p>
+            <pre className='mt-2 max-h-96 overflow-auto whitespace-pre-wrap text-xs'>{autoScheduleDiagnostics.preview}</pre>
           </details>
         </div>
       </details> : null}
