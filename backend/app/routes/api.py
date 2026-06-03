@@ -1042,6 +1042,27 @@ def _score_turf_wave_configuration(layout_name: str, remaining_demand: dict[str,
     return (fits_required * 1000 + younger_early_bonus * 10 - unused_components * 40 - unsupported_demand * 4, fits_required, -unused_components, -total_components)
 
 
+def _turf_wave_configuration_candidate_diagnostics(remaining_demand: dict[str, int], active_configuration_names: set[str], *, wave_index: int = 0) -> list[dict[str, object]]:
+    candidates = [name for name in active_configuration_names if _turf_configuration_metadata(name)]
+    rows: list[dict[str, object]] = []
+    for name in candidates:
+        metadata = _turf_configuration_metadata(name) or {'counts': _empty_field_size_counts()}
+        counts = {size: int(metadata['counts'].get(size, 0) or 0) for size in FIELD_SIZE_ORDER}
+        score_tuple = _score_turf_wave_configuration(name, remaining_demand, wave_index=wave_index)
+        rows.append({
+            'configuration_name': name,
+            'component_counts_by_size': counts,
+            'score': score_tuple[0],
+            'score_tuple': list(score_tuple),
+            'fits_required_components': score_tuple[1],
+            'unused_components_penalty_basis': -score_tuple[2],
+            'total_components': -score_tuple[3],
+            'remaining_demand_before_wave': _normalized_demand_counts(remaining_demand),
+            'selection_scoring_rule': 'fits_required*1000 + younger_early_bonus*10 - unused_components*40 - unsupported_demand*4',
+        })
+    return sorted(rows, key=lambda row: (int(row.get('score') or 0), int(row.get('fits_required_components') or 0), -int(row.get('unused_components_penalty_basis') or 0), -int(row.get('total_components') or 0), str(row.get('configuration_name') or '')), reverse=True)
+
+
 def _select_turf_wave_configuration(remaining_demand: dict[str, int], active_configuration_names: set[str], *, wave_index: int = 0) -> str | None:
     candidates = [name for name in active_configuration_names if _turf_configuration_metadata(name)]
     if not candidates:
@@ -3164,14 +3185,33 @@ def _dynamic_turf_capacity_for_availability(db: Session, host: HostLocation, ava
     waves: list[dict[str, object]] = []
     cursor = datetime.combine(availability.available_date, availability.start_time)
     for wave_index in range(hours):
+        remaining_before = _normalized_demand_counts(remaining)
+        candidate_diagnostics = _turf_wave_configuration_candidate_diagnostics(remaining_before, active_names, wave_index=wave_index)
         selected = _select_turf_wave_configuration(remaining, active_names, wave_index=wave_index)
         if not selected:
+            waves.append({
+                'host_location_id': str(host.id),
+                'host_location_name': host.name,
+                'game_date': str(availability.available_date),
+                'wave_number': wave_index + 1,
+                'start_time': cursor.time().isoformat(),
+                'end_time': (cursor + timedelta(hours=1)).time().isoformat(),
+                'wave_configuration': None,
+                'approved_configurations_considered': sorted(active_names),
+                'candidate_configuration_scores': candidate_diagnostics,
+                'remaining_demand_before_wave': remaining_before,
+                'remaining_demand_after_wave': remaining_before,
+                'expected_components_by_size': _empty_field_size_counts(),
+                'selected_configuration_reason': 'no approved turf configuration metadata was available for this wave',
+            })
+            cursor += timedelta(hours=1)
             continue
         metadata = _turf_configuration_metadata(selected) or {'counts': _empty_field_size_counts()}
         counts = {size: int(metadata['counts'].get(size, 0) or 0) for size in FIELD_SIZE_ORDER}
         for size in FIELD_SIZE_ORDER:
             capacity[size] += counts[size]
             remaining[size] = max(0, int(remaining.get(size, 0) or 0) - counts[size])
+        selected_score = next((row for row in candidate_diagnostics if row.get('configuration_name') == selected), None)
         waves.append({
             'host_location_id': str(host.id),
             'host_location_name': host.name,
@@ -3181,8 +3221,12 @@ def _dynamic_turf_capacity_for_availability(db: Session, host: HostLocation, ava
             'end_time': (cursor + timedelta(hours=1)).time().isoformat(),
             'wave_configuration': selected,
             'approved_configurations_considered': sorted(active_names),
+            'candidate_configuration_scores': candidate_diagnostics,
+            'selected_configuration_score': selected_score,
+            'remaining_demand_before_wave': remaining_before,
+            'remaining_demand_after_wave': _normalized_demand_counts(remaining),
             'expected_components_by_size': counts,
-            'selected_configuration_reason': 'best dynamic fit for remaining same-date demand',
+            'selected_configuration_reason': 'highest scoring dynamic fit for remaining same-date demand',
         })
         cursor += timedelta(hours=1)
     return capacity, waves
@@ -3206,8 +3250,26 @@ def _host_activation_plan_for_date(db: Session, season_id: uuid.UUID | str | Non
         classified.setdefault(_classify_host_for_date(db, host, availability), []).append((host, availability))
     primary_capacity = _empty_field_size_counts()
     wave_definitions: list[dict[str, object]] = []
+    primary_turf_host_capacity_diagnostics: list[dict[str, object]] = []
     for host, availability in classified.get(HOST_ROLE_PRIMARY_TURF, []):
         capacity, waves = _dynamic_turf_capacity_for_availability(db, host, availability, demand_by_size)
+        host_can_fit, host_reasons = _host_plan_capacity_sufficiency(capacity, demand_by_size)
+        primary_turf_host_capacity_diagnostics.append({
+            'host_location_id': str(host.id),
+            'host_location_name': host.name,
+            'availability_id': str(availability.id),
+            'available_window': {
+                'date': str(availability.available_date),
+                'start_time': availability.start_time.isoformat() if availability.start_time else None,
+                'end_time': availability.end_time.isoformat() if availability.end_time else None,
+                'hours': _hours_between(availability.start_time, availability.end_time, availability.available_date),
+            },
+            'demand_by_field_size': _normalized_demand_counts(demand_by_size),
+            'dynamic_wave_capacity_by_field_size': capacity,
+            'primary_turf_host_can_fit_all_demand_individually': host_can_fit,
+            'capacity_shortfall_reasons': host_reasons,
+            'wave_configurations_selected': waves,
+        })
         for size in FIELD_SIZE_ORDER:
             primary_capacity[size] += capacity[size]
         wave_definitions.extend(waves)
@@ -3215,6 +3277,17 @@ def _host_activation_plan_for_date(db: Session, season_id: uuid.UUID | str | Non
     standard_grass_ids = {host.id for host, _ in classified.get(HOST_ROLE_STANDARD_GRASS, [])}
     primary_turf_ids = {host.id for host, _ in classified.get(HOST_ROLE_PRIMARY_TURF, [])}
     overflow_grass_ids = {host.id for host, _ in classified.get(HOST_ROLE_OVERFLOW_GRASS, []) if bool(getattr(host, 'overflow_activation_allowed', True))}
+    overflow_grass_host_diagnostics = [
+        {
+            'host_location_id': str(host.id),
+            'host_location_name': host.name,
+            'availability_id': str(availability.id),
+            'overflow_activation_allowed': bool(getattr(host, 'overflow_activation_allowed', True)),
+            'minimum_games_to_activate_overflow_host': int(getattr(host, 'minimum_games_to_activate_overflow_host', 2) or 2),
+            'status': 'eligible_overflow_grass_host' if bool(getattr(host, 'overflow_activation_allowed', True)) else 'overflow_activation_disabled',
+        }
+        for host, availability in classified.get(HOST_ROLE_OVERFLOW_GRASS, [])
+    ]
     selected_host_ids: set[uuid.UUID] = set()
     activated_overflow_ids: set[uuid.UUID] = set()
     activation_reason = 'NO_PRIMARY_TURF_HOSTS'
@@ -3229,11 +3302,43 @@ def _host_activation_plan_for_date(db: Session, season_id: uuid.UUID | str | Non
     else:
         selected_host_ids.update(standard_grass_ids or overflow_grass_ids)
     minimum_threshold = min([int(getattr(host, 'minimum_games_to_activate_overflow_host', 2) or 2) for host, _ in classified.get(HOST_ROLE_OVERFLOW_GRASS, [])], default=2)
+    for row in overflow_grass_host_diagnostics:
+        host_id = uuid.UUID(str(row['host_location_id']))
+        if host_id in activated_overflow_ids:
+            row['activated'] = True
+            row['activation_decision_reason'] = activation_reason
+        elif not row.get('overflow_activation_allowed'):
+            row['activated'] = False
+            row['activation_decision_reason'] = 'Overflow activation is disabled for this host location.'
+        elif primary_turf_ids and primary_can_fit:
+            row['activated'] = False
+            row['activation_decision_reason'] = 'Primary turf dynamic wave capacity can fit all required games; overflow grass host not needed.'
+        elif primary_turf_ids:
+            row['activated'] = False
+            row['activation_decision_reason'] = 'Primary turf capacity was insufficient, but this host was not selected for activation.'
+        else:
+            row['activated'] = host_id in selected_host_ids
+            row['activation_decision_reason'] = 'No primary turf host was available; grass hosts were used by the existing fallback selection.'
     return {
         'scheduling_date': str(game_date) if game_date else None,
         'hosts_available': len(host_rows),
         'primary_turf_hosts_considered': [str(host.id) for host, _ in classified.get(HOST_ROLE_PRIMARY_TURF, [])],
+        'primary_turf_capacity_diagnostics': {
+            'diagnostic_label': 'Primary Turf Dynamic Wave Capacity',
+            'demand_by_field_size': _normalized_demand_counts(demand_by_size),
+            'combined_dynamic_wave_capacity_by_field_size': primary_capacity,
+            'primary_turf_capacity_can_fit_all_required_games': primary_can_fit,
+            'capacity_shortfall_reasons': primary_reasons,
+            'hosts': primary_turf_host_capacity_diagnostics,
+        },
         'overflow_grass_hosts_considered': [str(host.id) for host, _ in classified.get(HOST_ROLE_OVERFLOW_GRASS, [])],
+        'overflow_grass_host_diagnostics': {
+            'diagnostic_label': 'Overflow Grass Host Activation',
+            'activation_reason': activation_reason,
+            'primary_turf_capacity_can_fit_all_required_games': primary_can_fit,
+            'primary_turf_capacity_shortfall_reasons': primary_reasons,
+            'hosts': overflow_grass_host_diagnostics,
+        },
         'standard_grass_hosts_considered': [str(host.id) for host, _ in classified.get(HOST_ROLE_STANDARD_GRASS, [])],
         'selected_host_ids': [str(host_id) for host_id in sorted(selected_host_ids, key=str)],
         'selected_host_uuid_set': selected_host_ids,
@@ -5876,6 +5981,21 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         'unknown_host_ownership_candidate_count': 0,
         'formerly_host_balance_rejected_now_allowed_count': 0,
         'host_balance_candidate_details': [],
+        'host_community_balance_decision_summary': {
+            'diagnostic_label': 'Host-Community Balance Decisions',
+            'applied_true_home_candidate_count': 0,
+            'skipped_neutral_site_candidate_count': 0,
+            'unknown_host_ownership_candidate_count': 0,
+            'rejected_true_home_candidate_count': 0,
+        },
+        'grass_to_turf_move_diagnostics': {
+            'diagnostic_label': 'Grass to Turf Compaction Moves',
+            'candidate_count': 0,
+            'accepted_count': 0,
+            'rejected_count': 0,
+            'rejected_by_reason': {},
+            'candidates': [],
+        },
     }
     if not enabled:
         diagnostics['compaction_skipped_reason'] = 'COMPACTION_DISABLED'
@@ -6131,6 +6251,45 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         if isinstance(counts, dict):
             counts[reason] = int(counts.get(reason) or 0) + 1
 
+    def _slot_surface_category(slot: GameSlot | None) -> str:
+        host = slot.host_location if slot else None
+        return 'TURF' if host and str(host.surface_type or '').upper() == 'TURF_STADIUM' else 'GRASS'
+
+    def _record_grass_to_turf_candidate(game: Game | None, source: GameSlot | None, target: GameSlot | None, *, accepted: bool, reason: str | None = None, detail: str | None = None, score_before: int | None = None, score_after: int | None = None, reasons: list[str] | None = None) -> None:
+        if _slot_surface_category(source) != 'GRASS' or _slot_surface_category(target) != 'TURF':
+            return
+        summary = diagnostics.get('grass_to_turf_move_diagnostics')
+        if not isinstance(summary, dict):
+            return
+        summary['candidate_count'] = int(summary.get('candidate_count') or 0) + 1
+        if accepted:
+            summary['accepted_count'] = int(summary.get('accepted_count') or 0) + 1
+        else:
+            summary['rejected_count'] = int(summary.get('rejected_count') or 0) + 1
+            rejected_by_reason = summary.get('rejected_by_reason')
+            if isinstance(rejected_by_reason, dict):
+                key = reason or 'UNKNOWN_REJECTION_REASON'
+                rejected_by_reason[key] = int(rejected_by_reason.get(key) or 0) + 1
+        candidates = summary.get('candidates')
+        if isinstance(candidates, list):
+            candidates.append({
+                'game_id': str(game.id) if game else None,
+                'division': _division_label_for_game(game),
+                'teams': _game_teams(game),
+                'source_surface': _slot_surface_category(source),
+                'target_surface': _slot_surface_category(target),
+                'original_host': source.host_location.name if source and source.host_location else None,
+                'original_time': source.start_time.isoformat() if source and source.start_time else None,
+                'target_host': target.host_location.name if target and target.host_location else None,
+                'target_time': target.start_time.isoformat() if target and target.start_time else None,
+                'accepted': bool(accepted),
+                'decision_reason': reason,
+                'decision_detail': detail,
+                'score_before': score_before,
+                'score_after': score_after,
+                'accepted_reasons': reasons or [],
+            })
+
     def _record_host_balance_candidate_context(row: dict[str, object]) -> None:
         details = diagnostics.get('host_balance_candidate_details')
         if isinstance(details, list):
@@ -6353,6 +6512,7 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
             rejected_row.update(_host_balance_match_context(game, source, target))
             rejected_row['final_rejection_reason'] = normalized_reason
             rejected_row['accepted'] = False
+            _record_grass_to_turf_candidate(game, source, target, accepted=False, reason=normalized_reason, detail=rejected_row.get('rejection_detail'), score_before=score_before, score_after=score_after)
         rejected = diagnostics['rejected_moves']
         if isinstance(rejected, list):
             rejected.append(rejected_row)
@@ -7261,6 +7421,7 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
                     'host_owner_as_away_after_move': False,
                 })
                 diagnostics['accepted_moves_with_younger_division_late_penalty_count'] = len(accepted_with_penalty)
+        _record_grass_to_turf_candidate(game, source, target, accepted=True, reason=reasons[0] if reasons else 'ACCEPTED', detail='Candidate move was accepted by turf wave compaction scoring.', score_before=None, score_after=_score, reasons=reasons)
         accepted = diagnostics['accepted_moves']
         if isinstance(accepted, list):
             accepted.append({
@@ -7388,6 +7549,18 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
                     row['final_rejection_reason'] = 'VALIDATION_FAILED_AFTER_COMPACTION_ROLLBACK'
                     row['rollback_reason'] = diagnostics['rollback_reason']
 
+        grass_to_turf_summary = diagnostics.get('grass_to_turf_move_diagnostics')
+        if isinstance(grass_to_turf_summary, dict):
+            candidates = grass_to_turf_summary.get('candidates')
+            if isinstance(candidates, list):
+                for row in candidates:
+                    if isinstance(row, dict) and row.get('accepted'):
+                        row['accepted'] = False
+                        row['decision_reason'] = 'VALIDATION_FAILED_AFTER_COMPACTION_ROLLBACK'
+                        row['decision_detail'] = 'Candidate move was rolled back because post-compaction validation failed.'
+                grass_to_turf_summary['accepted_count'] = 0
+                grass_to_turf_summary['rejected_count'] = len(candidates)
+
     after = _metrics()
     _record_utilization_metrics('after', after)
     _initialize_partial_wave_details(phase='after')
@@ -7428,6 +7601,20 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
     diagnostics['younger_division_late_penalty_rejection_summary_line'] = (
         f'Former younger-division-late candidates now rejected by: {younger_late_rejection_summary}'
     )
+    host_balance_summary = diagnostics.get('host_community_balance_decision_summary')
+    if isinstance(host_balance_summary, dict):
+        host_balance_summary.update({
+            'applied_true_home_candidate_count': int(diagnostics.get('host_balance_applied_true_home_game_count') or 0),
+            'skipped_neutral_site_candidate_count': int(diagnostics.get('host_balance_skipped_neutral_site_count') or 0),
+            'unknown_host_ownership_candidate_count': int(diagnostics.get('unknown_host_ownership_candidate_count') or 0),
+            'rejected_true_home_candidate_count': int(diagnostics.get('host_balance_rejected_true_home_game_count') or 0),
+            'formerly_rejected_neutral_candidates_now_allowed_count': int(diagnostics.get('formerly_host_balance_rejected_now_allowed_count') or 0),
+            'decision_detail_count': len(diagnostics.get('host_balance_candidate_details') or []),
+        })
+    grass_to_turf_summary = diagnostics.get('grass_to_turf_move_diagnostics')
+    if isinstance(grass_to_turf_summary, dict):
+        grass_to_turf_summary['candidate_count'] = len(grass_to_turf_summary.get('candidates') or [])
+
     diagnostics['turf_wave_optimization_summary'] = {
         'section': 'Turf Wave Optimization Summary',
         'younger_division_late_penalty_rejection_summary_line': diagnostics.get('younger_division_late_penalty_rejection_summary_line'),
