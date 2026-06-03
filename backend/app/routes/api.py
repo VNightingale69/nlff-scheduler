@@ -599,6 +599,7 @@ def _build_revised_scheduling_hierarchy_diagnostics(db: Session, season_id: uuid
             'hosting_community_games': hosting_community_game_rows,
             'active_host_location_diagnostics': active_host_location_details,
             'true_home_host_enforcement_passed': date_home_host_violations == 0 and date_missing_exception_reasons == 0 and date_candidates_not_evaluated == 0,
+            'true_home_host_hard_rule_passed': date_home_host_violations == 0 and date_missing_exception_reasons == 0 and date_candidates_not_evaluated == 0,
             'total_home_host_violations': date_home_host_violations,
             'total_home_host_exceptions': date_exceptions,
             'total_missing_exception_reasons': date_missing_exception_reasons,
@@ -656,7 +657,7 @@ def _build_revised_scheduling_hierarchy_diagnostics(db: Session, season_id: uuid
     if int(neutral_rejected.get('WORSENS_HOST_COMMUNITY_BALANCE') or 0) > 0:
         bug_warnings.append('BUG: neutral-site-to-neutral-site move rejected for host-community balance.')
     if host_owner_as_away_games:
-        bug_warnings.append('BUG: host-community team playing at home but not assigned as home team.')
+        bug_warnings.append('BUG: hosting-community team playing at owned active host but not assigned as home team.')
     if doubleheader_failures:
         bug_warnings.append('BUG: doubleheader rule violated.')
 
@@ -9816,6 +9817,26 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             host_lock_reason = 'fallback host selection used to avoid missing required games'
         else:
             _add_skipped('Unable to schedule required games due to hard scheduling constraints.')
+    # Hard true home-host pre-placement constraint: if a community has active
+    # generated host capacity on this scheduling date and one of its teams is in
+    # the division being placed, that community's owned active host locations
+    # must stay in the candidate set. Host balancing/compaction selection is not
+    # allowed to hide those owned-host candidates before matchup placement.
+    hosting_team_org_ids_for_division = {
+        team.organization_id
+        for team in teams_by_id.values()
+        if team.organization_id in available_host_community_ids
+    }
+    forced_true_home_host_ids = {
+        host_id
+        for org_id in hosting_team_org_ids_for_division
+        for host_id in host_ids_by_org.get(org_id, set())
+    }
+    if forced_true_home_host_ids:
+        selected_host_ids.update(forced_true_home_host_ids)
+        for org_id in hosting_team_org_ids_for_division:
+            if org_id not in selected_rotation_orgs:
+                selected_rotation_orgs.append(org_id)
     if selected_host_ids and not admin_override_third_host:
         remaining_slots = [slot for slot in remaining_slots if slot.host_location_id in selected_host_ids]
         open_slots = [slot for slot in open_slots if slot.host_location_id in selected_host_ids]
@@ -12538,6 +12559,21 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
     host_ids_by_org: dict[str, set[str]] = {}
     for location_id, org_id in host_org_by_location_id.items():
         host_ids_by_org.setdefault(org_id, set()).add(location_id)
+    active_date_host_rows = db.query(GameSlot.host_location_id, HostLocation.organization_id).join(
+        HostLocation, HostLocation.id == GameSlot.host_location_id
+    ).filter(
+        GameSlot.season_id == season_id,
+        GameSlot.week_id == week_id,
+        GameSlot.slot_date == week_game_date,
+        GameSlot.host_location_id.isnot(None),
+    ).distinct().all()
+    active_hosting_community_ids: set[str] = {
+        str(org_id) for _host_id, org_id in active_date_host_rows if org_id
+    }
+    owned_active_hosts_by_community: dict[str, set[str]] = {}
+    for host_id, org_id in active_date_host_rows:
+        if host_id and org_id:
+            owned_active_hosts_by_community.setdefault(str(org_id), set()).add(str(host_id))
 
     def _slot_host_rank(
         requested_slot: GameSlot | None,
@@ -12790,6 +12826,67 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
             return False, 'duplicate opponent'
         return True, ''
 
+    def _true_home_host_ordered_orgs(home_team_id: str, away_team_id: str) -> list[str]:
+        home_team = teams_by_id.get(str(home_team_id))
+        away_team = teams_by_id.get(str(away_team_id))
+        home_org = str(home_team.organization_id) if home_team and home_team.organization_id else None
+        away_org = str(away_team.organization_id) if away_team and away_team.organization_id else None
+        home_active = home_org in active_hosting_community_ids if home_org else False
+        away_active = away_org in active_hosting_community_ids if away_org else False
+        if home_active and away_active:
+            return [org for org in (home_org, away_org) if org]
+        if home_active:
+            return [home_org]
+        if away_active:
+            return [away_org]
+        return []
+
+    def _home_away_for_owned_host(home_team_id: str, away_team_id: str, owner_org_id: str) -> tuple[str, str] | None:
+        home_team = teams_by_id.get(str(home_team_id))
+        away_team = teams_by_id.get(str(away_team_id))
+        if home_team and home_team.organization_id and str(home_team.organization_id) == owner_org_id:
+            return str(home_team_id), str(away_team_id)
+        if away_team and away_team.organization_id and str(away_team.organization_id) == owner_org_id:
+            return str(away_team_id), str(home_team_id)
+        return None
+
+    def _find_valid_true_home_host_slot(home_team_id: str, away_team_id: str, current_slot: GameSlot | None) -> tuple[GameSlot | None, str, str, str | None, list[dict[str, object]]]:
+        rejections: list[dict[str, object]] = []
+        ordered_orgs = _true_home_host_ordered_orgs(home_team_id, away_team_id)
+        if not ordered_orgs:
+            return None, str(home_team_id), str(away_team_id), None, rejections
+        for owner_org_id in ordered_orgs:
+            owned_host_ids = owned_active_hosts_by_community.get(owner_org_id, set())
+            oriented = _home_away_for_owned_host(home_team_id, away_team_id, owner_org_id)
+            if not owned_host_ids or not oriented:
+                continue
+            oriented_home_id, oriented_away_id = oriented
+            candidates = [
+                candidate_slot for candidate_slot in sorted_slots
+                if candidate_slot.host_location_id and str(candidate_slot.host_location_id) in owned_host_ids
+            ]
+            candidates.sort(key=lambda candidate_slot: (
+                0 if current_slot and candidate_slot.id == current_slot.id else 1,
+                candidate_slot.slot_date,
+                candidate_slot.start_time,
+                str(candidate_slot.host_location_id),
+                str(candidate_slot.field_instance_id),
+            ))
+            for candidate_slot in candidates:
+                ok, reason = _can_place_matchup(oriented_home_id, oriented_away_id, candidate_slot)
+                rejections.append({
+                    'candidate_host_location_id': str(candidate_slot.host_location_id) if candidate_slot.host_location_id else None,
+                    'candidate_host_location_name': candidate_slot.host_location.name if candidate_slot.host_location else None,
+                    'candidate_field_or_wave': str(candidate_slot.turf_wave_id or candidate_slot.field_instance_id or candidate_slot.id),
+                    'candidate_start_time': candidate_slot.start_time.isoformat() if candidate_slot.start_time else None,
+                    'rejected': not ok,
+                    'rejection_reason': reason or 'accepted owned active host placement',
+                    'hard_constraint_failure': not ok,
+                })
+                if ok:
+                    return candidate_slot, oriented_home_id, oriented_away_id, owner_org_id, rejections
+        return None, str(home_team_id), str(away_team_id), None, rejections
+
     for proposal in proposals:
         if existing_games_count + created_games >= required_games_for_division_week:
             _add_skipped('weekly game limit reached for selected division/week')
@@ -12803,6 +12900,30 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         if not slot:
             _add_skipped('No compatible large field available for this division.' if required_field_type == 'LARGE' else 'not enough open matching slots')
             continue
+        active_home_host_orgs = _true_home_host_ordered_orgs(str(home_team_id), str(away_team_id))
+        current_slot_owner_org = host_org_by_location_id.get(str(slot.host_location_id)) if slot.host_location_id else None
+        current_slot_is_allowed_owned_host = bool(current_slot_owner_org and current_slot_owner_org in active_home_host_orgs)
+        if active_home_host_orgs and not current_slot_is_allowed_owned_host:
+            owned_slot, owned_home_id, owned_away_id, _owner_org_id, owned_candidate_rejections = _find_valid_true_home_host_slot(str(home_team_id), str(away_team_id), slot)
+            if owned_slot is not None:
+                slot = owned_slot
+                home_team_id = owned_home_id
+                away_team_id = owned_away_id
+                logger.info(
+                    'true_home_host_preplacement_redirect game=%s_vs_%s slot=%s owned_slot=%s owned_candidates=%s',
+                    proposal.get('home_team_id'),
+                    proposal.get('away_team_id'),
+                    proposal.get('slot_id'),
+                    str(owned_slot.id),
+                    owned_candidate_rejections,
+                )
+            elif owned_candidate_rejections:
+                proposal.setdefault('true_home_host_exception_reason', 'all owned active host candidates failed hard validation')
+                proposal.setdefault('owned_host_candidate_rejection_reasons', owned_candidate_rejections)
+        elif active_home_host_orgs and current_slot_is_allowed_owned_host:
+            oriented = _home_away_for_owned_host(str(home_team_id), str(away_team_id), current_slot_owner_org)
+            if oriented:
+                home_team_id, away_team_id = oriented
         selected_slot_unavailable = slot.status != 'OPEN' or slot.assigned_game_id is not None
         if selected_slot_unavailable:
             if is_odd_division and no_byes:
@@ -12816,6 +12937,21 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
             else:
                 _add_skipped('No compatible large field available for this division.' if required_field_type == 'LARGE' else 'not enough open matching slots')
                 continue
+        if active_home_host_orgs:
+            current_slot_owner_org = host_org_by_location_id.get(str(slot.host_location_id)) if slot.host_location_id else None
+            if current_slot_owner_org not in active_home_host_orgs:
+                owned_slot, owned_home_id, owned_away_id, _owner_org_id, owned_candidate_rejections = _find_valid_true_home_host_slot(str(home_team_id), str(away_team_id), slot)
+                if owned_slot is not None:
+                    slot = owned_slot
+                    home_team_id = owned_home_id
+                    away_team_id = owned_away_id
+                elif owned_candidate_rejections:
+                    proposal.setdefault('true_home_host_exception_reason', 'all owned active host candidates failed hard validation')
+                    proposal.setdefault('owned_host_candidate_rejection_reasons', owned_candidate_rejections)
+            else:
+                oriented = _home_away_for_owned_host(str(home_team_id), str(away_team_id), current_slot_owner_org)
+                if oriented:
+                    home_team_id, away_team_id = oriented
         field_time_key = (str(slot.host_location_id), str(slot.field_instance_id), slot.slot_date, slot.start_time)
         if field_time_key in field_time_occupied:
             _add_skipped(f"Rejected: time slot already occupied by existing {field_time_occupied[field_time_key]} game.")
@@ -12836,6 +12972,21 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
             else:
                 _add_skipped('Rejected: team already scheduled at the same exact time.')
                 continue
+        if active_home_host_orgs:
+            current_slot_owner_org = host_org_by_location_id.get(str(slot.host_location_id)) if slot.host_location_id else None
+            if current_slot_owner_org not in active_home_host_orgs:
+                owned_slot, owned_home_id, owned_away_id, _owner_org_id, owned_candidate_rejections = _find_valid_true_home_host_slot(str(home_team_id), str(away_team_id), slot)
+                if owned_slot is not None:
+                    slot = owned_slot
+                    home_team_id = owned_home_id
+                    away_team_id = owned_away_id
+                elif owned_candidate_rejections:
+                    proposal.setdefault('true_home_host_exception_reason', 'all owned active host candidates failed hard validation')
+                    proposal.setdefault('owned_host_candidate_rejection_reasons', owned_candidate_rejections)
+            else:
+                oriented = _home_away_for_owned_host(str(home_team_id), str(away_team_id), current_slot_owner_org)
+                if oriented:
+                    home_team_id, away_team_id = oriented
         if slot.host_location_id is None or slot.field_instance_id is None:
             _add_skipped('Rejected: host location does not have an available compatible field at this date/time.')
             continue
@@ -13123,17 +13274,31 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
                     away_count = week_team_game_counts.get(uuid.UUID(away_tid), 0)
                     if home_count >= 2 or away_count >= 2:
                         continue
+                    active_home_host_orgs = _true_home_host_ordered_orgs(home_tid, away_tid)
                     preferred_slots = sorted(
                         open_slots,
                         key=lambda slot: (
-                            0 if str(slot.host_location_id) in selected_host_ids else (
-                                1 if str(slot.host_location_id) in selected_org_host_ids else 2
+                            0 if slot.host_location_id and host_org_by_location_id.get(str(slot.host_location_id)) in active_home_host_orgs else (
+                                1 if str(slot.host_location_id) in selected_host_ids else (
+                                    2 if str(slot.host_location_id) in selected_org_host_ids else 3
+                                )
                             ),
                             _minutes_from_time(slot.start_time),
                         ),
                     )
                     for slot in preferred_slots:
-                        ok, reason = _can_place_matchup(home_tid, away_tid, slot)
+                        slot_owner_org = host_org_by_location_id.get(str(slot.host_location_id)) if slot.host_location_id else None
+                        oriented = _home_away_for_owned_host(home_tid, away_tid, slot_owner_org) if slot_owner_org in active_home_host_orgs else None
+                        placement_home_tid, placement_away_tid = oriented if oriented else (home_tid, away_tid)
+                        if active_home_host_orgs and slot_owner_org not in active_home_host_orgs:
+                            owned_slot, owned_home_id, owned_away_id, _owner_org_id, owned_candidate_rejections = _find_valid_true_home_host_slot(home_tid, away_tid, slot)
+                            if owned_slot is not None:
+                                slot = owned_slot
+                                placement_home_tid = owned_home_id
+                                placement_away_tid = owned_away_id
+                            elif owned_candidate_rejections:
+                                recovery_diagnostics.append({'slot': f"{slot.start_time} {slot.field_type}", 'home': _team_name(home_tid), 'away': _team_name(away_tid), 'reason': 'all owned active host candidates failed hard validation', 'owned_host_candidate_rejection_reasons': owned_candidate_rejections})
+                        ok, reason = _can_place_matchup(placement_home_tid, placement_away_tid, slot)
                         if not ok:
                             recovery_diagnostics.append({'slot': f"{slot.start_time} {slot.field_type}", 'home': _team_name(home_tid), 'away': _team_name(away_tid), 'reason': reason})
                             continue
@@ -13141,10 +13306,10 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
                             recovery_overflow_used = True
                             two_location_rule_relaxed = True
                             overflow_host_ids.add(str(slot.host_location_id))
-                        game = Game(season_id=season_id, week_id=week_id, home_team_id=home_tid, away_team_id=away_tid, field_id=None, host_location_id=slot.host_location_id, field_instance_id=slot.field_instance_id, game_status_id=status.id, game_date=slot.slot_date, kickoff_time=slot.start_time)
+                        game = Game(season_id=season_id, week_id=week_id, home_team_id=placement_home_tid, away_team_id=placement_away_tid, field_id=None, host_location_id=slot.host_location_id, field_instance_id=slot.field_instance_id, game_status_id=status.id, game_date=slot.slot_date, kickoff_time=slot.start_time)
                         db.add(game); db.flush()
                         slot.status = 'ASSIGNED'; slot.assigned_game_id = game.id
-                        team_time_occupied.add((home_tid, slot.slot_date, slot.start_time)); team_time_occupied.add((away_tid, slot.slot_date, slot.start_time))
+                        team_time_occupied.add((placement_home_tid, slot.slot_date, slot.start_time)); team_time_occupied.add((placement_away_tid, slot.slot_date, slot.start_time))
                         field_time_occupied[(str(slot.host_location_id), str(slot.field_instance_id), slot.slot_date, slot.start_time)] = division.name if division else 'another division'
                         host_time_occupied[(str(slot.host_location_id), slot.slot_date, slot.start_time)] = division.name if division else 'another division'
                         week_team_game_counts[uuid.UUID(home_tid)] = home_count + 1
