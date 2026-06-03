@@ -11,6 +11,16 @@ from app.schemas import GameCreate, GameValidationResponse, ValidationMessage
 
 GAME_DURATION_MINUTES = 60
 
+TURF_CONFIGURATION_ALIASES = {
+    'ONE_MEDIUM_ONE_LARGE': 'ONE_LARGE_ONE_MEDIUM',
+}
+
+
+def _normalize_turf_configuration_name(value: str | None) -> str | None:
+    normalized = str(value or '').strip().upper().replace('-', '_').replace(' ', '_')
+    return TURF_CONFIGURATION_ALIASES.get(normalized, normalized) or None
+
+
 TURF_APPROVED_LAYOUTS_BY_SMALL_MEDIUM_LARGE = {
     (0, 0, 2): 'TWO_LARGE',
     (2, 1, 0): 'ONE_MEDIUM_TWO_SMALL',
@@ -33,7 +43,7 @@ def _turf_slot_layout_code(slots: list[GameSlot], proposed_slot: GameSlot | None
         proposed_size = _normalize_field_size(proposed_slot.field_type)
         if proposed_size in counts:
             counts[proposed_size] += 1
-    return TURF_APPROVED_LAYOUTS_BY_SMALL_MEDIUM_LARGE.get((counts['SMALL'], counts['MEDIUM'], counts['LARGE']))
+    return _normalize_turf_configuration_name(TURF_APPROVED_LAYOUTS_BY_SMALL_MEDIUM_LARGE.get((counts['SMALL'], counts['MEDIUM'], counts['LARGE'])))
 
 
 def _normalize_field_size(value: str | None) -> str | None:
@@ -171,6 +181,16 @@ def validate_game(db: Session, payload: GameCreate, game_id: uuid.UUID | None = 
             if not _turf_slot_layout_code(host_time_slots, matching_slot):
                 hard_conflicts.append(ValidationMessage(code='unsupported_turf_slot_configuration', message='Manual turf assignment must resolve to an approved slot-level configuration within the 120-yard footprint.'))
             if matching_slot.turf_wave:
+                duplicate_component_query = db.query(GameSlot).filter(
+                    GameSlot.turf_wave_id == matching_slot.turf_wave_id,
+                    GameSlot.field_instance_id == matching_slot.field_instance_id,
+                    GameSlot.id != matching_slot.id,
+                    GameSlot.assigned_game_id.isnot(None),
+                )
+                if game_id:
+                    duplicate_component_query = duplicate_component_query.filter(GameSlot.assigned_game_id != game_id)
+                if duplicate_component_query.first() is not None:
+                    hard_conflicts.append(ValidationMessage(code='duplicate_turf_wave_field_component', message='Generated turf field component is already assigned within the selected wave.'))
                 wave_start = datetime.combine(matching_slot.slot_date, matching_slot.turf_wave.start_time)
                 wave_end = datetime.combine(matching_slot.slot_date, matching_slot.turf_wave.end_time)
                 transition_start = wave_start - timedelta(minutes=matching_slot.turf_wave.transition_before_minutes or 0)
