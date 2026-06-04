@@ -4798,6 +4798,22 @@ def _dynamic_turf_capacity_for_availability(db: Session, host: HostLocation, ava
     return capacity, waves
 
 
+def _get_skip_reason(item: object) -> str:
+    """Return a skipped-placement reason from legacy strings or structured rows."""
+    if isinstance(item, dict):
+        return str(item.get('reason', '') or '')
+    return str(item or '')
+
+def _normalize_skipped_entry(item: object, **extra: object) -> dict[str, object]:
+    """Normalize skipped-placement diagnostics while keeping legacy reasons readable."""
+    payload: dict[str, object] = dict(item) if isinstance(item, dict) else {'reason': _get_skip_reason(item)}
+    if not payload.get('reason'):
+        payload['reason'] = _get_skip_reason(item) or 'unknown'
+    for key, value in extra.items():
+        if value is not None and key not in payload:
+            payload[key] = value
+    return payload
+
 def _capacity_by_size_from_slots(slots: list[GameSlot]) -> dict[str, int]:
     counts = _empty_field_size_counts()
     for slot in slots:
@@ -10542,9 +10558,16 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                     'required_field_size': required_field_type,
                     'compatible_slots_found': 0,
                     'compatible_large_slots_available': 0 if _normalize_field_size(required_field_type) == FIELD_SIZE_LARGE else None,
+                    'adjacent_same_location_large_slot_pairs_available': 0 if _normalize_field_size(required_field_type) == FIELD_SIZE_LARGE else None,
+                    'adjacent_same_location_large_slot_pairs_considered': {},
+                    'adjacent_slot_pair_rejection_reasons': [],
+                    'selected_host_locations_available': [],
+                    'turf_wave_large_components_available_by_time': {},
                     'placement_attempt_details': [],
                     'skipped_placement_reasons': [_msg],
                     'doubleheader_team_selected': None,
+                    'doubleheader_team_selection_failure_reasons': ['no compatible large slots'] if is_odd_division and no_byes and _normalize_field_size(required_field_type) == FIELD_SIZE_LARGE else [],
+                    'doubleheader_placement_attempts': [],
                     'doubleheader_placement_failed': bool(is_odd_division and no_byes and max_new_games_without_slots),
                 }
             },
@@ -11320,6 +11343,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     matchups_removed_by_filter: list[dict[str, object]] = []
     required_matchup_pairs: set[tuple[uuid.UUID, uuid.UUID]] = set()
     compatible_adjacent_slot_pairs_by_host: dict[str, list[dict[str, object]]] = {}
+    adjacent_slot_pair_rejection_reasons: list[dict[str, object]] = []
     doubleheader_placement_attempts: list[dict[str, object]] = []
     fallback_doubleheader_team_ids_attempted: list[uuid.UUID] = []
     placement_attempt_details: list[dict[str, object]] = []
@@ -11743,6 +11767,15 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                             'slot_date': str(first.slot_date) if first.slot_date else None,
                             'slot_ids': [str(first.id), str(second.id)],
                             'start_times': [str(first.start_time), str(second.start_time)],
+                            'field_type': _normalize_field_size(first.field_type) or str(first.field_type or ''),
+                        })
+                    elif len(adjacent_slot_pair_rejection_reasons) < 100:
+                        adjacent_slot_pair_rejection_reasons.append({
+                            'host_location_id': str(host_id),
+                            'slot_date': str(a_slot.slot_date) if a_slot.slot_date else None,
+                            'start_time_pair': [str(a_slot.start_time), str(b_slot.start_time)],
+                            'field_type': _normalize_field_size(a_slot.field_type) or str(a_slot.field_type or ''),
+                            'rejection_reason': 'slots are same-location but not adjacent by one game duration',
                         })
         return adjacent_pairs
 
@@ -11775,11 +11808,26 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             double_header_reservation_failure_reasons.append('Unable to place required double-header because no same-location adjacent slots exist.')
         for candidate_team_id in candidates:
             candidate_pairs = _odd_week_matchups_for_doubleheader_team(candidate_team_id)
+            attempt_rejections = []
+            if len(candidate_pairs) < max_new_games:
+                attempt_rejections.append('not enough active opponents remained to build required odd-team weekly matchups')
+            if not adjacent_slot_pairs:
+                attempt_rejections.append('no same-location adjacent slots')
             doubleheader_placement_attempts.append({
                 'team_id': str(candidate_team_id),
                 'team_name': teams_by_id[candidate_team_id].name,
                 'generated_matchups': [_matchup_label(a, b) for a, b in candidate_pairs],
                 'adjacent_slot_pairs_available': len(adjacent_slot_pairs),
+                'candidate_same_location_adjacent_slot_pairs_considered': [
+                    {
+                        'host_location_id': str(first.host_location_id) if first.host_location_id else None,
+                        'host_location': first.host_location.name if first.host_location else None,
+                        'start_time_pair': [str(first.start_time), str(second.start_time)],
+                        'field_type': _normalize_field_size(first.field_type) or str(first.field_type or ''),
+                    }
+                    for first, second in adjacent_slot_pairs[:25]
+                ],
+                'rejection_reasons': attempt_rejections,
             })
             if len(candidate_pairs) < max_new_games:
                 matchups_removed_by_filter.append({
@@ -11814,6 +11862,10 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                 'candidate_doubleheader_teams': [teams_by_id[tid].name for tid in candidates],
             }
             break
+        if selected_double_header_team_id is None and candidates and not double_header_reservation_failure_reasons:
+            double_header_reservation_failure_reasons.append('No eligible doubleheader team found after evaluating candidate teams and adjacent slot constraints.')
+        if not candidates and not double_header_reservation_failure_reasons:
+            double_header_reservation_failure_reasons.append('No eligible doubleheader team found.')
     while remaining_slots and len(plans) < max_new_games:
         if is_odd_division and no_byes and selected_double_header_team_id:
             available_team_ids = [tid for tid in teams_by_id if week_team_game_counts.get(tid, 0) < 1]
@@ -13059,7 +13111,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         len(plans),
         total_created_games,
         rejected_games,
-        [row.get('reason') for row in skipped],
+        [_get_skip_reason(row) for row in skipped],
     )
     unscheduled_team_ids = [str(tid) for tid, count in week_team_game_counts.items() if count == 0]
     teams_with_one_game = [str(tid) for tid, count in week_team_game_counts.items() if count == 1]
@@ -13466,6 +13518,12 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                 'matchups_removed_by_filter': matchups_removed_by_filter,
                 'candidate_doubleheader_teams': [teams_by_id[tid].name for tid in odd_double_header_candidate_ids],
                 'compatible_adjacent_slot_pairs_by_host': compatible_adjacent_slot_pairs_by_host,
+                'adjacent_same_location_large_slot_pairs_available': sum(len(rows) for rows in compatible_adjacent_slot_pairs_by_host.values()) if _normalize_field_size(required_field_type) == FIELD_SIZE_LARGE else None,
+                'adjacent_same_location_large_slot_pairs_considered': compatible_adjacent_slot_pairs_by_host,
+                'adjacent_slot_pair_rejection_reasons': adjacent_slot_pair_rejection_reasons,
+                'doubleheader_team_selection_failure_reasons': double_header_reservation_failure_reasons if not selected_double_header_team_id else [],
+                'selected_host_locations_available': selected_host_ids,
+                'turf_wave_large_components_available_by_time': {},
                 'doubleheader_placement_attempts': doubleheader_placement_attempts,
                 'fallback_doubleheader_teams_attempted': [teams_by_id[tid].name for tid in fallback_doubleheader_team_ids_attempted],
                 'placement_attempts': placement_attempt_counter,
@@ -13481,7 +13539,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                 'search_limit_warnings': search_limit_warnings,
                 'host_activation_summary': host_activation_summary,
                 'compatible_large_slots_available': compatible_slots_found if _normalize_field_size(required_field_type) == FIELD_SIZE_LARGE else None,
-                'skipped_placement_reasons': [row.get('reason') for row in skipped],
+                'skipped_placement_reasons': [_get_skip_reason(row) for row in skipped],
                 'placement_attempt_details': placement_attempt_details,
                 'auto_schedule_placement_priority_diagnostics': placement_priority_diagnostics,
             },
@@ -13494,6 +13552,10 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                 'reservation_failure_reasons': double_header_reservation_failure_reasons,
                 'candidate_doubleheader_teams': [teams_by_id[tid].name for tid in odd_double_header_candidate_ids],
                 'compatible_adjacent_slot_pairs_by_host': compatible_adjacent_slot_pairs_by_host,
+                'adjacent_same_location_large_slot_pairs_available': sum(len(rows) for rows in compatible_adjacent_slot_pairs_by_host.values()) if _normalize_field_size(required_field_type) == FIELD_SIZE_LARGE else None,
+                'adjacent_same_location_large_slot_pairs_considered': compatible_adjacent_slot_pairs_by_host,
+                'adjacent_slot_pair_rejection_reasons': adjacent_slot_pair_rejection_reasons,
+                'doubleheader_team_selection_failure_reasons': double_header_reservation_failure_reasons if not selected_double_header_team_id else [],
                 'doubleheader_placement_attempts': doubleheader_placement_attempts,
                 'fallback_doubleheader_teams_attempted': [teams_by_id[tid].name for tid in fallback_doubleheader_team_ids_attempted],
             },
@@ -14725,9 +14787,9 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
                 db.flush()
         warnings_resolved = max(0, baseline_warning_count - current_warning_count)
         warnings_remaining = current_warning_count
-        skipped.append(f'Double-header optimization swaps attempted: {optimization_swaps_attempted}')
-        skipped.append(f'Warnings resolved: {warnings_resolved}')
-        skipped.append(f'Warnings remaining: {warnings_remaining}')
+        skipped.append({'reason': f'Double-header optimization swaps attempted: {optimization_swaps_attempted}', 'division_id': str(division_id), 'week_id': str(week_id), 'season_id': str(season_id)})
+        skipped.append({'reason': f'Warnings resolved: {warnings_resolved}', 'division_id': str(division_id), 'week_id': str(week_id), 'season_id': str(season_id)})
+        skipped.append({'reason': f'Warnings remaining: {warnings_remaining}', 'division_id': str(division_id), 'week_id': str(week_id), 'season_id': str(season_id)})
 
     selected_host_ids = extract_selected_host_ids(proposals)
     if not selected_host_ids:
@@ -15138,7 +15200,7 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
             'actual_games_scheduled': total_created_for_week,
             'odd_even_status_source': 'division_active_team_count',
             'valid_slot_combinations_found': len(proposals),
-            'rules_relaxed': len([s for s in skipped if 'non-back-to-back' in str(s.get('reason', '')).lower()]),
+            'rules_relaxed': len([s for s in skipped if 'non-back-to-back' in _get_skip_reason(s).lower()]),
             'conflicts_avoided': len(skipped),
             'final_games_created': created_games,
             'same_community_home_swaps': same_community_home_swaps,
@@ -15162,8 +15224,6 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         },
     }
 
-
-
 def _auto_schedule_division_order(db: Session | None = None) -> list[tuple[str, str]]:
     return [
         ('COED', 'K-1'),
@@ -15184,6 +15244,16 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
 
     def _iso_ts(value: datetime) -> str:
         return value.isoformat(timespec='milliseconds') + 'Z'
+
+    def _top_rejection_reasons(limit: int = 10) -> list[dict[str, object]]:
+        try:
+            reasons = failed_validation_reasons
+        except NameError:
+            return []
+        return [
+            {'reason': reason, 'count': count}
+            for reason, count in sorted(reasons.items(), key=lambda item: (-int(item[1] or 0), str(item[0])))[:limit]
+        ]
 
     def _start_phase(name: str, *, records_evaluated: int = 0, moves_considered: int = 0, moves_accepted: int = 0, moves_rejected: int = 0) -> dict[str, object]:
         started = datetime.utcnow()
@@ -15220,7 +15290,7 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         phase['candidates_considered'] = int(phase.get('moves_considered') or 0)
         phase['candidates_accepted'] = int(phase.get('moves_accepted') or 0)
         phase['candidates_rejected'] = int(phase.get('moves_rejected') or 0)
-        phase['top_rejection_reasons'] = []
+        phase['top_rejection_reasons'] = _top_rejection_reasons()
         phase['end_time'] = _iso_ts(ended)
         phase['elapsed_ms'] = elapsed_ms
         phase_metrics.append(phase)
@@ -15436,6 +15506,7 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
     auto_schedule_diagnostics_warnings: list[str] = []
     weekly_diagnostics_by_week_id: dict[uuid.UUID, dict[str, object]] = {}
     division_week_diagnostics: list[dict[str, object]] = []
+    apply_failures: list[dict[str, object]] = []
 
     def _regular_season_weeks() -> list[Week]:
         return [week for week in weeks if _is_regular_season_week(week)]
@@ -15534,7 +15605,7 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
 
     def _record_skipped(skipped_rows: list[dict[str, object]] | None) -> None:
         for row in skipped_rows or []:
-            reason = str((row or {}).get('reason') or 'unknown')
+            reason = (_get_skip_reason(row) or 'unknown')
             key = _normalize_skip_reason(reason)
             skipped_attempts_by_reason[key] = skipped_attempts_by_reason.get(key, 0) + 1
             failed_validation_reasons[key] = failed_validation_reasons.get(key, 0) + 1
@@ -15864,6 +15935,8 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
             'failed_validation_count': 0 if (sum(expected_games_by_week.values()) > 0 and existing_scheduled_games_total >= sum(expected_games_by_week.values())) else max(failed_validation_count, sum(failed_validation_reasons.values())),
             'failed_validation_reasons': {} if (sum(expected_games_by_week.values()) > 0 and existing_scheduled_games_total >= sum(expected_games_by_week.values())) else dict(failed_validation_reasons),
             'database_commit_failed_count': database_commit_failed_count,
+            'apply_failures': apply_failures,
+            'auto_schedule_apply_failures': apply_failures,
             'dry_run': dry_run,
             'scheduled_games_count': existing_scheduled_games_total,
             'existing_scheduled_games_total': existing_scheduled_games_total,
@@ -15872,6 +15945,22 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
             'skipped_reasons': dict(skipped_attempts_by_reason),
             'diagnostics_warnings': auto_schedule_diagnostics_warnings,
             'selected_host_enforcement_diagnostics': selected_host_enforcement_diagnostics,
+            'schedule_complete': (sum(expected_games_by_week.values()) > 0 and existing_scheduled_games_total >= sum(expected_games_by_week.values()) and not apply_failures),
+            'missing_games_total': max(sum(expected_games_by_week.values()) - existing_scheduled_games_total, 0),
+            'missing_games_by_week_and_division': [
+                row for row in generated_game_groups_by_division_week
+                if int(row.get('expected_games') or 0) > int(row.get('existing_scheduled_games') or 0)
+            ],
+            'missing_teams': sorted({
+                team
+                for row in required_games_missing
+                for team in (row.get('teams_missing_games') or [])
+            }),
+            'missing_matchups': [
+                row.get('required_matchups_generated')
+                for row in required_games_missing
+                if row.get('required_matchups_generated')
+            ],
         }
         diagnostics['root_cause_categories'] = _build_root_cause_categories(diagnostics)
         return diagnostics
@@ -15929,6 +16018,12 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
             'skipped_attempts_summary': skipped_attempts_summary,
             'skipped_attempts_by_reason': skipped_attempts_by_reason,
             'required_games_still_missing': [],
+            'schedule_complete': False,
+            'missing_games_total': max(preplacement_expected_games, 0),
+            'missing_games_by_week_and_division': preplacement_diagnostics.get('missing_games_by_week_and_division') or [],
+            'missing_teams': preplacement_diagnostics.get('missing_teams') or [],
+            'missing_matchups': preplacement_diagnostics.get('missing_matchups') or [],
+            'apply_failures': [],
             'warnings': warnings,
             'informational_notes': [],
             'validation_failures': validation_errors,
@@ -16065,10 +16160,28 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
                             division_unresolved = True
                             actual_created_games = _actual_created_game_count_for_week(division.id, week.id)
                             host_count = _host_count_for_week(division.id, week.id)
-                            apply_skipped = [{'reason': f'Placement failed but scheduling continued for later divisions: {exc}'}]
+                            failure_diagnostic = {
+                                'season_id': str(season_id),
+                                'week_id': str(week.id),
+                                'week': week.week_number,
+                                'division_id': str(division.id),
+                                'division_name': division_label,
+                                'exception_type': type(exc).__name__,
+                                'exception_message': str(exc),
+                                'proposals_attempted': len(proposals),
+                                'scheduled_games_after_failure': actual_created_games,
+                                'expected_games': required_games,
+                            }
+                            apply_failures.append(failure_diagnostic)
+                            apply_skipped = [_normalize_skipped_entry({
+                                'reason': f'Placement failed but scheduling continued for later divisions: {type(exc).__name__}: {exc}',
+                                **failure_diagnostic,
+                            })]
                             _record_skipped(apply_skipped)
-                            warnings.append(f'{division_label} Week {week.week_number}: placement failed; continuing with later divisions.')
-                            logger.exception('auto_schedule_apply_failed_continuing season_id=%s week_id=%s division_id=%s', season_id, week.id, division.id)
+                            warning_message = f'{division_label} Week {week.week_number}: placement failed ({type(exc).__name__}); continuing with later divisions.'
+                            warnings.append(warning_message)
+                            validation_errors.append(warning_message)
+                            logger.exception('auto_schedule_apply_failed_continuing season_id=%s week_id=%s division_id=%s exception_type=%s exception_message=%s', season_id, week.id, division.id, type(exc).__name__, str(exc))
             except Exception as exc:
                 db.rollback()
                 division_unresolved = True
@@ -16104,11 +16217,11 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
                 or unscheduled_teams
                 or []
             )
-            skip_reasons = sorted({_skip_reason_code(str((row or {}).get('reason') or 'unknown')) for row in all_skips_for_division_week})
+            skip_reasons = sorted({_skip_reason_code((_get_skip_reason(row) or 'unknown')) for row in all_skips_for_division_week})
             rejected_attempt_reasons = [
-                str(row.get('reason') or 'unknown')
+                (_get_skip_reason(row) or 'unknown')
                 for row in placement_attempt_details
-                if row.get('status') == 'rejected'
+                if isinstance(row, dict) and row.get('status') == 'rejected'
             ]
             division_week_diagnostic = {
                 'division_id': str(division.id),
@@ -16132,10 +16245,17 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
                 'compatible_slots_found': int(preview.get('compatible_slots_found') or placement_preview_diagnostic.get('compatible_slot_count') or missing_preview_diagnostic.get('compatible_slots_found') or 0),
                 'compatible_slot_count': int(preview.get('compatible_slots_found') or placement_preview_diagnostic.get('compatible_slot_count') or missing_preview_diagnostic.get('compatible_slots_found') or 0),
                 'compatible_large_slots_available': placement_preview_diagnostic.get('compatible_large_slots_available') if placement_preview_diagnostic else missing_preview_diagnostic.get('compatible_large_slots_available'),
+                'adjacent_same_location_large_slot_pairs_available': placement_preview_diagnostic.get('adjacent_same_location_large_slot_pairs_available') if placement_preview_diagnostic else missing_preview_diagnostic.get('adjacent_same_location_large_slot_pairs_available'),
+                'adjacent_same_location_large_slot_pairs_considered': placement_preview_diagnostic.get('adjacent_same_location_large_slot_pairs_considered') if placement_preview_diagnostic else missing_preview_diagnostic.get('adjacent_same_location_large_slot_pairs_considered'),
+                'adjacent_slot_pair_rejection_reasons': placement_preview_diagnostic.get('adjacent_slot_pair_rejection_reasons') if placement_preview_diagnostic else missing_preview_diagnostic.get('adjacent_slot_pair_rejection_reasons'),
+                'selected_host_locations_available': placement_preview_diagnostic.get('selected_host_locations_available') if placement_preview_diagnostic else missing_preview_diagnostic.get('selected_host_locations_available'),
+                'turf_wave_large_components_available_by_time': placement_preview_diagnostic.get('turf_wave_large_components_available_by_time') if placement_preview_diagnostic else missing_preview_diagnostic.get('turf_wave_large_components_available_by_time'),
+                'doubleheader_team_selection_failure_reasons': placement_preview_diagnostic.get('doubleheader_team_selection_failure_reasons') if placement_preview_diagnostic else missing_preview_diagnostic.get('doubleheader_team_selection_failure_reasons'),
+                'doubleheader_placement_attempts': placement_preview_diagnostic.get('doubleheader_placement_attempts') if placement_preview_diagnostic else missing_preview_diagnostic.get('doubleheader_placement_attempts'),
                 'host_activation_summary': placement_preview_diagnostic.get('host_activation_summary') if placement_preview_diagnostic else missing_preview_diagnostic.get('host_activation_summary'),
                 'placement_attempt_details': placement_attempt_details,
                 'rejected_placement_reasons': rejected_attempt_reasons,
-                'skipped_placement_reasons': [str((row or {}).get('reason') or 'unknown') for row in all_skips_for_division_week],
+                'skipped_placement_reasons': [(_get_skip_reason(row) or 'unknown') for row in all_skips_for_division_week],
                 'doubleheader_team_selected': preview_dh.get('selected_team_name') or placement_preview_diagnostic.get('doubleheader_team_selected') or missing_preview_diagnostic.get('doubleheader_team_selected'),
                 'doubleheader_placement_failed': bool(
                     (active_team_count % 2 == 1)
@@ -16247,12 +16367,17 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
                     'created_games': actual_created_games,
                     'missing_games': missing_games,
                     'teams_missing_games': missing_team_names,
-                    'rejected_placement_reasons': rejected_attempt_reasons or [str((row or {}).get('reason') or 'unknown') for row in all_skips_for_division_week],
+                    'rejected_placement_reasons': rejected_attempt_reasons or [(_get_skip_reason(row) or 'unknown') for row in all_skips_for_division_week],
                     'placement_attempt_details': placement_attempt_details,
                     'required_matchups_generated': required_matchups_generated,
                     'doubleheader_team_selected': division_week_diagnostic.get('doubleheader_team_selected'),
                     'compatible_slot_count': division_week_diagnostic.get('compatible_slot_count'),
                     'compatible_large_slots_available': division_week_diagnostic.get('compatible_large_slots_available'),
+                    'adjacent_same_location_large_slot_pairs_available': division_week_diagnostic.get('adjacent_same_location_large_slot_pairs_available'),
+                    'adjacent_same_location_large_slot_pairs_considered': division_week_diagnostic.get('adjacent_same_location_large_slot_pairs_considered'),
+                    'adjacent_slot_pair_rejection_reasons': division_week_diagnostic.get('adjacent_slot_pair_rejection_reasons'),
+                    'doubleheader_team_selection_failure_reasons': division_week_diagnostic.get('doubleheader_team_selection_failure_reasons'),
+                    'doubleheader_placement_attempts': division_week_diagnostic.get('doubleheader_placement_attempts'),
                 })
                 validation_errors.append(
                     f'{division_label} Week {week.week_number}: required={required_games}, created={actual_created_games}, missing={missing_games}, teams_missing_games={missing_team_names}'
@@ -16597,6 +16722,27 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
     failed_validation_total = int(auto_schedule_diagnostics.get('failed_validation_count') or 0)
     failed_validation_total += int(((auto_schedule_diagnostics.get('True Home-Host Diagnostics') or {}).get('total_home_host_violations') or 0))
     required_missing_total = sum(int(row.get('missing_games') or 0) for row in required_games_missing)
+    missing_games_by_week_and_division = [
+        row for row in (auto_schedule_diagnostics.get('generated_game_groups_by_division_week') or [])
+        if int(row.get('expected_games') or 0) > int(row.get('existing_scheduled_games') or 0)
+    ]
+    missing_teams = sorted({
+        team
+        for row in required_games_missing
+        for team in (row.get('teams_missing_games') or row.get('missing_teams') or [])
+    })
+    missing_matchups = [
+        row.get('required_matchups_generated')
+        for row in required_games_missing
+        if row.get('required_matchups_generated')
+    ]
+    auto_schedule_diagnostics['apply_failures'] = apply_failures
+    auto_schedule_diagnostics['auto_schedule_apply_failures'] = apply_failures
+    auto_schedule_diagnostics['missing_games_total'] = required_missing_total
+    auto_schedule_diagnostics['missing_games_by_week_and_division'] = missing_games_by_week_and_division
+    auto_schedule_diagnostics['missing_teams'] = missing_teams
+    auto_schedule_diagnostics['missing_matchups'] = missing_matchups
+    auto_schedule_diagnostics['schedule_complete'] = False
     division_week_counts_complete = all(
         int(row.get('generated_game_groups') or 0) == int(row.get('expected_games') or 0)
         and int(row.get('existing_scheduled_games') or 0) == int(row.get('expected_games') or 0)
@@ -16609,10 +16755,12 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         and failed_validation_total == 0
         and division_week_counts_complete
         and not validation_errors
+        and not apply_failures
     )
 
-    final_status = 'complete' if diagnostic_complete else 'incomplete'
-    final_message = 'Auto-schedule completed successfully. All required games are scheduled.' if diagnostic_complete else 'Auto-schedule completed with missing required games; review validation_failures and diagnostics.'
+    auto_schedule_diagnostics['schedule_complete'] = diagnostic_complete
+    final_status = 'complete' if diagnostic_complete else ('PARTIAL_SUCCESS' if total_games_created > 0 or scheduled_games_count > 0 else 'VALIDATION_FAILED')
+    final_message = 'Auto-schedule completed successfully. All required games are scheduled.' if diagnostic_complete else 'Auto-schedule completed with missing required games or apply failures; review validation_failures and diagnostics.'
     if dry_run:
         final_status = 'complete' if preview_assignments_count > 0 else 'warning'
         if preview_assignments_count > 0:
@@ -16646,6 +16794,7 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         'optimization_limits_hit': optimization_limits_hit,
         'timeout_triggered': timeout_triggered,
         'best_valid_schedule_returned': bool(turf_wave_compaction.get('best_valid_schedule_returned', True)) if 'turf_wave_compaction' in locals() else True,
+        'top_rejection_reasons': _top_rejection_reasons(),
     }
     auto_schedule_diagnostics['phase_metrics'] = phase_metrics
     auto_schedule_diagnostics['total_runtime_ms'] = total_elapsed_ms
@@ -16685,6 +16834,12 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         'skipped_attempts_summary': skipped_attempts_summary,
         'skipped_attempts_by_reason': skipped_attempts_by_reason,
         'required_games_still_missing': required_games_missing,
+        'schedule_complete': diagnostic_complete,
+        'missing_games_total': required_missing_total,
+        'missing_games_by_week_and_division': missing_games_by_week_and_division,
+        'missing_teams': missing_teams,
+        'missing_matchups': missing_matchups,
+        'apply_failures': apply_failures,
         'warnings': warnings,
         'informational_notes': informational_notes,
         'validation_failures': validation_errors,
