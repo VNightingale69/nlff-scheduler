@@ -1980,10 +1980,13 @@ def _score_turf_wave_configuration(layout_name: str, remaining_demand: dict[str,
     counts = metadata['counts'] if metadata else {size: 0 for size in FIELD_SIZE_ORDER}
     fits_required = sum(min(int(counts.get(size, 0) or 0), max(int(remaining_demand.get(size, 0) or 0), 0)) for size in FIELD_SIZE_ORDER)
     unused_components = sum(max(int(counts.get(size, 0) or 0) - max(int(remaining_demand.get(size, 0) or 0), 0), 0) for size in FIELD_SIZE_ORDER)
-    unsupported_demand = sum(max(int(remaining_demand.get(size, 0) or 0) - int(counts.get(size, 0) or 0), 0) for size in FIELD_SIZE_ORDER)
+    later_games_reduced = fits_required
     total_components = sum(int(counts.get(size, 0) or 0) for size in FIELD_SIZE_ORDER)
-    younger_early_bonus = 1 if wave_index <= 1 and int(counts.get(FIELD_SIZE_SMALL, 0) or 0) else 0
-    return (fits_required * 1000 + younger_early_bonus * 10 - unused_components * 40 - unsupported_demand * 4, fits_required, -unused_components, -total_components)
+    # Hard utilization order: maximize valid same-size component usage for this
+    # chronological block, then minimize unused components.  Soft division/age
+    # preferences intentionally do not participate in turf wave configuration
+    # selection because wave fill must be global by required field size.
+    return (fits_required * 1000 - unused_components * 40 + later_games_reduced, fits_required, -unused_components, -total_components)
 
 
 def _turf_wave_configuration_candidate_diagnostics(remaining_demand: dict[str, int], active_configuration_names: set[str], *, wave_index: int = 0) -> list[dict[str, object]]:
@@ -2002,7 +2005,7 @@ def _turf_wave_configuration_candidate_diagnostics(remaining_demand: dict[str, i
             'unused_components_penalty_basis': -score_tuple[2],
             'total_components': -score_tuple[3],
             'remaining_demand_before_wave': _normalized_demand_counts(remaining_demand),
-            'selection_scoring_rule': 'fits_required*1000 + younger_early_bonus*10 - unused_components*40 - unsupported_demand*4',
+            'selection_scoring_rule': 'maximize valid same-size assignments, then fewest unused components, then reduce later same-date games',
         })
     return sorted(rows, key=lambda row: (int(row.get('score') or 0), int(row.get('fits_required_components') or 0), -int(row.get('unused_components_penalty_basis') or 0), -int(row.get('total_components') or 0), str(row.get('configuration_name') or '')), reverse=True)
 
@@ -4499,7 +4502,9 @@ def _host_role_value(host: HostLocation | None) -> str | None:
 def _is_turf_stadium_host(host: HostLocation | None) -> bool:
     if not host:
         return False
-    return _host_role_value(host) == HOST_ROLE_TURF_STADIUM or str(getattr(host, 'surface_type', '') or '').strip().upper() == 'TURF_STADIUM'
+    role = _host_role_value(host)
+    surface = str(getattr(host, 'surface_type', '') or '').strip().upper()
+    return surface == 'TURF_STADIUM' or role in {HOST_ROLE_TURF_STADIUM, HOST_ROLE_PRIMARY_TURF, HOST_ROLE_SECONDARY_TURF}
 
 
 def _host_supports_turf_waves(db: Session, host: HostLocation | None) -> bool:
@@ -4552,13 +4557,13 @@ def _highest_priority_host_ids_for_org(host_ids: set[uuid.UUID], host_role_by_id
 
 
 def _renumber_turf_waves_for_host_date(db: Session, host_location_id: uuid.UUID | None, host_date: date | None) -> None:
-    """Keep turf wave identity scoped to one availability, host location, and game date.
+    """Keep turf wave identity scoped to one selected turf-capable host/date.
 
     Wave numbers are chronological time-block numbers. They intentionally do not
-    encode or reset by turf configuration. Grass/non-turf hosts are ignored.  The
-    field-instance name update is collision-safe because field names are unique
-    per hosting availability; referenced historical fields may already own a
-    readable wave label that a regenerated component would otherwise reuse.
+    encode configuration and are never global across host locations. Grass and
+    non-turf-capable hosts are ignored. Field-instance label updates remain
+    collision-safe per hosting availability, but the displayed wave number is
+    the host/date-local chronological number.
     """
     if not host_location_id or not host_date:
         return
@@ -4568,56 +4573,55 @@ def _renumber_turf_waves_for_host_date(db: Session, host_location_id: uuid.UUID 
     waves = db.query(TurfWave).filter(
         TurfWave.host_location_id == host_location_id,
         TurfWave.host_date == host_date,
-    ).order_by(TurfWave.hosting_availability_id.asc(), TurfWave.start_time.asc(), TurfWave.id.asc()).all()
-    waves_by_availability: dict[uuid.UUID, list[TurfWave]] = {}
+    ).order_by(TurfWave.start_time.asc(), TurfWave.id.asc()).all()
+    wave_number_by_id = {wave.id: index for index, wave in enumerate(waves, start=1)}
     for wave in waves:
-        waves_by_availability.setdefault(wave.hosting_availability_id, []).append(wave)
+        expected_number = wave_number_by_id.get(wave.id)
+        if expected_number and wave.sequence_number != expected_number:
+            wave.sequence_number = expected_number
 
     existing_names_by_availability: dict[uuid.UUID, dict[str, uuid.UUID]] = {}
-    for availability_id, availability_waves in waves_by_availability.items():
-        for index, wave in enumerate(sorted(availability_waves, key=lambda item: (item.start_time, str(item.id))), start=1):
-            if wave.sequence_number != index:
-                wave.sequence_number = index
-
-        existing_names_by_availability[availability_id] = {
-            name: field_instance_id
-            for field_instance_id, name in db.query(FieldInstance.id, FieldInstance.field_name).filter(
-                FieldInstance.hosting_availability_id == availability_id,
-            ).all()
-        }
-        names_by_availability = existing_names_by_availability[availability_id]
-        for wave_index, wave in enumerate(sorted(availability_waves, key=lambda item: (item.start_time, str(item.id))), start=1):
-            layout = _normalize_configuration_name(wave.preferred_layout_code)
-            wave_slots = db.query(GameSlot).filter(GameSlot.turf_wave_id == wave.id).all()
-            instances = sorted(
-                {slot.field_instance for slot in wave_slots if slot.field_instance is not None},
-                key=lambda instance: (_field_size_sequence_rank(instance.field_type), str(instance.id)),
-            )
-            component_counts = {size: 0 for size in FIELD_SIZE_ORDER}
-            for instance in instances:
-                size = _normalize_field_size(instance.field_type)
-                if size not in component_counts:
-                    continue
-                component_counts[size] += 1
-                desired_name = f'Wave {wave_index} {layout} {size.title()} Field {component_counts[size]}'
-                owner_id = names_by_availability.get(desired_name)
-                if owner_id and owner_id != instance.id:
-                    logger.warning(
-                        '%s availability_id=%s host_location_id=%s existing_field_instance_id=%s proposed_field_instance_id=%s field_name=%s',
-                        GENERATED_SLOT_REGENERATION_BUG_WARNINGS['rename_collision'],
-                        wave.hosting_availability_id,
-                        host_location_id,
-                        owner_id,
-                        instance.id,
-                        desired_name,
-                    )
-                    continue
-                old_name = instance.field_name
-                if old_name != desired_name:
-                    if old_name in names_by_availability and names_by_availability[old_name] == instance.id:
-                        del names_by_availability[old_name]
-                    instance.field_name = desired_name
-                    names_by_availability[desired_name] = instance.id
+    for wave in waves:
+        if wave.hosting_availability_id not in existing_names_by_availability:
+            existing_names_by_availability[wave.hosting_availability_id] = {
+                name: field_instance_id
+                for field_instance_id, name in db.query(FieldInstance.id, FieldInstance.field_name).filter(
+                    FieldInstance.hosting_availability_id == wave.hosting_availability_id,
+                ).all()
+            }
+        names_by_availability = existing_names_by_availability[wave.hosting_availability_id]
+        wave_index = wave_number_by_id.get(wave.id, wave.sequence_number)
+        layout = _normalize_configuration_name(wave.preferred_layout_code)
+        wave_slots = db.query(GameSlot).filter(GameSlot.turf_wave_id == wave.id).all()
+        instances = sorted(
+            {slot.field_instance for slot in wave_slots if slot.field_instance is not None},
+            key=lambda instance: (_field_size_sequence_rank(instance.field_type), str(instance.id)),
+        )
+        component_counts = {size: 0 for size in FIELD_SIZE_ORDER}
+        for instance in instances:
+            size = _normalize_field_size(instance.field_type)
+            if size not in component_counts:
+                continue
+            component_counts[size] += 1
+            desired_name = f'Wave {wave_index} {layout} {size.title()} Field {component_counts[size]}'
+            owner_id = names_by_availability.get(desired_name)
+            if owner_id and owner_id != instance.id:
+                logger.warning(
+                    '%s availability_id=%s host_location_id=%s existing_field_instance_id=%s proposed_field_instance_id=%s field_name=%s',
+                    GENERATED_SLOT_REGENERATION_BUG_WARNINGS['rename_collision'],
+                    wave.hosting_availability_id,
+                    host_location_id,
+                    owner_id,
+                    instance.id,
+                    desired_name,
+                )
+                continue
+            old_name = instance.field_name
+            if old_name != desired_name:
+                if old_name in names_by_availability and names_by_availability[old_name] == instance.id:
+                    del names_by_availability[old_name]
+                instance.field_name = desired_name
+                names_by_availability[desired_name] = instance.id
 
 
 def _date_host_availabilities(db: Session, season_id: uuid.UUID | str | None, week_id: uuid.UUID | str | None, game_date: date | None, allowed_host_ids: set[uuid.UUID] | None = None) -> list[tuple[HostLocation, HostingAvailability]]:
@@ -7661,7 +7665,12 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
             HostingAvailability,
             HostingAvailability.id == TurfWave.hosting_availability_id,
         ).filter(HostingAvailability.season_id == season_id).all()
-        waves = {wave.id: wave for wave in wave_rows}
+        waves = {
+            wave.id: wave
+            for wave in wave_rows
+            if _host_plan_allowed_host_ids_for_week(db, season_id, wave.week_id, wave.host_date) is None
+            or wave.host_location_id in (_host_plan_allowed_host_ids_for_week(db, season_id, wave.week_id, wave.host_date) or set())
+        }
         slots_by_wave = {wave_id: [] for wave_id in waves}
         if waves:
             for slot in db.query(GameSlot).filter(GameSlot.turf_wave_id.in_(list(waves))).all():
@@ -8315,7 +8324,11 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         return None
 
     def _score_move(game: Game, source: GameSlot, target: GameSlot, target_wave: TurfWave, source_wave: TurfWave | None) -> tuple[int, list[str], dict[str, object] | None, dict[str, object] | None]:
-        younger_late_penalty = _younger_division_late_penalty(game, source, target, target_wave)
+        # Turf wave compaction is governed by hard-rule feasibility and
+        # same-date field-size utilization; division age/category preferences
+        # must not preserve later placement when an earlier compatible component
+        # is available.
+        younger_late_penalty = 0
         host_balance_row: dict[str, object] | None = None
 
         def reject_move(reason: str, *, detail: str | None = None, hard_constraint_failure: bool = True, score_before: int | None = None, score_after: int | None = None) -> tuple[int, list[str], dict[str, object] | None, dict[str, object] | None]:
@@ -8344,6 +8357,9 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
 
         if target.assigned_game_id or str(target.status or '').upper() != 'OPEN':
             return reject_move('TARGET_SLOT_NOT_AVAILABLE', detail='Target slot is not open or already has an assigned game.')
+        allowed_target_hosts = _host_plan_allowed_host_ids_for_week(db, season_id, target.week_id, target.slot_date)
+        if allowed_target_hosts is not None and target.host_location_id not in allowed_target_hosts:
+            return reject_move('SELECTED_HOST_VIOLATION', detail='Target host location is not SELECTED in host_plan_selections for this game date.')
         if source.id == target.id:
             return reject_move('SOURCE_GAME_ALREADY_OPTIMAL', detail='Source game is already in the target slot.', hard_constraint_failure=False)
         if source.slot_date != target.slot_date or game.game_date != target.slot_date:
@@ -8915,7 +8931,146 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         diagnostics['candidate_moves_evaluated'] = int(diagnostics.get('candidate_moves_evaluated') or 0) + 1
         diagnostics['total_candidate_moves_evaluated'] = int(diagnostics.get('total_candidate_moves_evaluated') or 0) + 1
 
+    def _global_turf_wave_utilization_diagnostics(phase: str) -> list[dict[str, object]]:
+        waves, slots_by_wave = _wave_rows()
+        scheduled_games = _build_compaction_scheduled_games()
+        groups: dict[tuple[uuid.UUID | None, date | None], list[TurfWave]] = {}
+        for wave in waves.values():
+            groups.setdefault((wave.host_location_id, wave.host_date), []).append(wave)
+        rejected_by_game: dict[str, list[str]] = {}
+        for row in diagnostics.get('rejected_moves') or []:
+            if isinstance(row, dict) and row.get('game_id'):
+                rejected_by_game.setdefault(str(row.get('game_id')), []).append(str(row.get('rejection_reason') or 'UNKNOWN_REJECTION_REASON'))
+        rows: list[dict[str, object]] = []
+        for (host_id, host_date), group_waves in sorted(groups.items(), key=lambda item: (item[0][1] or date.min, str(item[0][0]))):
+            host = db.query(HostLocation).filter(HostLocation.id == host_id).first() if host_id else None
+            ordered = sorted(group_waves, key=lambda wave: (wave.start_time or time.min, str(wave.id)))
+            wave_numbers = [int(wave.sequence_number or 0) for wave in ordered]
+            expected = list(range(1, len(ordered) + 1))
+            wave_rows: list[dict[str, object]] = []
+            utilization_by_wave: dict[str, object] = {}
+            games_left_late: list[dict[str, object]] = []
+            active_starts = []
+            for expected_number, wave in enumerate(ordered, start=1):
+                wave_slots = slots_by_wave.get(wave.id, [])
+                active_configs = db.query(HostLocationConfiguration).filter(
+                    HostLocationConfiguration.host_location_id == wave.host_location_id,
+                    HostLocationConfiguration.is_active.is_(True),
+                ).all() if wave.host_location_id else []
+                active_names = _available_turf_configuration_names(active_configs)
+                expected_counts = _wave_capacity_counts(wave, wave_slots)
+                assigned_counts = _assigned_counts(wave_slots)
+                unused_counts = {size: max(0, int(expected_counts.get(size) or 0) - int(assigned_counts.get(size) or 0)) for size in FIELD_SIZE_ORDER}
+                total_expected = sum(expected_counts.values()) or len(wave_slots)
+                total_assigned = sum(assigned_counts.values())
+                status = 'EMPTY' if total_assigned == 0 else ('FULL' if total_expected and total_assigned >= total_expected and all(unused_counts.get(size, 0) == 0 for size in FIELD_SIZE_ORDER) else 'PARTIAL')
+                if total_assigned and wave.start_time:
+                    active_starts.append(wave.start_time)
+                later_by_size = {size: 0 for size in FIELD_SIZE_ORDER}
+                later_considered_by_size = {size: [] for size in FIELD_SIZE_ORDER}
+                rejected_reason_counts: dict[str, int] = {}
+                for row in scheduled_games:
+                    row_date = _coerce_compaction_date(row.get('date'))
+                    row_start = _coerce_compaction_time(row.get('start_time'))
+                    if row_date != host_date or not row_start or not wave.start_time or row_start <= wave.start_time:
+                        continue
+                    game_size = _field_size_label(row.get('field_type'))
+                    if not game_size or int(unused_counts.get(game_size) or 0) <= 0:
+                        continue
+                    later_by_size[game_size] += 1
+                    later_considered_by_size[game_size].append(str(row.get('game_id')))
+                    reasons = rejected_by_game.get(str(row.get('game_id')), [])
+                    if not reasons:
+                        games_left_late.append({'game_id': str(row.get('game_id')), 'start_time': row_start.isoformat(), 'field_size': game_size, 'reason': 'NO_HARD_REJECTION_REASON_RECORDED'})
+                    for reason in reasons:
+                        rejected_reason_counts[reason] = int(rejected_reason_counts.get(reason) or 0) + 1
+                considered_configs = []
+                demand_remaining = {size: int(assigned_counts.get(size) or 0) + int(later_by_size.get(size) or 0) for size in FIELD_SIZE_ORDER}
+                selected_config = _normalize_configuration_name(wave.preferred_layout_code)
+                best_config = None
+                best_score = None
+                for config_name in sorted(active_names):
+                    metadata = _turf_configuration_metadata(config_name) or {'counts': _empty_field_size_counts()}
+                    counts = {size: int(metadata['counts'].get(size, 0) or 0) for size in FIELD_SIZE_ORDER}
+                    valid_by_size = {size: min(counts.get(size, 0), demand_remaining.get(size, 0)) for size in FIELD_SIZE_ORDER}
+                    potential = sum(valid_by_size.values())
+                    unused = sum(max(0, counts.get(size, 0) - valid_by_size.get(size, 0)) for size in FIELD_SIZE_ORDER)
+                    score_tuple = (potential, -unused, -sum(counts.values()), config_name)
+                    if best_score is None or score_tuple > best_score:
+                        best_score = score_tuple
+                        best_config = config_name
+                    considered_configs.append({
+                        'configuration_name': config_name,
+                        'available_components_by_size': _compact_size_counts(counts),
+                        'valid_candidate_games_by_size': _compact_size_counts(valid_by_size),
+                        'potential_assignments_count': potential,
+                        'unused_components_count': unused,
+                        'rejected_reason_if_not_selected': None if config_name == selected_config else 'LOWER_VALID_UTILIZATION_OR_TIE_BREAK',
+                    })
+                if best_config and selected_config != best_config:
+                    _add_diagnostics_warning('BUG: selected wave configuration did not maximize valid field usage.', error=True)
+                if status == 'PARTIAL' and any(later_by_size.values()) and not rejected_reason_counts:
+                    _add_diagnostics_warning('BUG: earlier turf wave left partially unused while compatible later game exists.', error=True)
+                    _add_diagnostics_warning('BUG: game remained later without hard rejection reason for earlier compatible component.', error=True)
+                component_rows = []
+                for size in FIELD_SIZE_ORDER:
+                    for _ in range(int(unused_counts.get(size) or 0)):
+                        considered = later_considered_by_size.get(size) or []
+                        component_rows.append({
+                            'field_size': size,
+                            'compatible_later_games_considered': considered,
+                            'compatible_later_games_rejected_by_reason': rejected_reason_counts,
+                            'final_reason_component_unused': 'NO_COMPATIBLE_LATER_GAME' if not considered else (';'.join(sorted(rejected_reason_counts)) if rejected_reason_counts else 'NO_HARD_REJECTION_REASON_RECORDED'),
+                        })
+                utilization_pct = round((total_assigned / total_expected) * 100, 1) if total_expected else 0
+                wave_row = {
+                    'host_location_id': str(wave.host_location_id) if wave.host_location_id else None,
+                    'game_date': host_date.isoformat() if host_date else None,
+                    'wave_number': wave.sequence_number,
+                    'start_time': wave.start_time.isoformat() if wave.start_time else None,
+                    'selected_wave_configuration': selected_config,
+                    'approved_configurations_considered': sorted(active_names),
+                    'configuration_selection_reason': 'max valid same-date field-size utilization; tie fewest unused components',
+                    'expected_components_by_size': _compact_size_counts(expected_counts),
+                    'assigned_components_by_size': _compact_size_counts(assigned_counts),
+                    'unused_components_by_size': _compact_size_counts(unused_counts),
+                    'utilization_percentage': utilization_pct,
+                    'wave_status': status,
+                    'compatible_later_games_available_by_size': _compact_size_counts(later_by_size),
+                    'compatible_games_rejected_by_reason': rejected_reason_counts,
+                    'reason_wave_not_full': None if status == 'FULL' else ('NO_UNUSED_COMPONENTS' if not any(unused_counts.values()) else ('HARD_REJECTIONS_RECORDED' if rejected_reason_counts else 'NO_COMPATIBLE_LATER_GAME_WITH_HARD_RULE_PASS')),
+                    'approved_configurations_considered_detail': considered_configs,
+                    'unused_components': component_rows,
+                }
+                if wave.sequence_number != expected_number:
+                    _add_diagnostics_warning('BUG: wave numbering was applied globally instead of per host_location_id and date.', error=True)
+                wave_rows.append(wave_row)
+                utilization_by_wave[str(wave.sequence_number)] = utilization_pct
+            rows.append({
+                'host_location_id': str(host_id) if host_id else None,
+                'host_location_name': host.name if host else None,
+                'surface_type': host.surface_type if host else None,
+                'host_role': host.host_role if host else None,
+                'game_date': host_date.isoformat() if host_date else None,
+                'total_waves': len(ordered),
+                'wave_numbers_present': wave_numbers,
+                'wave_numbers_expected': expected,
+                'wave_numbering_consecutive': wave_numbers == expected,
+                'latest_start_before_compaction': diagnostics.get('latest_start_before') if phase == 'after' else (max(active_starts).isoformat() if active_starts else None),
+                'latest_start_after_compaction': max(active_starts).isoformat() if active_starts else None,
+                'active_time_window_before': diagnostics.get('active_time_window_before') if phase == 'after' else None,
+                'active_time_window_after': diagnostics.get('active_time_window_after') if phase == 'after' else None,
+                'wave_utilization_before': None if phase == 'before' else diagnostics.get('global_turf_wave_utilization_before'),
+                'wave_utilization_after': utilization_by_wave,
+                'games_moved_earlier': diagnostics.get('accepted_moves') or [],
+                'games_left_late_with_reason': games_left_late,
+                'waves': wave_rows,
+            })
+        return rows
+
     compaction_scheduled_games = _build_compaction_scheduled_games()
+    diagnostics['global_turf_wave_utilization_before'] = _global_turf_wave_utilization_diagnostics('before')
+    diagnostics['Global Turf Wave Utilization Diagnostics'] = diagnostics['global_turf_wave_utilization_before']
     if target_partial_waves and int(diagnostics.get('compaction_scheduled_games_count') or 0) == 0:
         _add_diagnostics_warning('BUG: partial waves exist but candidate discovery received zero scheduled games.', error=True)
 
@@ -9069,8 +9224,6 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
                                 target_detail['medium_games_considered'] = int(target_detail.get('medium_games_considered') or 0) + 1
                             if target_size == FIELD_SIZE_LARGE:
                                 target_detail['large_games_considered'] = int(target_detail.get('large_games_considered') or 0) + 1
-                                if _is_girls_6_8(game):
-                                    target_detail['girls_6_8_games_considered'] = int(target_detail.get('girls_6_8_games_considered') or 0) + 1
                                 if _move_would_eliminate_source_wave(source, target_wave):
                                     target_detail['moving_game_would_eliminate_later_partial_two_large_wave'] = True
                         source_wave = source.turf_wave
@@ -9087,8 +9240,9 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
                                 target_detail['doubleheader_rules_blocked_move'] = True
                         if score <= 0:
                             continue
-                        if target_size == FIELD_SIZE_LARGE and _is_girls_6_8(game):
-                            score += 20
+                        if target.start_time and source.start_time and target.start_time < source.start_time:
+                            target_minutes = target.start_time.hour * 60 + target.start_time.minute
+                            score += 10_000 + max(0, (24 * 60) - target_minutes)
                         if source_wave and source_wave.host_date == target_wave.host_date and source_wave.start_time > target_wave.start_time:
                             score += 10
                         candidate = (score, game, source, target, target_wave, source_wave, reasons, younger_late_penalty_row, host_balance_row)
@@ -9300,6 +9454,8 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
     after = _metrics()
     _record_utilization_metrics('after', after)
     _initialize_partial_wave_details(phase='after')
+    diagnostics['global_turf_wave_utilization_after'] = _global_turf_wave_utilization_diagnostics('after')
+    diagnostics['Global Turf Wave Utilization Diagnostics'] = diagnostics['global_turf_wave_utilization_after']
     _warn_if_counted_partial_waves_missing_from_collection(phase='after')
     final_partial_waves = diagnostics.get('partial_waves') if isinstance(diagnostics.get('partial_waves'), list) else []
     if int(diagnostics.get('total_partial_waves_found') or 0) != len(final_partial_waves):
