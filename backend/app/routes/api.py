@@ -10186,6 +10186,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     repeat_matchup_warnings: list[dict[str, object]] = []
     third_meeting_warnings: list[dict[str, object]] = []
     search_limit_warnings: list[str] = []
+    placement_priority_diagnostics: list[dict[str, object]] = []
     preferred_home_site_failures: list[dict[str, object]] = []
     overflow_host_ids: set[uuid.UUID] = set()
     two_location_rule_relaxed = False
@@ -10758,6 +10759,62 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             host_name_by_id[host_obj.id] = host_obj.name or ''
     host_role_by_id: dict[uuid.UUID, str] = _host_priority_role_map_for_hosts(db, list(host_rows_by_id.values()))
     host_priority_rank_by_id: dict[uuid.UUID, int] = {host_id: _host_priority_rank(role) for host_id, role in host_role_by_id.items()}
+    turf_wave_number_by_id: dict[uuid.UUID, int] = {}
+    turf_wave_configuration_by_id: dict[uuid.UUID, str | None] = {}
+    waves_by_host_date: dict[tuple[uuid.UUID, date], list[TurfWave]] = {}
+    weekly_turf_wave_ids = {slot.turf_wave_id for slot in all_open_slots_for_week if slot.turf_wave_id}
+    if weekly_turf_wave_ids:
+        for wave in db.query(TurfWave).filter(TurfWave.id.in_(list(weekly_turf_wave_ids))).all():
+            if wave.host_location_id and wave.host_date:
+                waves_by_host_date.setdefault((wave.host_location_id, wave.host_date), []).append(wave)
+        for (_host_id, _host_date), grouped_waves in waves_by_host_date.items():
+            for wave_number, wave in enumerate(sorted(grouped_waves, key=lambda item: (item.start_time, str(item.id))), start=1):
+                turf_wave_number_by_id[wave.id] = wave_number
+                turf_wave_configuration_by_id[wave.id] = _normalize_configuration_name(wave.preferred_layout_code)
+
+    def _slot_wave_number(slot: GameSlot | None) -> int | None:
+        return turf_wave_number_by_id.get(slot.turf_wave_id) if slot and slot.turf_wave_id else None
+
+    def _slot_wave_configuration(slot: GameSlot | None) -> str | None:
+        return turf_wave_configuration_by_id.get(slot.turf_wave_id) if slot and slot.turf_wave_id else None
+
+    def _slot_start_minutes(slot: GameSlot | None) -> int:
+        minutes = _minutes_from_time(slot.start_time if slot else None)
+        return minutes if minutes is not None else 24 * 60
+
+    def _earlier_compatible_turf_slot_status(candidate_slot: GameSlot | None, required_size: str | None, team_ids: set[uuid.UUID] | None = None) -> tuple[bool, list[str]]:
+        if not candidate_slot or not candidate_slot.turf_wave_id or not candidate_slot.host_location_id or not candidate_slot.slot_date or not candidate_slot.start_time:
+            return False, []
+        normalized_size = _normalize_field_size(required_size)
+        if not normalized_size:
+            return False, ['invalid field size']
+        saw_earlier_component = False
+        rejection_reasons: list[str] = []
+        for earlier_slot in remaining_slots:
+            if earlier_slot.id == candidate_slot.id:
+                continue
+            if earlier_slot.host_location_id != candidate_slot.host_location_id or earlier_slot.slot_date != candidate_slot.slot_date:
+                continue
+            if not earlier_slot.turf_wave_id or not earlier_slot.start_time or earlier_slot.start_time >= candidate_slot.start_time:
+                continue
+            saw_earlier_component = True
+            if _normalize_field_size(earlier_slot.field_type) != normalized_size:
+                rejection_reasons.append('invalid field size')
+                continue
+            earlier_field_key = (str(earlier_slot.host_location_id), str(earlier_slot.field_instance_id), earlier_slot.slot_date, earlier_slot.start_time)
+            if earlier_field_key in field_time_occupied:
+                rejection_reasons.append('field time conflict')
+                continue
+            if team_ids and any((str(team_id), earlier_slot.slot_date, earlier_slot.start_time) in team_time_occupied for team_id in team_ids):
+                rejection_reasons.append('team time conflict')
+                continue
+            if no_simultaneous_games_same_host and (str(earlier_slot.host_location_id), earlier_slot.slot_date, earlier_slot.start_time) in host_time_occupied:
+                rejection_reasons.append('field time conflict')
+                continue
+            return True, []
+        return False, sorted(set(rejection_reasons)) if saw_earlier_component else []
+
+
     highest_priority_host_ids_by_org: dict[uuid.UUID, set[uuid.UUID]] = {
         org_id: _highest_priority_host_ids_for_org(host_ids, host_role_by_id)
         for org_id, host_ids in host_ids_by_org.items()
@@ -11962,17 +12019,14 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                                 if utilization_before_components == 1 and utilization_after_components == 2:
                                     score += 40
                                     reason_bits.append('fills second component of already-open TWO_LARGE wave (+40)')
-                                if selected_division_key == 'GIRLS_6_8' and utilization_after_components >= 2:
-                                    score += 25
-                                    reason_bits.append('pairs Girls 6-8 with another LARGE game in TWO_LARGE wave (+25)')
                                 if utilization_before_components == 1:
                                     score += 35
                                     reason_bits.append('reuses already-open TWO_LARGE wave with unused large component (+35)')
                                 same_day_partial_two_large_available = _has_same_day_partial_two_large_wave(selected_field_slot, exclude_wave_id=selected_field_slot.turf_wave_id)
                                 earlier_partial_two_large_available = _has_same_day_partial_two_large_wave(selected_field_slot, exclude_wave_id=selected_field_slot.turf_wave_id, earlier_only=True)
-                                if utilization_before_components == 0 and same_day_partial_two_large_available and selected_division_key == 'GIRLS_6_8':
+                                if utilization_before_components == 0 and same_day_partial_two_large_available:
                                     score -= 35
-                                    warning_bits.append('Girls 6-8 opens new TWO_LARGE wave while compatible partial TWO_LARGE wave exists (-35)')
+                                    warning_bits.append('opens new TWO_LARGE wave while compatible partial TWO_LARGE wave exists (-35)')
                                 if utilization_before_components == 0 and earlier_partial_two_large_available:
                                     score -= 30
                                     warning_bits.append('opens new TWO_LARGE wave while earlier compatible partial TWO_LARGE wave exists (-30)')
@@ -12012,6 +12066,19 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                         elif _has_existing_turf_wave_capacity(required_field_type):
                             score -= 1200
                             warning_bits.append('existing turf stadium wave still has compatible unused capacity (-1200)')
+                        earlier_compatible_available, earlier_compatible_rejection_reasons = _earlier_compatible_turf_slot_status(selected_field_slot, required_field_type, {a, b})
+                        if earlier_compatible_available:
+                            _record_placement_attempt(
+                                selected_field_slot,
+                                a,
+                                b,
+                                'rejected',
+                                'BUG: initial placement chose later candidate while earlier compatible candidate was valid.',
+                                selected_field_slot,
+                            )
+                            continue
+                        if earlier_compatible_rejection_reasons:
+                            warning_bits.append('earlier turf components rejected by hard constraints: ' + ', '.join(earlier_compatible_rejection_reasons))
                         if is_odd_division and no_byes and selected_double_header_team_id and selected_double_header_team_id in {a, b}:
                             prior_double_header_slots = [
                                 p for p in plans
@@ -12577,6 +12644,11 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                             'away_team_id': b,
                             'pair': pair,
                             'score': score,
+                            'slot_start_minutes': _slot_start_minutes(selected_field_slot),
+                            'turf_wave_number': _slot_wave_number(selected_field_slot),
+                            'selected_wave_configuration': _slot_wave_configuration(selected_field_slot),
+                            'earlier_compatible_candidates_available': bool(earlier_compatible_available),
+                            'earlier_compatible_candidate_rejection_reasons': list(earlier_compatible_rejection_reasons),
                             'same_community': same_community,
                             'hosted_by_own_community': hosted_by_own_community,
                             'reason_bits': reason_bits,
@@ -12675,7 +12747,19 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         if not valid_candidates:
             break
 
-        best = max(valid_candidates, key=lambda c: c['score'])
+        def _candidate_hard_priority_key(candidate: dict[str, object]) -> tuple[int, int, int, int, int, int]:
+            # Hard-rule ordering happens before soft score: true home-host priority,
+            # then chronological turf wave fill, then the existing detailed score.
+            true_home = bool(candidate.get('true_home_host_candidate'))
+            home_bucket = 2 if true_home else 1
+            owned_rank = int(candidate.get('home_host_priority_tier') or len(OWNED_HOST_PRIORITY_ORDER) + 1)
+            wave_number = int(candidate.get('turf_wave_number') or 9999)
+            is_turf = 1 if candidate.get('turf_wave_number') is not None else 0
+            start_minutes = int(candidate.get('slot_start_minutes') or 24 * 60)
+            score_value = int(candidate.get('score') or 0)
+            return (home_bucket, -owned_rank, is_turf, -start_minutes, -wave_number, score_value)
+
+        best = max(valid_candidates, key=_candidate_hard_priority_key)
         selected_field_slot = best['selected_field_slot']
         if best.get('is_cross_candidate'):
             same_community_rejected = bool(best.get('same_community_rejected_available'))
@@ -12727,6 +12811,39 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'home_host_priority_tier': best.get('home_host_priority_tier'),
             'listed_home_owned_host_candidate': bool(best.get('listed_home_owned_host_candidate')),
             'listed_away_owned_host_candidate': bool(best.get('listed_away_owned_host_candidate')),
+        })
+        selected_host_candidate_ids_considered = sorted({
+            str(c.get('selected_field_slot').host_location_id)
+            for c in valid_candidates
+            if c.get('selected_field_slot') is not None and c.get('selected_field_slot').host_location_id
+        })
+        owned_home_host_candidate_ids_considered = sorted({
+            str(c.get('selected_field_slot').host_location_id)
+            for c in valid_candidates
+            if c.get('true_home_host_candidate') and c.get('selected_field_slot') is not None and c.get('selected_field_slot').host_location_id
+        })
+        turf_wave_candidates_considered = sorted({
+            str(c.get('turf_wave_number'))
+            for c in valid_candidates
+            if c.get('turf_wave_number') is not None
+        })
+        placement_priority_diagnostics.append({
+            'game_id': None,
+            'game_date': str(selected_field_slot.slot_date) if selected_field_slot and selected_field_slot.slot_date else None,
+            'division': full_division_label,
+            'required_field_size': _normalize_field_size(required_field_type) or str(required_field_type),
+            'home_team': home_team.name,
+            'away_team': away_team.name,
+            'selected_host_candidates_considered': selected_host_candidate_ids_considered,
+            'owned_home_host_candidates_considered': owned_home_host_candidate_ids_considered,
+            'turf_wave_candidates_considered': turf_wave_candidates_considered,
+            'selected_candidate_host': str(selected_field_slot.host_location_id) if selected_field_slot and selected_field_slot.host_location_id else None,
+            'selected_candidate_wave': best.get('turf_wave_number'),
+            'selected_candidate_start_time': selected_field_slot.start_time.isoformat() if selected_field_slot and selected_field_slot.start_time else None,
+            'selected_candidate_configuration': best.get('selected_wave_configuration'),
+            'placement_reason': '; '.join(reason_bits),
+            'earlier_compatible_candidates_available': bool(best.get('earlier_compatible_candidates_available')),
+            'earlier_compatible_candidate_rejection_reasons': list(best.get('earlier_compatible_candidate_rejection_reasons') or []),
         })
         if (
             selected_host_ids
@@ -13267,7 +13384,9 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                 'compatible_large_slots_available': compatible_slots_found if _normalize_field_size(required_field_type) == FIELD_SIZE_LARGE else None,
                 'skipped_placement_reasons': [row.get('reason') for row in skipped],
                 'placement_attempt_details': placement_attempt_details,
+                'auto_schedule_placement_priority_diagnostics': placement_priority_diagnostics,
             },
+            'Auto-Schedule Placement Priority Diagnostics': placement_priority_diagnostics,
             'odd_team_double_header_reservation': {
                 'selected_team_id': str(selected_double_header_team_id) if selected_double_header_team_id else None,
                 'selected_team_name': teams_by_id[selected_double_header_team_id].name if selected_double_header_team_id and selected_double_header_team_id in teams_by_id else None,
