@@ -7601,6 +7601,18 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         if limit_name not in optimization_limits_hit:
             optimization_limits_hit.append(limit_name)
             diagnostics.setdefault('warnings', []).append(warning)
+            diagnostics.setdefault('limit_hit_details', []).append({
+                'limit_name': limit_name,
+                'warning': warning,
+                'skipped_optional_phase': True,
+                'may_explain_remaining_turf_wave_inefficiencies': True,
+            })
+            counts = diagnostics.get('rejected_moves_by_reason')
+            if isinstance(counts, dict):
+                counts['OPTIMIZATION_LIMIT_REACHED'] = int(counts.get('OPTIMIZATION_LIMIT_REACHED') or 0) + 1
+            counts = diagnostics.get('candidates_rejected_by_reason')
+            if isinstance(counts, dict):
+                counts['OPTIMIZATION_LIMIT_REACHED'] = int(counts.get('OPTIMIZATION_LIMIT_REACHED') or 0) + 1
             logger.warning('%s season_id=%s limit_name=%s', warning, season_id, limit_name)
         diagnostics['optimization_limits_hit'] = list(optimization_limits_hit)
         diagnostics['optional_optimization_stopped'] = True
@@ -7743,6 +7755,12 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         'pull_forward_candidates_considered': 0,
         'wave_fill_candidates_considered': 0,
         'repeated_candidate_checks_skipped': 0,
+        'same_move_evaluated_repeatedly_count': 0,
+        'candidate_rejection_cache': [],
+        'cached_rejection_reasons': {},
+        'accepted_candidate_move_keys': [],
+        'duplicate_candidate_move_keys': [],
+        'limit_hit_details': [],
         'optimization_limits_hit': [],
         'optional_optimization_stopped': False,
         'best_valid_schedule_returned': True,
@@ -8222,14 +8240,19 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         score_after: int | None = None,
         target_wave: TurfWave | None = None,
     ) -> None:
-        normalized_reason = reason if reason in {
-            'TEAM_TIME_CONFLICT', 'FIELD_TIME_CONFLICT', 'WRONG_FIELD_SIZE', 'BREAKS_DOUBLEHEADER_BACK_TO_BACK',
-            'BREAKS_DOUBLEHEADER_ORDER', 'MOVES_GAME_TO_DIFFERENT_DATE', 'MOVES_GAME_OUTSIDE_ALLOWED_WINDOW',
-            'MOVES_YOUNGER_DIVISION_TOO_LATE', 'WORSENS_HOST_COMMUNITY_BALANCE', 'VIOLATES_HOST_COMMUNITY_HARD_RULE',
-            'VIOLATES_HOME_SITE_REQUIREMENT', 'NO_NET_WAVE_IMPROVEMENT', 'TARGET_SLOT_NOT_AVAILABLE',
-            'TARGET_FIELD_INSTANCE_NOT_FOUND', 'TARGET_WAVE_NOT_FOUND', 'SOURCE_GAME_LOCKED', 'SOURCE_GAME_ALREADY_OPTIMAL',
-            'COMPACTION_DISABLED', 'SOURCE_SLOT_NOT_FOUND', 'WOULD_CREATE_HOST_OWNER_AS_AWAY', 'WOULD_MOVE_HOSTING_COMMUNITY_TEAM_AWAY_FROM_PRIMARY_OWNED_HOST', 'WOULD_MOVE_HOSTING_COMMUNITY_TEAM_AWAY_FROM_OWN_HOST', 'WOULD_VIOLATE_TRUE_HOME_HOST_PRIORITY', 'UNKNOWN_HOST_OWNERSHIP', 'UNKNOWN_REJECTION_REASON'
-        } else 'UNKNOWN_REJECTION_REASON'
+        normalized_reason = _canonical_move_rejection_reason(reason)
+        allowed_reasons = {
+            'TEAM_TIME_CONFLICT', 'FIELD_TIME_CONFLICT', 'WOULD_VIOLATE_TRUE_HOME_HOST_PRIORITY',
+            'SELECTED_HOST_VIOLATION', 'INVALID_FIELD_SIZE', 'INVALID_TURF_COMPONENT',
+            'DOUBLEHEADER_BACK_TO_BACK_VIOLATION', 'HOST_OWNER_AS_AWAY_VIOLATION',
+            'DOES_NOT_IMPROVE_SCHEDULE', 'TARGET_SLOT_NOT_OPEN', 'CACHED_REJECTION',
+            'DUPLICATE_MOVE_SKIPPED', 'OPTIMIZATION_LIMIT_REACHED', 'UNKNOWN_HOST_OWNERSHIP',
+            'VIOLATES_HOST_COMMUNITY_HARD_RULE', 'VIOLATES_HOME_SITE_REQUIREMENT', 'SOURCE_GAME_LOCKED',
+            'SOURCE_SLOT_NOT_FOUND', 'TARGET_FIELD_INSTANCE_NOT_FOUND', 'MOVES_GAME_OUTSIDE_ALLOWED_WINDOW',
+            'MOVES_YOUNGER_DIVISION_TOO_LATE', 'COMPACTION_DISABLED', 'UNKNOWN_REJECTION_REASON',
+        }
+        if normalized_reason not in allowed_reasons:
+            normalized_reason = 'UNKNOWN_REJECTION_REASON'
         diagnostics['moves_rejected'] = int(diagnostics['moves_rejected']) + 1
         diagnostics['rejected_moves_count'] = int(diagnostics.get('rejected_moves_count') or 0) + 1
         if hard_constraint_failure:
@@ -8919,9 +8942,19 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
     pull_forward_attempts_by_date: dict[str, int] = {}
     move_attempts_by_date: dict[str, int] = {}
     total_move_attempts = 0
-    rejected_candidate_keys: set[tuple[str, str, str, str, str, str, str]] = set()
-    repeated_candidate_counts: dict[tuple[str, str, str, str, str, str, str], int] = {}
-    hard_validation_cache: dict[tuple[str, str, str, str, str, str, str], tuple[int, list[str], dict[str, object] | None, dict[str, object] | None]] = {}
+    schedule_state_version = 0
+    # Candidate identity is intentionally phase-aware for in-phase deduplication,
+    # while the phase-less signature lets pull-forward skip moves already proven
+    # impossible by wave-fill hard-rule validation.
+    CandidateMoveKey = tuple[str, str, str, str, str, str, str, str, str]
+    CandidateMoveSignature = tuple[str, str, str, str, str, str, str, str]
+    accepted_candidate_keys: set[CandidateMoveKey] = set()
+    rejected_candidate_keys: set[CandidateMoveKey] = set()
+    hard_rejected_candidate_signatures: set[CandidateMoveSignature] = set()
+    repeated_candidate_counts: dict[CandidateMoveKey, int] = {}
+    rejection_reason_cache: dict[CandidateMoveKey, dict[str, object]] = {}
+    hard_validation_cache: dict[CandidateMoveKey, tuple[int, list[str], dict[str, object] | None, dict[str, object] | None]] = {}
+    rejection_order = 0
     diagnostics['search_limits'] = {
         'max_optional_optimization_seconds': max_optional_seconds,
         'wave_fill_attempts_per_wave': max_wave_fill_per_wave,
@@ -8929,6 +8962,7 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         'pull_forward_attempts_per_date': max_pull_forward_per_date,
         'move_attempts_per_date': max_move_attempts_per_date,
         'move_attempts_per_schedule': max_move_attempts_per_schedule,
+        'max_repeated_rejections_per_candidate': max_repeated_rejections,
         'repeated_move_warn_threshold': max_repeated_rejections,
     }
     detected_waves_for_candidate_discovery = diagnostics.get('detected_turf_wave_groups')
@@ -9096,6 +9130,140 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         diagnostics['moves_evaluated'] = int(diagnostics.get('moves_evaluated') or 0) + 1
         diagnostics['candidate_moves_evaluated'] = int(diagnostics.get('candidate_moves_evaluated') or 0) + 1
         diagnostics['total_candidate_moves_evaluated'] = int(diagnostics.get('total_candidate_moves_evaluated') or 0) + 1
+
+    def _increment_reason_count(container_name: str, reason: str) -> None:
+        counts = diagnostics.get(container_name)
+        if isinstance(counts, dict):
+            counts[reason] = int(counts.get(reason) or 0) + 1
+
+    def _canonical_move_rejection_reason(reason: str | None) -> str:
+        raw = str(reason or 'UNKNOWN_REJECTION_REASON')
+        aliases = {
+            'WRONG_FIELD_SIZE': 'INVALID_FIELD_SIZE',
+            'TARGET_SLOT_NOT_AVAILABLE': 'TARGET_SLOT_NOT_OPEN',
+            'BREAKS_DOUBLEHEADER_BACK_TO_BACK': 'DOUBLEHEADER_BACK_TO_BACK_VIOLATION',
+            'BREAKS_DOUBLEHEADER_ORDER': 'DOUBLEHEADER_BACK_TO_BACK_VIOLATION',
+            'WOULD_CREATE_HOST_OWNER_AS_AWAY': 'HOST_OWNER_AS_AWAY_VIOLATION',
+            'NO_NET_WAVE_IMPROVEMENT': 'DOES_NOT_IMPROVE_SCHEDULE',
+            'SOURCE_GAME_ALREADY_OPTIMAL': 'DOES_NOT_IMPROVE_SCHEDULE',
+            'TARGET_WAVE_NOT_FOUND': 'INVALID_TURF_COMPONENT',
+            'WORSENS_HOST_COMMUNITY_BALANCE': 'WOULD_VIOLATE_TRUE_HOME_HOST_PRIORITY',
+            'WOULD_MOVE_HOSTING_COMMUNITY_TEAM_AWAY_FROM_PRIMARY_OWNED_HOST': 'WOULD_VIOLATE_TRUE_HOME_HOST_PRIORITY',
+            'WOULD_MOVE_HOSTING_COMMUNITY_TEAM_AWAY_FROM_OWN_HOST': 'WOULD_VIOLATE_TRUE_HOME_HOST_PRIORITY',
+            'WOULD_MOVE_HOSTING_COMMUNITY_TEAM_AWAY_FROM_TURF_STADIUM': 'WOULD_VIOLATE_TRUE_HOME_HOST_PRIORITY',
+            'MOVES_GAME_TO_DIFFERENT_DATE': 'DOES_NOT_IMPROVE_SCHEDULE',
+            'SOURCE_SLOT_NOT_FOUND': 'DOES_NOT_IMPROVE_SCHEDULE',
+        }
+        return aliases.get(raw, raw)
+
+    def _record_rejection_reason(reason: str | None) -> None:
+        canonical = _canonical_move_rejection_reason(reason)
+        for container_name in ('rejected_moves_by_reason', 'candidates_rejected_by_reason'):
+            _increment_reason_count(container_name, canonical)
+
+    def _record_non_evaluated_reason(reason: str) -> None:
+        canonical = _canonical_move_rejection_reason(reason)
+        _increment_reason_count('rejected_moves_by_reason', canonical)
+        _increment_reason_count('candidates_rejected_by_reason', canonical)
+
+    def _candidate_move_signature(game: Game | None, source: GameSlot | None, target: GameSlot | None) -> CandidateMoveSignature:
+        return (
+            str(season_id),
+            str(game.id) if game else '',
+            str(source.id) if source else '',
+            str(target.id) if target else '',
+            target.slot_date.isoformat() if target and target.slot_date else '',
+            str(target.host_location_id) if target and target.host_location_id else '',
+            str(_normalize_field_size(target.field_type) or (target.field_type if target else '') or ''),
+            target.start_time.isoformat() if target and target.start_time else '',
+        )
+
+    def _candidate_move_key(game: Game | None, source: GameSlot | None, target: GameSlot | None, optimization_phase: str) -> CandidateMoveKey:
+        return (*_candidate_move_signature(game, source, target), optimization_phase)
+
+    def _candidate_move_key_dict(candidate_key: CandidateMoveKey) -> dict[str, object]:
+        return {
+            'season_id': candidate_key[0],
+            'game_id': candidate_key[1],
+            'source_slot_id': candidate_key[2],
+            'target_slot_id': candidate_key[3],
+            'game_date': candidate_key[4],
+            'host_location_id': candidate_key[5],
+            'field_type': candidate_key[6],
+            'start_time': candidate_key[7],
+            'optimization_phase': candidate_key[8],
+        }
+
+    def _record_duplicate_candidate_skip(candidate_key: CandidateMoveKey, reason: str = 'DUPLICATE_MOVE_SKIPPED') -> None:
+        repeated_candidate_counts[candidate_key] = repeated_candidate_counts.get(candidate_key, 0) + 1
+        diagnostics['repeated_candidate_checks_skipped'] = int(diagnostics.get('repeated_candidate_checks_skipped') or 0) + 1
+        _record_non_evaluated_reason(reason)
+        duplicate_rows = diagnostics.get('duplicate_candidate_move_keys')
+        if isinstance(duplicate_rows, list) and len(duplicate_rows) < 100:
+            duplicate_rows.append({**_candidate_move_key_dict(candidate_key), 'skip_reason': reason, 'count': repeated_candidate_counts[candidate_key]})
+        if repeated_candidate_counts[candidate_key] >= max_repeated_rejections:
+            diagnostics['same_move_evaluated_repeatedly_count'] = int(diagnostics.get('same_move_evaluated_repeatedly_count') or 0) + 1
+            # This is a bug warning, but the move is not evaluated again.
+            logger.warning(
+                'WARN: same move reached duplicate evaluation threshold without re-evaluation season_id=%s game_id=%s source_slot_id=%s target_slot_id=%s phase=%s count=%s',
+                season_id, candidate_key[1], candidate_key[2], candidate_key[3], candidate_key[8], repeated_candidate_counts[candidate_key],
+            )
+
+    def _cache_rejected_candidate(candidate_key: CandidateMoveKey, reason: str, hard_constraint_failure: bool) -> None:
+        nonlocal rejection_order
+        rejection_order += 1
+        cached = {
+            **_candidate_move_key_dict(candidate_key),
+            'candidate_move_key': '|'.join(candidate_key),
+            'rejection_reason': _canonical_move_rejection_reason(reason),
+            'rejection_phase': candidate_key[8],
+            'hard_rule_failed': bool(hard_constraint_failure),
+            'order': rejection_order,
+            'schedule_state_version': schedule_state_version,
+        }
+        rejection_reason_cache[candidate_key] = cached
+        rejected_candidate_keys.add(candidate_key)
+        if hard_constraint_failure:
+            hard_rejected_candidate_signatures.add(candidate_key[:-1])
+        cache_rows = diagnostics.get('candidate_rejection_cache')
+        if isinstance(cache_rows, list) and len(cache_rows) < 500:
+            cache_rows.append(cached)
+        _increment_reason_count('cached_rejection_reasons', cached['rejection_reason'])
+
+    def _cheap_candidate_rejection_reason(game: Game, source: GameSlot | None, target: GameSlot, target_size: str, optimization_phase: str) -> str | None:
+        if not source:
+            return 'SOURCE_SLOT_NOT_FOUND'
+        if source.id == target.id:
+            return 'DOES_NOT_IMPROVE_SCHEDULE'
+        if _normalize_field_size(target.field_type) != target_size:
+            return 'INVALID_FIELD_SIZE'
+        if target.assigned_game_id or str(target.status or '').upper() != 'OPEN':
+            return 'TARGET_SLOT_NOT_OPEN'
+        if source.slot_date != target.slot_date or game.game_date != target.slot_date:
+            return 'DOES_NOT_IMPROVE_SCHEDULE'
+        allowed_target_hosts = _host_plan_allowed_host_ids_for_week(db, season_id, target.week_id, target.slot_date)
+        if allowed_target_hosts is not None and target.host_location_id not in allowed_target_hosts:
+            return 'SELECTED_HOST_VIOLATION'
+        if optimization_phase == 'pull-forward' and source.start_time and target.start_time and target.start_time >= source.start_time:
+            return 'DOES_NOT_IMPROVE_SCHEDULE'
+        if _field_has_time_conflict(game, target):
+            return 'FIELD_TIME_CONFLICT'
+        if _team_has_time_conflict(game, target):
+            return 'TEAM_TIME_CONFLICT'
+        home_away_plan = _compaction_home_away_plan(game, target)
+        if home_away_plan.get('would_create_host_owner_as_away'):
+            return 'HOST_OWNER_AS_AWAY_VIOLATION'
+        final_home_team = home_away_plan.get('final_home_team_obj')
+        final_home_team = final_home_team if isinstance(final_home_team, Team) else game.home_team
+        required_size = _required_field_type_for_division(final_home_team.division if final_home_team else None)
+        if _normalize_field_size(target.field_type) != required_size:
+            return 'INVALID_FIELD_SIZE'
+        priority_violation, _priority_detail = _true_home_priority_move_violation(game, source, target, required_size)
+        if priority_violation:
+            return priority_violation
+        if _breaks_doubleheader(game, target):
+            return 'DOUBLEHEADER_BACK_TO_BACK_VIOLATION'
+        return None
 
     def _global_turf_wave_utilization_diagnostics(phase: str) -> list[dict[str, object]]:
         waves, slots_by_wave = _wave_rows()
@@ -9375,23 +9543,51 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
                     for game, source in same_date_games_by_size.get(target_size, []):
                         if optimization_limits_hit:
                             break
+                        optimization_phase = 'pull-forward' if source and source.start_time and target.start_time and target.start_time < source.start_time else 'wave-fill'
+                        candidate_key = _candidate_move_key(game, source, target, optimization_phase)
+                        candidate_signature = candidate_key[:-1]
+                        cached_rejection = rejection_reason_cache.get(candidate_key)
+                        if candidate_key in accepted_candidate_keys:
+                            _record_duplicate_candidate_skip(candidate_key)
+                            continue
+                        if candidate_key in rejected_candidate_keys and cached_rejection and (bool(cached_rejection.get('hard_rule_failed')) or int(cached_rejection.get('schedule_state_version') or -1) == schedule_state_version):
+                            _record_duplicate_candidate_skip(candidate_key, 'CACHED_REJECTION')
+                            continue
+                        if optimization_phase == 'pull-forward' and candidate_signature in hard_rejected_candidate_signatures:
+                            _record_duplicate_candidate_skip(candidate_key, 'CACHED_REJECTION')
+                            continue
+                        cheap_rejection = _cheap_candidate_rejection_reason(game, source, target, target_size, optimization_phase)
+                        if cheap_rejection:
+                            candidate_games_failed_preliminary_filters = True
+                            diagnostics['candidates_rejected_by_precheck'] = int(diagnostics.get('candidates_rejected_by_precheck') or 0) + 1
+                            if target_detail is not None:
+                                target_detail['candidates_rejected_by_precheck'] = int(target_detail.get('candidates_rejected_by_precheck') or 0) + 1
+                                target_detail['rejected_candidate_game_count'] = int(target_detail.get('rejected_candidate_game_count') or 0) + 1
+                            hard_prefilter_failure = cheap_rejection not in {'DOES_NOT_IMPROVE_SCHEDULE'}
+                            diagnostics['moves_rejected'] = int(diagnostics.get('moves_rejected') or 0) + 1
+                            diagnostics['rejected_moves_count'] = int(diagnostics.get('rejected_moves_count') or 0) + 1
+                            if hard_prefilter_failure:
+                                diagnostics['candidates_rejected_by_hard_constraint'] = int(diagnostics.get('candidates_rejected_by_hard_constraint') or 0) + 1
+                            _cache_rejected_candidate(candidate_key, cheap_rejection, hard_prefilter_failure)
+                            _record_non_evaluated_reason(cheap_rejection)
+                            continue
                         wave_attempt_key = str(target_wave.id)
                         date_attempt_key = str(target.slot_date)
                         if _optional_time_exceeded():
                             diagnostics['timeout_triggered'] = True
                             _hit_optional_limit('max_optional_optimization_seconds', 'WARN: optional optimization stopped to preserve runtime.')
                             break
-                        if wave_fill_attempts_by_wave.get(wave_attempt_key, 0) >= max_wave_fill_per_wave:
+                        if optimization_phase == 'wave-fill' and wave_fill_attempts_by_wave.get(wave_attempt_key, 0) >= max_wave_fill_per_wave:
                             diagnostics['wave_fill_candidate_search_exceeded_limit'] = True
                             diagnostics['wave_fill_limit_exceeded_count'] = int(diagnostics.get('wave_fill_limit_exceeded_count') or 0) + 1
                             _hit_optional_limit('max_wave_fill_candidates_per_wave', 'WARN: wave-fill candidate search exceeded limit.')
                             break
-                        if wave_fill_attempts_by_date.get(date_attempt_key, 0) >= max_wave_fill_per_date:
+                        if optimization_phase == 'wave-fill' and wave_fill_attempts_by_date.get(date_attempt_key, 0) >= max_wave_fill_per_date:
                             diagnostics['wave_fill_candidate_search_exceeded_limit'] = True
                             diagnostics['wave_fill_limit_exceeded_count'] = int(diagnostics.get('wave_fill_limit_exceeded_count') or 0) + 1
                             _hit_optional_limit('max_wave_fill_candidates_per_date', 'WARN: wave-fill candidate search exceeded limit.')
                             break
-                        if pull_forward_attempts_by_date.get(date_attempt_key, 0) >= max_pull_forward_per_date:
+                        if optimization_phase == 'pull-forward' and pull_forward_attempts_by_date.get(date_attempt_key, 0) >= max_pull_forward_per_date:
                             diagnostics['pull_forward_candidate_search_exceeded_limit'] = True
                             diagnostics['pull_forward_limit_exceeded_count'] = int(diagnostics.get('pull_forward_limit_exceeded_count') or 0) + 1
                             _hit_optional_limit('max_pull_forward_candidates_per_date', 'WARN: pull-forward candidate search exceeded limit.')
@@ -9402,32 +9598,21 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
                         if total_move_attempts >= max_move_attempts_per_schedule:
                             _hit_optional_limit('max_total_move_attempts_per_schedule', 'WARN: optional optimization stopped to preserve runtime.')
                             break
-                        wave_fill_attempts_by_wave[wave_attempt_key] = wave_fill_attempts_by_wave.get(wave_attempt_key, 0) + 1
-                        wave_fill_attempts_by_date[date_attempt_key] = wave_fill_attempts_by_date.get(date_attempt_key, 0) + 1
-                        pull_forward_attempts_by_date[date_attempt_key] = pull_forward_attempts_by_date.get(date_attempt_key, 0) + 1
+                        if optimization_phase == 'wave-fill':
+                            wave_fill_attempts_by_wave[wave_attempt_key] = wave_fill_attempts_by_wave.get(wave_attempt_key, 0) + 1
+                            wave_fill_attempts_by_date[date_attempt_key] = wave_fill_attempts_by_date.get(date_attempt_key, 0) + 1
+                        if optimization_phase == 'pull-forward':
+                            pull_forward_attempts_by_date[date_attempt_key] = pull_forward_attempts_by_date.get(date_attempt_key, 0) + 1
+                            diagnostics['pull_forward_candidates_considered'] = int(diagnostics.get('pull_forward_candidates_considered') or 0) + 1
+                        else:
+                            diagnostics['wave_fill_candidates_considered'] = int(diagnostics.get('wave_fill_candidates_considered') or 0) + 1
                         move_attempts_by_date[date_attempt_key] = move_attempts_by_date.get(date_attempt_key, 0) + 1
                         total_move_attempts += 1
-                        diagnostics['wave_fill_candidates_considered'] = int(diagnostics.get('wave_fill_candidates_considered') or 0) + 1
-                        diagnostics['pull_forward_candidates_considered'] = int(diagnostics.get('pull_forward_candidates_considered') or 0) + 1
                         candidate_same_date_games_found = True
                         diagnostics['preliminary_candidates_created'] = int(diagnostics.get('preliminary_candidates_created') or 0) + 1
                         _record_candidate_evaluated()
                         if target_detail is not None:
                             target_detail['preliminary_candidates_created'] = int(target_detail.get('preliminary_candidates_created') or 0) + 1
-                        if not source:
-                            candidate_games_failed_preliminary_filters = True
-                            diagnostics['candidates_rejected_by_precheck'] = int(diagnostics.get('candidates_rejected_by_precheck') or 0) + 1
-                            if target_detail is not None:
-                                target_detail['candidates_rejected_by_precheck'] = int(target_detail.get('candidates_rejected_by_precheck') or 0) + 1
-                                target_detail['rejected_candidate_game_count'] = int(target_detail.get('rejected_candidate_game_count') or 0) + 1
-                            _reject(game, None, target, 'SOURCE_SLOT_NOT_FOUND', detail='Candidate game exists in the committed schedule export, but no assigned source slot was found for moving it.', hard_constraint_failure=False, target_wave=target_wave)
-                            continue
-                        if source.id == target.id:
-                            candidate_games_failed_preliminary_filters = True
-                            diagnostics['candidates_rejected_by_precheck'] = int(diagnostics.get('candidates_rejected_by_precheck') or 0) + 1
-                            if target_detail is not None:
-                                target_detail['candidates_rejected_by_precheck'] = int(target_detail.get('candidates_rejected_by_precheck') or 0) + 1
-                            continue
                         if source.turf_wave_id and source.turf_wave_id in target_wave_ids:
                             candidate_games_already_in_target_wave = True
                             continue
@@ -9444,22 +9629,6 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
                         source_wave = source.turf_wave
                         rejected_before = int(diagnostics.get('rejected_moves_count') or 0)
                         hard_rejected_before = int(diagnostics.get('candidates_rejected_by_hard_constraint') or 0)
-                        candidate_key = (
-                            str(game.id),
-                            str(source.id),
-                            str(target.id),
-                            str(target.slot_date),
-                            str(target.host_location_id),
-                            str(_normalize_field_size(target.field_type) or target.field_type or ''),
-                            target.start_time.isoformat() if target.start_time else '',
-                        )
-                        if candidate_key in rejected_candidate_keys:
-                            repeated_candidate_counts[candidate_key] = repeated_candidate_counts.get(candidate_key, 0) + 1
-                            diagnostics['repeated_candidate_checks_skipped'] = int(diagnostics.get('repeated_candidate_checks_skipped') or 0) + 1
-                            if repeated_candidate_counts[candidate_key] >= max_repeated_rejections:
-                                diagnostics['same_move_evaluated_repeatedly_count'] = int(diagnostics.get('same_move_evaluated_repeatedly_count') or 0) + 1
-                                logger.warning('WARN: same move evaluated repeatedly season_id=%s game_id=%s source_slot_id=%s target_slot_id=%s count=%s', season_id, game.id, source.id, target.id, repeated_candidate_counts[candidate_key])
-                            continue
                         if candidate_key in hard_validation_cache:
                             score, reasons, younger_late_penalty_row, host_balance_row = hard_validation_cache[candidate_key]
                         else:
@@ -9467,7 +9636,10 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
                             if score <= 0:
                                 hard_validation_cache[candidate_key] = (score, reasons, younger_late_penalty_row, host_balance_row)
                         if int(diagnostics.get('rejected_moves_count') or 0) > rejected_before:
-                            rejected_candidate_keys.add(candidate_key)
+                            rejected_moves = diagnostics.get('rejected_moves')
+                            last_rejection = rejected_moves[-1] if isinstance(rejected_moves, list) and rejected_moves else {}
+                            reason = last_rejection.get('rejection_reason') if isinstance(last_rejection, dict) else 'UNKNOWN_REJECTION_REASON'
+                            _cache_rejected_candidate(candidate_key, str(reason or 'UNKNOWN_REJECTION_REASON'), int(diagnostics.get('candidates_rejected_by_hard_constraint') or 0) > hard_rejected_before)
                         if target_detail is not None and int(diagnostics.get('rejected_moves_count') or 0) > rejected_before:
                             target_detail['rejected_candidate_game_count'] = int(target_detail.get('rejected_candidate_game_count') or 0) + 1
                             if int(diagnostics.get('candidates_rejected_by_hard_constraint') or 0) > hard_rejected_before:
@@ -9483,14 +9655,14 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
                             score += 10_000 + max(0, (24 * 60) - target_minutes)
                         if source_wave and source_wave.host_date == target_wave.host_date and source_wave.start_time > target_wave.start_time:
                             score += 10
-                        candidate = (score, game, source, target, target_wave, source_wave, reasons, younger_late_penalty_row, host_balance_row)
+                        candidate = (score, game, source, target, target_wave, source_wave, reasons, younger_late_penalty_row, host_balance_row, candidate_key)
                         if best is None or candidate[0] > best[0]:
                             best = candidate
         if optimization_limits_hit:
             break
         if not best:
             break
-        _score, game, source, target, target_wave, source_wave, reasons, younger_late_penalty_row, host_balance_row = best
+        _score, game, source, target, target_wave, source_wave, reasons, younger_late_penalty_row, host_balance_row, accepted_candidate_key = best
         accepted_wave_detail = partial_wave_detail_by_id.get(str(target_wave.id))
         if accepted_wave_detail is not None:
             accepted_wave_detail['accepted_candidate_game_count'] = int(accepted_wave_detail.get('accepted_candidate_game_count') or 0) + 1
@@ -9614,6 +9786,11 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
                 scheduled_game['_source_slot'] = target
                 break
         diagnostics['moves_accepted'] = int(diagnostics['moves_accepted']) + 1
+        accepted_candidate_keys.add(accepted_candidate_key)
+        accepted_key_rows = diagnostics.get('accepted_candidate_move_keys')
+        if isinstance(accepted_key_rows, list):
+            accepted_key_rows.append(_candidate_move_key_dict(accepted_candidate_key))
+        schedule_state_version += 1
         db.flush()
 
     for row in partial_wave_detail_by_id.values():
@@ -15290,7 +15467,14 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         phase['candidates_considered'] = int(phase.get('moves_considered') or 0)
         phase['candidates_accepted'] = int(phase.get('moves_accepted') or 0)
         phase['candidates_rejected'] = int(phase.get('moves_rejected') or 0)
-        phase['top_rejection_reasons'] = _top_rejection_reasons()
+        override_reasons = phase.pop('_rejection_reasons_override', None)
+        if isinstance(override_reasons, dict):
+            phase['top_rejection_reasons'] = [
+                {'reason': reason, 'count': count}
+                for reason, count in sorted(override_reasons.items(), key=lambda item: (-int(item[1] or 0), str(item[0])))[:10]
+            ]
+        else:
+            phase['top_rejection_reasons'] = _top_rejection_reasons()
         phase['end_time'] = _iso_ts(ended)
         phase['elapsed_ms'] = elapsed_ms
         phase_metrics.append(phase)
@@ -16632,6 +16816,7 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         enabled=bool(pre_compaction_complete and not dry_run and optional_budget_remaining),
         runtime_limits=runtime_limits,
     )
+    pull_forward_phase['_rejection_reasons_override'] = dict(turf_wave_compaction.get('rejected_moves_by_reason') or {})
     _finish_phase(
         pull_forward_phase,
         records_evaluated=int(turf_wave_compaction.get('candidate_moves_evaluated') or 0),
@@ -16688,6 +16873,7 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         records_evaluated=len((revised_hierarchy_diagnostics.get('true_home_host_diagnostics') or {}).get('by_date') or []),
         moves_rejected=int((revised_hierarchy_diagnostics.get('true_home_host_diagnostics') or {}).get('total_home_host_violations') or 0),
     )
+    turf_utilization_phase['_rejection_reasons_override'] = dict(turf_wave_compaction.get('rejected_moves_by_reason') or {})
     _finish_phase(
         turf_utilization_phase,
         records_evaluated=len((revised_hierarchy_diagnostics.get('turf_wave_diagnostics') or {}).get('waves') or []),
@@ -16794,7 +16980,10 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         'optimization_limits_hit': optimization_limits_hit,
         'timeout_triggered': timeout_triggered,
         'best_valid_schedule_returned': bool(turf_wave_compaction.get('best_valid_schedule_returned', True)) if 'turf_wave_compaction' in locals() else True,
-        'top_rejection_reasons': _top_rejection_reasons(),
+        'top_rejection_reasons': ([
+            {'reason': reason, 'count': count}
+            for reason, count in sorted((turf_wave_compaction.get('rejected_moves_by_reason') or {}).items(), key=lambda item: (-int(item[1] or 0), str(item[0])))[:10]
+        ] if 'turf_wave_compaction' in locals() and (turf_wave_compaction.get('rejected_moves_by_reason') or {}) else _top_rejection_reasons()),
     }
     auto_schedule_diagnostics['phase_metrics'] = phase_metrics
     auto_schedule_diagnostics['total_runtime_ms'] = total_elapsed_ms
