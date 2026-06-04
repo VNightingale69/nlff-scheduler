@@ -114,7 +114,7 @@ class MultiLocationHostingAvailabilityTest(unittest.TestCase):
         grass_host = HostLocation(id=uuid.uuid4(), organization_id=self.org.id, name='Community Grass', surface_type='GRASS_FIELD', is_active=True)
         turf_host = HostLocation(id=uuid.uuid4(), organization_id=self.org.id, name='Community Turf', surface_type='TURF_STADIUM', is_active=True)
         grass_field = Field(id=uuid.uuid4(), host_location_id=grass_host.id, name='Grass Small', layout_type='SMALL', is_active=True)
-        turf_large = HostLocationConfiguration(id=uuid.uuid4(), host_location_id=turf_host.id, configuration_name='TWO_LARGE', is_active=True)
+        turf_large = HostLocationConfiguration(id=uuid.uuid4(), host_location_id=turf_host.id, configuration_name='ONE_SMALL_ONE_LARGE', is_active=True)
         turf_small = HostLocationConfiguration(id=uuid.uuid4(), host_location_id=turf_host.id, configuration_name='THREE_SMALL', is_active=True)
         grass_availability = HostingAvailability(
             id=uuid.uuid4(), organization_id=self.org.id, host_location_id=grass_host.id,
@@ -336,7 +336,7 @@ class TurfMixedLayoutPlanningTest(unittest.TestCase):
         self.db.flush()
         configurations = []
         selected_config = None
-        for layout in ('TWO_LARGE', 'ONE_MEDIUM_TWO_SMALL', 'ONE_LARGE_ONE_MEDIUM', 'TWO_MEDIUM', 'THREE_SMALL', 'ONE_LARGE_ONE_SMALL'):
+        for layout in ('THREE_SMALL', 'TWO_SMALL_ONE_MEDIUM', 'TWO_MEDIUM', 'ONE_SMALL_ONE_LARGE'):
             config = HostLocationConfiguration(id=uuid.uuid4(), host_location_id=host.id, configuration_name=layout, is_active=True)
             _apply_turf_configuration_metadata(config, layout)
             configurations.append(config)
@@ -417,8 +417,8 @@ class TurfMixedLayoutPlanningTest(unittest.TestCase):
         slots = self.db.query(GameSlot).filter(GameSlot.host_location_id == host.id).all()
         self.assertIn('MEDIUM', {slot.field_type for slot in slots})
         self.assertIn('LARGE', {slot.field_type for slot in slots})
-        self.assertTrue(any(slot.field_instance.field_name.startswith('Wave 1 ONE_MEDIUM_TWO_SMALL') for slot in slots if slot.field_type == 'MEDIUM'))
-        self.assertTrue(any(slot.field_instance.field_name.startswith('Wave 2 TWO_LARGE') for slot in slots if slot.field_type == 'LARGE'))
+        self.assertTrue(any(slot.field_instance.field_name.startswith('Wave 1 TWO_SMALL_ONE_MEDIUM') for slot in slots if slot.field_type == 'MEDIUM'))
+        self.assertTrue(any(slot.field_instance.field_name.startswith('Wave 2 ONE_SMALL_ONE_LARGE') for slot in slots if slot.field_type == 'LARGE'))
 
     def test_auto_turf_planning_uses_mixed_small_medium_before_large(self):
         from app.models import GameSlot
@@ -437,22 +437,21 @@ class TurfMixedLayoutPlanningTest(unittest.TestCase):
         self.db.commit()
 
         slots = self.db.query(GameSlot).join(GameSlot.field_instance).filter(GameSlot.host_location_id == host.id).order_by(GameSlot.start_time, GameSlot.field_type).all()
-        early_field_names = {slot.field_instance.field_name for slot in slots if slot.start_time < time(11, 0)}
-        late_field_names = {slot.field_instance.field_name for slot in slots if slot.start_time >= time(11, 0)}
         self.assertGreater(metrics['new_slots_created'], 0)
-        self.assertTrue(all(name.startswith('Wave 1 ONE_MEDIUM_TWO_SMALL') for name in early_field_names))
-        self.assertTrue(all(name.startswith('Wave 2 TWO_LARGE') for name in late_field_names))
+        self.assertTrue(all(slot.field_instance.field_name.startswith('Wave 1 TWO_SMALL_ONE_MEDIUM') for slot in slots if slot.start_time == time(9, 0)))
+        self.assertTrue(all(slot.field_instance.field_name.startswith('Wave 2 TWO_SMALL_ONE_MEDIUM') for slot in slots if slot.start_time == time(10, 0)))
+        self.assertTrue(all(slot.field_instance.field_name.startswith('Wave 3 ONE_SMALL_ONE_LARGE') for slot in slots if slot.start_time == time(11, 0)))
         self.assertEqual({slot.field_type for slot in slots if slot.start_time == time(9, 0)}, {'SMALL', 'MEDIUM'})
-        self.assertEqual({slot.field_type for slot in slots if slot.start_time == time(11, 0)}, {'LARGE'})
+        self.assertEqual({slot.field_type for slot in slots if slot.start_time == time(11, 0)}, {'SMALL', 'LARGE'})
         waves = self.db.query(TurfWave).filter(TurfWave.host_location_id == host.id).order_by(TurfWave.sequence_number).all()
-        self.assertEqual([wave.wave_intent for wave in waves], ['SMALL_MEDIUM', 'LARGE'])
-        self.assertEqual([wave.preferred_layout_code for wave in waves], ['ONE_MEDIUM_TWO_SMALL', 'TWO_LARGE'])
+        self.assertEqual([wave.wave_intent for wave in waves[:3]], ['SMALL_MEDIUM', 'SMALL_MEDIUM', 'MIXED'])
+        self.assertEqual([wave.preferred_layout_code for wave in waves[:3]], ['TWO_SMALL_ONE_MEDIUM', 'TWO_SMALL_ONE_MEDIUM', 'ONE_SMALL_ONE_LARGE'])
         self.assertTrue(all(slot.turf_wave_id for slot in slots))
 
         readiness = get_schedule_readiness(current_user=None, db=self.db)
         turf_site = next(site for day in readiness.host_dates for site in day.host_sites if site.host_location_id == host.id)
-        self.assertEqual([wave.preferred_layout_code for wave in turf_site.turf_wave_plan], ['ONE_MEDIUM_TWO_SMALL', 'TWO_LARGE'])
-        self.assertEqual(turf_site.turf_wave_plan[0].slot_level_configurations[0].slot_level_configuration, 'ONE_MEDIUM_TWO_SMALL')
+        self.assertEqual([wave.preferred_layout_code for wave in turf_site.turf_wave_plan[:3]], ['TWO_SMALL_ONE_MEDIUM', 'TWO_SMALL_ONE_MEDIUM', 'ONE_SMALL_ONE_LARGE'])
+        self.assertEqual(turf_site.turf_wave_plan[0].slot_level_configurations[0].slot_level_configuration, 'TWO_SMALL_ONE_MEDIUM')
 
     def test_locked_turf_layout_does_not_create_mixed_dynamic_blocks(self):
         from app.models import GameSlot
@@ -470,7 +469,7 @@ class TurfMixedLayoutPlanningTest(unittest.TestCase):
 
         slots = self.db.query(GameSlot).join(GameSlot.field_instance).filter(GameSlot.host_location_id == host.id).all()
         self.assertEqual({slot.field_type for slot in slots}, {'SMALL'})
-        self.assertTrue(all(not slot.field_instance.field_name.startswith('Wave 1 ONE_MEDIUM_TWO_SMALL') for slot in slots))
+        self.assertTrue(all(not slot.field_instance.field_name.startswith('Wave 1 TWO_SMALL_ONE_MEDIUM') for slot in slots))
 
 
 class WeekEightCommunityCapacityGenerationTest(unittest.TestCase):

@@ -689,6 +689,10 @@ class PublicGameRead(BaseModel):
     field_id: uuid.UUID | None
     field_name: str
     field_type: str | None = None
+    turf_wave_id: uuid.UUID | None = None
+    turf_wave_start_time: time | None = None
+    turf_configuration_code: str | None = None
+    turf_field_slot: str | None = None
     organization_id: uuid.UUID
     organization_name: str
     division_id: uuid.UUID
