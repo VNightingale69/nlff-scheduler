@@ -165,6 +165,19 @@ export default function HostingAvailabilityManager() {
 
   const hostOptions = useMemo(() => hosts.filter((h: any) => !effectiveOrgId || h.organization_id === effectiveOrgId), [hosts, effectiveOrgId]);
   const selectedHost = useMemo(() => hostOptions.find((h: any) => h.id === hostId), [hostId, hostOptions]);
+  const isTurfStadiumHost = selectedHost?.surface_type === 'TURF_STADIUM' || selectedHost?.surface_type === STADIUM_TYPE || selectedHost?.host_role === 'TURF_STADIUM';
+  const isStadiumArea = (area?: any) => Boolean(
+    area?.surface_type === 'TURF_STADIUM'
+    || area?.surface_type === STADIUM_TYPE
+    || area?.field_space_type === 'TURF_STADIUM'
+    || area?.field_space_type === STADIUM_TYPE
+    || area?.host_role === 'TURF_STADIUM'
+    || area?.hostLocation?.surface_type === 'TURF_STADIUM'
+    || area?.hostLocation?.host_role === 'TURF_STADIUM'
+    || area?.host_location?.surface_type === 'TURF_STADIUM'
+    || area?.host_location?.host_role === 'TURF_STADIUM'
+    || isTurfStadiumHost
+  );
   const visibleAreas = useMemo(() => areas.filter((a: any) => a.is_active && (!hostId || a.host_location_id === hostId)), [areas, hostId]);
   const hostConfigsForSelectedHost = useMemo(() => hostConfigs.filter((c: any) => c.is_active && c.host_location_id === hostId && APPROVED_TURF_LAYOUT_CODES.has(c.configuration_name)), [hostConfigs, hostId]);
   const configsByArea = useMemo(
@@ -292,14 +305,14 @@ export default function HostingAvailabilityManager() {
     const nextConfigs: Record<string, string> = {};
     const nextAutoSelect: Record<string, boolean> = {};
     const nextLocks: Record<string, boolean> = {};
-    const area = visibleAreas[0] || (selectedHost || entry.host_location_id ? { id: entry.host_location_id || selectedHost?.id, name: entry.host_location_name || selectedHost?.name, hostLevel: true } : null);
+    const area = visibleAreas[0] || (selectedHost || entry.host_location_id ? { id: entry.host_location_id || selectedHost?.id, name: entry.host_location_name || selectedHost?.name, surface_type: selectedHost?.surface_type, host_role: selectedHost?.host_role, hostLevel: true } : null);
     if (!area?.id) return;
     for (const range of entry.time_ranges) {
       const start = Number(range.start_time.slice(0, 2));
       const end = Number(range.end_time.slice(0, 2));
       for (let h = start; h < end; h += 1) nextSlots[slotKey(area.id, entry.available_date, h)] = true;
     }
-    const cfgs = (area.hostLevel ? hostConfigs.filter((c: any) => c.host_location_id === area.id).map((c: any) => ({ ...c, name: c.configuration_name })) : (configsByArea[area.id] || [])).filter((c: any) => !isStadiumArea(area) || isApprovedTurfConfigurationCode(c.name || c.configuration_name));
+    const cfgs = (area?.hostLevel ? hostConfigs.filter((c: any) => c.host_location_id === area.id).map((c: any) => ({ ...c, name: c.configuration_name })) : (configsByArea[area?.id] || [])).filter((c: any) => !isStadiumArea(area) || isApprovedTurfConfigurationCode(c.name || c.configuration_name));
     const cfg = cfgs.find((c: any) => c.name === entry.available_layout || c.configuration_name === entry.available_layout);
     if (cfg) nextConfigs[layoutKey(area.id, entry.available_date)] = cfg.id;
     nextAutoSelect[layoutKey(area.id, entry.available_date)] = entry.auto_select_turf_layout ?? true;
@@ -326,7 +339,7 @@ export default function HostingAvailabilityManager() {
   };
 
   const save = async () => {
-    if (!selectedDates.length || !hostId || (!visibleAreas.length && (selectedHost?.surface_type === 'TURF_STADIUM' || selectedHost?.surface_type === STADIUM_TYPE) && !hostConfigsForSelectedHost.length)) {
+    if (!selectedDates.length || !hostId || (!visibleAreas.length && isTurfStadiumHost && !hostConfigsForSelectedHost.length)) {
       setType('err');
       setMessage('Select season weeks with Primary Game Dates, hosting site, and field configuration first.');
       return;
@@ -335,7 +348,7 @@ export default function HostingAvailabilityManager() {
     try {
       const slots: any[] = [];
       if (!visibleAreas.length && hostId) {
-        const isTurfHost = selectedHost?.surface_type === 'TURF_STADIUM' || selectedHost?.surface_type === STADIUM_TYPE;
+        const isTurfHost = isTurfStadiumHost;
         for (const week of selectedWeeks) {
           const d = week.primary_game_date as string;
           const configId = getSelectedConfigId(hostId, d, hostConfigsForSelectedHost[0]?.id || '');
@@ -361,7 +374,7 @@ export default function HostingAvailabilityManager() {
         }
       }
       for (const area of visibleAreas) {
-        const cfgs = (configsByArea[area.id] || []).filter((c: any) => !isStadiumArea(area) || isApprovedTurfConfigurationCode(c.name || c.configuration_name));
+        const cfgs = (configsByArea[area?.id] || []).filter((c: any) => !isStadiumArea(area) || isApprovedTurfConfigurationCode(c.name || c.configuration_name));
         for (const week of selectedWeeks) {
           const d = week.primary_game_date as string;
           const configId = getSelectedConfigId(area.id, d, cfgs[0]?.id || '');
@@ -636,13 +649,14 @@ export default function HostingAvailabilityManager() {
         <h2 className='mb-2 font-semibold'>3. Hosting Site Setup</h2>
         {!hostId ? <p className='text-slate-500'>Select a hosting site to view facility setup.</p> : (
           <div className='space-y-3'>
-            {(visibleAreas.length ? visibleAreas : (selectedHost ? [{ id: selectedHost.id, name: selectedHost.name, field_space_type: selectedHost.surface_type, hostLevel: true }] : [])).map((area: any) => {
-              const cfgs = (area.hostLevel ? hostConfigsForSelectedHost.map((c: any) => ({ ...c, name: c.configuration_name, physical_field_area_id: area.id, thirty_yard_capacity: 0, fifty_three_yard_capacity: 0 })) : (configsByArea[area.id] || [])).filter((c: any) => !isStadiumArea(area) || isApprovedTurfConfigurationCode(c.name || c.configuration_name));
+            {(visibleAreas.length ? visibleAreas : (selectedHost ? [{ id: selectedHost.id, name: selectedHost.name, surface_type: selectedHost.surface_type, host_role: selectedHost.host_role, field_space_type: selectedHost.surface_type, hostLevel: true }] : [])).map((area: any) => {
+              const isStadium = isStadiumArea(area);
+              const cfgs = (area?.hostLevel ? hostConfigsForSelectedHost.map((c: any) => ({ ...c, name: c.configuration_name, physical_field_area_id: area.id, thirty_yard_capacity: 0, fifty_three_yard_capacity: 0 })) : (configsByArea[area?.id] || [])).filter((c: any) => !isStadium || isApprovedTurfConfigurationCode(c.name || c.configuration_name));
               return (
                 <div key={area.id} className='rounded border bg-slate-50 p-3'>
                   <div className='font-medium'>{area.name}</div>
-                  <div className='text-sm text-slate-600'>{area.field_space_type === STADIUM_TYPE || area.field_space_type === 'TURF_STADIUM' ? 'Turf Stadium' : 'Grass/Park Site'}</div>
-                  {isCommunityAdmin ? <p className='mt-2 rounded bg-emerald-50 p-2 text-sm text-emerald-900'>{area.field_space_type === STADIUM_TYPE || area.field_space_type === 'TURF_STADIUM' ? 'Turf stadium layouts are selected automatically during scheduling.' : 'Grass field size is fixed from My Fields.'}</p> : <ul className='mt-2 list-disc pl-6 text-sm'>
+                  <div className='text-sm text-slate-600'>{isStadium ? 'Turf Stadium' : 'Grass/Park Site'}</div>
+                  {isCommunityAdmin ? <p className='mt-2 rounded bg-emerald-50 p-2 text-sm text-emerald-900'>{isStadium ? 'Turf stadium layouts are selected automatically during scheduling.' : 'Grass field size is fixed from My Fields.'}</p> : <ul className='mt-2 list-disc pl-6 text-sm'>
                     {cfgs.map((c: any) => <li key={c.id}>{layoutLabel(c.name)} ({c.small_field_count || c.thirty_yard_capacity || 0} Small / {c.medium_field_count || 0} Medium / {c.large_field_count || c.fifty_three_yard_capacity || 0} Large)</li>)}
                   </ul>}
                 </div>
@@ -698,9 +712,9 @@ export default function HostingAvailabilityManager() {
         {loading || !hostId || !selectedDates.length ? <p className='text-slate-500'>Select hosting site and dates.</p> : selectedDates.map((date) => (
           <div key={date} className='mb-4'>
             <h3 className='mb-2 font-medium'>{weekLabelForDate(date)} — {formatDateLabel(date)}</h3>
-            {(visibleAreas.length ? visibleAreas : (selectedHost ? [{ id: selectedHost.id, name: selectedHost.name, field_space_type: selectedHost.surface_type, hostLevel: true }] : [])).map((area: any) => {
+            {(visibleAreas.length ? visibleAreas : (selectedHost ? [{ id: selectedHost.id, name: selectedHost.name, surface_type: selectedHost.surface_type, host_role: selectedHost.host_role, field_space_type: selectedHost.surface_type, hostLevel: true }] : [])).map((area: any) => {
               const isStadium = isStadiumArea(area);
-              const cfgs = (area.hostLevel ? hostConfigsForSelectedHost.map((c: any) => ({ ...c, name: c.configuration_name, physical_field_area_id: area.id })) : (configsByArea[area.id] || [])).filter((c: any) => !isStadium || isApprovedTurfConfigurationCode(c.name || c.configuration_name));
+              const cfgs = (area?.hostLevel ? hostConfigsForSelectedHost.map((c: any) => ({ ...c, name: c.configuration_name, physical_field_area_id: area.id })) : (configsByArea[area?.id] || [])).filter((c: any) => !isStadium || isApprovedTurfConfigurationCode(c.name || c.configuration_name));
               const defaultCfg = cfgs[0]?.id || '';
               const selectedCfg = getSelectedConfigId(area.id, date, defaultCfg);
               return (
@@ -803,9 +817,9 @@ export default function HostingAvailabilityManager() {
         <h2 className='mb-2 font-semibold'>9. Availability Summary</h2>
         {!selectedDates.length || !selectedHost ? <p className='text-slate-500'>Select dates and hosting site to preview summary.</p> : (
           <div className='space-y-3'>
-            {selectedDates.map((date) => (visibleAreas.length ? visibleAreas : (selectedHost ? [{ id: selectedHost.id, name: selectedHost.name, field_space_type: selectedHost.surface_type, hostLevel: true }] : [])).map((area: any) => {
+            {selectedDates.map((date) => (visibleAreas.length ? visibleAreas : (selectedHost ? [{ id: selectedHost.id, name: selectedHost.name, surface_type: selectedHost.surface_type, host_role: selectedHost.host_role, field_space_type: selectedHost.surface_type, hostLevel: true }] : [])).map((area: any) => {
               const isTurfArea = isStadiumArea(area);
-              const cfgs = (area.hostLevel ? hostConfigsForSelectedHost.map((c: any) => ({ ...c, name: c.configuration_name })) : (configsByArea[area.id] || [])).filter((c: any) => !isTurfArea || isApprovedTurfConfigurationCode(c.name || c.configuration_name));
+              const cfgs = (area?.hostLevel ? hostConfigsForSelectedHost.map((c: any) => ({ ...c, name: c.configuration_name })) : (configsByArea[area?.id] || [])).filter((c: any) => !isTurfArea || isApprovedTurfConfigurationCode(c.name || c.configuration_name));
               const selectedCfg = cfgs.find((c: any) => c.id === getSelectedConfigId(area.id, date, cfgs[0]?.id || ''));
               const ranges = summaryRanges(area.id, date);
               if (!ranges.length) return null;
