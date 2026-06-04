@@ -19282,15 +19282,47 @@ def cleanup_unscheduled_games(db: Session = Depends(get_db)):
         'reopened_slots_from_missing_game_links': reopened_missing_links,
     }
 
+def _format_schedule_export_date(value: date | None) -> str:
+    if not value:
+        return ''
+    return f'{value.month}/{value.day}/{value.year}'
+
+
+def _format_schedule_export_time(value: time | None) -> str:
+    if not value:
+        return ''
+    return f'{value.hour}:{value.minute:02d}'
+
+
+def _format_schedule_export_status(value: str | None) -> str:
+    return str(value or '').strip().upper()
+
+
+def _schedule_export_row_values(g, slot, fi, host, home, away, div, status) -> list[str]:
+    return [
+        _format_schedule_export_date(g.game_date),
+        _format_schedule_export_time(g.kickoff_time),
+        normalized_division_key(div.division_group, div.name),
+        home.name,
+        away.name,
+        host.name if host else '',
+        fi.field_name if fi else '',
+        _format_schedule_export_status(slot.field_type if slot else ''),
+        _format_schedule_export_status(status.code),
+    ]
+
+
 @router.get('/schedule-management/export.csv', dependencies=[Depends(get_current_user)])
 def export_schedule_management_csv(date: date | None = None, division_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, host_location_id: uuid.UUID | None = None, field_type: str | None = None, field_id: uuid.UUID | None = None, team_id: uuid.UUID | None = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     rows = _schedule_management_rows(db, {'date': date, 'division_id': division_id, 'organization_id': organization_id, 'host_location_id': host_location_id, 'field_type': field_type, 'field_id': field_id, 'team_id': team_id})
-    out = io.StringIO(); w=csv.writer(out); w.writerow(['Date','Time','Division Group','Division','Division ID','Display Division Name','Category/Gender','Normalized Division Key','Home Team','Away Team','Host Location','Field','Field Type','Status'])
+    out = io.StringIO()
+    w = csv.writer(out)
+    w.writerow(['Date', 'Time', 'Normalized Division Key', 'Home Team', 'Away Team', 'Host Location', 'Field', 'Field Type', 'Status'])
     export_division_names: set[str] = set()
     exported_dates = {g.game_date for g, *_ in rows if g.game_date}
     for g, slot, fi, host, home, away, div, org, status in rows:
         export_division_names.add(f'{div.division_group} {div.name}'.strip())
-        w.writerow([g.game_date.isoformat(), g.kickoff_time.strftime('%H:%M'), div.division_group, div.name, str(div.id), f'{div.division_group} {div.name}'.strip(), div.division_group or '', normalized_division_key(div.division_group, div.name), home.name, away.name, host.name if host else '', fi.field_name if fi else '', slot.field_type if slot else '', status.code])
+        w.writerow(_schedule_export_row_values(g, slot, fi, host, home, away, div, status))
 
     validation_week_query = db.query(Week)
     if date:
@@ -19332,19 +19364,17 @@ def export_schedule_management_csv(date: date | None = None, division_id: uuid.U
                 'missing_games': missing_games,
             })
             w.writerow([
-                _week_game_date(validation_week).isoformat() if _week_game_date(validation_week) else '',
+                _format_schedule_export_date(_week_game_date(validation_week)),
                 '',
-                validation_division.division_group,
-                validation_division.name,
-                str(validation_division.id),
-                division_label,
-                validation_division.division_group or '',
                 normalized_division_key(validation_division.division_group, validation_division.name),
                 warning_message,
                 '',
                 '',
                 '',
-                _normalize_field_size(_required_field_type_for_division(validation_division)) or str(_required_field_type_for_division(validation_division)),
+                _format_schedule_export_status(
+                    _normalize_field_size(_required_field_type_for_division(validation_division))
+                    or str(_required_field_type_for_division(validation_division))
+                ),
                 'EXPORT_VALIDATION_INCOMPLETE',
             ])
     if export_validation_warnings:
