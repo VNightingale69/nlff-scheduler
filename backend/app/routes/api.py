@@ -1358,6 +1358,7 @@ def normalized_division_key(division_group: str | None, division_name: str | Non
     return normalize_division_name(f"{division_group or ''} {division_name or ''}")
 
 ALLOWED_SURFACE_TYPES = {'TURF_STADIUM', 'GRASS_FIELD'}
+TURF_CAPABLE_SURFACE_TYPES = {'TURF_STADIUM'}
 FIELD_SIZE_SMALL = 'SMALL'
 FIELD_SIZE_MEDIUM = 'MEDIUM'
 FIELD_SIZE_LARGE = 'LARGE'
@@ -2337,6 +2338,7 @@ def _regenerate_generated_slots(
     availability: HostingAvailability,
     host_location_id: uuid.UUID,
     demand_counts_override: dict[str, int] | None = None,
+    turf_layout_blocks_override: list[tuple[str, int]] | None = None,
 ) -> dict[str, object]:
     slot_date = availability.primary_game_date or availability.available_date
     host = availability.host_location or (availability.field.host_location if availability.field else None) or (availability.physical_field_area.host_location if availability.physical_field_area else None)
@@ -2455,15 +2457,25 @@ def _regenerate_generated_slots(
         locked_layout = None
         if availability.lock_selected_layout and selected_configuration:
             locked_layout = _normalize_configuration_name(selected_configuration.configuration_name)
-        elif selected_configuration and not availability.auto_select_turf_layout:
-            locked_layout = _normalize_configuration_name(selected_configuration.configuration_name)
-        if locked_layout and locked_layout in active_configuration_names:
+        if turf_layout_blocks_override is not None:
+            turf_layout_blocks = [(_normalize_configuration_name(layout), int(hours or 1)) for layout, hours in turf_layout_blocks_override]
+        elif locked_layout and locked_layout in active_configuration_names:
             turf_layout_blocks = [(locked_layout, 1) for _ in range(max(int(total_hours or 0), 0))]
         elif active_configuration_names:
             turf_layout_blocks = _plan_turf_layout_blocks(demand_counts, total_hours, active_configuration_names)
         if turf_layout_blocks:
             first_layout = turf_layout_blocks[0][0]
             selected_configuration = next((config for config in active_configs if _normalize_configuration_name(config.configuration_name) == first_layout), selected_configuration)
+        diagnostics['turf_wave_configuration_plan'] = [
+            {
+                'wave_number': index,
+                'selected_configuration': layout,
+                'block_hours': hours,
+                'components_by_field_size': _turf_wave_layout_counts(layout),
+                'configuration_selection_reason': 'global required field-size demand planner' if turf_layout_blocks_override is not None else ('locked selected turf layout' if locked_layout else 'local required field-size demand planner'),
+            }
+            for index, (layout, hours) in enumerate(turf_layout_blocks, start=1)
+        ]
         if selected_configuration and availability.selected_configuration_id != selected_configuration.id:
             availability.selected_configuration_id = selected_configuration.id
             host_configuration = selected_configuration
@@ -2681,6 +2693,7 @@ def _regenerate_hosting_day(
     availability_rows: list[HostingAvailability],
     host: HostLocation,
     demand_by_availability_id: dict[uuid.UUID, dict[str, int]] | None = None,
+    turf_layout_blocks_by_availability_id: dict[uuid.UUID, list[tuple[str, int]]] | None = None,
 ) -> HostingGenerationLocationResult:
     result = HostingGenerationLocationResult(
         host_location_id=host.id,
@@ -2708,7 +2721,7 @@ def _regenerate_hosting_day(
 
             before_instances = db.query(FieldInstance).filter(FieldInstance.hosting_availability_id == availability_id).count()
             before_slots = db.query(GameSlot).join(GameSlot.field_instance).filter(FieldInstance.hosting_availability_id == availability_id).count()
-            slot_metrics = _regenerate_generated_slots(db, availability, host_id, (demand_by_availability_id or {}).get(availability_id))
+            slot_metrics = _regenerate_generated_slots(db, availability, host_id, (demand_by_availability_id or {}).get(availability_id), (turf_layout_blocks_by_availability_id or {}).get(availability_id))
             after_instances = db.query(FieldInstance).filter(FieldInstance.hosting_availability_id == availability_id).count()
             after_slots = db.query(GameSlot).join(GameSlot.field_instance).filter(FieldInstance.hosting_availability_id == availability_id).count()
             result.field_instances_created += max(after_instances, before_instances)
@@ -11943,6 +11956,41 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             demand[normalized_candidate_size] = max(demand[normalized_candidate_size] - 1, 0)
         return demand
 
+    def _would_exhaust_required_field_size_capacity(candidate_slot: GameSlot | None, candidate_size: str | None) -> tuple[bool, dict[str, object]]:
+        normalized_candidate_size = _normalize_field_size(candidate_size)
+        demand_after_candidate = _projected_unscheduled_game_demand_by_size(normalized_candidate_size)
+        open_capacity_by_size = _empty_field_size_counts()
+        open_slot_rows = db.query(GameSlot).filter(
+            GameSlot.season_id == season_id,
+            GameSlot.week_id == week_id,
+            GameSlot.slot_date == week_game_date,
+            GameSlot.assigned_game_id.is_(None),
+            GameSlot.status == 'OPEN',
+        ).all()
+        proposed_slot_ids = {str(plan.get('slot_id')) for plan in plans if plan.get('slot_id')}
+        for open_slot in open_slot_rows:
+            if str(open_slot.id) in proposed_slot_ids:
+                continue
+            if candidate_slot and open_slot.id == candidate_slot.id:
+                continue
+            if selected_host_ids and open_slot.host_location_id not in selected_host_ids:
+                continue
+            size = _normalize_field_size(open_slot.field_type)
+            if size in open_capacity_by_size:
+                open_capacity_by_size[size] += 1
+        shortage_by_size = {
+            size: max(0, int(demand_after_candidate.get(size, 0) or 0) - int(open_capacity_by_size.get(size, 0) or 0))
+            for size in FIELD_SIZE_ORDER
+        }
+        would_exhaust = any(int(shortage_by_size.get(size, 0) or 0) > 0 for size in FIELD_SIZE_ORDER)
+        return would_exhaust, {
+            'reason_code': 'WOULD_EXHAUST_REQUIRED_FIELD_SIZE_CAPACITY',
+            'candidate_field_size': normalized_candidate_size,
+            'remaining_required_games_after_candidate_by_size': demand_after_candidate,
+            'remaining_open_slots_after_candidate_by_size': open_capacity_by_size,
+            'shortage_by_size': shortage_by_size,
+        }
+
     def _turf_wave_packing_projection(wave_id: uuid.UUID | None, candidate_size: str | None) -> dict[str, object]:
         empty_counts = {size: 0 for size in FIELD_SIZE_ORDER}
         if not wave_id:
@@ -12658,6 +12706,18 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                             if not bool(payload.get('admin_override_incompatible_field_size', False)):
                                 _record_placement_attempt(selected_field_slot, a, b, 'rejected', 'Field size is not compatible with division layout requirements.')
                                 continue
+                        would_exhaust_capacity, exhaust_diagnostic = _would_exhaust_required_field_size_capacity(selected_field_slot, required_field_type)
+                        if would_exhaust_capacity:
+                            _record_placement_attempt(
+                                selected_field_slot,
+                                a,
+                                b,
+                                'rejected',
+                                'WOULD_EXHAUST_REQUIRED_FIELD_SIZE_CAPACITY',
+                                selected_field_slot,
+                            )
+                            warning_bits.append('WOULD_EXHAUST_REQUIRED_FIELD_SIZE_CAPACITY')
+                            continue
                         if true_home_host_candidate and candidate_owned_host_priority_rank == best_owned_host_priority_rank:
                             score += 3000000
                             reason_bits.append('hard-priority highest-priority selected owned host placement (+3000000)')
@@ -15858,16 +15918,16 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
     }
 
 def _auto_schedule_division_order(db: Session | None = None) -> list[tuple[str, str]]:
-    return [
-        ('COED', 'K-1'),
-        ('COED', '2-3'),
-        ('COED', '4-5'),
-        ('COED', '6-7'),
-        ('COED', '8'),
-        ('GIRLS', 'K-2'),
-        ('GIRLS', '3-5'),
-        ('GIRLS', '6-8'),
-    ]
+    if db is not None:
+        return [
+            (division.division_group or '', division.name or '')
+            for division in db.query(Division).filter(Division.is_active.is_(True)).order_by(
+                Division.sort_order.asc(),
+                Division.division_group.asc(),
+                Division.name.asc(),
+            ).all()
+        ]
+    return []
 
 @router.post('/manual-schedule-builder/auto-schedule-season')
 def auto_schedule_entire_season(payload: dict, current_user: User = Depends(require_roles(ROLE_LEAGUE_ADMIN)), db: Session = Depends(get_db)):
@@ -16176,6 +16236,10 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         for group, name in division_order:
             division = divisions_by_key.get(canonical_division_id(group, name)) or divisions_by_normalized_name.get(normalize_division_name(f'{group} {name}'))
             if division and division.is_active and division.id not in seen_division_ids:
+                active_divisions.append(division)
+                seen_division_ids.add(division.id)
+        for division in sorted(all_divisions, key=lambda d: (int(d.sort_order or 0), str(d.division_group or ''), str(d.name or ''), str(d.id))):
+            if division.is_active and division.id not in seen_division_ids:
                 active_divisions.append(division)
                 seen_division_ids.add(division.id)
         return active_divisions
@@ -16726,8 +16790,54 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
     if slot_preflight_errors:
         validation_errors.extend(slot_preflight_errors)
         warnings.append(
-            'Some weeks are missing generated slots for required field sizes; auto-schedule will still preview or commit other valid weeks.'
+            'Generated field-size capacity is insufficient for at least one regular-season date; auto-schedule placement was not started.'
         )
+        return {
+            'status': 'VALIDATION_FAILED',
+            'message': 'Generated slot capacity is insufficient for required field-size demand before placement.',
+            'dry_run': dry_run,
+            'preview_games_count': 0,
+            'committed_games_count': 0,
+            'scheduled_games_count': 0,
+            'total_games_created': 0,
+            'root_cause_categories': [
+                'REQUIRED_FIELD_SIZE_CAPACITY_SHORTAGE',
+                'GENERATED_SLOT_COVERAGE_INSUFFICIENT',
+                'TURF_CONFIGURATION_DID_NOT_GENERATE_REQUIRED_FIELD_SIZE',
+            ],
+            'auto_schedule_diagnostics': {
+                'slot_capacity_validation': slot_preflight,
+                'Required Field-Size Demand vs Generated Capacity Diagnostics': [
+                    row.get('Required Field-Size Demand vs Generated Capacity Diagnostics')
+                    for row in (slot_preflight.get('validation_rows') or [])
+                ],
+                'phase_metrics': phase_metrics,
+            },
+            'slot_capacity_validation': slot_preflight,
+            'games_skipped': 0,
+            'skipped_attempts_message': '0 placement attempts skipped; placement was not started because generated field-size capacity was insufficient.',
+            'skipped_attempts_summary': skipped_attempts_summary,
+            'skipped_attempts_by_reason': skipped_attempts_by_reason,
+            'required_games_still_missing': [],
+            'schedule_complete': False,
+            'missing_games_total': games_to_schedule_count,
+            'missing_games_by_week_and_division': [],
+            'missing_teams': [],
+            'missing_matchups': [],
+            'apply_failures': [],
+            'warnings': warnings,
+            'informational_notes': [],
+            'validation_failures': validation_errors,
+            'validation_errors': validation_errors,
+            'validation_warnings': validation_warnings,
+            'weekly_schedule_diagnostics': [],
+            'division_week_schedule_diagnostics': [],
+            'hard_validation': [],
+            'post_run_validation': [],
+            'divisions_completed': [],
+            'divisions_with_unresolved_games': [],
+            'post_schedule_repair': {'ran': False, 'note': 'Run manual optimization endpoint to execute repairs.'},
+        }
 
     initial_placement_phase = _start_phase('initial placement')
     week_progress_started_at: dict[str, float] = {}
@@ -17816,16 +17926,17 @@ def _league_week_demand_summary(db: Session, division_order: list[tuple[str, str
     for division in sorted(all_divisions, key=lambda d: (str(d.division_group or ''), str(d.name or ''), str(d.id))):
         if division.id in seen_division_ids:
             continue
-        if canonical_division_id_from_division(division) in LEAGUE_DEMAND_DIVISION_KEYS:
-            ordered_divisions.append(division)
-            seen_division_ids.add(division.id)
+        ordered_divisions.append(division)
+        seen_division_ids.add(division.id)
 
     division_rows: list[dict[str, object]] = []
     for division in ordered_divisions:
         division_key = canonical_division_id_from_division(division)
-        if not division.is_active or division_key not in LEAGUE_DEMAND_DIVISION_KEYS:
+        if not division.is_active:
             continue
         active_team_count = db.query(Team.id).filter(Team.division_id == division.id, Team.is_active.is_(True)).count()
+        if active_team_count <= 0:
+            continue
         expected_games = _estimated_games_from_team_count(active_team_count)
         required_size = _required_field_type_for_division(division)
         if required_size not in demand:
@@ -18048,6 +18159,88 @@ def _regenerate_and_validate_slots_for_weeks(
                     demand_by_availability_id_by_host.setdefault(host.id, {})[availability.id] = dict(required_games_by_size)
 
 
+    turf_layout_blocks_by_availability_id: dict[uuid.UUID, list[tuple[str, int]]] = {}
+    turf_global_planning_diagnostics_by_date: dict[date, dict[str, object]] = {}
+    for available_date, date_hosts in available_hosts_by_date.items():
+        remaining = _normalized_demand_counts(required_games_by_size)
+        wave_rows: list[dict[str, object]] = []
+        selected_turf_hosts = [
+            host for host in date_hosts
+            if str(host.surface_type or '').upper() in TURF_CAPABLE_SURFACE_TYPES
+        ]
+        for host in sorted(selected_turf_hosts, key=lambda h: ((h.name or '').lower(), str(h.id))):
+            for availability in sorted(availabilities_by_host_id.get(host.id, []), key=lambda a: (a.start_time, str(a.id))):
+                if (availability.primary_game_date or availability.available_date) != available_date:
+                    continue
+                _ensure_approved_turf_configurations(db, host)
+                db.flush()
+                active_configs = db.query(HostLocationConfiguration).filter(
+                    HostLocationConfiguration.host_location_id == host.id,
+                    HostLocationConfiguration.is_active.is_(True),
+                ).all()
+                active_names = _available_turf_configuration_names(active_configs)
+                selected_configuration = _select_best_turf_configuration(db, availability, host)
+                locked_layout = _normalize_configuration_name(selected_configuration.configuration_name) if availability.lock_selected_layout and selected_configuration else None
+                start_dt = datetime.combine(available_date, availability.start_time)
+                total_hours = _hours_between(availability.start_time, availability.end_time, available_date)
+                for wave_index in range(max(int(total_hours or 0), 0)):
+                    start_time = (start_dt + timedelta(hours=wave_index)).time()
+                    wave_rows.append({
+                        'availability': availability,
+                        'host': host,
+                        'wave_index': wave_index,
+                        'start_time': start_time,
+                        'active_names': active_names,
+                        'locked_layout': locked_layout if locked_layout in active_names else None,
+                    })
+        wave_diagnostics: list[dict[str, object]] = []
+        for wave in sorted(wave_rows, key=lambda row: (row['start_time'], (row['host'].name or '').lower(), str(row['host'].id), row['wave_index'])):
+            availability = wave['availability']
+            active_names = set(wave['active_names'] or set())
+            locked_layout = wave.get('locked_layout')
+            before = _normalized_demand_counts(remaining)
+            if locked_layout:
+                selected = str(locked_layout)
+                reason = 'locked selected turf layout; may limit field-size coverage'
+            else:
+                selected = _select_turf_wave_configuration(remaining, active_names, wave_index=int(wave['wave_index'] or 0))
+                reason = 'global required field-size demand planner'
+            if selected:
+                turf_layout_blocks_by_availability_id.setdefault(availability.id, []).append((selected, 1))
+                counts = _turf_wave_layout_counts(selected)
+                for size in FIELD_SIZE_ORDER:
+                    remaining[size] = max(0, int(remaining.get(size, 0) or 0) - int(counts.get(size, 0) or 0))
+            else:
+                counts = _empty_field_size_counts()
+                reason = 'no approved turf configurations available for this hourly wave'
+            wave_diagnostics.append({
+                'host_location_id': str(wave['host'].id),
+                'host_location_name': wave['host'].name,
+                'surface_type': wave['host'].surface_type,
+                'game_date': str(available_date),
+                'earliest_start_time': availability.start_time.isoformat() if availability.start_time else None,
+                'latest_start_time': (datetime.combine(available_date, availability.end_time) - GAME_DURATION).time().isoformat() if availability.end_time else None,
+                'wave_number': int(wave['wave_index'] or 0) + 1,
+                'start_time': wave['start_time'].isoformat() if wave.get('start_time') else None,
+                'selected_configuration': selected,
+                'approved_configurations_considered': sorted(active_names),
+                'components_by_field_size': counts,
+                'assigned_games_by_field_size': _empty_field_size_counts(),
+                'unused_components_by_field_size': counts,
+                'configuration_selection_reason': reason,
+                'remaining_required_demand_before_wave': before,
+                'remaining_required_demand_after_wave': _normalized_demand_counts(remaining),
+            })
+        turf_global_planning_diagnostics_by_date[available_date] = {
+            'selected_turf_host_location_ids': [str(host.id) for host in selected_turf_hosts],
+            'selected_turf_host_location_names': [host.name for host in selected_turf_hosts],
+            'required_games_by_field_size': dict(required_games_by_size),
+            'remaining_required_demand_after_planning': _normalized_demand_counts(remaining),
+            'turf_reconfiguration_attempted': bool(wave_rows),
+            'turf_reconfiguration_success': not any(int(remaining.get(size, 0) or 0) > 0 for size in FIELD_SIZE_ORDER),
+            'selected_turf_field_wave_diagnostics': wave_diagnostics,
+        }
+
     for host in hosts:
         availabilities = availabilities_by_host_id.get(host.id, [])
         if not availabilities:
@@ -18056,7 +18249,7 @@ def _regenerate_and_validate_slots_for_weeks(
             availability.id: demand_by_availability_id_by_host.get(host.id, {}).get(availability.id, _empty_field_size_counts())
             for availability in availabilities
         }
-        result = _regenerate_hosting_day(db, availabilities, host, demand_by_availability_id)
+        result = _regenerate_hosting_day(db, availabilities, host, demand_by_availability_id, turf_layout_blocks_by_availability_id)
         slots_created_by_availability = {
             availability.id: db.query(GameSlot.id).join(GameSlot.field_instance).filter(
                 FieldInstance.hosting_availability_id == availability.id,
@@ -18119,8 +18312,41 @@ def _regenerate_and_validate_slots_for_weeks(
                 slot_counts[size] += int(count or 0)
         missing_sizes = [
             size for size in FIELD_SIZE_ORDER
-            if int(required_games_by_size.get(size, 0) or 0) > 0 and int(slot_counts.get(size, 0) or 0) == 0
+            if int(required_games_by_size.get(size, 0) or 0) > int(slot_counts.get(size, 0) or 0)
         ]
+        missing_games_by_size = {
+            size: max(0, int(required_games_by_size.get(size, 0) or 0) - int(slot_counts.get(size, 0) or 0))
+            for size in FIELD_SIZE_ORDER
+        }
+        capacity_sufficient_by_size = {
+            size: int(slot_counts.get(size, 0) or 0) >= int(required_games_by_size.get(size, 0) or 0)
+            for size in FIELD_SIZE_ORDER
+        }
+        scheduled_games_by_size = _empty_field_size_counts()
+        for field_type, count in db.query(GameSlot.field_type, func.count(GameSlot.id)).filter(
+            GameSlot.season_id == week.season_id,
+            GameSlot.week_id == week.id,
+            GameSlot.slot_date == game_date,
+            GameSlot.assigned_game_id.isnot(None),
+        ).group_by(GameSlot.field_type).all():
+            size = _normalize_field_size(field_type)
+            if size in scheduled_games_by_size:
+                scheduled_games_by_size[size] += int(count or 0)
+        remaining_slots_by_size = {
+            size: max(0, int(slot_counts.get(size, 0) or 0) - int(scheduled_games_by_size.get(size, 0) or 0))
+            for size in FIELD_SIZE_ORDER
+        }
+        turf_capacity_diagnostic = dict(turf_global_planning_diagnostics_by_date.get(game_date, {}))
+        turf_capacity_diagnostic.update({
+            'generated_slots_by_field_size': dict(slot_counts),
+            'scheduled_games_by_field_size': dict(scheduled_games_by_size),
+            'remaining_slots_by_field_size': dict(remaining_slots_by_size),
+            'missing_games_by_field_size': dict(missing_games_by_size),
+            'capacity_sufficient_by_field_size': dict(capacity_sufficient_by_size),
+            'capacity_shortage_reason': (
+                'GENERATED_SLOT_COVERAGE_INSUFFICIENT' if missing_sizes else None
+            ),
+        })
         community_capacity_by_size: dict[str, dict[str, int]] = {}
         location_capacity_by_community: dict[str, list[dict[str, object]]] = {}
         capacity_rows = db.query(HostLocation.organization_id, HostLocation.name, GameSlot.field_type, func.count(GameSlot.id)).select_from(GameSlot).join(
@@ -18173,6 +18399,7 @@ def _regenerate_and_validate_slots_for_weeks(
         }
         demand_summary['selected_hosts'] = selected_hosts_for_date
         demand_summary['generated_slots_by_size'] = dict(slot_counts)
+        demand_summary['Required Field-Size Demand vs Generated Capacity Diagnostics'] = turf_capacity_diagnostic
         demand_summary['selected_host_enforcement_diagnostics'] = selected_enforcement_by_date.get(game_date)
         demand_summary['selected_host_generated_slot_diagnostics'] = selected_host_diagnostics
         demand_summary['host_plan_data_integrity_summary'] = host_plan_data_integrity_summary
@@ -18186,6 +18413,11 @@ def _regenerate_and_validate_slots_for_weeks(
             'league_wide_demand_by_size': dict(required_games_by_size),
             'active_divisions_included': active_division_demand_rows,
             'generated_slots_by_size': dict(slot_counts),
+            'scheduled_games_by_field_size': dict(scheduled_games_by_size),
+            'remaining_slots_by_field_size': dict(remaining_slots_by_size),
+            'missing_games_by_field_size': dict(missing_games_by_size),
+            'capacity_sufficient_by_field_size': dict(capacity_sufficient_by_size),
+            'Required Field-Size Demand vs Generated Capacity Diagnostics': turf_capacity_diagnostic,
             'community_capacity_by_field_size': community_capacity_by_size,
             'host_location_capacity_by_community': location_capacity_by_community,
             'missing_field_sizes': missing_sizes,
@@ -18201,7 +18433,7 @@ def _regenerate_and_validate_slots_for_weeks(
         validation_rows.append(row)
         for size in missing_sizes:
             validation_errors.append(
-                f'Week {week.week_number} ({game_date}) requires {required_games_by_size[size]} {size} game(s) but generated 0 {size} slot(s). '
+                f'REQUIRED_FIELD_SIZE_CAPACITY_SHORTAGE: Week {week.week_number} ({game_date}) requires {required_games_by_size[size]} {size} game(s) but generated {slot_counts.get(size, 0)} {size} slot(s). '
                 f'Host locations evaluated: {", ".join(row["host_locations_evaluated"]) or "none"}. '
                 f'Reasons: {" | ".join(row["generation_reasons"]) or "No hosting availability was evaluated for this week."}'
             )
