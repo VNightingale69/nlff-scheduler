@@ -3,10 +3,11 @@ import { useEffect, useMemo, useState } from 'react';
 import Toast from './Toast';
 import { apiFetch } from '@/lib/api';
 import { getAuthUser, getToken } from '@/lib/auth';
-import { APPROVED_TURF_CONFIGURATIONS, turfAvailableFieldsLabel, turfConfigurationLabel } from '@/lib/turfConfigurations';
+import { APPROVED_TURF_CONFIGURATIONS, turfAvailableFieldsLabel, turfConfigurationLabel, type TurfConfiguration } from '@/lib/turfConfigurations';
 
 const TURF_STADIUM = 'TURF_STADIUM';
 const GRASS_FIELD = 'GRASS_FIELD';
+type FieldType = 'SMALL' | 'MEDIUM' | 'LARGE';
 const FIELD_TYPES = ['SMALL', 'MEDIUM', 'LARGE'];
 const FACILITY_TYPES = [
   { value: TURF_STADIUM, label: 'Turf Stadium', fieldSize: undefined },
@@ -15,18 +16,43 @@ const FACILITY_TYPES = [
   { value: 'SMALL_GRASS_FIELD', label: 'Small Grass Field', fieldSize: 'SMALL' },
 ];
 
-const DIVISION_COMPATIBILITY = {
+const DIVISION_COMPATIBILITY: Record<FieldType, string[]> = {
   SMALL: ['Coed K-1', 'Coed 2-3', 'Girls K-2'],
   MEDIUM: ['Coed 4-5', 'Girls 3-5'],
   LARGE: ['Coed 6-7', 'Coed 8', 'Girls 6-8'],
 };
 
-const TURF_LAYOUTS = [
-  { name: 'THREE_SMALL', title: 'Three Small Fields', fields: ['Small', 'Small', 'Small'], large: 0, medium: 0, small: 3, schedulingNote: 'Best for one-hour waves with small-division demand.' },
-  { name: 'TWO_SMALL_ONE_MEDIUM', title: 'Two Small Fields + One Medium Field', fields: ['Small', 'Small', 'Medium'], large: 0, medium: 1, small: 2, schedulingNote: 'Supports small and medium games in the same one-hour wave.' },
-  { name: 'TWO_MEDIUM', title: 'Two Medium Fields', fields: ['Medium', 'Medium'], large: 0, medium: 2, small: 0, schedulingNote: 'Best for one-hour waves with medium-division demand.' },
-  { name: 'ONE_SMALL_ONE_LARGE', title: 'One Small Field + One Large Field', fields: ['Small', 'Large'], large: 1, medium: 0, small: 1, schedulingNote: 'Supports large games while allowing one compatible small game in the same one-hour wave.' },
-];
+type FieldAreaLayout = {
+  name?: string;
+  code?: string;
+  title?: string;
+  displayName?: string;
+  fields?: string[];
+  availableFields?: TurfConfiguration['availableFields'];
+  supportedDivisions?: string[];
+  large?: number;
+  medium?: number;
+  small?: number;
+  fieldType?: string;
+  field_type?: string;
+  type?: string;
+  required_field_layout_type?: string;
+  schedulingNote?: string;
+};
+
+const TURF_LAYOUTS: FieldAreaLayout[] = APPROVED_TURF_CONFIGURATIONS.map((config) => ({
+  name: config.code,
+  code: config.code,
+  title: config.displayName,
+  displayName: config.displayName,
+  availableFields: config.availableFields,
+  fields: config.availableFields.map((fieldType) => `${fieldType.charAt(0)}${fieldType.slice(1).toLowerCase()}`),
+  supportedDivisions: config.supportedDivisions,
+  large: config.availableFields.filter((fieldType) => fieldType === 'LARGE').length,
+  medium: config.availableFields.filter((fieldType) => fieldType === 'MEDIUM').length,
+  small: config.availableFields.filter((fieldType) => fieldType === 'SMALL').length,
+  schedulingNote: config.schedulingNote,
+}));
 const APPROVED_TURF_LAYOUT_CODES = new Set(TURF_LAYOUTS.map((layout) => layout.name));
 
 const formatSurfaceType = (value?: string) => value === TURF_STADIUM ? 'Turf Stadium' : value === GRASS_FIELD ? 'Grass Field' : 'Not set';
@@ -35,11 +61,48 @@ const facilityTypeLabel = (value?: string) => FACILITY_TYPES.find((option) => op
 const grassFacilityTypeForSize = (value?: string) => `${_fieldTypeLabel(value)} Grass Field`;
 const fieldTypeLabel = _fieldTypeLabel;
 const configuredFieldsText = (count: number) => `${count} active configured field${count === 1 ? '' : 's'}`;
-const configLabel = (value?: string) => {
-  const layout = TURF_LAYOUTS.find((item) => item.name === value);
-  return layout ? `${layout.name} — ${layout.title}` : value || 'Unknown layout';
-};
+const configLabel = (value?: string) => turfConfigurationLabel(value);
 const errorMessage = (error: any, fallback: string) => error?.message || fallback;
+
+const normalizeFieldType = (value?: string | null): FieldType | undefined => {
+  const normalized = String(value || '').toUpperCase();
+  return FIELD_TYPES.includes(normalized as FieldType) ? normalized as FieldType : undefined;
+};
+
+const fieldTypesForLayout = (layout?: FieldAreaLayout | null): FieldType[] => {
+  if (!layout) return [];
+
+  const explicitType = normalizeFieldType(layout.fieldType || layout.field_type || layout.type || layout.required_field_layout_type);
+  if (explicitType) return [explicitType];
+
+  const fieldTypes = [
+    ...(layout.availableFields || []),
+    ...(layout.fields || []).map((field) => normalizeFieldType(field)),
+  ].filter(Boolean) as FieldType[];
+
+  if (fieldTypes.length) return fieldTypes;
+
+  return [
+    ...Array(Math.max(0, layout.small || 0)).fill('SMALL'),
+    ...Array(Math.max(0, layout.medium || 0)).fill('MEDIUM'),
+    ...Array(Math.max(0, layout.large || 0)).fill('LARGE'),
+  ] as FieldType[];
+};
+
+const supportedGroups = (layout?: FieldAreaLayout | null): string => {
+  if (layout?.supportedDivisions?.length) return layout.supportedDivisions.join(', ');
+
+  const divisions = Array.from(new Set(fieldTypesForLayout(layout).flatMap((fieldType) => DIVISION_COMPATIBILITY[fieldType] || [])));
+  return divisions.length ? divisions.join(', ') : 'Configured divisions';
+};
+
+const layoutFieldsLabel = (layout?: FieldAreaLayout | null): string => {
+  const availableFields = layout?.availableFields || fieldTypesForLayout(layout);
+  if (availableFields.length) return turfAvailableFieldsLabel(availableFields);
+  return (layout?.fields || []).join(' + ') || 'Configured fields';
+};
+
+const schedulingNote = (layout?: FieldAreaLayout | null): string => layout?.schedulingNote || 'Scheduling rules use the configured field layout metadata.';
 
 
 
@@ -238,7 +301,7 @@ export default function FieldAreaManager() {
         medium: activeFields.filter((field: any) => field.layout_type === 'MEDIUM').length,
         small: activeFields.filter((field: any) => field.layout_type === 'SMALL').length,
       };
-      const maxFieldsPerWave = surfaceType === TURF_STADIUM ? Math.max(...TURF_LAYOUTS.map((layout) => layout.fields.length)) : 0;
+      const maxFieldsPerWave = surfaceType === TURF_STADIUM ? Math.max(...TURF_LAYOUTS.map((layout) => fieldTypesForLayout(layout).length)) : 0;
       const isReady = surfaceType === TURF_STADIUM ? Boolean(host.is_active) : activeFields.length > 0;
       if (isCommunityAdmin) {
         return <tr key={host.id}>
@@ -314,11 +377,11 @@ export default function FieldAreaManager() {
           <p className='mt-2 text-xs font-semibold uppercase text-slate-500'>Display Name</p>
           <p className='text-sm'>{layout.title}</p>
           <p className='mt-2 text-xs font-semibold uppercase text-slate-500'>Available Fields</p>
-          <p className='text-sm'>{layout.fields.join(' + ')}</p>
+          <p className='text-sm'>{layoutFieldsLabel(layout)}</p>
           <p className='mt-2 text-xs font-semibold uppercase text-slate-500'>Supported Divisions</p>
           <p className='text-sm'>{supportedGroups(layout)}</p>
           <p className='mt-2 text-xs font-semibold uppercase text-slate-500'>Scheduling Note</p>
-          <p className='text-sm'>{layout.schedulingNote}</p>
+          <p className='text-sm'>{schedulingNote(layout)}</p>
         </article>)}
       </div>
       <p className='mt-3 rounded bg-emerald-50 p-3 text-sm text-emerald-900'>This turf location supports the four approved league turf configurations. During scheduling, each one-hour wave will be assigned one approved configuration code. Unused field slots are allowed when there are not enough compatible games to fill the selected layout.</p>
