@@ -33,7 +33,7 @@ def upgrade() -> None:
             op.execute(
                 sa.text(
                     "UPDATE host_location_configurations "
-                    "SET is_active = 0 "
+                    "SET is_active = FALSE "
                     "WHERE UPPER(REPLACE(REPLACE(configuration_name, '-', '_'), ' ', '_')) NOT IN ('THREE_SMALL', 'TWO_SMALL_ONE_MEDIUM', 'TWO_MEDIUM', 'ONE_SMALL_ONE_LARGE')"
                 )
             )
@@ -44,7 +44,7 @@ def upgrade() -> None:
             op.execute(
                 sa.text(
                     "UPDATE hosting_availabilities "
-                    "SET selected_configuration_id = NULL, auto_select_turf_layout = 1, lock_selected_layout = 0 "
+                    "SET selected_configuration_id = NULL, auto_select_turf_layout = TRUE, lock_selected_layout = FALSE "
                     "WHERE selected_configuration_id IN ("
                     "SELECT id FROM host_location_configurations "
                     "WHERE UPPER(REPLACE(REPLACE(configuration_name, '-', '_'), ' ', '_')) NOT IN ('THREE_SMALL', 'TWO_SMALL_ONE_MEDIUM', 'TWO_MEDIUM', 'ONE_SMALL_ONE_LARGE'))"
@@ -68,7 +68,7 @@ def upgrade() -> None:
             op.execute(
                 sa.text(
                     "UPDATE field_configuration_options "
-                    "SET is_active = 0 "
+                    "SET is_active = FALSE "
                     "WHERE surface_type = 'TURF_STADIUM' "
                     "AND UPPER(REPLACE(REPLACE(configuration_name, '-', '_'), ' ', '_')) NOT IN ('THREE_SMALL', 'TWO_SMALL_ONE_MEDIUM', 'TWO_MEDIUM', 'ONE_SMALL_ONE_LARGE')"
                 )
