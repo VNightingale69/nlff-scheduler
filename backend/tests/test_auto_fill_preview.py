@@ -7,8 +7,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import Base
-from app.models import Division, FieldInstance, Game, GameSlot, GameStatus, HostLocation, HostPlanSelection, HostingAvailability, Organization, Season, Team, TurfWave, Week
-from app.routes.api import _build_host_location_vs_home_team_verification, _build_revised_scheduling_hierarchy_diagnostics, _build_turf_stadium_utilization_diagnostics, _classify_host_for_date, _diagnostic_active_teams_expected_to_play, _diagnostic_expected_games_for_team_count, _diagnostic_field_size_diff, _host_availability_matrix_response, _run_turf_wave_compaction_pass, _renumber_turf_waves_for_host_date, auto_fill_apply, auto_fill_preview, auto_schedule_entire_season, generate_suggested_host_plan
+from app.models import Division, FieldInstance, Game, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostPlanSelection, HostingAvailability, Organization, Season, Team, TurfWave, Week
+from app.routes.api import _build_host_location_vs_home_team_verification, _build_revised_scheduling_hierarchy_diagnostics, _build_turf_stadium_utilization_diagnostics, _classify_host_for_date, _regenerate_generated_slots, _diagnostic_active_teams_expected_to_play, _diagnostic_expected_games_for_team_count, _diagnostic_field_size_diff, _host_availability_matrix_response, _run_turf_wave_compaction_pass, _renumber_turf_waves_for_host_date, auto_fill_apply, auto_fill_preview, auto_schedule_entire_season, generate_suggested_host_plan
 
 
 class AutoFillPreviewTest(unittest.TestCase):
@@ -136,6 +136,109 @@ class AutoFillPreviewTest(unittest.TestCase):
         self.assertEqual('Wave 1 ONE_MEDIUM_TWO_SMALL Small Field 1', small.field_name)
         self.assertEqual('Wave 1 ONE_MEDIUM_TWO_SMALL Medium Field 1', medium.field_name)
         self.assertEqual('Wave 2 THREE_SMALL Small Field 1', later_small.field_name)
+
+    def test_selected_turf_stadium_generates_one_wave_for_every_available_hour(self):
+        self.host.surface_type = 'TURF_STADIUM'
+        self.host.host_role = 'TURF_STADIUM'
+        availability = HostingAvailability(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week2.id,
+            organization_id=self.org_w.id,
+            host_location_id=self.host.id,
+            available_date=self.week2.start_date,
+            primary_game_date=self.week2.start_date,
+            start_time=time(9, 0),
+            end_time=time(12, 0),
+            active=True,
+            is_available=True,
+            auto_select_turf_layout=True,
+            lock_selected_layout=False,
+        )
+        self.db.add(availability)
+        self.db.add(HostPlanSelection(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week2.id,
+            game_date=self.week2.start_date,
+            community_id=self.org_w.id,
+            host_location_id=self.host.id,
+            availability_id=availability.id,
+            status='SELECTED',
+        ))
+        self.db.commit()
+
+        metrics = _regenerate_generated_slots(self.db, availability, self.host.id, { 'SMALL': 0, 'MEDIUM': 0, 'LARGE': 0 })
+        self.db.commit()
+
+        waves = self.db.query(TurfWave).filter(TurfWave.host_location_id == self.host.id, TurfWave.host_date == self.week2.start_date).order_by(TurfWave.sequence_number).all()
+        self.assertEqual(3, len(waves))
+        self.assertEqual([1, 2, 3], [wave.sequence_number for wave in waves])
+        self.assertEqual([time(9, 0), time(10, 0), time(11, 0)], [wave.start_time for wave in waves])
+        self.assertEqual(3, metrics['new_slots_created'] // 2)  # zero demand still creates hourly waves using a valid two-component layout
+
+        diagnostics = _build_revised_scheduling_hierarchy_diagnostics(self.db, self.season.id)
+        simplicity = diagnostics['Turf Wave Simplicity Diagnostics'][0]
+        self.assertEqual(3, simplicity['expected_wave_count'])
+        self.assertEqual([1, 2, 3], simplicity['wave_numbers_expected'])
+        self.assertEqual([1, 2, 3], simplicity['wave_numbers_generated'])
+        self.assertEqual([], simplicity['skipped_available_hours'])
+        self.assertTrue(simplicity['wave_numbering_consecutive'])
+        self.assertEqual(['EMPTY', 'EMPTY', 'EMPTY'], [wave['wave_status'] for wave in simplicity['waves']])
+
+    def test_locked_turf_layout_still_generates_hourly_waves_not_day_template_slots(self):
+        self.host.surface_type = 'TURF_STADIUM'
+        self.host.host_role = 'TURF_STADIUM'
+        locked_config = HostLocationConfiguration(
+            id=uuid.uuid4(),
+            host_location_id=self.host.id,
+            configuration_name='THREE_SMALL',
+            is_active=True,
+            surface_type='TURF_STADIUM',
+            small_field_count=3,
+            medium_field_count=0,
+            large_field_count=0,
+            space_used_yards=100,
+            remaining_yards=20,
+        )
+        availability = HostingAvailability(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week2.id,
+            organization_id=self.org_w.id,
+            host_location_id=self.host.id,
+            available_date=self.week2.start_date,
+            primary_game_date=self.week2.start_date,
+            start_time=time(9, 0),
+            end_time=time(11, 0),
+            active=True,
+            is_available=True,
+            selected_configuration_id=locked_config.id,
+            auto_select_turf_layout=False,
+            lock_selected_layout=True,
+        )
+        self.db.add_all([locked_config, availability])
+        self.db.add(HostPlanSelection(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week2.id,
+            game_date=self.week2.start_date,
+            community_id=self.org_w.id,
+            host_location_id=self.host.id,
+            availability_id=availability.id,
+            status='SELECTED',
+        ))
+        self.db.commit()
+
+        _regenerate_generated_slots(self.db, availability, self.host.id)
+        self.db.commit()
+
+        waves = self.db.query(TurfWave).filter(TurfWave.host_location_id == self.host.id, TurfWave.host_date == self.week2.start_date).order_by(TurfWave.start_time).all()
+        self.assertEqual([time(9, 0), time(10, 0)], [wave.start_time for wave in waves])
+        self.assertEqual([1, 2], [wave.sequence_number for wave in waves])
+        self.assertEqual(['THREE_SMALL', 'THREE_SMALL'], [wave.preferred_layout_code for wave in waves])
+        slots_by_wave = {wave.id: self.db.query(GameSlot).filter(GameSlot.turf_wave_id == wave.id).count() for wave in waves}
+        self.assertEqual([3, 3], [slots_by_wave[wave.id] for wave in waves])
 
     def test_host_location_vs_home_team_verification_reports_away_owned_host(self):
         game = Game(
