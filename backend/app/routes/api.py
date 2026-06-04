@@ -326,11 +326,20 @@ def _build_revised_scheduling_hierarchy_diagnostics(db: Session, season_id: uuid
     }
 
     all_slots = db.query(GameSlot).filter(GameSlot.season_id == season_id).all() if season_id else []
+    diagnostic_dates = {g.game_date for g, *_rest in rows if g.game_date} | {slot.slot_date for slot in all_slots if slot.slot_date}
+    selected_host_maps = _selected_owned_host_maps_for_dates(db, season_id, diagnostic_dates)
+    selected_hosts_by_date: dict[date, set[uuid.UUID]] = selected_host_maps.get('selected_hosts_by_date') or {}
+    selected_owned_hosts_by_community_and_date: dict[date, dict[uuid.UUID, set[uuid.UUID]]] = selected_host_maps.get('selected_owned_hosts_by_community_and_date') or {}
     slots_by_date_host: dict[tuple[date, uuid.UUID], list[GameSlot]] = {}
     for slot in all_slots:
+        selected_ids_for_slot_date = selected_hosts_by_date.get(slot.slot_date)
+        if selected_ids_for_slot_date is not None and selected_ids_for_slot_date and slot.host_location_id not in selected_ids_for_slot_date:
+            continue
         if slot.slot_date and slot.host_location_id:
             slots_by_date_host.setdefault((slot.slot_date, slot.host_location_id), []).append(slot)
     hosts_by_id = {host.id: host for host in db.query(HostLocation).filter(HostLocation.is_active.is_(True)).all()}
+    true_home_host_violation_count = 0
+    host_owner_as_away_violation_count = len(host_owner_as_away_games)
     host_activation_summary_by_date: list[dict[str, object]] = []
     true_home_host_enforcement_by_date: list[dict[str, object]] = []
     field_utilization_diagnostics: list[dict[str, object]] = []
@@ -339,8 +348,9 @@ def _build_revised_scheduling_hierarchy_diagnostics(db: Session, season_id: uuid
     primary_host_counts: dict[str, int] = {}
     bug_warnings = []
     for game_date in sorted(set([*games_by_date.keys(), *[key[0] for key in slots_by_date_host.keys()]])):
-        date_host_ids = {host_id for d, host_id in slots_by_date_host if d == game_date}
-        active_host_ids = {host.id for _g, _slot, _fi, host, *_rest in games_by_date.get(game_date, []) if host}
+        selected_ids_for_date = selected_hosts_by_date.get(game_date)
+        date_host_ids = set(selected_ids_for_date or {host_id for d, host_id in slots_by_date_host if d == game_date})
+        active_host_ids = {host.id for _g, _slot, _fi, host, *_rest in games_by_date.get(game_date, []) if host and (not selected_ids_for_date or host.id in selected_ids_for_date)}
         primary_available = [str(hid) for hid in sorted(date_host_ids, key=str) if _classify_host_for_date(db, hosts_by_id.get(hid)) in {HOST_ROLE_TURF_STADIUM, HOST_ROLE_PRIMARY_TURF, HOST_ROLE_SECONDARY_TURF, HOST_ROLE_PRIMARY_GRASS, HOST_ROLE_STANDARD_GRASS}]
         overflow_available = [str(hid) for hid in sorted(date_host_ids, key=str) if _classify_host_for_date(db, hosts_by_id.get(hid)) == HOST_ROLE_OVERFLOW_GRASS]
         overflow_used = [str(hid) for hid in sorted(active_host_ids, key=str) if _classify_host_for_date(db, hosts_by_id.get(hid)) == HOST_ROLE_OVERFLOW_GRASS]
@@ -381,11 +391,12 @@ def _build_revised_scheduling_hierarchy_diagnostics(db: Session, season_id: uuid
                 'reason_compatible_component_remained_unused': 'No later compatible game was identified without re-running hard-constraint search.' if sum(remaining.values()) else None,
             })
         active_host_location_rows = [hosts_by_id.get(host_id) for host_id in sorted(date_host_ids, key=str) if hosts_by_id.get(host_id)]
-        active_hosting_community_ids = {host.organization_id for host in active_host_location_rows if host.organization_id}
+        active_hosting_community_ids = set(selected_owned_hosts_by_community_and_date.get(game_date, {}).keys()) or {_host_owner_community_id(host) for host in active_host_location_rows if _host_owner_community_id(host)}
         active_host_ids_by_org: dict[uuid.UUID, set[uuid.UUID]] = {}
         for host in active_host_location_rows:
-            if host.organization_id:
-                active_host_ids_by_org.setdefault(host.organization_id, set()).add(host.id)
+            owner_id = _host_owner_community_id(host)
+            if owner_id:
+                active_host_ids_by_org.setdefault(owner_id, set()).add(host.id)
         host_role_by_id = _host_priority_role_map_for_hosts(db, active_host_location_rows)
         hosts_by_role_by_org: dict[uuid.UUID, dict[str, list[uuid.UUID]]] = {}
         for host in active_host_location_rows:
@@ -639,13 +650,13 @@ def _build_revised_scheduling_hierarchy_diagnostics(db: Session, season_id: uuid
                         bug_warnings.append('BUG: hosting-community game assigned to grass/overflow without TURF_STADIUM rejection reason.')
                 if scheduled_at_other_active_host and not exception_used:
                     date_home_host_violations += 1
-                    bug_warnings.append('BUG: hosting-community team scheduled at another community host without all owned host candidates failing hard constraints.')
+                    bug_warnings.append('BUG: hosting-community team scheduled away from selected owned host while valid owned-host slot existed.')
                 if scheduled_at_owned and not team_is_home and not same_hosting_community:
                     date_home_host_violations += 1
-                    bug_warnings.append('BUG: hosting-community team playing at owned active host but not assigned as home team.')
+                    bug_warnings.append('BUG: hosting-community team was not home at its selected owned host.')
                 if not scheduled_at_owned and compatible_owned_slots and not candidate_rejections:
                     date_candidates_not_evaluated += 1
-                    bug_warnings.append('BUG: hosting-community owned host candidates were not evaluated before alternate host placement.')
+                    bug_warnings.append('BUG: candidate scoring selected non-owned host before exhausting owned selected host candidates.')
                 if exception_used and not exception_reason:
                     date_missing_exception_reasons += 1
                     bug_warnings.append('BUG: hosting-community home-host exception used without recorded hard reason.')
@@ -656,9 +667,16 @@ def _build_revised_scheduling_hierarchy_diagnostics(db: Session, season_id: uuid
                     hosting_teams.append(away.name)
                 hosting_community_game_rows.append({
                     'game_id': str(g.id),
+                    'game_date': game_date.isoformat(),
                     'division': f'{div.division_group or ""} {div.name or ""}'.strip(),
+                    'required_field_size': _required_field_type_for_division(div),
+                    'original_home_team': home.name,
+                    'original_away_team': away.name,
                     'home_team': home.name,
                     'away_team': away.name,
+                    'final_home_team': home.name,
+                    'final_away_team': away.name,
+                    'participating_communities': [str(org_id) for org_id in {getattr(home, 'organization_id', None), getattr(away, 'organization_id', None)} if org_id],
                     'home_team_community_id': str(getattr(home, 'organization_id', None)) if getattr(home, 'organization_id', None) else None,
                     'away_team_community_id': str(getattr(away, 'organization_id', None)) if getattr(away, 'organization_id', None) else None,
                     'hosting_community_team_or_teams': hosting_teams,
@@ -673,6 +691,7 @@ def _build_revised_scheduling_hierarchy_diagnostics(db: Session, season_id: uuid
                     'expected_primary_turf_host_location_ids': [str(host_id) for host_id in sorted(expected_primary_turf_ids, key=str)],
                     'actual_host_location_id': str(actual_host.id) if actual_host else None,
                     'actual_host_location_name': actual_host.name if actual_host else None,
+                    'actual_host_owner_community': str(actual_host_owner_id) if actual_host_owner_id else None,
                     'actual_host_owner_community_id': str(actual_host_owner_id) if actual_host_owner_id else None,
                     'actual_host_surface_type': actual_host.surface_type if actual_host else None,
                     'actual_host_role': actual_host_role,
@@ -682,6 +701,8 @@ def _build_revised_scheduling_hierarchy_diagnostics(db: Session, season_id: uuid
                     'scheduled_at_primary_owned_turf_host': scheduled_at_primary_turf,
                     'scheduled_at_lower_priority_owned_host': scheduled_at_lower_priority_owned,
                     'scheduled_at_other_community_host': scheduled_at_other_active_host,
+                    'scheduled_at_owned_selected_host': scheduled_at_owned,
+                    'host_owning_team_is_home': bool(team_is_home or same_hosting_community),
                     'scheduled_at_owned_host': scheduled_at_owned,
                     'scheduled_at_owned_host_location': scheduled_at_owned,
                     'scheduled_at_other_active_host': scheduled_at_other_active_host,
@@ -697,6 +718,10 @@ def _build_revised_scheduling_hierarchy_diagnostics(db: Session, season_id: uuid
                     'primary_turf_rejection_reasons': rejection_reasons if expected_primary_turf_ids and not scheduled_at_primary_turf else {},
                     'hard_exception_valid': bool(not scheduled_at_highest_priority and exception_reason),
                     'owned_host_candidates_considered': candidate_rejections,
+                    'owned_selected_host_candidates_considered': candidate_rejections,
+                    'owned_selected_host_candidate_rejection_reasons': rejection_reasons,
+                    'non_owned_host_candidates_considered_after_owned_hosts_failed': bool(not scheduled_at_owned and not compatible_owned_slots),
+                    'true_home_host_rule_passed': bool(scheduled_at_owned or exception_used),
                     'owned_host_candidate_rejection_reasons': rejection_reasons,
                     'home_host_slots_considered': len(compatible_owned_slots),
                     'rejection_reasons_for_home_host_slots': rejection_reasons,
@@ -817,7 +842,7 @@ def _build_revised_scheduling_hierarchy_diagnostics(db: Session, season_id: uuid
     if int(neutral_rejected.get('WORSENS_HOST_COMMUNITY_BALANCE') or 0) > 0:
         bug_warnings.append('BUG: neutral-site-to-neutral-site move rejected for host-community balance.')
     if host_owner_as_away_games:
-        bug_warnings.append('BUG: hosting-community team playing at owned active host but not assigned as home team.')
+        bug_warnings.append('BUG: hosting-community team was not home at its selected owned host.')
     if doubleheader_failures:
         bug_warnings.append('BUG: doubleheader rule violated.')
         bug_warnings.append('BUG: hosting-community doubleheader placed at lower-priority host while TURF_STADIUM had valid back-to-back capacity.')
@@ -1000,7 +1025,7 @@ def _build_revised_scheduling_hierarchy_diagnostics(db: Session, season_id: uuid
 
     return {
         'diagnostics_warnings': list(dict.fromkeys(diagnostics_warnings + bug_warnings)),
-        'schedule_health_summary': schedule_health_summary,
+        'schedule_health_summary': dict(schedule_health_summary, true_home_host_violations=true_home_host_violation_count, host_owner_as_away_violations=host_owner_as_away_violation_count, validation_failures=int(schedule_health_summary.get('validation_failures') or 0) + true_home_host_violation_count),
         'turf_stadium_schedule_summary': turf_stadium_schedule_summary,
         'host_activation_summary_by_date': host_activation_summary_by_date,
         'true_home_host_priority_preservation_diagnostics': {
@@ -1031,6 +1056,10 @@ def _build_revised_scheduling_hierarchy_diagnostics(db: Session, season_id: uuid
             'same_community_games': same_community_games,
             'neutral_site_games': neutral_site_games,
             'hosts': sorted(host_diag_by_id.values(), key=lambda row: str(row.get('host_location_name') or '')),
+            'total_home_host_violations': true_home_host_violation_count,
+            'TRUE_HOME_HOST_VIOLATION': true_home_host_violation_count,
+            'HOST_OWNER_AS_AWAY_VIOLATION': host_owner_as_away_violation_count,
+            'by_date': true_home_host_enforcement_by_date,
             'enforcement_by_date': true_home_host_enforcement_by_date,
         },
         'True Home-Host Placement Enforcement': true_home_host_enforcement_by_date,
@@ -4306,6 +4335,60 @@ def _host_plan_allowed_host_ids_for_week(db: Session, season_id: uuid.UUID | str
         return None
     return {row.host_location_id for row in all_rows if str(row.status or '').upper() == 'SELECTED'}
 
+
+
+def _host_owner_community_id(host: HostLocation | None) -> uuid.UUID | None:
+    """Return the community/organization that owns a host location."""
+    if not host:
+        return None
+    return getattr(host, 'owner_community_id', None) or getattr(host, 'organization_id', None)
+
+
+def _team_community_id(team: Team | None) -> uuid.UUID | None:
+    """Return a team's community id, falling back to organization_id."""
+    if not team:
+        return None
+    return getattr(team, 'community_id', None) or getattr(team, 'organization_id', None)
+
+
+def _selected_owned_host_maps_for_dates(
+    db: Session,
+    season_id: uuid.UUID | str | None,
+    game_dates: set[date] | list[date] | tuple[date, ...],
+) -> dict[str, object]:
+    """Build selected-host maps using only host_plan_selections.status=SELECTED.
+
+    These maps are the hard source of truth for selected host eligibility and
+    hosting-community ownership. Generated slots, active host flags, and old game
+    placements are intentionally not used to infer selection.
+    """
+    normalized_dates = {value for value in game_dates if value}
+    selected_hosts_by_date: dict[date, set[uuid.UUID]] = {value: set() for value in normalized_dates}
+    selected_owned_hosts_by_community_and_date: dict[date, dict[uuid.UUID, set[uuid.UUID]]] = {value: {} for value in normalized_dates}
+    if not season_id or not normalized_dates:
+        return {
+            'selected_hosts_by_date': selected_hosts_by_date,
+            'selected_owned_hosts_by_community_and_date': selected_owned_hosts_by_community_and_date,
+        }
+    rows = db.query(HostPlanSelection).filter(
+        HostPlanSelection.season_id == season_id,
+        HostPlanSelection.game_date.in_(list(normalized_dates)),
+        HostPlanSelection.status == 'SELECTED',
+    ).all()
+    host_ids = {row.host_location_id for row in rows if row.host_location_id}
+    hosts_by_id = {host.id: host for host in db.query(HostLocation).filter(HostLocation.id.in_(list(host_ids))).all()} if host_ids else {}
+    for row in rows:
+        if not row.game_date or not row.host_location_id:
+            continue
+        host = hosts_by_id.get(row.host_location_id)
+        owner_id = _host_owner_community_id(host) or getattr(row, 'community_id', None)
+        selected_hosts_by_date.setdefault(row.game_date, set()).add(row.host_location_id)
+        if owner_id:
+            selected_owned_hosts_by_community_and_date.setdefault(row.game_date, {}).setdefault(owner_id, set()).add(row.host_location_id)
+    return {
+        'selected_hosts_by_date': selected_hosts_by_date,
+        'selected_owned_hosts_by_community_and_date': selected_owned_hosts_by_community_and_date,
+    }
 
 def _apply_host_plan_filter_to_slots(query, db: Session, season_id: uuid.UUID | str | None, week_id: uuid.UUID | str | None = None, game_date: date | None = None):
     allowed_host_ids = _host_plan_allowed_host_ids_for_week(db, season_id, week_id, game_date)
@@ -8129,7 +8212,7 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
             'MOVES_YOUNGER_DIVISION_TOO_LATE', 'WORSENS_HOST_COMMUNITY_BALANCE', 'VIOLATES_HOST_COMMUNITY_HARD_RULE',
             'VIOLATES_HOME_SITE_REQUIREMENT', 'NO_NET_WAVE_IMPROVEMENT', 'TARGET_SLOT_NOT_AVAILABLE',
             'TARGET_FIELD_INSTANCE_NOT_FOUND', 'TARGET_WAVE_NOT_FOUND', 'SOURCE_GAME_LOCKED', 'SOURCE_GAME_ALREADY_OPTIMAL',
-            'COMPACTION_DISABLED', 'SOURCE_SLOT_NOT_FOUND', 'WOULD_CREATE_HOST_OWNER_AS_AWAY', 'WOULD_MOVE_HOSTING_COMMUNITY_TEAM_AWAY_FROM_PRIMARY_OWNED_HOST', 'WOULD_MOVE_HOSTING_COMMUNITY_TEAM_AWAY_FROM_OWN_HOST', 'UNKNOWN_HOST_OWNERSHIP', 'UNKNOWN_REJECTION_REASON'
+            'COMPACTION_DISABLED', 'SOURCE_SLOT_NOT_FOUND', 'WOULD_CREATE_HOST_OWNER_AS_AWAY', 'WOULD_MOVE_HOSTING_COMMUNITY_TEAM_AWAY_FROM_PRIMARY_OWNED_HOST', 'WOULD_MOVE_HOSTING_COMMUNITY_TEAM_AWAY_FROM_OWN_HOST', 'WOULD_VIOLATE_TRUE_HOME_HOST_PRIORITY', 'UNKNOWN_HOST_OWNERSHIP', 'UNKNOWN_REJECTION_REASON'
         } else 'UNKNOWN_REJECTION_REASON'
         diagnostics['moves_rejected'] = int(diagnostics['moves_rejected']) + 1
         diagnostics['rejected_moves_count'] = int(diagnostics.get('rejected_moves_count') or 0) + 1
@@ -8234,12 +8317,18 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
     def _active_owned_hosts_for_date(slot_date: date | None, org_id: uuid.UUID | None) -> dict[str, object]:
         if not slot_date or not org_id:
             return {'host_ids': set(), 'role_by_host': {}, 'highest_host_ids': set(), 'primary_turf_ids': set(), 'turf_stadium_ids': set()}
-        host_rows = db.query(HostLocation).join(GameSlot, GameSlot.host_location_id == HostLocation.id).filter(
+        selected_host_ids = _host_plan_allowed_host_ids_for_week(db, season_id, None, slot_date)
+        if selected_host_ids is not None and not selected_host_ids:
+            return {'host_ids': set(), 'role_by_host': {}, 'highest_host_ids': set(), 'primary_turf_ids': set(), 'turf_stadium_ids': set()}
+        host_rows_query = db.query(HostLocation).join(GameSlot, GameSlot.host_location_id == HostLocation.id).filter(
             GameSlot.season_id == season_id,
             GameSlot.slot_date == slot_date,
             HostLocation.organization_id == org_id,
             HostLocation.is_active.is_(True),
-        ).distinct().all()
+        )
+        if selected_host_ids is not None:
+            host_rows_query = host_rows_query.filter(HostLocation.id.in_(selected_host_ids))
+        host_rows = host_rows_query.distinct().all()
         role_by_host = {host.id: _classify_host_for_date(db, host) for host in host_rows}
         host_ids = {host.id for host in host_rows}
         return {
@@ -8291,15 +8380,15 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
             source_is_owned = source_host_id in owned_host_ids
             target_is_owned = target_host_id in owned_host_ids
             if source_is_owned and not target_is_owned:
-                return TRUE_HOME_PRIORITY_REJECTION, 'Optimization would move a hosting-community game away from its owned active host location.'
+                return TRUE_HOME_PRIORITY_REJECTION, 'BUG: optimization moved hosting-community team away from selected owned host.'
             if source_is_owned and target_is_owned and target_rank > source_rank:
-                return TRUE_HOME_PRIORITY_REJECTION, 'Optimization would move a hosting-community game from a higher-priority owned host to a lower-priority owned host.'
+                return TRUE_HOME_PRIORITY_REJECTION, 'BUG: optimization moved hosting-community team away from selected owned host.'
             if source_host_id in turf_stadium_ids and target_is_owned and target_host_id not in turf_stadium_ids:
                 return TURF_STADIUM_REJECTION, 'Optimization would move a hosting-community game from TURF_STADIUM to owned grass/overflow.'
             if source_host_id in primary_turf_ids and target_is_owned and target_host_id not in primary_turf_ids:
                 return PRIMARY_OWNED_HOST_REJECTION, 'Optimization would move a hosting-community game from primary owned turf to owned grass/overflow.'
             if highest_open and (not target_is_owned or target_host_id not in highest_host_ids):
-                return TRUE_HOME_PRIORITY_REJECTION, 'A valid highest-priority owned active host slot exists; optimization cannot use a lower-priority or other-community host.'
+                return TRUE_HOME_PRIORITY_REJECTION, 'BUG: optimization moved hosting-community team away from selected owned host.'
             if turf_stadium_open and target_is_owned and target_host_id not in turf_stadium_ids:
                 return TURF_STADIUM_REJECTION, 'A valid TURF_STADIUM slot exists; optimization cannot use owned grass or overflow.'
             if primary_turf_open and target_is_owned and target_host_id not in primary_turf_ids:
@@ -8307,7 +8396,7 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
             if target_is_owned and target_rank > best_rank and highest_open:
                 return TRUE_HOME_PRIORITY_REJECTION, 'Higher-priority owned host candidate has valid capacity.'
         if source_owner_id in participant_org_ids and target_owner_id not in participant_org_ids:
-            return TRUE_HOME_PRIORITY_REJECTION, 'Optimization would move a true home-host game to another community host.'
+            return TRUE_HOME_PRIORITY_REJECTION, 'BUG: optimization moved hosting-community team away from selected owned host.'
         return None, None
 
 
@@ -11918,13 +12007,21 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                                 continue
                         if true_home_host_candidate and candidate_owned_host_priority_rank == best_owned_host_priority_rank:
                             score += 3000000
-                            reason_bits.append('hard-priority highest-priority active owned host placement (+3000000)')
+                            reason_bits.append('hard-priority highest-priority selected owned host placement (+3000000)')
                         elif true_home_host_candidate:
                             score += 1000000
-                            warning_bits.append('lower-priority active owned host considered only if all higher-priority owned hosts fail hard constraints (+1000000)')
+                            warning_bits.append('lower-priority selected owned host considered only if all higher-priority selected owned hosts fail hard constraints (+1000000)')
                         elif hosting_community_game and home_host_slot_ids_considered:
-                            score -= 3000000
-                            warning_bits.append('hosting-community team has a valid active owned host slot; neutral/other-community placement is not allowed unless hard constraints exhaust owned host options (-3000000)')
+                            _record_placement_attempt(
+                                selected_field_slot,
+                                a,
+                                b,
+                                'rejected',
+                                'BUG: candidate scoring selected non-owned host before exhausting owned selected host candidates.',
+                                selected_field_slot,
+                            )
+                            rejected_move_counts_for_date[repeated_key] = rejected_seen + 1
+                            continue
                         elif neutral_site_candidate and active_turf_host_ids and candidate_host_id in active_turf_host_ids:
                             min_turf_load = min(turf_host_projected_by_id.values(), default=0)
                             host_load = turf_host_projected_by_id.get(candidate_host_id, 0)
@@ -12677,7 +12774,8 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                             'expected_highest_priority_owned_host_location_ids': [str(host_id) for host_id in sorted({hid for hid in active_owned_participant_host_ids if host_priority_rank_by_id.get(hid, len(OWNED_HOST_PRIORITY_ORDER)) == best_owned_host_priority_rank}, key=str)],
                             'actual_host_role': host_role_by_id.get(candidate_host_id),
                             'actual_host_priority_rank': candidate_owned_host_priority_rank,
-                            'home_host_exception_reason': None if (true_home_host_candidate and candidate_owned_host_priority_rank == best_owned_host_priority_rank) or not hosting_community_game or home_host_slot_ids_considered else 'No compatible active owned host slot survived hard constraints for this placement pass.',
+                            'home_host_exception_reason': None if true_home_host_candidate or not hosting_community_game or home_host_slot_ids_considered else 'No compatible selected owned host slot survived hard constraints for this placement pass.',
+                            'host_rotation_rank': community_rotation_rank_by_org.get(candidate_host_org_id_for_week, 999),
                         })
 
             best_home_host_tier_by_pair = {
@@ -12699,7 +12797,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                             rejected_candidate.get('home_team_id'),
                             rejected_candidate.get('away_team_id'),
                             'rejected',
-                            'Hosting-community owned host candidate available at a higher priority; alternate host placement rejected before optimization.',
+                            'WOULD_VIOLATE_TRUE_HOME_HOST_PRIORITY: Hosting-community selected owned host candidate available at a higher priority; alternate host placement rejected before optimization.',
                         )
                 all_candidates = [
                     c for c in all_candidates
@@ -12747,17 +12845,18 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         if not valid_candidates:
             break
 
-        def _candidate_hard_priority_key(candidate: dict[str, object]) -> tuple[int, int, int, int, int, int]:
+        def _candidate_hard_priority_key(candidate: dict[str, object]) -> tuple[int, int, int, int, int, int, int]:
             # Hard-rule ordering happens before soft score: true home-host priority,
             # then chronological turf wave fill, then the existing detailed score.
             true_home = bool(candidate.get('true_home_host_candidate'))
             home_bucket = 2 if true_home else 1
             owned_rank = int(candidate.get('home_host_priority_tier') or len(OWNED_HOST_PRIORITY_ORDER) + 1)
+            rotation_rank = int(candidate.get('host_rotation_rank') or 999)
             wave_number = int(candidate.get('turf_wave_number') or 9999)
             is_turf = 1 if candidate.get('turf_wave_number') is not None else 0
             start_minutes = int(candidate.get('slot_start_minutes') or 24 * 60)
             score_value = int(candidate.get('score') or 0)
-            return (home_bucket, -owned_rank, is_turf, -start_minutes, -wave_number, score_value)
+            return (home_bucket, -owned_rank, -rotation_rank, is_turf, -start_minutes, -wave_number, score_value)
 
         best = max(valid_candidates, key=_candidate_hard_priority_key)
         selected_field_slot = best['selected_field_slot']
@@ -13972,17 +14071,24 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
     host_ids_by_org: dict[str, set[str]] = {}
     for location_id, org_id in host_org_by_location_id.items():
         host_ids_by_org.setdefault(org_id, set()).add(location_id)
-    active_date_host_rows = db.query(GameSlot.host_location_id, HostLocation.organization_id).join(
+    selected_apply_maps = _selected_owned_host_maps_for_dates(db, season_id, {week_game_date})
+    selected_apply_hosts_by_date: dict[date, set[uuid.UUID]] = selected_apply_maps.get('selected_hosts_by_date') or {}
+    selected_apply_owned_hosts_by_community_and_date: dict[date, dict[uuid.UUID, set[uuid.UUID]]] = selected_apply_maps.get('selected_owned_hosts_by_community_and_date') or {}
+    active_date_host_query = db.query(GameSlot.host_location_id, HostLocation.organization_id).join(
         HostLocation, HostLocation.id == GameSlot.host_location_id
     ).filter(
         GameSlot.season_id == season_id,
         GameSlot.week_id == week_id,
         GameSlot.slot_date == week_game_date,
         GameSlot.host_location_id.isnot(None),
-    ).distinct().all()
+    )
+    selected_apply_host_ids = selected_apply_hosts_by_date.get(week_game_date)
+    if selected_apply_host_ids:
+        active_date_host_query = active_date_host_query.filter(GameSlot.host_location_id.in_(selected_apply_host_ids))
+    active_date_host_rows = active_date_host_query.distinct().all()
     active_hosting_community_ids: set[str] = {
-        str(org_id) for _host_id, org_id in active_date_host_rows if org_id
-    }
+        str(org_id) for org_id in selected_apply_owned_hosts_by_community_and_date.get(week_game_date, {})
+    } or {str(org_id) for _host_id, org_id in active_date_host_rows if org_id}
     owned_active_hosts_by_community: dict[str, set[str]] = {}
     for host_id, org_id in active_date_host_rows:
         if host_id and org_id:
@@ -14311,7 +14417,7 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
                         'candidate_field_or_wave': str(candidate_slot.turf_wave_id or candidate_slot.field_instance_id or candidate_slot.id),
                         'candidate_start_time': candidate_slot.start_time.isoformat() if candidate_slot.start_time else None,
                         'rejected': not ok,
-                        'rejection_reason': reason or 'accepted highest-priority owned active host placement',
+                        'rejection_reason': reason or 'accepted highest-priority selected owned host placement',
                         'hard_constraint_failure': not ok,
                     })
                     if ok:
@@ -14354,7 +14460,7 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
                     owned_candidate_rejections,
                 )
             elif owned_candidate_rejections:
-                proposal.setdefault('true_home_host_exception_reason', 'all owned active host candidates failed hard validation')
+                proposal.setdefault('true_home_host_exception_reason', 'all selected owned host candidates failed hard validation')
                 proposal.setdefault('owned_host_candidate_rejection_reasons', owned_candidate_rejections)
         elif active_home_host_orgs and current_slot_is_allowed_owned_host:
             oriented = _home_away_for_owned_host(str(home_team_id), str(away_team_id), current_slot_owner_org)
@@ -14385,7 +14491,7 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
                     home_team_id = owned_home_id
                     away_team_id = owned_away_id
                 elif owned_candidate_rejections:
-                    proposal.setdefault('true_home_host_exception_reason', 'all owned active host candidates failed hard validation')
+                    proposal.setdefault('true_home_host_exception_reason', 'all selected owned host candidates failed hard validation')
                     proposal.setdefault('owned_host_candidate_rejection_reasons', owned_candidate_rejections)
             else:
                 oriented = _home_away_for_owned_host(str(home_team_id), str(away_team_id), current_slot_owner_org)
@@ -14420,7 +14526,7 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
                     home_team_id = owned_home_id
                     away_team_id = owned_away_id
                 elif owned_candidate_rejections:
-                    proposal.setdefault('true_home_host_exception_reason', 'all owned active host candidates failed hard validation')
+                    proposal.setdefault('true_home_host_exception_reason', 'all selected owned host candidates failed hard validation')
                     proposal.setdefault('owned_host_candidate_rejection_reasons', owned_candidate_rejections)
             else:
                 oriented = _home_away_for_owned_host(str(home_team_id), str(away_team_id), current_slot_owner_org)
@@ -16434,6 +16540,17 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         auto_schedule_diagnostics['Doubleheader Diagnostics'] = revised_hierarchy_diagnostics.get('doubleheader_diagnostics')
         auto_schedule_diagnostics['Overflow/Grass Location Diagnostics'] = revised_hierarchy_diagnostics.get('overflow_grass_location_diagnostics')
         auto_schedule_diagnostics['Pull-Forward Optimization Diagnostics'] = revised_hierarchy_diagnostics.get('pull_forward_optimization_diagnostics')
+        true_home_diag = revised_hierarchy_diagnostics.get('true_home_host_diagnostics') or {}
+        true_home_violation_total = int(true_home_diag.get('total_home_host_violations') or true_home_diag.get('TRUE_HOME_HOST_VIOLATION') or 0)
+        host_owner_as_away_violation_total = int(true_home_diag.get('HOST_OWNER_AS_AWAY_VIOLATION') or true_home_diag.get('host_owner_as_away_count') or 0)
+        if true_home_violation_total > 0:
+            validation_errors.append('TRUE_HOME_HOST_VIOLATION: Auto-schedule returned success despite TRUE_HOME_HOST_VIOLATION.')
+            warnings.append('BUG: auto-schedule returned success despite TRUE_HOME_HOST_VIOLATION.')
+        if host_owner_as_away_violation_total > 0:
+            validation_errors.append('HOST_OWNER_AS_AWAY_VIOLATION: host-owning team is away at its selected owned host.')
+            warnings.append('BUG: hosting-community team was not home at its selected owned host.')
+        if host_owner_as_away_violation_total == 0 and true_home_violation_total > 0:
+            warnings.append('BUG: host-owner-as-away validation passed but true home-host validation failed.')
         for diagnostic_warning in revised_hierarchy_diagnostics.get('diagnostics_warnings') or []:
             warnings.append(str(diagnostic_warning))
     except Exception as exc:
@@ -16478,6 +16595,7 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
     committed_games_count = int(auto_schedule_diagnostics.get('committed_games_count') or 0)
     scheduled_games_count = int(auto_schedule_diagnostics.get('existing_scheduled_games_total') or 0)
     failed_validation_total = int(auto_schedule_diagnostics.get('failed_validation_count') or 0)
+    failed_validation_total += int(((auto_schedule_diagnostics.get('True Home-Host Diagnostics') or {}).get('total_home_host_violations') or 0))
     required_missing_total = sum(int(row.get('missing_games') or 0) for row in required_games_missing)
     division_week_counts_complete = all(
         int(row.get('generated_game_groups') or 0) == int(row.get('expected_games') or 0)
