@@ -19,8 +19,19 @@ const displayHour = (hour: number) => formatDisplayTime(`${hour === 24 ? 0 : hou
 
 const formatDateLabel = (date: string) => formatDisplayDate(date);
 
-const layoutLabel = (layout: string) => (layout === 'Active Grass Fields' ? 'Active Grass Fields' : layout === 'Auto Select Best Layout' ? 'Auto Select Best Layout' : turfConfigurationLabel(layout));
-const isStadiumArea = (area: any) => area?.field_space_type === STADIUM_TYPE || area?.field_space_type === 'TURF_STADIUM';
+const APPROVED_TURF_LAYOUTS = [
+  { code: 'THREE_SMALL', label: 'Three Small Fields' },
+  { code: 'TWO_SMALL_ONE_MEDIUM', label: 'Two Small Fields + One Medium Field' },
+  { code: 'TWO_MEDIUM', label: 'Two Medium Fields' },
+  { code: 'ONE_SMALL_ONE_LARGE', label: 'One Small Field + One Large Field' },
+];
+const APPROVED_TURF_LAYOUT_CODES = new Set(APPROVED_TURF_LAYOUTS.map((layout) => layout.code));
+const layoutLabel = (layout: string) => {
+  if (layout === 'Active Grass Fields') return 'Active Grass Fields';
+  if (layout === 'Auto Select Best Layout') return 'Auto Select Best Layout';
+  const approvedLayout = APPROVED_TURF_LAYOUTS.find((item) => item.code === layout);
+  return approvedLayout ? `${approvedLayout.code} — ${approvedLayout.label}` : layout || 'Unknown Layout';
+};
 
 const STATUS_BADGE: Record<string, string> = {
   Hosting: 'bg-emerald-100 text-emerald-800',
@@ -155,7 +166,7 @@ export default function HostingAvailabilityManager() {
   const hostOptions = useMemo(() => hosts.filter((h: any) => !effectiveOrgId || h.organization_id === effectiveOrgId), [hosts, effectiveOrgId]);
   const selectedHost = useMemo(() => hostOptions.find((h: any) => h.id === hostId), [hostId, hostOptions]);
   const visibleAreas = useMemo(() => areas.filter((a: any) => a.is_active && (!hostId || a.host_location_id === hostId)), [areas, hostId]);
-  const hostConfigsForSelectedHost = useMemo(() => hostConfigs.filter((c: any) => c.is_active && c.host_location_id === hostId && isApprovedTurfConfigurationCode(c.configuration_name)), [hostConfigs, hostId]);
+  const hostConfigsForSelectedHost = useMemo(() => hostConfigs.filter((c: any) => c.is_active && c.host_location_id === hostId && APPROVED_TURF_LAYOUT_CODES.has(c.configuration_name)), [hostConfigs, hostId]);
   const configsByArea = useMemo(
     () => configs.filter((c: any) => c.is_active).reduce((m: any, c: any) => ((m[c.physical_field_area_id] = [...(m[c.physical_field_area_id] || []), c]), m), {}),
     [configs],
@@ -742,7 +753,7 @@ export default function HostingAvailabilityManager() {
         <div className='mb-3 grid gap-2 md:grid-cols-4'>
           <input type='date' className='rounded border p-2' value={savedDateFilter} onChange={(e) => setSavedDateFilter(e.target.value)} />
           <select className='rounded border p-2' value={savedSiteTypeFilter} onChange={(e) => setSavedSiteTypeFilter(e.target.value)}><option value=''>All Site Types</option><option value='TURF_STADIUM'>Turf Stadium</option><option value='GRASS_FIELD'>Grass Field</option><option value='STADIUM_SITE'>Legacy Stadium Site</option><option value='GRASS_PARK_SITE'>Legacy Grass/Park Site</option></select>
-          {!isCommunityAdmin && <select className='rounded border p-2' value={savedLayoutFilter} onChange={(e) => setSavedLayoutFilter(e.target.value)}><option value=''>All Layouts</option>{APPROVED_TURF_CONFIGURATIONS.map((config) => <option key={config.code} value={config.code}>{config.code} — {config.displayName}</option>)}</select>}
+          {!isCommunityAdmin && <select className='rounded border p-2' value={savedLayoutFilter} onChange={(e) => setSavedLayoutFilter(e.target.value)}><option value=''>All Layouts</option>{APPROVED_TURF_LAYOUTS.map((layout) => <option key={layout.code} value={layout.code}>{layout.code} — {layout.label}</option>)}</select>}
         </div>
         {!hostId ? <p className='text-slate-500'>Select a hosting site to view saved availability.</p> : !savedAvailability.length ? <p className='text-slate-500'>No saved availability has been entered for this hosting site.</p> : <div className='space-y-3'>{savedAvailability.map((entry: any, idx: number) => (
           <div key={`${entry.available_date}-${idx}`} className='rounded border bg-slate-50 p-3 text-sm'>

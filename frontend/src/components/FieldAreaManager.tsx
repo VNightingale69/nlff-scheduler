@@ -21,18 +21,13 @@ const DIVISION_COMPATIBILITY = {
   LARGE: ['Coed 6-7', 'Coed 8', 'Girls 6-8'],
 };
 
-const TURF_LAYOUTS = APPROVED_TURF_CONFIGURATIONS.map((config) => ({
-  name: config.code,
-  title: config.displayName,
-  availableFields: config.availableFields,
-  supportedDivisions: config.supportedDivisions,
-  maxFieldsPerWave: config.maxFieldsPerWave,
-  schedulingNote: config.schedulingNote,
-  large: config.availableFields.filter((field) => field === 'LARGE').length,
-  medium: config.availableFields.filter((field) => field === 'MEDIUM').length,
-  small: config.availableFields.filter((field) => field === 'SMALL').length,
-}));
-
+const TURF_LAYOUTS = [
+  { name: 'THREE_SMALL', title: 'Three Small Fields', fields: ['Small', 'Small', 'Small'], large: 0, medium: 0, small: 3, schedulingNote: 'Best for one-hour waves with small-division demand.' },
+  { name: 'TWO_SMALL_ONE_MEDIUM', title: 'Two Small Fields + One Medium Field', fields: ['Small', 'Small', 'Medium'], large: 0, medium: 1, small: 2, schedulingNote: 'Supports small and medium games in the same one-hour wave.' },
+  { name: 'TWO_MEDIUM', title: 'Two Medium Fields', fields: ['Medium', 'Medium'], large: 0, medium: 2, small: 0, schedulingNote: 'Best for one-hour waves with medium-division demand.' },
+  { name: 'ONE_SMALL_ONE_LARGE', title: 'One Small Field + One Large Field', fields: ['Small', 'Large'], large: 1, medium: 0, small: 1, schedulingNote: 'Supports large games while allowing one compatible small game in the same one-hour wave.' },
+];
+const APPROVED_TURF_LAYOUT_CODES = new Set(TURF_LAYOUTS.map((layout) => layout.name));
 
 const formatSurfaceType = (value?: string) => value === TURF_STADIUM ? 'Turf Stadium' : value === GRASS_FIELD ? 'Grass Field' : 'Not set';
 const _fieldTypeLabel = (value?: string) => value ? value.charAt(0).toUpperCase() + value.slice(1).toLowerCase() : '—';
@@ -40,7 +35,10 @@ const facilityTypeLabel = (value?: string) => FACILITY_TYPES.find((option) => op
 const grassFacilityTypeForSize = (value?: string) => `${_fieldTypeLabel(value)} Grass Field`;
 const fieldTypeLabel = _fieldTypeLabel;
 const configuredFieldsText = (count: number) => `${count} active configured field${count === 1 ? '' : 's'}`;
-const configLabel = (value?: string) => turfConfigurationLabel(value);
+const configLabel = (value?: string) => {
+  const layout = TURF_LAYOUTS.find((item) => item.name === value);
+  return layout ? `${layout.name} — ${layout.title}` : value || 'Unknown layout';
+};
 const errorMessage = (error: any, fallback: string) => error?.message || fallback;
 
 
@@ -233,12 +231,14 @@ export default function FieldAreaManager() {
     return tableHosts.map((host: any) => {
       const hostFields = fieldsByHost[host.id] || [];
       const activeFields = hostFields.filter((field: any) => field.is_active);
-      const activeConfigs = (hostConfigsByHost[host.id] || []).filter((config: any) => config.is_active);
+      const activeConfigs = (hostConfigsByHost[host.id] || []).filter((config: any) => config.is_active && APPROVED_TURF_LAYOUT_CODES.has(config.configuration_name));
       const surfaceType = host.surface_type || GRASS_FIELD;
-      const approvedConfigCodes = APPROVED_TURF_CONFIGURATIONS.map((config) => config.code);
-      const approvedActiveConfigs = activeConfigs.filter((config: any) => approvedConfigCodes.includes(config.configuration_name));
-      const maxFieldsPerWave = APPROVED_TURF_CONFIGURATIONS.reduce((max, config) => Math.max(max, config.maxFieldsPerWave), 0);
-      const grassSummary = activeFields.length ? activeFields.map((field: any) => `${field.name} — ${fieldTypeLabel(field.layout_type)}`).join(', ') : 'No active configured fields';
+      const grassCounts = {
+        large: activeFields.filter((field: any) => field.layout_type === 'LARGE').length,
+        medium: activeFields.filter((field: any) => field.layout_type === 'MEDIUM').length,
+        small: activeFields.filter((field: any) => field.layout_type === 'SMALL').length,
+      };
+      const maxFieldsPerWave = surfaceType === TURF_STADIUM ? Math.max(...TURF_LAYOUTS.map((layout) => layout.fields.length)) : 0;
       const isReady = surfaceType === TURF_STADIUM ? Boolean(host.is_active) : activeFields.length > 0;
       if (isCommunityAdmin) {
         return <tr key={host.id}>
@@ -253,9 +253,15 @@ export default function FieldAreaManager() {
         <td className='border p-2'>{orgNameById[host.organization_id] || 'Unknown'}</td>
         <td className='border p-2'>{host.name}</td>
         <td className='border p-2'>{formatSurfaceType(surfaceType)}</td>
-        <td className='border p-2'>{surfaceType === TURF_STADIUM ? APPROVED_TURF_CONFIGURATIONS.length : configuredFieldsText(activeFields.length)}</td>
-        <td className='border p-2'>{surfaceType === TURF_STADIUM ? maxFieldsPerWave : (activeFields.length ? 1 : 0)}</td>
-        <td className='border p-2'>{surfaceType === TURF_STADIUM ? (approvedActiveConfigs.length ? approvedActiveConfigs.map((config: any) => configLabel(config.configuration_name)).join('; ') : APPROVED_TURF_CONFIGURATIONS.map((config) => `${config.code} — ${config.displayName}`).join('; ')) : grassSummary}</td>
+        {surfaceType === TURF_STADIUM ? <>
+          <td className='border p-2'>{activeConfigs.length ? activeConfigs.map((config: any) => configLabel(config.configuration_name)).join(', ') : 'No active turf layouts'}</td>
+          <td className='border p-2'>{activeConfigs.length}</td>
+          <td className='border p-2'>{maxFieldsPerWave}</td>
+          <td className='border p-2'>{formatSurfaceType(surfaceType)}</td>
+        </> : <>
+          <td className='border p-2'>{configuredFieldsText(activeFields.length)}</td>
+          <td className='border p-2'>{grassCounts.large}</td><td className='border p-2'>{grassCounts.medium}</td><td className='border p-2'>{grassCounts.small}</td>
+        </>}
         <td className='border p-2'>{isReady ? 'Active' : 'Needs setup'}</td>
         <td className='border p-2'><button className='rounded border px-2 py-1 text-xs' onClick={() => onHostChange(host.id)}>Edit</button></td>
       </tr>;
@@ -300,17 +306,22 @@ export default function FieldAreaManager() {
 
     {!isCommunityAdmin && selectedHost?.surface_type === TURF_STADIUM && <section className='rounded border p-4'>
       <h2 className='font-semibold'>Approved Turf Stadium Layouts</h2>
-      <p className='text-sm text-slate-600'>Only league-approved turf configurations are supported. The scheduler assigns one approved configuration code per turf field per one-hour wave and then fills as many compatible game slots as practical. Unused field slots are allowed when there are not enough compatible games to fill the selected layout.</p>
+      <p className='text-sm text-slate-600'>Only league-approved turf configurations are supported. The scheduler assigns one approved configuration code per turf field per one-hour wave and then fills as many compatible game slots as practical.</p>
       <div className='mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-3'>
         {TURF_LAYOUTS.map((layout) => <article key={layout.name} className='rounded border bg-slate-50 p-3 text-left'>
+          <p className='text-xs font-semibold uppercase text-slate-500'>Configuration Code</p>
           <p className='font-semibold'>{layout.name}</p>
-          <p className='mt-1 text-sm'><span className='font-medium'>Display Name:</span> {layout.title}</p>
-          <p className='text-sm'><span className='font-medium'>Available Fields:</span> {turfAvailableFieldsLabel(layout.availableFields)}</p>
-          <p className='text-sm'><span className='font-medium'>Supported Divisions:</span> {layout.supportedDivisions.join(', ')}</p>
-          <p className='mt-1 text-xs text-slate-600'><span className='font-medium'>Scheduling Note:</span> {layout.schedulingNote}</p>
+          <p className='mt-2 text-xs font-semibold uppercase text-slate-500'>Display Name</p>
+          <p className='text-sm'>{layout.title}</p>
+          <p className='mt-2 text-xs font-semibold uppercase text-slate-500'>Available Fields</p>
+          <p className='text-sm'>{layout.fields.join(' + ')}</p>
+          <p className='mt-2 text-xs font-semibold uppercase text-slate-500'>Supported Divisions</p>
+          <p className='text-sm'>{supportedGroups(layout)}</p>
+          <p className='mt-2 text-xs font-semibold uppercase text-slate-500'>Scheduling Note</p>
+          <p className='text-sm'>{layout.schedulingNote}</p>
         </article>)}
       </div>
-      <p className='mt-3 rounded bg-emerald-50 p-3 text-sm text-emerald-900'>All approved turf stadium layouts are available for this location. The scheduler will select the best layout for each host date unless a layout is locked in Hosting Availability.</p>
+      <p className='mt-3 rounded bg-emerald-50 p-3 text-sm text-emerald-900'>This turf location supports the four approved league turf configurations. During scheduling, each one-hour wave will be assigned one approved configuration code. Unused field slots are allowed when there are not enough compatible games to fill the selected layout.</p>
     </section>}
 
     {!isCommunityAdmin && selectedHost?.surface_type === GRASS_FIELD && <section className='rounded border p-4'>
@@ -348,7 +359,7 @@ export default function FieldAreaManager() {
       <h2 className='mb-2 font-semibold'>Current Facility Setups</h2>
       <div className='overflow-x-auto'>
         <table className='w-full text-sm'>
-          <thead>{isCommunityAdmin ? <tr><th className='border p-2 text-left'>Organization / Community</th><th className='border p-2 text-left'>Host Location</th><th className='border p-2 text-left'>Facility Type</th><th className='border p-2 text-left'>Status</th><th className='border p-2 text-left'>Actions</th></tr> : <tr><th className='border p-2 text-left'>Organization</th><th className='border p-2 text-left'>Host Location</th><th className='border p-2 text-left'>Surface Type</th><th className='border p-2 text-left'>Approved Configurations / Configured Fields</th><th className='border p-2 text-left'>Max Fields Per Wave</th><th className='border p-2 text-left'>Available Configuration Codes</th><th className='border p-2 text-left'>Status</th><th className='border p-2 text-left'>Actions</th></tr>}</thead>
+          <thead>{isCommunityAdmin ? <tr><th className='border p-2 text-left'>Organization / Community</th><th className='border p-2 text-left'>Host Location</th><th className='border p-2 text-left'>Facility Type</th><th className='border p-2 text-left'>Status</th><th className='border p-2 text-left'>Actions</th></tr> : <tr><th className='border p-2 text-left'>Organization</th><th className='border p-2 text-left'>Host Location</th><th className='border p-2 text-left'>Facility Summary</th><th className='border p-2 text-left'>Available Layout / Configured Fields</th><th className='border p-2 text-left'>Approved Configurations / Large Fields</th><th className='border p-2 text-left'>Max Fields Per Wave / Medium Fields</th><th className='border p-2 text-left'>Surface Type / Small Fields</th><th className='border p-2 text-left'>Status</th><th className='border p-2 text-left'>Actions</th></tr>}</thead>
           <tbody>{renderSetupRows()}</tbody>
         </table>
       </div>
