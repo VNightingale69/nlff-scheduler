@@ -597,6 +597,7 @@ class HostingGenerationLocationResult(BaseModel):
     slots_created: int = 0
     skipped_reason: str | None = None
     errors: list[str] = []
+    diagnostics: dict | None = None
 
 
 class HostingGenerationRunResult(BaseModel):
@@ -614,6 +615,7 @@ class HostingGenerationRunResult(BaseModel):
     total_hard_failures: int = 0
     last_generated_at: datetime
     results: list[HostingGenerationLocationResult]
+    selected_host_enforcement_diagnostics: list[dict] = []
 
 class GameStatusCreate(BaseModel):
     code: str

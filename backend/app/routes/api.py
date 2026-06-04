@@ -2206,6 +2206,26 @@ def _regenerate_generated_slots(
     before_instances = db.query(FieldInstance).filter(FieldInstance.hosting_availability_id == availability.id).all()
     diagnostics = _generated_slot_regeneration_diagnostics(availability, host_location_id, host_location_name, len(before_instances))
 
+    host_plan_rows = _host_plan_rows_for_week_date(db, availability.season_id, availability.week_id, slot_date)
+    if host_plan_rows and host_location_id not in {row.host_location_id for row in host_plan_rows if str(row.status or '').upper() == 'SELECTED'}:
+        deleted_by_host, stale_game_actions = _delete_generated_slots_for_unselected_hosts(db, availability.season_id, availability.week_id, slot_date)
+        diagnostics['warnings'].append(SELECTED_HOST_ENFORCEMENT_BUG_WARNINGS['slot_created_excluded'])
+        diagnostics['selected_host_enforcement'] = _selected_host_enforcement_diagnostics(
+            db, availability.season_id, availability.week_id, slot_date,
+            stale_slot_deletions_by_host=deleted_by_host,
+            stale_game_actions=stale_game_actions,
+        )
+        diagnostics['regeneration_aborted'] = True
+        diagnostics['regeneration_abort_reason'] = 'Host location is not SELECTED in host_plan_selections for this game date.'
+        return {
+            'total_slots_evaluated': 0,
+            'slots_regenerated': int(deleted_by_host.get(host_location_id) or 0),
+            'locked_slots_skipped': 0,
+            'new_slots_created': 0,
+            'obsolete_unused_slots_removed': int(deleted_by_host.get(host_location_id) or 0),
+            'diagnostics': diagnostics,
+        }
+
     existing_slots = db.query(GameSlot).join(GameSlot.field_instance).filter(
         FieldInstance.hosting_availability_id == availability.id,
     ).all()
@@ -2559,6 +2579,7 @@ def _regenerate_hosting_day(
             result.locked_slots_skipped += int(slot_metrics['locked_slots_skipped'])
             result.new_slots_created += int(slot_metrics['new_slots_created'])
             result.obsolete_unused_slots_removed += int(slot_metrics['obsolete_unused_slots_removed'])
+            result.diagnostics = slot_metrics.get('diagnostics')
             _renumber_turf_waves_for_host_date(db, host_id, availability_game_date)
             logger.info('Host %s (%s): availability %s regenerated, field_instances=%s slots=%s diagnostics=%s', host_name, host_id, availability_id, after_instances, after_slots, slot_metrics.get('diagnostics'))
         except HTTPException as exc:
@@ -4010,7 +4031,7 @@ def get_schedule_readiness(current_user: User = Depends(get_current_user), db: S
         weekly_field_demand=_build_weekly_field_demand_readiness(db),
     )
 
-HOST_PLAN_SCHEDULABLE_STATUSES = {'SELECTED', 'LOCKED', 'OVERFLOW'}
+HOST_PLAN_SCHEDULABLE_STATUSES = {'SELECTED'}
 HOST_PLAN_IGNORED_STATUSES = {'AVAILABLE', 'NOT_AVAILABLE', 'EXCLUDED', 'BLOCKED_CAPACITY', 'BLOCKED_ROTATION', 'BLOCKED_FIELD_SIZE'}
 HOST_PLAN_REQUIRES_AVAILABILITY_STATUSES = HOST_PLAN_SCHEDULABLE_STATUSES
 HOST_PLAN_MISSING_AVAILABILITY_MESSAGE = 'Missing Hosting Availability'
@@ -4244,31 +4265,30 @@ def _host_plan_capacity_sufficiency(
     return not reasons, reasons
 
 
-def _host_plan_allowed_host_ids_for_week(db: Session, season_id: uuid.UUID | str | None, week_id: uuid.UUID | str | None = None, game_date: date | None = None) -> set[uuid.UUID] | None:
-    """Return selected/locked/overflow hosts for the exact season/week/date key.
-
-    Auto-schedule slot compatibility must use the same key generated-slot
-    regeneration uses: season_id + season_week_id + game_date + host plan
-    status.  A legacy date-only fallback is kept only for rows that have not
-    been backfilled with week_id yet.
-    """
+def _host_plan_rows_for_week_date(db: Session, season_id: uuid.UUID | str | None, week_id: uuid.UUID | str | None = None, game_date: date | None = None) -> list[HostPlanSelection]:
     if not season_id or not game_date:
-        return None
+        return []
     query = db.query(HostPlanSelection).filter(
         HostPlanSelection.season_id == season_id,
         HostPlanSelection.game_date == game_date,
     )
     if week_id:
-        query = query.filter(
-            or_(
-                HostPlanSelection.week_id == week_id,
-                HostPlanSelection.week_id.is_(None),
-            )
-        )
-    all_rows = query.all()
+        query = query.filter(or_(HostPlanSelection.week_id == week_id, HostPlanSelection.week_id.is_(None)))
+    return query.all()
+
+
+def _host_plan_allowed_host_ids_for_week(db: Session, season_id: uuid.UUID | str | None, week_id: uuid.UUID | str | None = None, game_date: date | None = None) -> set[uuid.UUID] | None:
+    """Return only status=SELECTED hosts for the exact season/week/date key.
+
+    Host-plan selection status is the hard eligibility boundary for generated
+    slots, auto-schedule placement, optimizers, and exports.  Locked, overflow,
+    active-host, ownership, surface, existing-slot, and capacity signals do not
+    make a host eligible when its row is not SELECTED.
+    """
+    all_rows = _host_plan_rows_for_week_date(db, season_id, week_id, game_date)
     if not all_rows:
         return None
-    return {row.host_location_id for row in all_rows if row.status in HOST_PLAN_SCHEDULABLE_STATUSES or row.locked}
+    return {row.host_location_id for row in all_rows if str(row.status or '').upper() == 'SELECTED'}
 
 
 def _apply_host_plan_filter_to_slots(query, db: Session, season_id: uuid.UUID | str | None, week_id: uuid.UUID | str | None = None, game_date: date | None = None):
@@ -4278,6 +4298,163 @@ def _apply_host_plan_filter_to_slots(query, db: Session, season_id: uuid.UUID | 
     if not allowed_host_ids:
         return query.filter(GameSlot.host_location_id.in_([]))
     return query.filter(GameSlot.host_location_id.in_(allowed_host_ids))
+
+
+SELECTED_HOST_ENFORCEMENT_BUG_WARNINGS = {
+    'slot_created_excluded': 'BUG: generated slot created for EXCLUDED host location.',
+    'game_assigned_excluded': 'BUG: scheduled game assigned to EXCLUDED host location.',
+    'old_game_preserved_excluded': 'BUG: old scheduled game at EXCLUDED host preserved during full regeneration.',
+    'auto_scheduler_outside_selected': 'BUG: auto-scheduler used host outside SELECTED host_plan_selections.',
+    'turf_detection_host_role_only': 'BUG: Turf Stadium detection relied only on host_role even though surface_type = TURF_STADIUM.',
+}
+
+
+def _selected_host_enforcement_diagnostics(
+    db: Session,
+    season_id: uuid.UUID | str | None,
+    week_id: uuid.UUID | str | None,
+    game_date: date | None,
+    *,
+    stale_slot_deletions_by_host: dict[uuid.UUID, int] | None = None,
+    stale_game_actions: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    rows = _host_plan_rows_for_week_date(db, season_id, week_id, game_date)
+    hosts = {host.id: host for host in db.query(HostLocation).filter(HostLocation.id.in_([row.host_location_id for row in rows])).all()} if rows else {}
+    selected_ids = {row.host_location_id for row in rows if str(row.status or '').upper() == 'SELECTED'}
+    excluded_rows = [row for row in rows if str(row.status or '').upper() != 'SELECTED']
+    excluded_ids = {row.host_location_id for row in excluded_rows}
+    slot_counts = {host_id: int(count or 0) for host_id, count in db.query(GameSlot.host_location_id, func.count(GameSlot.id)).filter(
+        GameSlot.season_id == season_id,
+        GameSlot.week_id == week_id,
+        GameSlot.slot_date == game_date,
+    ).group_by(GameSlot.host_location_id).all()} if season_id and week_id and game_date else {}
+    scheduled_counts = {host_id: int(count or 0) for host_id, count in db.query(GameSlot.host_location_id, func.count(GameSlot.id)).filter(
+        GameSlot.season_id == season_id,
+        GameSlot.week_id == week_id,
+        GameSlot.slot_date == game_date,
+        GameSlot.assigned_game_id.isnot(None),
+    ).group_by(GameSlot.host_location_id).all()} if season_id and week_id and game_date else {}
+    stale_slot_deletions_by_host = stale_slot_deletions_by_host or {}
+    excluded_with_slots = []
+    for row in excluded_rows:
+        count = int(slot_counts.get(row.host_location_id) or 0)
+        if count > 0 or int(stale_slot_deletions_by_host.get(row.host_location_id) or 0) > 0:
+            host = hosts.get(row.host_location_id)
+            excluded_with_slots.append({
+                'host_location_id': str(row.host_location_id),
+                'host_location_name': host.name if host else None,
+                'surface_type': getattr(host, 'surface_type', None),
+                'status': row.status,
+                'generated_slot_count': count,
+                'stale_slots_deleted_or_deactivated_count': int(stale_slot_deletions_by_host.get(row.host_location_id) or 0),
+                'warning': SELECTED_HOST_ENFORCEMENT_BUG_WARNINGS['slot_created_excluded'] if count > 0 else None,
+            })
+    scheduled_at_excluded = int(sum(scheduled_counts.get(host_id, 0) for host_id in excluded_ids))
+    generated_at_excluded = int(sum(slot_counts.get(host_id, 0) for host_id in excluded_ids))
+    return {
+        'diagnostic_label': 'Selected Host Enforcement Diagnostics',
+        'season_id': str(season_id) if season_id else None,
+        'week_id': str(week_id) if week_id else None,
+        'game_date': str(game_date) if game_date else None,
+        'selected_host_location_ids': [str(host_id) for host_id in sorted(selected_ids, key=str)],
+        'selected_host_location_names': [hosts[host_id].name for host_id in sorted(selected_ids, key=str) if host_id in hosts],
+        'excluded_host_location_ids': [str(host_id) for host_id in sorted(excluded_ids, key=str)],
+        'excluded_host_location_names': [hosts[host_id].name for host_id in sorted(excluded_ids, key=str) if host_id in hosts],
+        'generated_slots_by_host_location': {str(host_id): count for host_id, count in slot_counts.items()},
+        'generated_slots_for_excluded_hosts_count': generated_at_excluded,
+        'scheduled_games_by_host_location': {str(host_id): count for host_id, count in scheduled_counts.items()},
+        'scheduled_games_at_excluded_hosts_count': scheduled_at_excluded,
+        'selected_host_enforcement_passed': generated_at_excluded == 0 and scheduled_at_excluded == 0,
+        'excluded_hosts_with_generated_slots': excluded_with_slots,
+        'scheduled_games_at_excluded_hosts': stale_game_actions or [],
+    }
+
+
+def _clear_stale_games_at_unselected_hosts(db: Session, season_id: uuid.UUID | str, week_id: uuid.UUID | str | None, game_date: date, selected_ids: set[uuid.UUID], excluded_rows: list[HostPlanSelection]) -> list[dict[str, object]]:
+    if not excluded_rows:
+        return []
+    unselected_ids = {row.host_location_id for row in excluded_rows}
+    status_by_host = {row.host_location_id: row.status for row in excluded_rows}
+    hosts = {host.id: host for host in db.query(HostLocation).filter(HostLocation.id.in_(list(unselected_ids))).all()}
+    unscheduled_status = db.query(GameStatus).filter(func.lower(GameStatus.code) == 'unscheduled').first()
+    rows = db.query(Game, GameSlot).join(GameSlot, GameSlot.assigned_game_id == Game.id).filter(
+        Game.season_id == season_id,
+        Game.week_id == week_id,
+        Game.game_date == game_date,
+        GameSlot.host_location_id.in_(list(unselected_ids)),
+    ).all() if unselected_ids else []
+    actions = []
+    for game, slot in rows:
+        host = hosts.get(slot.host_location_id)
+        slot.assigned_game_id = None
+        slot.status = 'OPEN'
+        game.host_location_id = None
+        game.field_instance_id = None
+        if unscheduled_status:
+            game.game_status_id = unscheduled_status.id
+        actions.append({
+            'game_id': str(game.id),
+            'game_date': str(game_date),
+            'host_location_id': str(slot.host_location_id),
+            'host_location_name': host.name if host else None,
+            'status': status_by_host.get(slot.host_location_id),
+            'stale_game_cleared': True,
+            'final_action': 'cleared_schedule_assignment_and_marked_unscheduled' if unscheduled_status else 'cleared_schedule_assignment',
+            'warning': SELECTED_HOST_ENFORCEMENT_BUG_WARNINGS['game_assigned_excluded'],
+        })
+    return actions
+
+
+def _delete_generated_slots_for_unselected_hosts(db: Session, season_id: uuid.UUID | str, week_id: uuid.UUID | str | None, game_date: date) -> tuple[dict[uuid.UUID, int], list[dict[str, object]]]:
+    rows = _host_plan_rows_for_week_date(db, season_id, week_id, game_date)
+    if not rows:
+        return {}, []
+    selected_ids = {row.host_location_id for row in rows if str(row.status or '').upper() == 'SELECTED'}
+    excluded_rows = [row for row in rows if row.host_location_id not in selected_ids]
+    unselected_ids = {row.host_location_id for row in excluded_rows}
+    game_actions = _clear_stale_games_at_unselected_hosts(db, season_id, week_id, game_date, selected_ids, excluded_rows)
+    deleted_by_host: dict[uuid.UUID, int] = {}
+    if unselected_ids:
+        field_instance_ids = [row[0] for row in db.query(FieldInstance.id).join(HostingAvailability, HostingAvailability.id == FieldInstance.hosting_availability_id).filter(
+            FieldInstance.host_location_id.in_(list(unselected_ids)),
+            FieldInstance.instance_date == game_date,
+            HostingAvailability.season_id == season_id,
+            HostingAvailability.week_id == week_id,
+        ).all()]
+        for host_id, count in db.query(GameSlot.host_location_id, func.count(GameSlot.id)).filter(
+            GameSlot.season_id == season_id,
+            GameSlot.week_id == week_id,
+            GameSlot.slot_date == game_date,
+            GameSlot.host_location_id.in_(list(unselected_ids)),
+            GameSlot.assigned_game_id.is_(None),
+        ).group_by(GameSlot.host_location_id).all():
+            deleted_by_host[host_id] = int(count or 0)
+        db.query(GameSlot).filter(
+            GameSlot.season_id == season_id,
+            GameSlot.week_id == week_id,
+            GameSlot.slot_date == game_date,
+            GameSlot.host_location_id.in_(list(unselected_ids)),
+            GameSlot.assigned_game_id.is_(None),
+        ).delete(synchronize_session=False)
+        if field_instance_ids:
+            remaining_slot_field_ids = {row[0] for row in db.query(GameSlot.field_instance_id).filter(GameSlot.field_instance_id.in_(field_instance_ids)).distinct().all()}
+            referenced_game_field_ids = {row[0] for row in db.query(Game.field_instance_id).filter(Game.field_instance_id.in_(field_instance_ids)).distinct().all() if row[0]}
+            deletable = [field_id for field_id in field_instance_ids if field_id not in remaining_slot_field_ids and field_id not in referenced_game_field_ids]
+            if deletable:
+                db.query(FieldInstance).filter(FieldInstance.id.in_(deletable)).delete(synchronize_session=False)
+    return deleted_by_host, game_actions
+
+
+def _schedule_row_has_selected_host(db: Session, game: Game | None, slot: GameSlot | None, host: HostLocation | None) -> bool:
+    season_id = getattr(game, 'season_id', None)
+    game_date = getattr(game, 'game_date', None)
+    host_location_id = getattr(slot, 'host_location_id', None) or getattr(game, 'host_location_id', None) or getattr(host, 'id', None)
+    if not season_id or not game_date or not host_location_id:
+        return False
+    rows = _host_plan_rows_for_week_date(db, season_id, getattr(game, 'week_id', None), game_date)
+    if not rows:
+        return True
+    return any(row.host_location_id == host_location_id and str(row.status or '').upper() == 'SELECTED' for row in rows)
 
 
 HOST_ROLE_TURF_STADIUM = 'TURF_STADIUM'
@@ -6835,6 +7012,7 @@ def regenerate_generated_game_slots(payload: dict | None = None, current_user: U
                 slots_regenerated=int(row.get('slots_regenerated') or 0),
                 locked_slots_skipped=int(row.get('locked_slots_skipped') or 0),
                 errors=list(row.get('errors') or []),
+                diagnostics=row.get('diagnostics'),
             )
             results.append(result)
             processed += 1
@@ -6868,6 +7046,7 @@ def regenerate_generated_game_slots(payload: dict | None = None, current_user: U
             total_hard_failures=total_hard_failures,
             last_generated_at=datetime.utcnow(),
             results=results,
+            selected_host_enforcement_diagnostics=[row.get('selected_host_enforcement_diagnostics') for row in (preflight.get('validation_rows') or []) if row.get('selected_host_enforcement_diagnostics')],
         )
 
     host_query = db.query(HostLocation).filter(HostLocation.is_active.is_(True))
@@ -13171,6 +13350,7 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
     if not teams:
         raise HTTPException(400, 'Division/week produced zero valid schedule candidates.')
     required_field_type = _required_field_type_for_division(division)
+    host_plan_allowed_ids = _host_plan_allowed_host_ids_for_week(db, season_id, week_id, week_game_date)
     open_slots_count = db.query(GameSlot).filter(
         GameSlot.season_id == season_id,
         GameSlot.week_id == week_id,
@@ -13179,6 +13359,7 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         GameSlot.assigned_game_id.is_(None),
         GameSlot.field_type == required_field_type,
         GameSlot.host_location_id.in_(_eligible_host_location_ids(db)),
+        GameSlot.host_location_id.in_(host_plan_allowed_ids) if host_plan_allowed_ids is not None else True,
     ).count()
     if open_slots_count <= 0:
         raise HTTPException(400, 'No valid slot combinations available.')
@@ -13191,6 +13372,7 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         GameSlot.field_type == required_field_type,
         GameSlot.host_location_id.is_not(None),
         GameSlot.host_location_id.in_(_eligible_host_location_ids(db)),
+        GameSlot.host_location_id.in_(host_plan_allowed_ids) if host_plan_allowed_ids is not None else True,
     ).distinct().count()
     if host_locations_count <= 0:
         raise HTTPException(400, 'No compatible host locations found.')
@@ -13203,7 +13385,6 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         GameSlot.field_type == required_field_type,
         GameSlot.host_location_id.in_(_eligible_host_location_ids(db)),
     ).all()
-    host_plan_allowed_ids = _host_plan_allowed_host_ids_for_week(db, season_id, week_id, week_game_date)
     if host_plan_allowed_ids is not None:
         open_slots = [slot for slot in open_slots if slot.host_location_id in host_plan_allowed_ids]
     sorted_slots = sorted(
@@ -13702,6 +13883,9 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         if not slot:
             _add_skipped('No compatible large field available for this division.' if required_field_type == 'LARGE' else 'not enough open matching slots')
             continue
+        if host_plan_allowed_ids is not None and slot.host_location_id not in host_plan_allowed_ids:
+            _add_skipped(SELECTED_HOST_ENFORCEMENT_BUG_WARNINGS['auto_scheduler_outside_selected'])
+            continue
         active_home_host_orgs = _true_home_host_ordered_orgs(str(home_team_id), str(away_team_id))
         current_slot_owner_org = host_org_by_location_id.get(str(slot.host_location_id)) if slot.host_location_id else None
         current_slot_is_allowed_owned_host = bool(current_slot_owner_org and current_slot_owner_org in active_home_host_orgs)
@@ -13732,6 +13916,9 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
                 fallback_slot, non_adjacent = _find_best_compatible_slot(slot, str(home_team_id), str(away_team_id))
                 if fallback_slot is None:
                     _add_skipped('No compatible large field available for this division.' if required_field_type == 'LARGE' else 'not enough open matching slots')
+                    continue
+                if host_plan_allowed_ids is not None and fallback_slot.host_location_id not in host_plan_allowed_ids:
+                    _add_skipped(SELECTED_HOST_ENFORCEMENT_BUG_WARNINGS['auto_scheduler_outside_selected'])
                     continue
                 slot = fallback_slot
                 if non_adjacent:
@@ -14464,6 +14651,20 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         for d in all_divisions
     }
     weeks = db.query(Week).filter(Week.season_id == season_id).order_by(Week.week_number.asc(), Week.primary_game_date.asc()).all()
+    selected_host_enforcement_diagnostics: list[dict[str, object]] = []
+    for week in weeks:
+        game_date_value = _week_game_date(week)
+        if not game_date_value:
+            continue
+        deleted_by_host, stale_game_actions = _delete_generated_slots_for_unselected_hosts(db, season_id, week.id, game_date_value)
+        diagnostic = _selected_host_enforcement_diagnostics(
+            db, season_id, week.id, game_date_value,
+            stale_slot_deletions_by_host=deleted_by_host,
+            stale_game_actions=stale_game_actions,
+        )
+        selected_host_enforcement_diagnostics.append(diagnostic)
+        if not diagnostic.get('selected_host_enforcement_passed'):
+            logger.warning('selected_host_enforcement_diagnostics_failed %s', diagnostic)
 
     total_games_created = 0
     preview_games_count = 0
@@ -14927,6 +15128,7 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
             'skipped_count': sum(skipped_attempts_by_reason.values()),
             'skipped_reasons': dict(skipped_attempts_by_reason),
             'diagnostics_warnings': auto_schedule_diagnostics_warnings,
+            'selected_host_enforcement_diagnostics': selected_host_enforcement_diagnostics,
         }
         diagnostics['root_cause_categories'] = _build_root_cause_categories(diagnostics)
         return diagnostics
@@ -15537,6 +15739,7 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         db.commit()
 
     host_location_verification = _build_host_location_vs_home_team_verification(db, season_id)
+    auto_schedule_diagnostics['selected_host_enforcement_diagnostics'] = selected_host_enforcement_diagnostics
     auto_schedule_diagnostics['host_location_vs_home_team_verification'] = host_location_verification
     if int(host_location_verification.get('host_owner_is_away_team') or 0) > 0 and not bool(host_location_verification.get('require_host_owner_as_home_team')):
         informational_notes.append('Host owner is away team for one or more games; host-owner home assignment is verification-only.')
@@ -15990,9 +16193,20 @@ def _regenerate_and_validate_slots_for_weeks(
             HostPlanSelection.game_date.in_(week_dates),
         ),
     ).order_by(HostPlanSelection.game_date, HostPlanSelection.status, HostPlanSelection.created_at).all() if week_dates and regular_week_ids else []
+    selected_enforcement_by_date: dict[date, dict[str, object]] = {}
+    for week in regular_weeks:
+        game_date = _normalize_local_date_only(_week_game_date(week))
+        if not game_date:
+            continue
+        deleted_by_host, stale_game_actions = _delete_generated_slots_for_unselected_hosts(db, week.season_id, week.id, game_date)
+        selected_enforcement_by_date[game_date] = _selected_host_enforcement_diagnostics(
+            db, week.season_id, week.id, game_date,
+            stale_slot_deletions_by_host=deleted_by_host,
+            stale_game_actions=stale_game_actions,
+        )
     for selection in selected_rows:
         selection_status = str(selection.status or '').upper()
-        if selection_status not in HOST_PLAN_SCHEDULABLE_STATUSES and not selection.locked:
+        if selection_status != 'SELECTED':
             continue
         week = week_by_id.get(selection.week_id) if selection.week_id else week_by_date.get(_normalize_local_date_only(selection.game_date))
         if not week or not _is_regular_season_week(week):
@@ -16045,11 +16259,12 @@ def _regenerate_and_validate_slots_for_weeks(
             available_hosts_by_date.setdefault(game_date, []).append(host)
 
     # Backward-compatible fallback: older setups may have saved HostingAvailability
-    # without HostPlanSelection rows. Use those rows only when no selected/locked/
-    # overflow host exists for that regular-season date.
+    # without HostPlanSelection rows. Never use this fallback when any host-plan
+    # selection rows exist for the date, because status=SELECTED is the hard
+    # eligibility boundary and EXCLUDED/OVERFLOW/LOCKED must not become capacity.
     for week in regular_weeks:
         game_date = _week_game_date(week)
-        if not game_date or available_hosts_by_date.get(game_date):
+        if not game_date or available_hosts_by_date.get(game_date) or _host_plan_rows_for_week_date(db, week.season_id, week.id, game_date):
             continue
         fallback_rows = db.query(HostingAvailability, HostLocation).join(
             HostLocation, HostingAvailability.host_location_id == HostLocation.id
@@ -16213,6 +16428,7 @@ def _regenerate_and_validate_slots_for_weeks(
         }
         demand_summary['selected_hosts'] = selected_hosts_for_date
         demand_summary['generated_slots_by_size'] = dict(slot_counts)
+        demand_summary['selected_host_enforcement_diagnostics'] = selected_enforcement_by_date.get(game_date)
         demand_summary['selected_host_generated_slot_diagnostics'] = selected_host_diagnostics
         demand_summary['host_plan_data_integrity_summary'] = host_plan_data_integrity_summary
         demand_summary['zero_slot_reason'] = zero_slot_reason
@@ -16231,6 +16447,7 @@ def _regenerate_and_validate_slots_for_weeks(
             'selected_hosts': selected_hosts_for_date,
             'host_locations_evaluated': selected_hosts_for_date,
             'generation_reasons': generation_reasons_by_date.get(game_date, []),
+            'selected_host_enforcement_diagnostics': selected_enforcement_by_date.get(game_date),
             'selected_host_generated_slot_diagnostics': selected_host_diagnostics,
             'host_plan_data_integrity_summary': host_plan_data_integrity_summary,
             'zero_slot_reason': zero_slot_reason,
@@ -16849,7 +17066,12 @@ def _schedule_management_rows(db: Session, filters: dict | None = None, organiza
     if filters.get('week_id'): q = q.filter(Game.week_id == filters['week_id'])
     if filters.get('status_code'): q = q.filter(func.lower(GameStatus.code) == str(filters['status_code']).strip().lower())
     if filters.get('season_id'): q = q.filter(Game.season_id == filters['season_id'])
-    return q.order_by(Game.game_date, Game.kickoff_time).all()
+    rows = q.order_by(Game.game_date, Game.kickoff_time).all()
+    valid_rows = [row for row in rows if _schedule_row_has_selected_host(db, row[0], row[1], row[3])]
+    invalid_count = len(rows) - len(valid_rows)
+    if invalid_count > 0:
+        logger.warning('selected_host_export_protection_filtered invalid_or_stale_schedule_rows=%s filters=%s warning=%s', invalid_count, _serialize_schedule_filters(filters), SELECTED_HOST_ENFORCEMENT_BUG_WARNINGS['game_assigned_excluded'])
+    return valid_rows
 
 
 def get_scheduled_games_for_season(db: Session, season_id: uuid.UUID | None, filters: dict | None = None, organization_filter_any_team: bool = False):
