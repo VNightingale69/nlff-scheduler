@@ -189,7 +189,7 @@ class GrassFieldForecastTest(unittest.TestCase):
         self.db.commit()
 
     def test_grass_forecast_generates_fixed_fields_with_readiness_details(self):
-        from app.models import GameSlot, HostLocation, HostingAvailability
+        from app.models import Field, GameSlot, HostLocation, HostingAvailability
         from app.routes.api import _regenerate_generated_slots
 
         host_date = date(2026, 9, 19)
@@ -219,7 +219,13 @@ class GrassFieldForecastTest(unittest.TestCase):
             end_time=time(11, 0),
             is_available=True,
         )
-        self.db.add_all([host, availability])
+        fields = [
+            Field(id=uuid.uuid4(), host_location_id=host.id, name='Grass Small 1', layout_type='SMALL', is_active=True),
+            Field(id=uuid.uuid4(), host_location_id=host.id, name='Grass Small 2', layout_type='SMALL', is_active=True),
+            Field(id=uuid.uuid4(), host_location_id=host.id, name='Grass Medium 1', layout_type='MEDIUM', is_active=True),
+            Field(id=uuid.uuid4(), host_location_id=host.id, name='Grass Large 1', layout_type='LARGE', is_active=True),
+        ]
+        self.db.add_all([host, availability, *fields])
         self.db.commit()
 
         metrics = _regenerate_generated_slots(self.db, availability, host.id)
@@ -245,7 +251,7 @@ class GrassFieldForecastTest(unittest.TestCase):
         self.assertEqual(grass_site.turf_wave_plan, [])
 
     def test_grass_forecast_is_capped_by_configured_capacity(self):
-        from app.models import HostLocation, HostingAvailability
+        from app.models import Field, HostLocation, HostingAvailability
         from app.routes.api import _grass_setup_forecast_for_availability
 
         host_date = date(2026, 9, 20)
@@ -271,7 +277,8 @@ class GrassFieldForecastTest(unittest.TestCase):
             end_time=time(11, 0),
             is_available=True,
         )
-        self.db.add_all([host, availability])
+        field = Field(id=uuid.uuid4(), host_location_id=host.id, name='Only Small Grass', layout_type='SMALL', is_active=True)
+        self.db.add_all([host, availability, field])
         self.db.commit()
 
         forecast = _grass_setup_forecast_for_availability(self.db, host, availability)
