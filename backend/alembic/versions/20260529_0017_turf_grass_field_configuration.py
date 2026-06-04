@@ -39,16 +39,10 @@ def upgrade() -> None:
         _add_column_if_missing(inspector, 'host_location_configurations', sa.Column('small_field_count', sa.Integer(), nullable=False, server_default='0'))
 
         config_updates = {
-            'TWO_LARGE': (120, 0, 2, 0, 0),
-            '2X53': (120, 0, 2, 0, 0),
-            'ONE_MEDIUM_TWO_SMALL': (120, 0, 0, 1, 2),
-            '1X53_PLUS_2X30': (120, 0, 0, 1, 2),
-            'ONE_LARGE_ONE_MEDIUM': (115, 5, 1, 1, 0),
-            'TWO_MEDIUM': (110, 10, 0, 2, 0),
             'THREE_SMALL': (100, 20, 0, 0, 3),
-            '3X30': (100, 20, 0, 0, 3),
-            'ONE_LARGE_ONE_SMALL': (90, 30, 1, 0, 1),
-            'ONE_MEDIUM_ONE_SMALL': (85, 35, 0, 1, 1),
+            'TWO_SMALL_ONE_MEDIUM': (120, 0, 0, 1, 2),
+            'TWO_MEDIUM': (110, 10, 0, 2, 0),
+            'ONE_SMALL_ONE_LARGE': (90, 30, 1, 0, 1),
         }
         for name, (used, remaining, large, medium, small) in config_updates.items():
             op.execute(

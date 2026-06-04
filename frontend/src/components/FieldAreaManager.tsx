@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from 'react';
 import Toast from './Toast';
 import { apiFetch } from '@/lib/api';
 import { getAuthUser, getToken } from '@/lib/auth';
+import { APPROVED_TURF_CONFIGURATIONS, turfAvailableFieldsLabel, turfConfigurationLabel } from '@/lib/turfConfigurations';
 
 const TURF_STADIUM = 'TURF_STADIUM';
 const GRASS_FIELD = 'GRASS_FIELD';
@@ -40,13 +41,7 @@ const configLabel = (value?: string) => {
 };
 const errorMessage = (error: any, fallback: string) => error?.message || fallback;
 
-const supportedGroups = (layout: typeof TURF_LAYOUTS[number]) => {
-  const groups: string[] = [];
-  if (layout.small) groups.push('Coed K-1', 'Coed 2-3', 'Girls K-2');
-  if (layout.medium) groups.push('Coed 4-5', 'Girls 3-5');
-  if (layout.large) groups.push('Coed 6-7', 'Coed 8', 'Girls 6-8');
-  return groups.join(', ');
-};
+
 
 export default function FieldAreaManager() {
   const token = getToken();
@@ -227,7 +222,7 @@ export default function FieldAreaManager() {
   };
 
   const renderSetupRows = () => {
-    const colSpan = isCommunityAdmin ? 5 : 9;
+    const colSpan = isCommunityAdmin ? 5 : 8;
     if (!orgId) return <tr><td className='border p-3 text-center text-slate-500' colSpan={colSpan}>Select an organization to view hosting site setups.</td></tr>;
     if (hostLoadError || fieldLoadError) return <tr><td className='border p-3 text-center text-rose-700' colSpan={colSpan}>Unable to load setup data. {hostLoadError || fieldLoadError}</td></tr>;
     if (loadingOrgData) return <tr><td className='border p-3 text-center text-slate-500' colSpan={colSpan}>Loading hosting site setups…</td></tr>;

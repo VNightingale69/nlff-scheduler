@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { apiFetch } from '@/lib/api';
 import { getToken } from '@/lib/auth';
+import { APPROVED_TURF_CONFIGURATIONS, turfConfigurationLabel } from '@/lib/turfConfigurations';
 import Toast from '@/components/Toast';
 import FormField from '@/components/ui/FormField';
 import Link from 'next/link';

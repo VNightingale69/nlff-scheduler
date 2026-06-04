@@ -16,12 +16,22 @@ def _assigned_node(module: ast.Module, name: str) -> ast.AST:
         if isinstance(node, ast.Assign):
             if any(isinstance(target, ast.Name) and target.id == name for target in node.targets):
                 return node.value
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id == name:
+            return node.value
     raise AssertionError(f'{name} assignment not found')
 
 
 def test_turf_stadium_configurations_are_limited_to_approved_wave_codes():
-    module = ast.parse((APP_ROOT / 'routes' / 'api.py').read_text())
-    codes = _literal_string_set(_assigned_node(module, 'TURF_STADIUM_CONFIGURATIONS'))
+    module = ast.parse((APP_ROOT / 'turf_configurations.py').read_text())
+    configs = _assigned_node(module, 'APPROVED_TURF_CONFIGURATIONS')
+    assert isinstance(configs, ast.Tuple)
+    codes = set()
+    for item in configs.elts:
+        assert isinstance(item, ast.Dict)
+        for key, value in zip(item.keys, item.values):
+            if isinstance(key, ast.Constant) and key.value == 'code':
+                assert isinstance(value, ast.Constant)
+                codes.add(value.value)
 
     assert codes == {
         'THREE_SMALL',

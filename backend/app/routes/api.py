@@ -31,6 +31,7 @@ from app.security import create_access_token, create_refresh_token, hash_passwor
 from app.services.game_statuses import REQUIRED_GAME_STATUSES, ensure_required_game_statuses
 from app.services.organization_cleanup import cleanup_organization_dependencies, collect_organization_delete_inventory
 from app.services.scheduling_validation import validate_game
+from app.turf_configurations import INVALID_TURF_CONFIGURATION_MESSAGE, BACKWARD_COMPATIBLE_TURF_CONFIGURATION_ALIASES, turf_configuration_legacy_metadata
 
 router = APIRouter(prefix='/api')
 logger = logging.getLogger(__name__)
@@ -1427,37 +1428,7 @@ def _normalize_local_date_only(value) -> date | None:
     except ValueError:
         return None
 
-TURF_STADIUM_CONFIGURATIONS = {
-    'THREE_SMALL': {
-        'configuration_name': '3 Small',
-        'space_used_yards': 100,
-        'remaining_yards': 20,
-        'counts': {FIELD_SIZE_LARGE: 0, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_SMALL: 3},
-    },
-    'TWO_SMALL_ONE_MEDIUM': {
-        'configuration_name': '2 Small + 1 Medium',
-        'space_used_yards': 120,
-        'remaining_yards': 0,
-        'counts': {FIELD_SIZE_LARGE: 0, FIELD_SIZE_MEDIUM: 1, FIELD_SIZE_SMALL: 2},
-    },
-    'TWO_MEDIUM': {
-        'configuration_name': '2 Medium',
-        'space_used_yards': 110,
-        'remaining_yards': 10,
-        'counts': {FIELD_SIZE_LARGE: 0, FIELD_SIZE_MEDIUM: 2, FIELD_SIZE_SMALL: 0},
-    },
-    'ONE_SMALL_ONE_LARGE': {
-        'configuration_name': '1 Small + 1 Large',
-        'space_used_yards': 90,
-        'remaining_yards': 30,
-        'counts': {FIELD_SIZE_LARGE: 1, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_SMALL: 1},
-    },
-}
-BACKWARD_COMPATIBLE_TURF_CONFIGURATION_ALIASES = {
-    '3X30': 'THREE_SMALL',
-    'ONE_MEDIUM_TWO_SMALL': 'TWO_SMALL_ONE_MEDIUM',
-    'ONE_LARGE_ONE_SMALL': 'ONE_SMALL_ONE_LARGE',
-}
+TURF_STADIUM_CONFIGURATIONS = turf_configuration_legacy_metadata()
 CONFIGURATION_FIELD_TEMPLATES = {
     key: [(f'{field_type.title()} Field {index}', field_type) for field_type in FIELD_SIZE_ORDER for index in range(1, config['counts'][field_type] + 1)]
     for key, config in TURF_STADIUM_CONFIGURATIONS.items()
@@ -2176,7 +2147,7 @@ def _select_best_turf_configuration(db: Session, availability: HostingAvailabili
 def _apply_turf_configuration_metadata(obj, configuration_name: str) -> None:
     metadata = _turf_configuration_metadata(configuration_name)
     if not metadata:
-        raise HTTPException(400, f'Invalid turf stadium configuration_name: {configuration_name}')
+        raise HTTPException(400, INVALID_TURF_CONFIGURATION_MESSAGE)
     counts = metadata['counts']
     obj.configuration_name = _normalize_configuration_name(configuration_name)
     obj.surface_type = 'TURF_STADIUM'
@@ -2196,9 +2167,22 @@ def _ensure_approved_turf_configurations(db: Session, host: HostLocation) -> boo
         for config in db.query(HostLocationConfiguration).filter(HostLocationConfiguration.host_location_id == host.id).all()
     }
     changed = False
+    invalid_config_ids = []
     for config_name, config in existing.items():
-        if config_name not in TURF_STADIUM_CONFIGURATIONS and config.is_active:
-            config.is_active = False
+        if config_name not in TURF_STADIUM_CONFIGURATIONS:
+            invalid_config_ids.append(config.id)
+            if config.is_active:
+                config.is_active = False
+                changed = True
+    if invalid_config_ids:
+        stale_locks = db.query(HostingAvailability).filter(
+            HostingAvailability.host_location_id == host.id,
+            HostingAvailability.selected_configuration_id.in_(invalid_config_ids),
+        ).all()
+        for availability in stale_locks:
+            availability.selected_configuration_id = None
+            availability.auto_select_turf_layout = True
+            availability.lock_selected_layout = False
             changed = True
     for config_name in TURF_STADIUM_CONFIGURATIONS:
         config = existing.get(config_name)
@@ -6596,7 +6580,7 @@ def _resolve_availability_host_and_validate(payload, current_user: User, db: Ses
                 ).first()
                 if not config: raise HTTPException(400, 'Invalid host location configuration')
                 if not _turf_configuration_metadata(config.configuration_name):
-                    raise HTTPException(400, 'Unsupported turf stadium configuration')
+                    raise HTTPException(400, INVALID_TURF_CONFIGURATION_MESSAGE)
             elif not payload.auto_select_turf_layout:
                 raise HTTPException(400, 'selected_configuration_id is required when auto-select turf layout is disabled')
         else:
@@ -10667,6 +10651,14 @@ def assign_generated_slot(payload: dict, db: Session = Depends(get_db)):
     if not division:
         raise HTTPException(404, 'Division not found')
     expected_field_type = _required_field_type_for_division(division)
+    if slot.turf_wave_id:
+        wave = slot.turf_wave or db.query(TurfWave).filter(TurfWave.id == slot.turf_wave_id).first()
+        selected_config = _normalize_configuration_name(wave.preferred_layout_code if wave else None)
+        if selected_config not in TURF_APPROVED_LAYOUT_CODES:
+            raise HTTPException(400, INVALID_TURF_CONFIGURATION_MESSAGE)
+        available_counts = _turf_wave_layout_counts(selected_config, [slot])
+        if int(available_counts.get(expected_field_type, 0) or 0) <= 0:
+            raise HTTPException(400, 'Selected approved turf configuration does not include a compatible field-size slot for this division.')
     if slot.field_type != expected_field_type:
         raise HTTPException(400, 'Selected slot field type must match division requirement')
     overlap = db.query(Game).join(GameSlot, GameSlot.assigned_game_id == Game.id).filter(
