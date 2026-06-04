@@ -1425,23 +1425,17 @@ def _normalize_local_date_only(value) -> date | None:
         return None
 
 TURF_STADIUM_CONFIGURATIONS = {
-    'TWO_LARGE': {
-        'configuration_name': '2 Large',
-        'space_used_yards': 120,
-        'remaining_yards': 0,
-        'counts': {FIELD_SIZE_LARGE: 2, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_SMALL: 0},
+    'THREE_SMALL': {
+        'configuration_name': '3 Small',
+        'space_used_yards': 100,
+        'remaining_yards': 20,
+        'counts': {FIELD_SIZE_LARGE: 0, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_SMALL: 3},
     },
-    'ONE_MEDIUM_TWO_SMALL': {
-        'configuration_name': '1 Medium + 2 Small',
+    'TWO_SMALL_ONE_MEDIUM': {
+        'configuration_name': '2 Small + 1 Medium',
         'space_used_yards': 120,
         'remaining_yards': 0,
         'counts': {FIELD_SIZE_LARGE: 0, FIELD_SIZE_MEDIUM: 1, FIELD_SIZE_SMALL: 2},
-    },
-    'ONE_LARGE_ONE_MEDIUM': {
-        'configuration_name': '1 Large + 1 Medium',
-        'space_used_yards': 115,
-        'remaining_yards': 5,
-        'counts': {FIELD_SIZE_LARGE: 1, FIELD_SIZE_MEDIUM: 1, FIELD_SIZE_SMALL: 0},
     },
     'TWO_MEDIUM': {
         'configuration_name': '2 Medium',
@@ -1449,23 +1443,17 @@ TURF_STADIUM_CONFIGURATIONS = {
         'remaining_yards': 10,
         'counts': {FIELD_SIZE_LARGE: 0, FIELD_SIZE_MEDIUM: 2, FIELD_SIZE_SMALL: 0},
     },
-    'THREE_SMALL': {
-        'configuration_name': '3 Small',
-        'space_used_yards': 100,
-        'remaining_yards': 20,
-        'counts': {FIELD_SIZE_LARGE: 0, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_SMALL: 3},
-    },
-    'ONE_LARGE_ONE_SMALL': {
-        'configuration_name': '1 Large + 1 Small',
+    'ONE_SMALL_ONE_LARGE': {
+        'configuration_name': '1 Small + 1 Large',
         'space_used_yards': 90,
         'remaining_yards': 30,
         'counts': {FIELD_SIZE_LARGE: 1, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_SMALL: 1},
     },
 }
 BACKWARD_COMPATIBLE_TURF_CONFIGURATION_ALIASES = {
-    '2X53': 'TWO_LARGE',
     '3X30': 'THREE_SMALL',
-    'ONE_MEDIUM_ONE_LARGE': 'ONE_LARGE_ONE_MEDIUM',
+    'ONE_MEDIUM_TWO_SMALL': 'TWO_SMALL_ONE_MEDIUM',
+    'ONE_LARGE_ONE_SMALL': 'ONE_SMALL_ONE_LARGE',
 }
 CONFIGURATION_FIELD_TEMPLATES = {
     key: [(f'{field_type.title()} Field {index}', field_type) for field_type in FIELD_SIZE_ORDER for index in range(1, config['counts'][field_type] + 1)]
@@ -1498,11 +1486,9 @@ def _is_approved_turf_slot_counts(counts: dict[str, int]) -> bool:
 
 def _turf_wave_intent_for_layout(layout_code: str) -> str:
     normalized = _normalize_configuration_name(layout_code)
-    if normalized == 'ONE_MEDIUM_TWO_SMALL':
+    if normalized == 'TWO_SMALL_ONE_MEDIUM':
         return TURF_WAVE_INTENT_SMALL_MEDIUM
-    if normalized == 'TWO_LARGE':
-        return TURF_WAVE_INTENT_LARGE
-    if normalized in {'ONE_LARGE_ONE_MEDIUM', 'ONE_LARGE_ONE_SMALL'}:
+    if normalized == 'ONE_SMALL_ONE_LARGE':
         return TURF_WAVE_INTENT_MIXED
     return TURF_WAVE_INTENT_CUSTOM
 
@@ -2052,7 +2038,7 @@ def _simulate_turf_layout_sequence(
             for size in FIELD_SIZE_ORDER:
                 total_capacity += counts[size] * hours
                 remaining[size] = max(remaining[size] - counts[size] * hours, 0)
-            if layout_name == 'ONE_MEDIUM_TWO_SMALL' and before_small > remaining[FIELD_SIZE_SMALL] and before_medium > remaining[FIELD_SIZE_MEDIUM]:
+            if layout_name == 'TWO_SMALL_ONE_MEDIUM' and before_small > remaining[FIELD_SIZE_SMALL] and before_medium > remaining[FIELD_SIZE_MEDIUM]:
                 scheduled_together = True
         unscheduled = sum(remaining.values())
         used_hours = sum(hours_by_layout)
@@ -2067,7 +2053,7 @@ def _simulate_turf_layout_sequence(
         score -= unused_capacity * 30
         score += int(utilization * 500)
         if mixed_layout_available and demand_counts.get(FIELD_SIZE_SMALL, 0) > 0 and demand_counts.get(FIELD_SIZE_MEDIUM, 0) > 0:
-            if 'ONE_MEDIUM_TWO_SMALL' in relevant_sequence:
+            if 'TWO_SMALL_ONE_MEDIUM' in relevant_sequence:
                 score += 500
                 if scheduled_together:
                     score += 300
@@ -2075,12 +2061,12 @@ def _simulate_turf_layout_sequence(
             has_medium_only = any(_turf_configuration_metadata(layout)['counts'][FIELD_SIZE_MEDIUM] > 0 and _turf_configuration_metadata(layout)['counts'][FIELD_SIZE_SMALL] == 0 for layout in relevant_sequence)
             if has_small_only and has_medium_only:
                 score -= 500
-        if demand_counts.get(FIELD_SIZE_LARGE, 0) > 0 and 'TWO_LARGE' in relevant_sequence:
+        if demand_counts.get(FIELD_SIZE_LARGE, 0) > 0 and 'ONE_SMALL_ONE_LARGE' in relevant_sequence:
             score += 300
         if layout_changes == 1:
             score += 250
-        if 'TWO_LARGE' in relevant_sequence:
-            large_index = relevant_sequence.index('TWO_LARGE')
+        if 'ONE_SMALL_ONE_LARGE' in relevant_sequence:
+            large_index = relevant_sequence.index('ONE_SMALL_ONE_LARGE')
             later_layouts = relevant_sequence[large_index + 1:]
             if any(
                 _turf_configuration_metadata(layout)['counts'][FIELD_SIZE_SMALL] > 0
@@ -2110,7 +2096,15 @@ def _simulate_turf_layout_sequence(
     return best
 
 
-def _score_turf_wave_configuration(layout_name: str, remaining_demand: dict[str, int], *, wave_index: int = 0) -> tuple[int, int, int, int]:
+TURF_WAVE_CONFIGURATION_PRIORITY = {
+    'THREE_SMALL': 40,
+    'TWO_SMALL_ONE_MEDIUM': 30,
+    'TWO_MEDIUM': 20,
+    'ONE_SMALL_ONE_LARGE': 10,
+}
+
+
+def _score_turf_wave_configuration(layout_name: str, remaining_demand: dict[str, int], *, wave_index: int = 0) -> tuple[int, int, int, int, int]:
     metadata = _turf_configuration_metadata(layout_name)
     counts = metadata['counts'] if metadata else {size: 0 for size in FIELD_SIZE_ORDER}
     fits_required = sum(min(int(counts.get(size, 0) or 0), max(int(remaining_demand.get(size, 0) or 0), 0)) for size in FIELD_SIZE_ORDER)
@@ -2121,7 +2115,7 @@ def _score_turf_wave_configuration(layout_name: str, remaining_demand: dict[str,
     # chronological block, then minimize unused components.  Soft division/age
     # preferences intentionally do not participate in turf wave configuration
     # selection because wave fill must be global by required field size.
-    return (fits_required * 1000 - unused_components * 40 + later_games_reduced, fits_required, -unused_components, -total_components)
+    return (fits_required * 1000 - unused_components * 40 + later_games_reduced, fits_required, -unused_components, -total_components, TURF_WAVE_CONFIGURATION_PRIORITY.get(_normalize_configuration_name(layout_name), 0))
 
 
 def _turf_wave_configuration_candidate_diagnostics(remaining_demand: dict[str, int], active_configuration_names: set[str], *, wave_index: int = 0) -> list[dict[str, object]]:
@@ -2224,6 +2218,10 @@ def _ensure_approved_turf_configurations(db: Session, host: HostLocation) -> boo
         for config in db.query(HostLocationConfiguration).filter(HostLocationConfiguration.host_location_id == host.id).all()
     }
     changed = False
+    for config_name, config in existing.items():
+        if config_name not in TURF_STADIUM_CONFIGURATIONS and config.is_active:
+            config.is_active = False
+            changed = True
     for config_name in TURF_STADIUM_CONFIGURATIONS:
         config = existing.get(config_name)
         if not config:
@@ -7906,8 +7904,8 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         'rejected_moves_count': 0,
         'rejected_moves_by_reason': {},
         'total_partial_waves_found': 0,
-        'partial_ONE_MEDIUM_TWO_SMALL_waves_found': 0,
-        'partial_TWO_LARGE_waves_found': 0,
+        'partial_TWO_SMALL_ONE_MEDIUM_waves_found': 0,
+        'partial_ONE_SMALL_ONE_LARGE_waves_found': 0,
         'waves_improved_count': 0,
         'rollback_occurred': False,
         'rollback_reason': None,
@@ -7917,22 +7915,22 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         'partial_waves_before': 0,
         'empty_turf_waves_before': 0,
         'one_medium_two_small_partials_before': 0,
-        'two_large_partials_before': 0,
+        'one_small_one_large_partials_before': 0,
         'turf_waves_after_total': 0,
         'full_turf_waves_after': 0,
         'partial_turf_waves_after': 0,
         'partial_waves_after': 0,
         'empty_turf_waves_after': 0,
         'one_medium_two_small_partials_after': 0,
-        'two_large_partials_after': 0,
+        'one_small_one_large_partials_after': 0,
         'host_owner_as_away_after_compaction': 0,
         'turf_wave_optimization_summary': {},
         'waves_fully_utilized_before': 0,
         'waves_fully_utilized_after': 0,
         'partially_used_one_medium_two_small_waves_before': 0,
         'partially_used_one_medium_two_small_waves_after': 0,
-        'partially_used_two_large_waves_before': 0,
-        'partially_used_two_large_waves_after': 0,
+        'partially_used_one_small_one_large_waves_before': 0,
+        'partially_used_one_small_one_large_waves_after': 0,
         'active_turf_waves_used_before': 0,
         'active_turf_waves_used_after': 0,
         'detected_turf_wave_groups': [],
@@ -8150,10 +8148,10 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
             'partial_turf_waves': 0,
             'empty_turf_waves': 0,
             'one_medium_two_small_partials': 0,
-            'two_large_partials': 0,
+            'one_small_one_large_partials': 0,
             'waves_fully_utilized': 0,
             'partially_used_one_medium_two_small_waves': 0,
-            'partially_used_two_large_waves': 0,
+            'partially_used_one_small_one_large_waves': 0,
             'active_turf_waves_used': 0,
         }
         for wave_id, wave in waves.items():
@@ -8173,12 +8171,12 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
                 metrics['waves_fully_utilized'] += 1
             if is_partial:
                 metrics['partial_turf_waves'] += 1
-                if layout == 'ONE_MEDIUM_TWO_SMALL':
+                if layout == 'TWO_SMALL_ONE_MEDIUM':
                     metrics['one_medium_two_small_partials'] += 1
                     metrics['partially_used_one_medium_two_small_waves'] += 1
-                if layout == 'TWO_LARGE':
-                    metrics['two_large_partials'] += 1
-                    metrics['partially_used_two_large_waves'] += 1
+                if layout == 'ONE_SMALL_ONE_LARGE':
+                    metrics['one_small_one_large_partials'] += 1
+                    metrics['partially_used_one_small_one_large_waves'] += 1
             if is_empty:
                 metrics['empty_turf_waves'] += 1
         return metrics
@@ -8846,12 +8844,12 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         score = 0
         reasons: list[str] = []
         layout = _normalize_configuration_name(target_wave.preferred_layout_code)
-        if layout == 'ONE_MEDIUM_TWO_SMALL' and target_after_assigned == target_capacity == 3:
-            score += 100; reasons.append('FILLED_ONE_MEDIUM_TWO_SMALL_TO_3_OF_3')
-        if layout == 'TWO_LARGE' and target_after_assigned == target_capacity == 2:
-            score += 100; reasons.append('FILLED_TWO_LARGE_TO_2_OF_2')
+        if layout == 'TWO_SMALL_ONE_MEDIUM' and target_after_assigned == target_capacity == 3:
+            score += 100; reasons.append('FILLED_TWO_SMALL_ONE_MEDIUM_TO_3_OF_3')
+        if layout == 'ONE_SMALL_ONE_LARGE' and target_after_assigned == target_capacity == 2:
+            score += 100; reasons.append('FILLED_ONE_SMALL_ONE_LARGE_TO_2_OF_2')
             if source_wave and source_wave.start_time > target_wave.start_time:
-                reasons.append('REUSED_EARLIER_PARTIAL_TWO_LARGE')
+                reasons.append('REUSED_EARLIER_PARTIAL_ONE_SMALL_ONE_LARGE')
         if source_wave and source_after_assigned == 0 and source_wave.start_time >= target_wave.start_time:
             score += 75; reasons.append('ELIMINATED_LATER_PARTIAL_WAVE')
         if source_after_assigned == 0 and before_active > 0:
@@ -8913,7 +8911,7 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         diagnostics[f'partial_waves_{phase}'] = int(metrics.get('partial_turf_waves') or 0)
         diagnostics[f'empty_turf_waves_{phase}'] = int(metrics.get('empty_turf_waves') or 0)
         diagnostics[f'one_medium_two_small_partials_{phase}'] = int(metrics.get('one_medium_two_small_partials') or 0)
-        diagnostics[f'two_large_partials_{phase}'] = int(metrics.get('two_large_partials') or 0)
+        diagnostics[f'one_small_one_large_partials_{phase}'] = int(metrics.get('one_small_one_large_partials') or 0)
 
     before = _metrics()
     _record_utilization_metrics('before', before)
@@ -8948,7 +8946,7 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
     def _warn_if_counted_partial_waves_missing_from_collection(*, phase: str) -> None:
         counted_partial_waves = (
             int(diagnostics.get(f'partially_used_one_medium_two_small_waves_{phase}') or 0)
-            + int(diagnostics.get(f'partially_used_two_large_waves_{phase}') or 0)
+            + int(diagnostics.get(f'partially_used_one_small_one_large_waves_{phase}') or 0)
         )
         if counted_partial_waves > 0 and _partial_wave_collection_is_empty():
             _add_diagnostics_warning(
@@ -9062,7 +9060,7 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
             'large_games_exist_elsewhere_same_date': None,
             'large_games_considered': 0,
             'girls_6_8_games_considered': 0,
-            'moving_game_would_eliminate_later_partial_two_large_wave': False,
+            'moving_game_would_eliminate_later_partial_one_small_one_large_wave': False,
             'doubleheader_rules_blocked_move': False,
             'same_date_games_scanned': 0,
             'same_date_matching_field_size_games_found': 0,
@@ -9151,8 +9149,8 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         diagnostics[f'partial_waves_{phase}_details'] = partial_waves
         diagnostics[f'partial_turf_waves_{phase}'] = len(partial_waves)
         diagnostics[f'partial_waves_{phase}'] = len(partial_waves)
-        diagnostics[f'one_medium_two_small_partials_{phase}'] = sum(1 for row in partial_waves if row.get('wave_layout') == 'ONE_MEDIUM_TWO_SMALL')
-        diagnostics[f'two_large_partials_{phase}'] = sum(1 for row in partial_waves if row.get('wave_layout') == 'TWO_LARGE')
+        diagnostics[f'one_medium_two_small_partials_{phase}'] = sum(1 for row in partial_waves if row.get('wave_layout') == 'TWO_SMALL_ONE_MEDIUM')
+        diagnostics[f'one_small_one_large_partials_{phase}'] = sum(1 for row in partial_waves if row.get('wave_layout') == 'ONE_SMALL_ONE_LARGE')
         if update_current_collections:
             diagnostics['detected_turf_wave_groups'] = detected_turf_wave_groups
             diagnostics['Detected Turf Wave Groups'] = detected_turf_wave_groups
@@ -9161,8 +9159,8 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
             diagnostics['partial_waves_created_count'] = len(partial_waves)
             diagnostics['partial_wave_details_created_count'] = len(partial_waves)
             diagnostics['total_partial_waves_found'] = len(partial_waves)
-            diagnostics['partial_ONE_MEDIUM_TWO_SMALL_waves_found'] = sum(1 for row in partial_waves if row.get('wave_layout') == 'ONE_MEDIUM_TWO_SMALL')
-            diagnostics['partial_TWO_LARGE_waves_found'] = sum(1 for row in partial_waves if row.get('wave_layout') == 'TWO_LARGE')
+            diagnostics['partial_TWO_SMALL_ONE_MEDIUM_waves_found'] = sum(1 for row in partial_waves if row.get('wave_layout') == 'TWO_SMALL_ONE_MEDIUM')
+            diagnostics['partial_ONE_SMALL_ONE_LARGE_waves_found'] = sum(1 for row in partial_waves if row.get('wave_layout') == 'ONE_SMALL_ONE_LARGE')
 
         detected_partial_count = sum(1 for row in detected_turf_wave_groups if row.get('status') == 'PARTIAL')
         if detected_partial_count > 0 and len(partial_waves) == 0:
@@ -9175,11 +9173,11 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
     _initialize_partial_wave_details(phase='before')
     _warn_if_counted_partial_waves_missing_from_collection(phase='before')
     logger.info(
-        'turf_wave_compaction_partial_waves season_id=%s total=%s one_medium_two_small=%s two_large=%s',
+        'turf_wave_compaction_partial_waves season_id=%s total=%s one_medium_two_small=%s one_small_one_large=%s',
         season_id,
         diagnostics.get('total_partial_waves_found'),
-        diagnostics.get('partial_ONE_MEDIUM_TWO_SMALL_waves_found'),
-        diagnostics.get('partial_TWO_LARGE_waves_found'),
+        diagnostics.get('partial_TWO_SMALL_ONE_MEDIUM_waves_found'),
+        diagnostics.get('partial_ONE_SMALL_ONE_LARGE_waves_found'),
     )
 
     snapshots: list[dict[str, object]] = []
@@ -9735,9 +9733,9 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
                 if _field_size_label(size)
             ]
             if not target_sizes:
-                if layout == 'ONE_MEDIUM_TWO_SMALL':
+                if layout == 'TWO_SMALL_ONE_MEDIUM':
                     target_sizes = [size for size in (FIELD_SIZE_SMALL, FIELD_SIZE_MEDIUM) if unused.get(size, 0) > 0]
-                elif layout == 'TWO_LARGE' and unused.get(FIELD_SIZE_LARGE, 0) > 0:
+                elif layout == 'ONE_SMALL_ONE_LARGE' and unused.get(FIELD_SIZE_LARGE, 0) > 0:
                     target_sizes = [FIELD_SIZE_LARGE]
             if not target_sizes:
                 candidate_games_failed_preliminary_filters = True
@@ -9872,7 +9870,7 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
                             if target_size == FIELD_SIZE_LARGE:
                                 target_detail['large_games_considered'] = int(target_detail.get('large_games_considered') or 0) + 1
                                 if _move_would_eliminate_source_wave(source, target_wave):
-                                    target_detail['moving_game_would_eliminate_later_partial_two_large_wave'] = True
+                                    target_detail['moving_game_would_eliminate_later_partial_one_small_one_large_wave'] = True
                         source_wave = source.turf_wave
                         rejected_before = int(diagnostics.get('rejected_moves_count') or 0)
                         hard_rejected_before = int(diagnostics.get('candidates_rejected_by_hard_constraint') or 0)
@@ -12067,7 +12065,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                 return True
         return False
 
-    def _has_same_day_partial_two_large_wave(slot: GameSlot, *, exclude_wave_id: uuid.UUID | None = None, earlier_only: bool = False) -> bool:
+    def _has_same_day_partial_one_small_one_large_wave(slot: GameSlot, *, exclude_wave_id: uuid.UUID | None = None, earlier_only: bool = False) -> bool:
         if _normalize_field_size(slot.field_type) != FIELD_SIZE_LARGE:
             return False
         seen_wave_ids: set[uuid.UUID] = set()
@@ -12081,7 +12079,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                 continue
             if earlier_only and remaining_slot.start_time >= slot.start_time:
                 continue
-            if _turf_wave_layout_code(remaining_slot.turf_wave_id) != 'TWO_LARGE':
+            if _turf_wave_layout_code(remaining_slot.turf_wave_id) != 'ONE_SMALL_ONE_LARGE':
                 continue
             projection = _turf_wave_packing_projection(remaining_slot.turf_wave_id, None)
             remaining = projection.get('remaining_after_candidate') or {}
@@ -12808,40 +12806,40 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                                 score += lookahead_bonus
                                 reason_bits.append(f'turf lookahead found compatible same-division game(s) for remaining components (+{lookahead_bonus})')
 
-                            if layout_code == 'ONE_MEDIUM_TWO_SMALL':
+                            if layout_code == 'TWO_SMALL_ONE_MEDIUM':
                                 if utilization_before_components == 2 and utilization_after_components == 3:
                                     score += 40
-                                    reason_bits.append('fills final unused ONE_MEDIUM_TWO_SMALL component (+40)')
+                                    reason_bits.append('fills final unused TWO_SMALL_ONE_MEDIUM component (+40)')
                                 elif utilization_before_components == 1 and utilization_after_components == 2:
                                     score += 25
-                                    reason_bits.append('improves ONE_MEDIUM_TWO_SMALL utilization from 1/3 to 2/3 (+25)')
+                                    reason_bits.append('improves TWO_SMALL_ONE_MEDIUM utilization from 1/3 to 2/3 (+25)')
                                 elif utilization_before_components == 0 and utilization_after_components == 1:
                                     score += 15
-                                    reason_bits.append('starts ONE_MEDIUM_TWO_SMALL utilization at 1/3 (+15)')
+                                    reason_bits.append('starts TWO_SMALL_ONE_MEDIUM utilization at 1/3 (+15)')
                                 if utilization_after_components == 1 and (packable_total >= 2 or same_division_lookahead > 0):
                                     score -= 35
-                                    warning_bits.append('leaves ONE_MEDIUM_TWO_SMALL at 1/3 while compatible packing could reach at least 2/3 (-35)')
+                                    warning_bits.append('leaves TWO_SMALL_ONE_MEDIUM at 1/3 while compatible packing could reach at least 2/3 (-35)')
                                 elif utilization_after_components == 2 and (packable_total >= 3 or same_division_lookahead > 0):
                                     score -= 20
-                                    warning_bits.append('leaves ONE_MEDIUM_TWO_SMALL at 2/3 while compatible packing could reach 3/3 (-20)')
+                                    warning_bits.append('leaves TWO_SMALL_ONE_MEDIUM at 2/3 while compatible packing could reach 3/3 (-20)')
 
-                            if layout_code == 'TWO_LARGE' and normalized_required_size == FIELD_SIZE_LARGE:
+                            if layout_code == 'ONE_SMALL_ONE_LARGE' and normalized_required_size == FIELD_SIZE_LARGE:
                                 if utilization_before_components == 1 and utilization_after_components == 2:
                                     score += 40
-                                    reason_bits.append('fills second component of already-open TWO_LARGE wave (+40)')
+                                    reason_bits.append('fills open large component of already-open ONE_SMALL_ONE_LARGE wave (+40)')
                                 if utilization_before_components == 1:
                                     score += 35
-                                    reason_bits.append('reuses already-open TWO_LARGE wave with unused large component (+35)')
-                                same_day_partial_two_large_available = _has_same_day_partial_two_large_wave(selected_field_slot, exclude_wave_id=selected_field_slot.turf_wave_id)
-                                earlier_partial_two_large_available = _has_same_day_partial_two_large_wave(selected_field_slot, exclude_wave_id=selected_field_slot.turf_wave_id, earlier_only=True)
-                                if utilization_before_components == 0 and same_day_partial_two_large_available:
+                                    reason_bits.append('reuses already-open ONE_SMALL_ONE_LARGE wave with unused large component (+35)')
+                                same_day_partial_one_small_one_large_available = _has_same_day_partial_one_small_one_large_wave(selected_field_slot, exclude_wave_id=selected_field_slot.turf_wave_id)
+                                earlier_partial_one_small_one_large_available = _has_same_day_partial_one_small_one_large_wave(selected_field_slot, exclude_wave_id=selected_field_slot.turf_wave_id, earlier_only=True)
+                                if utilization_before_components == 0 and same_day_partial_one_small_one_large_available:
                                     score -= 35
-                                    warning_bits.append('opens new TWO_LARGE wave while compatible partial TWO_LARGE wave exists (-35)')
-                                if utilization_before_components == 0 and earlier_partial_two_large_available:
+                                    warning_bits.append('opens new ONE_SMALL_ONE_LARGE wave while compatible partial ONE_SMALL_ONE_LARGE wave exists (-35)')
+                                if utilization_before_components == 0 and earlier_partial_one_small_one_large_available:
                                     score -= 30
-                                    warning_bits.append('opens new TWO_LARGE wave while earlier compatible partial TWO_LARGE wave exists (-30)')
+                                    warning_bits.append('opens new ONE_SMALL_ONE_LARGE wave while earlier compatible partial ONE_SMALL_ONE_LARGE wave exists (-30)')
                                     score -= 15
-                                    warning_bits.append('opens later TWO_LARGE wave while earlier partial TWO_LARGE wave is available (-15)')
+                                    warning_bits.append('opens later ONE_SMALL_ONE_LARGE wave while earlier partial ONE_SMALL_ONE_LARGE wave is available (-15)')
 
                             unused_component_penalty = max(wave_capacity - utilization_after_components, 0) * 10
                             wave_utilization_score = utilization_after_percent - unused_component_penalty
@@ -19177,6 +19175,8 @@ def _score_fields(score: GameScore | None, game: Game | None = None, public: boo
 def _score_game_dict(row, include_history: bool = False) -> dict:
     g, slot, fi, host, home, away, div, org, status = row
     score = getattr(g, 'score', None)
+    wave = slot.turf_wave if slot and slot.turf_wave_id else None
+    turf_configuration_code = _normalize_configuration_name(wave.preferred_layout_code) if wave else None
     data = {
         'id': str(g.id),
         'game_id': str(g.id),
@@ -19187,6 +19187,10 @@ def _score_game_dict(row, include_history: bool = False) -> dict:
         'field_id': str(fi.id) if fi else None,
         'field_name': fi.field_name if fi else '',
         'field_type': slot.field_type if slot else None,
+        'turf_wave_id': str(slot.turf_wave_id) if slot and slot.turf_wave_id else None,
+        'turf_wave_start_time': wave.start_time.isoformat() if wave else None,
+        'turf_configuration_code': turf_configuration_code if turf_configuration_code in TURF_APPROVED_LAYOUT_CODES else None,
+        'turf_field_slot': _turf_field_slot_label(slot, fi),
         'host_community_id': str(host.organization_id) if host and host.organization_id else None,
         'host_community_name': getattr(getattr(host, 'organization', None), 'name', None) if host else None,
         'division_id': str(div.id),
@@ -19341,8 +19345,35 @@ def admin_score_history(game_id: uuid.UUID, db: Session = Depends(get_db)):
     return {'items': [_score_submission_dict(item) for item in submissions], 'total': len(submissions)}
 
 
+
+
+def _turf_field_slot_label(slot: GameSlot | None, field_instance: FieldInstance | None = None) -> str | None:
+    """Return display slot label such as Small 1 within a turf wave configuration."""
+    if not slot or not slot.turf_wave_id:
+        return None
+    instance = field_instance or slot.field_instance
+    size = _normalize_field_size(slot.field_type or (instance.field_type if instance else None))
+    if not size:
+        return None
+    name = str(getattr(instance, 'field_name', '') or '')
+    match = re.search(rf'{re.escape(size.title())}\s+Field\s+(\d+)\b', name)
+    if match:
+        return f'{size.title()} {match.group(1)}'
+    same_wave_slots = []
+    if getattr(slot, 'turf_wave', None):
+        same_wave_slots = sorted(
+            [candidate for candidate in getattr(slot.turf_wave, 'slots', []) if _normalize_field_size(candidate.field_type) == size],
+            key=lambda candidate: ((candidate.field_instance.field_name if candidate.field_instance else ''), str(candidate.id)),
+        )
+    for index, candidate in enumerate(same_wave_slots, start=1):
+        if candidate.id == slot.id:
+            return f'{size.title()} {index}'
+    return f'{size.title()} 1'
+
 def _public_game_read_from_schedule_row(row) -> PublicGameRead:
     g, slot, fi, host, home, away, div, org, status = row
+    wave = slot.turf_wave if slot and slot.turf_wave_id else None
+    turf_configuration_code = _normalize_configuration_name(wave.preferred_layout_code) if wave else None
     return PublicGameRead(
         id=g.id,
         game_date=g.game_date,
@@ -19352,6 +19383,10 @@ def _public_game_read_from_schedule_row(row) -> PublicGameRead:
         field_id=fi.id if fi else None,
         field_name=fi.field_name if fi else '',
         field_type=slot.field_type if slot else None,
+        turf_wave_id=slot.turf_wave_id if slot else None,
+        turf_wave_start_time=wave.start_time if wave else None,
+        turf_configuration_code=turf_configuration_code if turf_configuration_code in TURF_APPROVED_LAYOUT_CODES else None,
+        turf_field_slot=_turf_field_slot_label(slot, fi),
         organization_id=org.id,
         organization_name=org.name,
         division_id=div.id,
@@ -19440,6 +19475,7 @@ def _build_turf_stadium_utilization_diagnostics(db: Session, season_id: uuid.UUI
         available_counts = _turf_wave_layout_counts(wave.preferred_layout_code, slots)
         placed_counts = _turf_slot_counts_from_slots(slots, assigned_only=True)
         unused_counts = _turf_unused_compatible_capacity(available_counts, placed_counts)
+        layout_code = _normalize_configuration_name(wave.preferred_layout_code)
         placed_games = []
         for slot in assigned_slots:
             game = slot.assigned_game
@@ -19453,6 +19489,8 @@ def _build_turf_stadium_utilization_diagnostics(db: Session, season_id: uuid.UUI
                 'slot_id': str(slot.id),
                 'field_type': _normalize_field_size(slot.field_type),
                 'field': slot.field_instance.field_name if slot.field_instance else None,
+                'field_slot': _turf_field_slot_label(slot),
+                'configuration_code': layout_code,
                 'home_team': home.name if home else None,
                 'away_team': away.name if away else None,
                 'division': division.name if division else None,
@@ -19460,15 +19498,14 @@ def _build_turf_stadium_utilization_diagnostics(db: Session, season_id: uuid.UUI
         optimization_warnings = []
         if capacity and 0 < assigned < capacity:
             optimization_warnings.append('Partial turf wave utilization: unused components remain available in this wave.')
-        layout_code = _normalize_configuration_name(wave.preferred_layout_code)
         used_components = _component_count_items(placed_counts)
         unused_components = _component_count_items(unused_counts)
         optimization_note = 'FULLY_UTILIZED' if capacity and assigned == capacity else 'UNUSED_COMPONENTS_REMAIN'
         if capacity and 0 < assigned < capacity:
-            if layout_code == 'ONE_MEDIUM_TWO_SMALL':
-                optimization_note = 'PARTIALLY_USED_ONE_MEDIUM_TWO_SMALL'
-            elif layout_code == 'TWO_LARGE':
-                optimization_note = 'PARTIALLY_USED_TWO_LARGE'
+            if layout_code == 'TWO_SMALL_ONE_MEDIUM':
+                optimization_note = 'PARTIALLY_USED_TWO_SMALL_ONE_MEDIUM'
+            elif layout_code == 'ONE_SMALL_ONE_LARGE':
+                optimization_note = 'PARTIALLY_USED_ONE_SMALL_ONE_LARGE'
             elif not unused_components:
                 optimization_note = 'NO_COMPATIBLE_GAME_AVAILABLE'
         elif capacity and assigned == 0:
@@ -19532,7 +19569,7 @@ def _build_turf_stadium_utilization_diagnostics(db: Session, season_id: uuid.UUI
         if len(wave_utilization) > 1:
             data['wave_2_utilization'] = wave_utilization[1]['utilization_percent']
         partial_wave_warnings = []
-        earlier_partial_two_large = False
+        earlier_partial_one_small_one_large = False
         for computed_wave_number, wave_row in enumerate(wave_utilization, start=1):
             wave_row['stored_sequence_number'] = wave_row.get('sequence_number')
             wave_row['sequence_number'] = computed_wave_number
@@ -19540,20 +19577,20 @@ def _build_turf_stadium_utilization_diagnostics(db: Session, season_id: uuid.UUI
             wave_row['wave_name'] = f'Wave {computed_wave_number}'
             wave_row['wave_numbering_scope'] = 'game_date+host_location_id'
             if (
-                wave_row.get('layout') == 'TWO_LARGE'
+                wave_row.get('layout') == 'ONE_SMALL_ONE_LARGE'
                 and int(wave_row.get('assigned_slots') or 0) > 0
-                and earlier_partial_two_large
+                and earlier_partial_one_small_one_large
             ):
                 wave_row['optimization_note'] = 'OPENED_NEW_WAVE_WHILE_PARTIAL_AVAILABLE'
                 warnings = list(wave_row.get('optimization_warnings') or [])
-                warnings.append('A later TWO_LARGE wave has games while an earlier TWO_LARGE wave still has an unused large component.')
+                warnings.append('A later ONE_SMALL_ONE_LARGE wave has games while an earlier ONE_SMALL_ONE_LARGE wave still has an unused large component.')
                 wave_row['optimization_warnings'] = warnings
             partial_wave_warnings.extend(wave_row.get('optimization_warnings') or [])
             if (
-                wave_row.get('layout') == 'TWO_LARGE'
+                wave_row.get('layout') == 'ONE_SMALL_ONE_LARGE'
                 and 0 < int(wave_row.get('assigned_slots') or 0) < int(wave_row.get('capacity_slots') or 0)
             ):
-                earlier_partial_two_large = True
+                earlier_partial_one_small_one_large = True
         wave_numbers_present = [int(row.get('sequence_number') or 0) for row in sorted(wave_utilization, key=lambda row: int(row.get('sequence_number') or 0))]
         wave_numbers_expected = list(range(1, len(wave_numbers_present) + 1))
         data['wave_numbers_present'] = wave_numbers_present
@@ -19774,12 +19811,21 @@ def schedule_management_games(season_id: uuid.UUID | None = None, date: date | N
     season = _get_schedule_scope_season(db, season_id)
     filters = _scheduled_games_filters(season.id if season else season_id, date=date, division_id=division_id, organization_id=organization_id, host_location_id=host_location_id, field_type=field_type, field_id=field_id, week_id=week_id, team_id=team_id, status_code=status_code)
     rows = get_scheduled_games_for_season(db, season.id if season else season_id, filters)
-    return {'items': [{
-        'id': str(g.id), 'date': g.game_date.isoformat(), 'time': g.kickoff_time.strftime('%H:%M:%S'), 'division_id': str(div.id), 'division_name': div.name,
-        'home_team_id': str(home.id), 'home_team_name': home.name, 'away_team_id': str(away.id), 'away_team_name': away.name,
-        'organization_id': str(org.id), 'organization_name': org.name, 'host_location_id': (str(host.id) if host else None), 'host_location_name': (host.name if host else None),
-        'field_id': (str(fi.id) if fi else None), 'field': (fi.field_name if fi else None), 'field_type': (slot.field_type if slot else None), 'status': status.code, 'slot_id': (str(slot.id) if slot else None), 'is_slot_active': (fi.is_active if fi else False),
-    } for g, slot, fi, host, home, away, div, org, status in rows]}
+    items = []
+    for g, slot, fi, host, home, away, div, org, status in rows:
+        wave = slot.turf_wave if slot and slot.turf_wave_id else None
+        turf_configuration_code = _normalize_configuration_name(wave.preferred_layout_code) if wave else None
+        items.append({
+            'id': str(g.id), 'date': g.game_date.isoformat(), 'time': g.kickoff_time.strftime('%H:%M:%S'), 'division_id': str(div.id), 'division_name': div.name,
+            'home_team_id': str(home.id), 'home_team_name': home.name, 'away_team_id': str(away.id), 'away_team_name': away.name,
+            'organization_id': str(org.id), 'organization_name': org.name, 'host_location_id': (str(host.id) if host else None), 'host_location_name': (host.name if host else None),
+            'field_id': (str(fi.id) if fi else None), 'field': (fi.field_name if fi else None), 'field_type': (slot.field_type if slot else None), 'status': status.code, 'slot_id': (str(slot.id) if slot else None), 'is_slot_active': (fi.is_active if fi else False),
+            'turf_wave_id': str(slot.turf_wave_id) if slot and slot.turf_wave_id else None,
+            'turf_wave_start_time': wave.start_time.isoformat() if wave else None,
+            'turf_configuration_code': turf_configuration_code if turf_configuration_code in TURF_APPROVED_LAYOUT_CODES else None,
+            'turf_field_slot': _turf_field_slot_label(slot, fi),
+        })
+    return {'items': items}
 
 @router.get('/schedule-management/conflicts', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def schedule_management_conflicts(db: Session = Depends(get_db)):

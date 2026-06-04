@@ -79,8 +79,9 @@ class FieldAreaDataAccessTest(unittest.TestCase):
         self.turf_config = HostLocationConfiguration(
             id=uuid.uuid4(),
             host_location_id=self.turf_host.id,
-            configuration_name='TWO_LARGE',
-            large_field_count=2,
+            configuration_name='ONE_SMALL_ONE_LARGE',
+            small_field_count=1,
+            large_field_count=1,
             is_active=True,
         )
         self.availability = HostingAvailability(

@@ -21,7 +21,7 @@ class ScheduleManagementExportTest(unittest.TestCase):
         values = _schedule_export_row_values(
             SimpleNamespace(game_date=date(2026, 8, 9), kickoff_time=time(9, 0)),
             SimpleNamespace(field_type='small'),
-            SimpleNamespace(field_name='Wave 1 ONE_MEDIUM_TWO_SMALL Small Field 2'),
+            SimpleNamespace(field_name='Wave 1 TWO_SMALL_ONE_MEDIUM Small Field 2'),
             SimpleNamespace(name='Westosha Stadium'),
             SimpleNamespace(name='Westosha Coed 2-3 Maroon'),
             SimpleNamespace(name='LCS Coed 2-3 Red'),
@@ -38,7 +38,7 @@ class ScheduleManagementExportTest(unittest.TestCase):
                 'Westosha Coed 2-3 Maroon',
                 'LCS Coed 2-3 Red',
                 'Westosha Stadium',
-                'Wave 1 ONE_MEDIUM_TWO_SMALL Small Field 2',
+                'Wave 1 TWO_SMALL_ONE_MEDIUM Small Field 2',
                 'SMALL',
                 'SCHEDULED',
             ],

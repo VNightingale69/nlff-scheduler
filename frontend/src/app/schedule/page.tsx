@@ -14,6 +14,8 @@ type Game = {
   kickoff_time: string;
   host_location_name: string;
   field_name: string;
+  turf_configuration_code?: string | null;
+  turf_field_slot?: string | null;
   division_name: string;
   home_team_name: string;
   away_team_name: string;
@@ -163,7 +165,14 @@ function PublicScheduleContent() {
                   <td className='p-2'>{formatDisplayDate(g.game_date)}</td>
                   <td className='p-2'>{formatDisplayTime(g.kickoff_time)}</td>
                   <td className='p-2'>{g.host_location_name}</td>
-                  <td className='p-2'>{g.field_name}</td>
+                  <td className='p-2'>
+                    <div>{g.field_name}</div>
+                    {g.turf_configuration_code && (
+                      <div className='text-xs text-slate-500'>
+                        {g.turf_configuration_code} · {g.turf_field_slot || 'Turf slot'}
+                      </div>
+                    )}
+                  </td>
                   <td className='p-2'>{g.division_name}</td>
                   <td className='p-2'>{g.home_team_name}</td>
                   <td className='p-2'>{g.away_team_name}</td>

@@ -107,7 +107,7 @@ class AutoFillPreviewTest(unittest.TestCase):
             week_id=self.week2.id,
             host_date=self.week2.start_date,
             sequence_number=1,
-            preferred_layout_code='ONE_MEDIUM_TWO_SMALL',
+            preferred_layout_code='TWO_SMALL_ONE_MEDIUM',
             start_time=time(9, 0),
             end_time=time(10, 0),
         )
@@ -133,8 +133,8 @@ class AutoFillPreviewTest(unittest.TestCase):
         self.db.refresh(later_small)
         self.assertEqual(1, wave_9.sequence_number)
         self.assertEqual(2, wave_10.sequence_number)
-        self.assertEqual('Wave 1 ONE_MEDIUM_TWO_SMALL Small Field 1', small.field_name)
-        self.assertEqual('Wave 1 ONE_MEDIUM_TWO_SMALL Medium Field 1', medium.field_name)
+        self.assertEqual('Wave 1 TWO_SMALL_ONE_MEDIUM Small Field 1', small.field_name)
+        self.assertEqual('Wave 1 TWO_SMALL_ONE_MEDIUM Medium Field 1', medium.field_name)
         self.assertEqual('Wave 2 THREE_SMALL Small Field 1', later_small.field_name)
 
     def test_selected_turf_stadium_generates_one_wave_for_every_available_hour(self):
@@ -386,7 +386,7 @@ class AutoFillPreviewTest(unittest.TestCase):
             host_date=self.week2.start_date,
             sequence_number=1,
             wave_intent='SMALL_MEDIUM',
-            preferred_layout_code='ONE_MEDIUM_TWO_SMALL',
+            preferred_layout_code='TWO_SMALL_ONE_MEDIUM',
             start_time=time(9, 0),
             end_time=time(10, 0),
         )
@@ -414,7 +414,7 @@ class AutoFillPreviewTest(unittest.TestCase):
 
         self.assertEqual(len(diagnostics), 1)
         wave_row = diagnostics[0]['wave_utilization'][0]
-        self.assertEqual(wave_row['layout'], 'ONE_MEDIUM_TWO_SMALL')
+        self.assertEqual(wave_row['layout'], 'TWO_SMALL_ONE_MEDIUM')
         self.assertEqual(wave_row['available_field_components'], [
             {'field_type': 'SMALL', 'count': 2},
             {'field_type': 'MEDIUM', 'count': 1},
@@ -430,7 +430,7 @@ class AutoFillPreviewTest(unittest.TestCase):
         ])
         self.assertEqual(wave_row['used_components'], [{'field_type': 'SMALL', 'count': 1}])
         self.assertEqual(wave_row['unused_component_count'], 2)
-        self.assertEqual(wave_row['optimization_note'], 'PARTIALLY_USED_ONE_MEDIUM_TWO_SMALL')
+        self.assertEqual(wave_row['optimization_note'], 'PARTIALLY_USED_TWO_SMALL_ONE_MEDIUM')
         self.assertEqual(wave_row['status'], 'Warning')
         self.assertTrue(diagnostics[0]['optimization_warnings'])
 
@@ -459,7 +459,7 @@ class AutoFillPreviewTest(unittest.TestCase):
             host_date=self.week2.start_date,
             sequence_number=1,
             wave_intent='SMALL_MEDIUM',
-            preferred_layout_code='ONE_MEDIUM_TWO_SMALL',
+            preferred_layout_code='TWO_SMALL_ONE_MEDIUM',
             start_time=time(9, 0),
             end_time=time(10, 0),
         )
@@ -502,7 +502,7 @@ class AutoFillPreviewTest(unittest.TestCase):
 
         export_diagnostics = _build_turf_stadium_utilization_diagnostics(self.db, self.season.id)
         export_wave = export_diagnostics[0]['wave_utilization'][0]
-        self.assertEqual(export_wave['optimization_note'], 'PARTIALLY_USED_ONE_MEDIUM_TWO_SMALL')
+        self.assertEqual(export_wave['optimization_note'], 'PARTIALLY_USED_TWO_SMALL_ONE_MEDIUM')
         self.assertEqual(export_wave['unused_components'], [
             {'field_type': 'SMALL', 'count': 1},
             {'field_type': 'MEDIUM', 'count': 1},
@@ -511,7 +511,7 @@ class AutoFillPreviewTest(unittest.TestCase):
         compaction = _run_turf_wave_compaction_pass(self.db, self.season.id)
 
         self.assertEqual(compaction['total_partial_waves_found'], 1)
-        self.assertEqual(compaction['partial_ONE_MEDIUM_TWO_SMALL_waves_found'], 1)
+        self.assertEqual(compaction['partial_TWO_SMALL_ONE_MEDIUM_waves_found'], 1)
         self.assertEqual(len(compaction['partial_waves']), compaction['total_partial_waves_found'])
         self.assertEqual(len(compaction['partial_wave_details']), compaction['total_partial_waves_found'])
         self.assertEqual(compaction['partial_waves_created_count'], compaction['total_partial_waves_found'])
@@ -522,7 +522,7 @@ class AutoFillPreviewTest(unittest.TestCase):
         self.assertIs(compaction['partial_waves'], compaction['partial_wave_details'])
         detail = compaction['partial_wave_details'][0]
         self.assertEqual(detail['host_location_name'], self.host.name)
-        self.assertEqual(detail['wave_layout'], 'ONE_MEDIUM_TWO_SMALL')
+        self.assertEqual(detail['wave_layout'], 'TWO_SMALL_ONE_MEDIUM')
         self.assertEqual(detail['status'], 'PARTIAL')
         self.assertEqual(detail['expected_components_by_size'], {'SMALL': 2, 'MEDIUM': 1})
         self.assertEqual(detail['assigned_components_by_size'], {'SMALL': 1})
@@ -573,7 +573,7 @@ class AutoFillPreviewTest(unittest.TestCase):
             host_date=self.week2.start_date + timedelta(days=1),
             sequence_number=1,
             wave_intent='SMALL_MEDIUM',
-            preferred_layout_code='ONE_MEDIUM_TWO_SMALL',
+            preferred_layout_code='TWO_SMALL_ONE_MEDIUM',
             start_time=time(9, 0),
             end_time=time(10, 0),
         )
@@ -674,7 +674,7 @@ class AutoFillPreviewTest(unittest.TestCase):
             host_date=self.week2.start_date,
             sequence_number=1,
             wave_intent='SMALL_MEDIUM',
-            preferred_layout_code='ONE_MEDIUM_TWO_SMALL',
+            preferred_layout_code='TWO_SMALL_ONE_MEDIUM',
             start_time=time(11, 0),
             end_time=time(12, 0),
         )
@@ -779,7 +779,7 @@ class AutoFillPreviewTest(unittest.TestCase):
             host_date=self.week2.start_date,
             sequence_number=1,
             wave_intent='SMALL_MEDIUM',
-            preferred_layout_code='ONE_MEDIUM_TWO_SMALL',
+            preferred_layout_code='TWO_SMALL_ONE_MEDIUM',
             start_time=time(11, 0),
             end_time=time(12, 0),
         )
@@ -881,7 +881,7 @@ class AutoFillPreviewTest(unittest.TestCase):
                 host_date=self.week2.start_date,
                 sequence_number=1,
                 wave_intent='SMALL_MEDIUM',
-                preferred_layout_code='ONE_MEDIUM_TWO_SMALL',
+                preferred_layout_code='TWO_SMALL_ONE_MEDIUM',
                 start_time=start,
                 end_time=time(start.hour + 1, 0),
             )
@@ -961,7 +961,7 @@ class AutoFillPreviewTest(unittest.TestCase):
             host_date=self.week2.start_date,
             sequence_number=1,
             wave_intent='SMALL_MEDIUM',
-            preferred_layout_code='ONE_MEDIUM_TWO_SMALL',
+            preferred_layout_code='TWO_SMALL_ONE_MEDIUM',
             start_time=time(10, 0),
             end_time=time(11, 0),
         )
@@ -973,7 +973,7 @@ class AutoFillPreviewTest(unittest.TestCase):
             host_date=self.week2.start_date,
             sequence_number=4,
             wave_intent='LARGE',
-            preferred_layout_code='TWO_LARGE',
+            preferred_layout_code='ONE_SMALL_ONE_LARGE',
             start_time=time(14, 0),
             end_time=time(15, 0),
         )
@@ -987,11 +987,11 @@ class AutoFillPreviewTest(unittest.TestCase):
         medium_game = Game(id=uuid.uuid4(), season_id=self.season.id, week_id=self.week2.id, home_team_id=medium_home.id, away_team_id=medium_away.id, game_status_id=self.status.id, game_date=self.week2.start_date, kickoff_time=time(10, 0))
         large_game = Game(id=uuid.uuid4(), season_id=self.season.id, week_id=self.week2.id, home_team_id=large_home.id, away_team_id=large_away.id, game_status_id=self.status.id, game_date=self.week2.start_date, kickoff_time=time(14, 0))
         field_rows = [
-            ('Wave 1 ONE_MEDIUM_TWO_SMALL Small Field 1', 'SMALL', time(10, 0), wave_one.id, small_game.id, 'BOOKED'),
-            ('Wave 1 ONE_MEDIUM_TWO_SMALL Medium Field 1', 'MEDIUM', time(10, 0), wave_one.id, medium_game.id, 'BOOKED'),
-            ('Wave 1 ONE_MEDIUM_TWO_SMALL Small Field 2', 'SMALL', time(10, 0), wave_one.id, None, 'OPEN'),
-            ('Wave 4 TWO_LARGE Large Field 1', 'LARGE', time(14, 0), wave_four.id, large_game.id, 'BOOKED'),
-            ('Wave 4 TWO_LARGE Large Field 2', 'LARGE', time(14, 0), wave_four.id, None, 'OPEN'),
+            ('Wave 1 TWO_SMALL_ONE_MEDIUM Small Field 1', 'SMALL', time(10, 0), wave_one.id, small_game.id, 'BOOKED'),
+            ('Wave 1 TWO_SMALL_ONE_MEDIUM Medium Field 1', 'MEDIUM', time(10, 0), wave_one.id, medium_game.id, 'BOOKED'),
+            ('Wave 1 TWO_SMALL_ONE_MEDIUM Small Field 2', 'SMALL', time(10, 0), wave_one.id, None, 'OPEN'),
+            ('Wave 4 ONE_SMALL_ONE_LARGE Large Field 1', 'LARGE', time(14, 0), wave_four.id, large_game.id, 'BOOKED'),
+            ('Wave 4 ONE_SMALL_ONE_LARGE Large Field 2', 'LARGE', time(14, 0), wave_four.id, None, 'OPEN'),
         ]
         self.db.add_all([availability, wave_one, wave_four, medium_division, large_division, medium_home, medium_away, large_home, large_away, small_game, medium_game, large_game])
         for field_name, field_type, start, wave_id, assigned_game_id, status in field_rows:
@@ -1028,8 +1028,8 @@ class AutoFillPreviewTest(unittest.TestCase):
         self.assertEqual(compaction['candidate_discovery_input_count'], len(partials))
         self.assertEqual(compaction['partial_waves_candidate_discovery_input_count'], len(partials))
         self.assertEqual(len(partials), 2)
-        one_medium_two_small = next(row for row in partials if row['wave_layout'] == 'ONE_MEDIUM_TWO_SMALL')
-        two_large = next(row for row in partials if row['wave_layout'] == 'TWO_LARGE')
+        one_medium_two_small = next(row for row in partials if row['wave_layout'] == 'TWO_SMALL_ONE_MEDIUM')
+        two_large = next(row for row in partials if row['wave_layout'] == 'ONE_SMALL_ONE_LARGE')
         self.assertEqual(one_medium_two_small['status'], 'PARTIAL')
         self.assertEqual(one_medium_two_small['assigned_components_by_size'], {'SMALL': 1, 'MEDIUM': 1})
         self.assertEqual(one_medium_two_small['needed_field_sizes'], ['SMALL'])
@@ -1074,7 +1074,7 @@ class AutoFillPreviewTest(unittest.TestCase):
             host_date=self.week2.start_date,
             sequence_number=2,
             wave_intent='SMALL_MEDIUM',
-            preferred_layout_code='ONE_MEDIUM_TWO_SMALL',
+            preferred_layout_code='TWO_SMALL_ONE_MEDIUM',
             start_time=time(9, 0),
             end_time=time(10, 0),
         )
