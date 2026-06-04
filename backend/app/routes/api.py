@@ -8,6 +8,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 import logging
+from time import perf_counter
 from datetime import date, datetime, time, timedelta
 
 from sqlalchemy import String, and_, delete, func, inspect as sa_inspect, or_, select, text
@@ -42,6 +43,13 @@ RULEBOOK_STORAGE_WARNING = (
 )
 GAME_DURATION_MINUTES = 60
 GAME_DURATION = timedelta(minutes=GAME_DURATION_MINUTES)
+AUTO_SCHEDULE_PHASE_WARN_MS = 10_000
+AUTO_SCHEDULE_TOTAL_WARN_MS = 120_000
+AUTO_SCHEDULE_CANDIDATE_EVALUATION_LIMIT_PER_DATE = 5_000
+AUTO_SCHEDULE_WAVE_FILL_ATTEMPT_LIMIT_PER_WAVE = 750
+AUTO_SCHEDULE_PULL_FORWARD_ATTEMPT_LIMIT_PER_DATE = 2_500
+AUTO_SCHEDULE_REPEATED_MOVE_WARN_THRESHOLD = 3
+
 
 
 HOST_LOCATION_VERIFICATION_CATEGORIES = (
@@ -8765,6 +8773,16 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
 
     snapshots: list[dict[str, object]] = []
     max_moves = 50
+    wave_fill_attempts_by_wave: dict[str, int] = {}
+    pull_forward_attempts_by_date: dict[str, int] = {}
+    rejected_candidate_keys: set[tuple[str, str, str]] = set()
+    repeated_candidate_counts: dict[tuple[str, str, str], int] = {}
+    hard_validation_cache: dict[tuple[str, str, str], tuple[int, list[str], dict[str, object] | None, dict[str, object] | None]] = {}
+    diagnostics['search_limits'] = {
+        'wave_fill_attempts_per_wave': AUTO_SCHEDULE_WAVE_FILL_ATTEMPT_LIMIT_PER_WAVE,
+        'pull_forward_attempts_per_date': AUTO_SCHEDULE_PULL_FORWARD_ATTEMPT_LIMIT_PER_DATE,
+        'repeated_move_warn_threshold': AUTO_SCHEDULE_REPEATED_MOVE_WARN_THRESHOLD,
+    }
     detected_waves_for_candidate_discovery = diagnostics.get('detected_turf_wave_groups')
     detected_waves_for_candidate_discovery = detected_waves_for_candidate_discovery if isinstance(detected_waves_for_candidate_discovery, list) else []
     partial_waves_for_candidate_discovery = diagnostics.get('partial_waves')
@@ -9194,6 +9212,20 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
                 for target in open_targets:
                     target_wave = target.turf_wave or primary_target_wave
                     for game, source in same_date_games_by_size.get(target_size, []):
+                        wave_attempt_key = str(target_wave.id)
+                        date_attempt_key = str(target.slot_date)
+                        if wave_fill_attempts_by_wave.get(wave_attempt_key, 0) >= AUTO_SCHEDULE_WAVE_FILL_ATTEMPT_LIMIT_PER_WAVE:
+                            diagnostics['wave_fill_candidate_search_exceeded_limit'] = True
+                            diagnostics['wave_fill_limit_exceeded_count'] = int(diagnostics.get('wave_fill_limit_exceeded_count') or 0) + 1
+                            logger.warning('WARN: wave-fill candidate search exceeded limit season_id=%s wave_id=%s limit=%s', season_id, wave_attempt_key, AUTO_SCHEDULE_WAVE_FILL_ATTEMPT_LIMIT_PER_WAVE)
+                            break
+                        if pull_forward_attempts_by_date.get(date_attempt_key, 0) >= AUTO_SCHEDULE_PULL_FORWARD_ATTEMPT_LIMIT_PER_DATE:
+                            diagnostics['pull_forward_candidate_search_exceeded_limit'] = True
+                            diagnostics['pull_forward_limit_exceeded_count'] = int(diagnostics.get('pull_forward_limit_exceeded_count') or 0) + 1
+                            logger.warning('WARN: pull-forward candidate search exceeded limit season_id=%s date=%s limit=%s', season_id, date_attempt_key, AUTO_SCHEDULE_PULL_FORWARD_ATTEMPT_LIMIT_PER_DATE)
+                            break
+                        wave_fill_attempts_by_wave[wave_attempt_key] = wave_fill_attempts_by_wave.get(wave_attempt_key, 0) + 1
+                        pull_forward_attempts_by_date[date_attempt_key] = pull_forward_attempts_by_date.get(date_attempt_key, 0) + 1
                         candidate_same_date_games_found = True
                         diagnostics['preliminary_candidates_created'] = int(diagnostics.get('preliminary_candidates_created') or 0) + 1
                         _record_candidate_evaluated()
@@ -9229,7 +9261,21 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
                         source_wave = source.turf_wave
                         rejected_before = int(diagnostics.get('rejected_moves_count') or 0)
                         hard_rejected_before = int(diagnostics.get('candidates_rejected_by_hard_constraint') or 0)
-                        score, reasons, younger_late_penalty_row, host_balance_row = _score_move(game, source, target, target_wave, source_wave)
+                        candidate_key = (str(game.id), str(source.id), str(target.id))
+                        if candidate_key in rejected_candidate_keys:
+                            repeated_candidate_counts[candidate_key] = repeated_candidate_counts.get(candidate_key, 0) + 1
+                            if repeated_candidate_counts[candidate_key] >= AUTO_SCHEDULE_REPEATED_MOVE_WARN_THRESHOLD:
+                                diagnostics['same_move_evaluated_repeatedly_count'] = int(diagnostics.get('same_move_evaluated_repeatedly_count') or 0) + 1
+                                logger.warning('WARN: same move evaluated repeatedly season_id=%s game_id=%s source_slot_id=%s target_slot_id=%s count=%s', season_id, game.id, source.id, target.id, repeated_candidate_counts[candidate_key])
+                            continue
+                        if candidate_key in hard_validation_cache:
+                            score, reasons, younger_late_penalty_row, host_balance_row = hard_validation_cache[candidate_key]
+                        else:
+                            score, reasons, younger_late_penalty_row, host_balance_row = _score_move(game, source, target, target_wave, source_wave)
+                            if score <= 0:
+                                hard_validation_cache[candidate_key] = (score, reasons, younger_late_penalty_row, host_balance_row)
+                        if int(diagnostics.get('rejected_moves_count') or 0) > rejected_before:
+                            rejected_candidate_keys.add(candidate_key)
                         if target_detail is not None and int(diagnostics.get('rejected_moves_count') or 0) > rejected_before:
                             target_detail['rejected_candidate_game_count'] = int(target_detail.get('rejected_candidate_game_count') or 0) + 1
                             if int(diagnostics.get('candidates_rejected_by_hard_constraint') or 0) > hard_rejected_before:
@@ -10039,6 +10085,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     same_community_home_host_conflicts: list[dict[str, object]] = []
     repeat_matchup_warnings: list[dict[str, object]] = []
     third_meeting_warnings: list[dict[str, object]] = []
+    search_limit_warnings: list[str] = []
     preferred_home_site_failures: list[dict[str, object]] = []
     overflow_host_ids: set[uuid.UUID] = set()
     two_location_rule_relaxed = False
@@ -10115,6 +10162,11 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'eligible_pairings_generated': 0,
             'compatible_slots_found': 0,
         }
+    candidate_evaluations_for_date = 0
+    rejected_move_counts_for_date: dict[tuple[str, str, str, str], int] = {}
+
+    def _candidate_limit_exceeded() -> bool:
+        return candidate_evaluations_for_date >= AUTO_SCHEDULE_CANDIDATE_EVALUATION_LIMIT_PER_DATE
     season_weeks = (
         db.query(Week)
         .filter(Week.season_id == season_id)
@@ -11545,6 +11597,11 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
 
         valid_candidates = []
         for target_time in time_windows:
+            if _candidate_limit_exceeded():
+                warning = f'WARN: auto-schedule candidate search exceeded limit for date {week_game_date} (limit={AUTO_SCHEDULE_CANDIDATE_EVALUATION_LIMIT_PER_DATE}).'
+                search_limit_warnings.append(warning)
+                logger.warning(warning)
+                break
             all_candidates = []
             seen_field_time_keys: set[tuple[str, object, object]] = set()
             for slot in sorted_slots:
@@ -11563,9 +11620,21 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                     continue
                 for i in range(len(available_team_ids)):
                     for j in range(i + 1, len(available_team_ids)):
+                        if _candidate_limit_exceeded():
+                            warning = f'WARN: auto-schedule candidate search exceeded limit for date {week_game_date} (limit={AUTO_SCHEDULE_CANDIDATE_EVALUATION_LIMIT_PER_DATE}).'
+                            if warning not in search_limit_warnings:
+                                search_limit_warnings.append(warning)
+                                logger.warning(warning)
+                            break
                         a = available_team_ids[i]
                         b = available_team_ids[j]
                         pair = tuple(sorted((a, b)))
+                        candidate_evaluations_for_date += 1
+                        repeated_key = (str(a), str(b), str(selected_field_slot.id), str(target_time))
+                        rejected_seen = rejected_move_counts_for_date.get(repeated_key, 0)
+                        if rejected_seen >= AUTO_SCHEDULE_REPEATED_MOVE_WARN_THRESHOLD:
+                            logger.warning('WARN: same move evaluated repeatedly date=%s matchup=%s slot_id=%s count=%s', week_game_date, _matchup_label(a, b), selected_field_slot.id, rejected_seen)
+                            continue
                         if required_matchup_pairs and pair not in required_matchup_pairs:
                             matchups_removed_by_filter.append({
                                 'matchup': _matchup_label(a, b),
@@ -11573,9 +11642,11 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                                 'away_team_id': str(b),
                                 'reason': 'not part of generated odd-team required matchup set for selected doubleheader team',
                             })
+                            rejected_move_counts_for_date[repeated_key] = rejected_seen + 1
                             continue
                         if pair in used_pairs:
                             _record_placement_attempt(selected_field_slot, a, b, 'rejected', 'Matchup already used in this division/week.')
+                            rejected_move_counts_for_date[repeated_key] = rejected_seen + 1
                             continue
                         if (str(a), slot.slot_date, slot.start_time) in team_time_occupied or (str(b), slot.slot_date, slot.start_time) in team_time_occupied:
                             _record_placement_attempt(selected_field_slot, a, b, 'rejected', 'Team already scheduled at this date/time.')
@@ -13088,6 +13159,10 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                 'missing_teams': [teams_by_id[uuid.UUID(tid)].name for tid in unscheduled_team_ids],
                 'doubleheader_team_selected': teams_by_id[selected_double_header_team_id].name if selected_double_header_team_id and selected_double_header_team_id in teams_by_id else None,
                 'compatible_slot_count': compatible_slots_found,
+                'candidate_evaluations_for_date': candidate_evaluations_for_date,
+                'candidate_evaluation_limit_per_date': AUTO_SCHEDULE_CANDIDATE_EVALUATION_LIMIT_PER_DATE,
+                'candidate_evaluation_limit_exceeded': candidate_evaluations_for_date >= AUTO_SCHEDULE_CANDIDATE_EVALUATION_LIMIT_PER_DATE,
+                'search_limit_warnings': search_limit_warnings,
                 'host_activation_summary': host_activation_summary,
                 'compatible_large_slots_available': compatible_slots_found if _normalize_field_size(required_field_type) == FIELD_SIZE_LARGE else None,
                 'skipped_placement_reasons': [row.get('reason') for row in skipped],
@@ -14778,27 +14853,72 @@ def _auto_schedule_division_order(db: Session | None = None) -> list[tuple[str, 
 
 @router.post('/manual-schedule-builder/auto-schedule-season')
 def auto_schedule_entire_season(payload: dict, current_user: User = Depends(require_roles(ROLE_LEAGUE_ADMIN)), db: Session = Depends(get_db)):
+    auto_schedule_started_perf = perf_counter()
+    auto_schedule_started_at = datetime.utcnow()
+    phase_metrics: list[dict[str, object]] = []
+
+    def _iso_ts(value: datetime) -> str:
+        return value.isoformat(timespec='milliseconds') + 'Z'
+
+    def _start_phase(name: str, *, records_evaluated: int = 0, moves_considered: int = 0, moves_accepted: int = 0, moves_rejected: int = 0) -> dict[str, object]:
+        started = datetime.utcnow()
+        phase = {
+            'phase_name': name,
+            'start_time': _iso_ts(started),
+            '_start_perf': perf_counter(),
+            'records_evaluated': int(records_evaluated or 0),
+            'moves_considered': int(moves_considered or 0),
+            'moves_accepted': int(moves_accepted or 0),
+            'moves_rejected': int(moves_rejected or 0),
+        }
+        logger.info(
+            'auto_schedule_phase_start phase=%s start_time=%s records_evaluated=%s moves_considered=%s moves_accepted=%s moves_rejected=%s',
+            phase['phase_name'], phase['start_time'], phase['records_evaluated'], phase['moves_considered'], phase['moves_accepted'], phase['moves_rejected'],
+        )
+        return phase
+
+    def _finish_phase(phase: dict[str, object], *, records_evaluated: int | None = None, moves_considered: int | None = None, moves_accepted: int | None = None, moves_rejected: int | None = None) -> dict[str, object]:
+        ended = datetime.utcnow()
+        elapsed_ms = int((perf_counter() - float(phase.pop('_start_perf', perf_counter()))) * 1000)
+        if records_evaluated is not None:
+            phase['records_evaluated'] = int(records_evaluated or 0)
+        if moves_considered is not None:
+            phase['moves_considered'] = int(moves_considered or 0)
+        if moves_accepted is not None:
+            phase['moves_accepted'] = int(moves_accepted or 0)
+        if moves_rejected is not None:
+            phase['moves_rejected'] = int(moves_rejected or 0)
+        phase['end_time'] = _iso_ts(ended)
+        phase['elapsed_ms'] = elapsed_ms
+        phase_metrics.append(phase)
+        log_method = logger.warning if elapsed_ms > AUTO_SCHEDULE_PHASE_WARN_MS else logger.info
+        if elapsed_ms > AUTO_SCHEDULE_PHASE_WARN_MS:
+            logger.warning('WARN: auto-schedule phase exceeded 10 seconds phase=%s elapsed_ms=%s', phase.get('phase_name'), elapsed_ms)
+        log_method(
+            'auto_schedule_phase_complete phase=%s start_time=%s end_time=%s elapsed_ms=%s records_evaluated=%s moves_considered=%s moves_accepted=%s moves_rejected=%s',
+            phase.get('phase_name'), phase.get('start_time'), phase.get('end_time'), phase.get('elapsed_ms'),
+            phase.get('records_evaluated'), phase.get('moves_considered'), phase.get('moves_accepted'), phase.get('moves_rejected'),
+        )
+        return phase
+
     if bool(payload.get('use_host_plan_selections', False)):
         _enforce_host_plan_selection_admin(current_user)
     season_id = payload.get('season_id')
     clear_existing = bool(payload.get('clear_existing', False))
     dry_run = bool(payload.get('dry_run', False))
+    logger.info(
+        'auto_schedule_post_start season_id=%s clear_existing=%s dry_run=%s start_timestamp=%s',
+        season_id,
+        clear_existing,
+        dry_run,
+        _iso_ts(auto_schedule_started_at),
+    )
     if not season_id:
         raise HTTPException(400, 'season_id is required')
+    load_phase = _start_phase('load schedule data')
     season = db.query(Season).filter(Season.id == season_id).first()
     if not season:
         raise HTTPException(404, 'Season not found')
-
-    if clear_existing:
-        game_ids_to_delete = [row[0] for row in db.query(Game.id).join(Game.status).filter(Game.season_id == season_id, GameStatus.code != 'UNSCHEDULED').all()]
-        if game_ids_to_delete:
-            db.query(GameSlot).filter(GameSlot.assigned_game_id.in_(game_ids_to_delete)).update({'assigned_game_id': None, 'status': 'OPEN'}, synchronize_session=False)
-            db.query(Game).filter(Game.id.in_(game_ids_to_delete)).delete(synchronize_session=False)
-            if dry_run:
-                db.flush()
-            else:
-                db.commit()
-
     division_order = _auto_schedule_division_order(db)
     all_divisions = db.query(Division).all()
     divisions_by_key = {canonical_division_id_from_division(d): d for d in all_divisions}
@@ -14807,6 +14927,83 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         for d in all_divisions
     }
     weeks = db.query(Week).filter(Week.season_id == season_id).order_by(Week.week_number.asc(), Week.primary_game_date.asc()).all()
+    _finish_phase(load_phase, records_evaluated=len(weeks) + len(all_divisions))
+
+    if clear_existing:
+        clear_phase = _start_phase('clear existing scheduled games')
+        game_ids_to_delete = [row[0] for row in db.query(Game.id).join(Game.status).filter(Game.season_id == season_id, GameStatus.code != 'UNSCHEDULED').all()]
+        if game_ids_to_delete:
+            db.query(GameSlot).filter(GameSlot.assigned_game_id.in_(game_ids_to_delete)).update({'assigned_game_id': None, 'status': 'OPEN'}, synchronize_session=False)
+            db.query(Game).filter(Game.id.in_(game_ids_to_delete)).delete(synchronize_session=False)
+            if dry_run:
+                db.flush()
+            else:
+                db.commit()
+        _finish_phase(clear_phase, records_evaluated=len(game_ids_to_delete), moves_considered=len(game_ids_to_delete), moves_accepted=len(game_ids_to_delete))
+
+    build_selected_host_phase = _start_phase('build selected host map')
+    host_rows_by_id = {host.id: host for host in db.query(HostLocation).all()}
+    selected_hosts_by_date: dict[str, list[dict[str, object]]] = {}
+    selected_turf_hosts_by_date: dict[str, list[dict[str, object]]] = {}
+    for week in weeks:
+        game_date_value = _week_game_date(week)
+        if not game_date_value:
+            continue
+        selected_ids = _host_plan_allowed_host_ids_for_week(db, season_id, week.id, game_date_value)
+        if selected_ids is None:
+            selected_ids = {
+                row[0] for row in db.query(HostingAvailability.host_location_id).filter(
+                    HostingAvailability.season_id == season_id,
+                    HostingAvailability.week_id == week.id,
+                    HostingAvailability.primary_game_date == game_date_value,
+                    HostingAvailability.is_available.is_(True),
+                ).distinct().all() if row[0]
+            }
+        date_key = str(game_date_value)
+        selected_hosts_by_date[date_key] = [
+            {'host_location_id': str(host_id), 'host_location_name': host_rows_by_id.get(host_id).name if host_rows_by_id.get(host_id) else None}
+            for host_id in sorted(selected_ids, key=str)
+        ]
+        selected_turf_hosts_by_date[date_key] = [
+            row for row in selected_hosts_by_date[date_key]
+            if (host := host_rows_by_id.get(uuid.UUID(str(row['host_location_id']))))
+            and (str(host.surface_type or '').upper() == 'TURF_STADIUM' or _classify_host_for_date(db, host) in {HOST_ROLE_TURF_STADIUM, HOST_ROLE_PRIMARY_TURF, HOST_ROLE_SECONDARY_TURF})
+        ]
+    _finish_phase(build_selected_host_phase, records_evaluated=sum(len(rows) for rows in selected_hosts_by_date.values()))
+
+    build_slots_phase = _start_phase('build generated slot map')
+    generated_slots_by_date_host: dict[str, dict[str, int]] = {}
+    for slot_date, host_id, count in db.query(GameSlot.slot_date, GameSlot.host_location_id, func.count(GameSlot.id)).filter(
+        GameSlot.season_id == season_id,
+    ).group_by(GameSlot.slot_date, GameSlot.host_location_id).all():
+        date_key = str(slot_date)
+        host_key = str(host_id) if host_id else 'unknown_host'
+        generated_slots_by_date_host.setdefault(date_key, {})[host_key] = int(count or 0)
+    _finish_phase(build_slots_phase, records_evaluated=sum(sum(row.values()) for row in generated_slots_by_date_host.values()))
+
+    def _expected_games_for_start_log() -> int:
+        total = 0
+        for group, name in division_order:
+            division = divisions_by_key.get(canonical_division_id(group, name)) or divisions_by_normalized_name.get(normalize_division_name(f'{group} {name}'))
+            if not division or not division.is_active:
+                continue
+            active_count = db.query(Team.id).filter(Team.division_id == division.id, Team.is_active.is_(True)).count()
+            for week in weeks:
+                if _is_regular_season_week(week):
+                    total += _diagnostic_expected_games_for_team_count(active_count, no_bye_doubleheaders_enabled=_diagnostic_no_bye_doubleheaders_enabled(division, season))
+        return total
+
+    games_to_schedule_count = _expected_games_for_start_log()
+    logger.info(
+        'auto_schedule_start season_id=%s weeks=%s games_to_schedule=%s selected_hosts_by_date=%s selected_turf_capable_hosts_by_date=%s generated_slots_count_by_date_host=%s start_timestamp=%s',
+        season_id,
+        len(weeks),
+        games_to_schedule_count,
+        selected_hosts_by_date,
+        selected_turf_hosts_by_date,
+        generated_slots_by_date_host,
+        _iso_ts(auto_schedule_started_at),
+    )
     selected_host_enforcement_diagnostics: list[dict[str, object]] = []
     for week in weeks:
         game_date_value = _week_game_date(week)
@@ -15356,7 +15553,13 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
             'post_schedule_repair': {'ran': False, 'note': 'Run manual optimization endpoint to execute repairs.'},
         }
 
+    turf_config_phase = _start_phase('turf wave configuration selection', records_evaluated=len(_regular_season_weeks()))
     slot_preflight = _regenerate_and_validate_slots_for_weeks(db, _regular_season_weeks(), division_order)
+    _finish_phase(
+        turf_config_phase,
+        records_evaluated=len((slot_preflight or {}).get('validation_rows') or []) + len((slot_preflight or {}).get('validation_errors') or []),
+        moves_rejected=len((slot_preflight or {}).get('validation_errors') or []),
+    )
     slot_preflight_errors = list(slot_preflight.get('validation_errors') or [])
     if slot_preflight_errors:
         validation_errors.extend(slot_preflight_errors)
@@ -15364,6 +15567,9 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
             'Some weeks are missing generated slots for required field sizes; auto-schedule will still preview or commit other valid weeks.'
         )
 
+    initial_placement_phase = _start_phase('initial game placement')
+    week_progress_started_at: dict[str, float] = {}
+    week_progress: dict[str, dict[str, object]] = {}
     for group, name in division_order:
         requested_label = f'{group} {name}'
         requested_normalized = normalize_division_name(requested_label)
@@ -15385,6 +15591,15 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
             if not week_game_date:
                 warnings.append(f'Week {week.week_number} skipped: missing Primary Game Date.')
                 continue
+            date_key = str(week_game_date)
+            week_progress_started_at.setdefault(date_key, perf_counter())
+            progress_row = week_progress.setdefault(date_key, {
+                'date': date_key,
+                'games_required': 0,
+                'games_scheduled': 0,
+                'selected_hosts': selected_hosts_by_date.get(date_key, []),
+                'candidate_slots': sum(generated_slots_by_date_host.get(date_key, {}).values()),
+            })
             proposals = []
             preview = {}
             preview_skipped: list[dict[str, object]] = []
@@ -15392,6 +15607,7 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
             generated_game_groups = 0
             active_team_count = _active_team_count(division.id)
             required_games = _division_required_games(active_team_count, division)
+            progress_row['games_required'] = int(progress_row.get('games_required') or 0) + required_games
             unscheduled_teams: list[str] = []
             unresolved_conflicts: list[dict[str, object]] = []
             host_count = 0
@@ -15536,6 +15752,17 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
                 ),
             }
             division_week_diagnostics.append(division_week_diagnostic)
+            progress_row['games_scheduled'] = int(progress_row.get('games_scheduled') or 0) + int(actual_created_games or 0)
+            date_elapsed_ms = int((perf_counter() - week_progress_started_at.get(date_key, perf_counter())) * 1000)
+            logger.info(
+                'auto_schedule_date_progress date=%s games_required=%s games_scheduled=%s selected_hosts=%s candidate_slots=%s elapsed_ms=%s',
+                progress_row.get('date'),
+                progress_row.get('games_required'),
+                progress_row.get('games_scheduled'),
+                progress_row.get('selected_hosts'),
+                progress_row.get('candidate_slots'),
+                date_elapsed_ms,
+            )
             log_level = logging.WARNING if int(division_week_diagnostic.get('missing_games') or 0) > 0 else logging.INFO
             logger.log(
                 log_level,
@@ -15669,7 +15896,17 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
                 )
                 warnings.append(f'Balance under-target teams for {division_label}: {under_target_teams}')
 
+    _finish_phase(
+        initial_placement_phase,
+        records_evaluated=attempted_game_groups,
+        moves_considered=attempted_game_groups,
+        moves_accepted=preview_assignments_count if dry_run else committed_assignments_count,
+        moves_rejected=sum(skipped_attempts_by_reason.values()) + failed_validation_count,
+    )
+
     hard_validation: list[dict[str, object]] = []
+    doubleheader_phase = _start_phase('doubleheader validation')
+    final_validation_phase = _start_phase('final validation')
     for week in _regular_season_weeks():
         week_game_date = _week_game_date(week)
         if not week_game_date:
@@ -15802,7 +16039,25 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         f"- Missing generated game group: {skipped_attempts_summary.get('Missing generated game group', 0)}"
     )
 
+    _finish_phase(
+        doubleheader_phase,
+        records_evaluated=len(hard_validation),
+        moves_rejected=sum(int(row.get('doubleheader_teams_count') or 0) for row in hard_validation),
+    )
+    _finish_phase(
+        final_validation_phase,
+        records_evaluated=len(hard_validation),
+        moves_rejected=len(validation_errors),
+    )
+
+    diagnostics_phase = _start_phase('diagnostics build')
     auto_schedule_diagnostics = _build_auto_schedule_diagnostics()
+    auto_schedule_diagnostics['phase_metrics'] = phase_metrics
+    auto_schedule_diagnostics['search_limits'] = {
+        'candidate_move_evaluations_per_date': AUTO_SCHEDULE_CANDIDATE_EVALUATION_LIMIT_PER_DATE,
+        'wave_fill_attempts_per_wave': AUTO_SCHEDULE_WAVE_FILL_ATTEMPT_LIMIT_PER_WAVE,
+        'pull_forward_attempts_per_date': AUTO_SCHEDULE_PULL_FORWARD_ATTEMPT_LIMIT_PER_DATE,
+    }
     host_activation_summaries_by_date: dict[str, dict[str, object]] = {}
     for division_row in division_week_diagnostics:
         summary = division_row.get('host_activation_summary')
@@ -15848,13 +16103,23 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         and pre_compaction_division_week_counts_complete
         and not validation_errors
     )
+    pull_forward_phase = _start_phase('pull-forward pass')
     turf_wave_compaction = _run_turf_wave_compaction_pass(
         db,
         season_id,
         enabled=bool(pre_compaction_complete and not dry_run),
     )
+    _finish_phase(
+        pull_forward_phase,
+        records_evaluated=int(turf_wave_compaction.get('candidate_moves_evaluated') or 0),
+        moves_considered=int(turf_wave_compaction.get('candidate_moves_evaluated') or 0),
+        moves_accepted=int(turf_wave_compaction.get('accepted_moves_count') or 0),
+        moves_rejected=int(turf_wave_compaction.get('rejected_moves_count') or 0),
+    )
     auto_schedule_diagnostics['turf_wave_compaction'] = turf_wave_compaction
     revised_hierarchy_diagnostics: dict[str, object] = {}
+    true_home_phase = _start_phase('true home-host enforcement')
+    turf_utilization_phase = _start_phase('turf wave utilization pass')
     try:
         revised_hierarchy_diagnostics = _build_revised_scheduling_hierarchy_diagnostics(
             db,
@@ -15884,15 +16149,30 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         warning = f'Diagnostics warning: revised scheduling hierarchy diagnostics unavailable ({exc}).'
         warnings.append(warning)
         auto_schedule_diagnostics.setdefault('diagnostics_warnings', []).append(warning)
+    _finish_phase(
+        true_home_phase,
+        records_evaluated=len((revised_hierarchy_diagnostics.get('true_home_host_diagnostics') or {}).get('by_date') or []),
+        moves_rejected=int((revised_hierarchy_diagnostics.get('true_home_host_diagnostics') or {}).get('total_home_host_violations') or 0),
+    )
+    _finish_phase(
+        turf_utilization_phase,
+        records_evaluated=len((revised_hierarchy_diagnostics.get('turf_wave_diagnostics') or {}).get('waves') or []),
+        moves_considered=int(turf_wave_compaction.get('candidate_moves_evaluated') or 0),
+        moves_accepted=int(turf_wave_compaction.get('accepted_moves_count') or 0),
+        moves_rejected=int(turf_wave_compaction.get('rejected_moves_count') or 0),
+    )
+    _finish_phase(diagnostics_phase, records_evaluated=len(auto_schedule_diagnostics), moves_rejected=len(warnings))
     if turf_wave_compaction.get('rollback_occurred'):
         rollback_warning = 'Turf wave compaction attempted but rolled back because validation failed.'
         warnings.append(rollback_warning)
         validation_warnings.append({'code': 'turf_wave_compaction_rollback', 'message': rollback_warning})
 
+    commit_phase = _start_phase('commit scheduled games')
     if dry_run:
         db.rollback()
     else:
         db.commit()
+    _finish_phase(commit_phase, records_evaluated=total_games_created, moves_accepted=0 if dry_run else total_games_created)
 
     host_location_verification = _build_host_location_vs_home_team_verification(db, season_id)
     auto_schedule_diagnostics['selected_host_enforcement_diagnostics'] = selected_host_enforcement_diagnostics
@@ -15938,6 +16218,23 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
             final_message = f'Auto-schedule completed but no games were scheduled: no generated slots for required field sizes ({missing_sizes_message}).'
         elif 'no_required_game_groups' in root_cause_categories:
             final_message = 'Auto-schedule completed but no games were scheduled: no required game groups were generated.'
+
+    total_elapsed_ms = int((perf_counter() - auto_schedule_started_perf) * 1000)
+    auto_schedule_diagnostics['phase_metrics'] = phase_metrics
+    auto_schedule_diagnostics['total_runtime_ms'] = total_elapsed_ms
+    if total_elapsed_ms > AUTO_SCHEDULE_TOTAL_WARN_MS:
+        runtime_warning = f'WARN: auto-schedule total runtime exceeded expected threshold ({total_elapsed_ms}ms).'
+        logger.warning(runtime_warning)
+        warnings.append(runtime_warning)
+    logger.info(
+        'auto_schedule_complete season_id=%s status=%s start_time=%s end_time=%s elapsed_ms=%s phase_metrics=%s',
+        season_id,
+        final_status,
+        _iso_ts(auto_schedule_started_at),
+        _iso_ts(datetime.utcnow()),
+        total_elapsed_ms,
+        phase_metrics,
+    )
 
     return {
         'status': final_status,
