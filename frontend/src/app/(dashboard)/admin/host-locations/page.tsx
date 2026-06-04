@@ -36,14 +36,16 @@ const SURFACE_TYPES = [
   { value: 'GRASS_FIELD', label: 'Grass Field' },
 ];
 const HOST_CONFIG_OPTIONS = [
-  { value: 'TWO_LARGE', label: '2 Large', used: 120, remaining: 0 },
-  { value: 'ONE_MEDIUM_TWO_SMALL', label: '1 Medium + 2 Small', used: 120, remaining: 0 },
-  { value: 'ONE_LARGE_ONE_MEDIUM', label: '1 Large + 1 Medium', used: 115, remaining: 5 },
-  { value: 'TWO_MEDIUM', label: '2 Medium', used: 110, remaining: 10 },
-  { value: 'THREE_SMALL', label: '3 Small', used: 100, remaining: 20 },
-  { value: 'ONE_LARGE_ONE_SMALL', label: '1 Large + 1 Small', used: 90, remaining: 30 },
+  { value: 'THREE_SMALL', label: 'Three Small Fields' },
+  { value: 'TWO_SMALL_ONE_MEDIUM', label: 'Two Small Fields + One Medium Field' },
+  { value: 'TWO_MEDIUM', label: 'Two Medium Fields' },
+  { value: 'ONE_SMALL_ONE_LARGE', label: 'One Small Field + One Large Field' },
 ];
-const configLabel = (value: string) => HOST_CONFIG_OPTIONS.find((option) => option.value === value)?.label || value;
+const APPROVED_TURF_LAYOUT_CODES = new Set(HOST_CONFIG_OPTIONS.map((option) => option.value));
+const configLabel = (value: string) => {
+  const option = HOST_CONFIG_OPTIONS.find((item) => item.value === value);
+  return option ? `${option.value} — ${option.label}` : value;
+};
 
 type DeleteCheck = {
   host_location_name: string;
@@ -113,7 +115,7 @@ export default function HostLocationsAdminPage() {
       const configs = configResponse.items || [];
       const nextConfigsByHost: Record<string, any[]> = {};
       for (const config of configs) {
-        if (!config?.host_location_id) continue;
+        if (!config?.host_location_id || !APPROVED_TURF_LAYOUT_CODES.has(config.configuration_name)) continue;
         nextConfigsByHost[config.host_location_id] = [...(nextConfigsByHost[config.host_location_id] || []), config];
       }
       const nextSiteTypes: Record<string, string> = {};
@@ -373,7 +375,7 @@ export default function HostLocationsAdminPage() {
                   <td className='px-3 py-2'>{(item as any).location}</td>
                   <td className='px-3 py-2'>{item.zip_code || '-'}</td>
                   <td className='px-3 py-2'>{SURFACE_TYPES.find((surface) => surface.value === item.surface_type)?.label || item.surface_type || 'Other'}</td>
-                  <td className='px-3 py-2'><div className='flex flex-col gap-1'>{item.surface_type === 'TURF_STADIUM' ? <>{(configsByHostId[item.id] || []).length ? (configsByHostId[item.id] || []).map((config: any) => <span key={config.id}>{configLabel(config.configuration_name)} — {config.space_used_yards ?? 0} used / {config.remaining_yards ?? 0} remaining ({(config.field_instances || []).join(', ')}){config.is_active ? '' : ' (Inactive)'}</span>) : <span className='text-slate-500'>No turf configuration selected</span>}<div className='mt-1 flex flex-wrap gap-1'>{HOST_CONFIG_OPTIONS.filter((option) => !(configsByHostId[item.id] || []).some((config: any) => config.configuration_name === option.value)).map((option) => <button key={option.value} type='button' className='rounded border px-2 py-0.5 text-xs text-emerald-700' title={`${option.used} yards used, ${option.remaining} yards remaining`} onClick={async () => { await apiFetch('/host-location-configurations', { method: 'POST', body: JSON.stringify({ host_location_id: item.id, configuration_name: option.value, is_active: true }) }, getToken()); load(); }}>+ {option.label}</button>)}</div></> : <span className='text-slate-600'>Manual grass fields: Small / Medium / Large</span>}</div></td>
+                  <td className='px-3 py-2'><div className='flex flex-col gap-1'>{item.surface_type === 'TURF_STADIUM' ? <>{(configsByHostId[item.id] || []).length ? (configsByHostId[item.id] || []).map((config: any) => <span key={config.id}>{configLabel(config.configuration_name)} ({(config.field_instances || []).join(', ')}){config.is_active ? '' : ' (Inactive)'}</span>) : <span className='text-slate-500'>No turf configuration selected</span>}<div className='mt-1 flex flex-wrap gap-1'>{HOST_CONFIG_OPTIONS.filter((option) => !(configsByHostId[item.id] || []).some((config: any) => config.configuration_name === option.value)).map((option) => <button key={option.value} type='button' className='rounded border px-2 py-0.5 text-xs text-emerald-700' onClick={async () => { await apiFetch('/host-location-configurations', { method: 'POST', body: JSON.stringify({ host_location_id: item.id, configuration_name: option.value, is_active: true }) }, getToken()); load(); }}>+ {option.label}</button>)}</div></> : <span className='text-slate-600'>Manual grass fields: Small / Medium / Large</span>}</div></td>
                   <td className='px-3 py-2'><div className='flex flex-col gap-1'><span>{item.status_label || ((item.effective_is_active ?? item.is_active) ? 'Active' : 'Inactive/Unavailable')}</span>{item.status_warning ? <span className='inline-flex w-fit rounded bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800'>{item.status_warning}</span> : null}</div></td>
                   <td className='space-x-2 px-3 py-2'>
                     <button className='text-blue-700' onClick={() => edit(item)}>Edit</button>
