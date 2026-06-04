@@ -11,10 +11,7 @@ from app.schemas import GameCreate, GameValidationResponse, ValidationMessage
 
 GAME_DURATION_MINUTES = 60
 
-TURF_CONFIGURATION_ALIASES = {
-    'ONE_MEDIUM_TWO_SMALL': 'TWO_SMALL_ONE_MEDIUM',
-    'ONE_LARGE_ONE_SMALL': 'ONE_SMALL_ONE_LARGE',
-}
+TURF_CONFIGURATION_ALIASES: dict[str, str] = {}
 
 
 def _normalize_turf_configuration_name(value: str | None) -> str | None:

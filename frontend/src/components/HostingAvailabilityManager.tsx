@@ -6,6 +6,7 @@ import { getAuthUser, getToken } from '@/lib/auth';
 import { formatDisplayDate, formatDisplayTime } from '@/lib/displayFormat';
 import Toast from './Toast';
 import { useSearchParams } from 'next/navigation';
+import { APPROVED_TURF_CONFIGURATIONS, isApprovedTurfConfigurationCode, turfConfigurationLabel } from '@/lib/turfConfigurations';
 
 const STADIUM_TYPE = 'STADIUM_SITE';
 const HOURS = [9, 10, 11, 12, 13, 14, 15, 16];
@@ -18,7 +19,8 @@ const displayHour = (hour: number) => formatDisplayTime(`${hour === 24 ? 0 : hou
 
 const formatDateLabel = (date: string) => formatDisplayDate(date);
 
-const layoutLabel = (layout: string) => (layout === 'Active Grass Fields' ? 'Active Grass Fields' : layout === 'Auto Select Best Layout' ? 'Auto Select Best Layout' : layout === '2x53' || layout === 'TWO_LARGE' ? '2 Large' : layout === 'ONE_MEDIUM_TWO_SMALL' ? '1 Medium + 2 Small' : layout === 'ONE_LARGE_ONE_MEDIUM' ? '1 Large + 1 Medium' : layout === 'TWO_MEDIUM' ? '2 Medium' : layout === '3x30' || layout === 'THREE_SMALL' ? '3 Small' : layout === 'ONE_LARGE_ONE_SMALL' ? '1 Large + 1 Small' : 'Custom Layout');
+const layoutLabel = (layout: string) => (layout === 'Active Grass Fields' ? 'Active Grass Fields' : layout === 'Auto Select Best Layout' ? 'Auto Select Best Layout' : turfConfigurationLabel(layout));
+const isStadiumArea = (area: any) => area?.field_space_type === STADIUM_TYPE || area?.field_space_type === 'TURF_STADIUM';
 
 const STATUS_BADGE: Record<string, string> = {
   Hosting: 'bg-emerald-100 text-emerald-800',
@@ -153,7 +155,7 @@ export default function HostingAvailabilityManager() {
   const hostOptions = useMemo(() => hosts.filter((h: any) => !effectiveOrgId || h.organization_id === effectiveOrgId), [hosts, effectiveOrgId]);
   const selectedHost = useMemo(() => hostOptions.find((h: any) => h.id === hostId), [hostId, hostOptions]);
   const visibleAreas = useMemo(() => areas.filter((a: any) => a.is_active && (!hostId || a.host_location_id === hostId)), [areas, hostId]);
-  const hostConfigsForSelectedHost = useMemo(() => hostConfigs.filter((c: any) => c.is_active && c.host_location_id === hostId), [hostConfigs, hostId]);
+  const hostConfigsForSelectedHost = useMemo(() => hostConfigs.filter((c: any) => c.is_active && c.host_location_id === hostId && isApprovedTurfConfigurationCode(c.configuration_name)), [hostConfigs, hostId]);
   const configsByArea = useMemo(
     () => configs.filter((c: any) => c.is_active).reduce((m: any, c: any) => ((m[c.physical_field_area_id] = [...(m[c.physical_field_area_id] || []), c]), m), {}),
     [configs],
@@ -286,7 +288,7 @@ export default function HostingAvailabilityManager() {
       const end = Number(range.end_time.slice(0, 2));
       for (let h = start; h < end; h += 1) nextSlots[slotKey(area.id, entry.available_date, h)] = true;
     }
-    const cfgs = area.hostLevel ? hostConfigs.filter((c: any) => c.host_location_id === area.id).map((c: any) => ({ ...c, name: c.configuration_name })) : (configsByArea[area.id] || []);
+    const cfgs = (area.hostLevel ? hostConfigs.filter((c: any) => c.host_location_id === area.id).map((c: any) => ({ ...c, name: c.configuration_name })) : (configsByArea[area.id] || [])).filter((c: any) => !isStadiumArea(area) || isApprovedTurfConfigurationCode(c.name || c.configuration_name));
     const cfg = cfgs.find((c: any) => c.name === entry.available_layout || c.configuration_name === entry.available_layout);
     if (cfg) nextConfigs[layoutKey(area.id, entry.available_date)] = cfg.id;
     nextAutoSelect[layoutKey(area.id, entry.available_date)] = entry.auto_select_turf_layout ?? true;
@@ -348,7 +350,7 @@ export default function HostingAvailabilityManager() {
         }
       }
       for (const area of visibleAreas) {
-        const cfgs = configsByArea[area.id] || [];
+        const cfgs = (configsByArea[area.id] || []).filter((c: any) => !isStadiumArea(area) || isApprovedTurfConfigurationCode(c.name || c.configuration_name));
         for (const week of selectedWeeks) {
           const d = week.primary_game_date as string;
           const configId = getSelectedConfigId(area.id, d, cfgs[0]?.id || '');
@@ -624,7 +626,7 @@ export default function HostingAvailabilityManager() {
         {!hostId ? <p className='text-slate-500'>Select a hosting site to view facility setup.</p> : (
           <div className='space-y-3'>
             {(visibleAreas.length ? visibleAreas : (selectedHost ? [{ id: selectedHost.id, name: selectedHost.name, field_space_type: selectedHost.surface_type, hostLevel: true }] : [])).map((area: any) => {
-              const cfgs = area.hostLevel ? hostConfigsForSelectedHost.map((c: any) => ({ ...c, name: c.configuration_name, physical_field_area_id: area.id, thirty_yard_capacity: 0, fifty_three_yard_capacity: 0 })) : (configsByArea[area.id] || []);
+              const cfgs = (area.hostLevel ? hostConfigsForSelectedHost.map((c: any) => ({ ...c, name: c.configuration_name, physical_field_area_id: area.id, thirty_yard_capacity: 0, fifty_three_yard_capacity: 0 })) : (configsByArea[area.id] || [])).filter((c: any) => !isStadiumArea(area) || isApprovedTurfConfigurationCode(c.name || c.configuration_name));
               return (
                 <div key={area.id} className='rounded border bg-slate-50 p-3'>
                   <div className='font-medium'>{area.name}</div>
@@ -686,10 +688,10 @@ export default function HostingAvailabilityManager() {
           <div key={date} className='mb-4'>
             <h3 className='mb-2 font-medium'>{weekLabelForDate(date)} — {formatDateLabel(date)}</h3>
             {(visibleAreas.length ? visibleAreas : (selectedHost ? [{ id: selectedHost.id, name: selectedHost.name, field_space_type: selectedHost.surface_type, hostLevel: true }] : [])).map((area: any) => {
-              const cfgs = area.hostLevel ? hostConfigsForSelectedHost.map((c: any) => ({ ...c, name: c.configuration_name, physical_field_area_id: area.id })) : (configsByArea[area.id] || []);
+              const isStadium = isStadiumArea(area);
+              const cfgs = (area.hostLevel ? hostConfigsForSelectedHost.map((c: any) => ({ ...c, name: c.configuration_name, physical_field_area_id: area.id })) : (configsByArea[area.id] || [])).filter((c: any) => !isStadium || isApprovedTurfConfigurationCode(c.name || c.configuration_name));
               const defaultCfg = cfgs[0]?.id || '';
               const selectedCfg = getSelectedConfigId(area.id, date, defaultCfg);
-              const isStadium = area.field_space_type === STADIUM_TYPE || area.field_space_type === 'TURF_STADIUM';
               return (
                 <div key={`${area.id}-${date}`} className='mb-4 rounded border p-3'>
                   <div className='mb-2 flex flex-col gap-2 md:flex-row md:items-center md:justify-between'>
@@ -740,7 +742,7 @@ export default function HostingAvailabilityManager() {
         <div className='mb-3 grid gap-2 md:grid-cols-4'>
           <input type='date' className='rounded border p-2' value={savedDateFilter} onChange={(e) => setSavedDateFilter(e.target.value)} />
           <select className='rounded border p-2' value={savedSiteTypeFilter} onChange={(e) => setSavedSiteTypeFilter(e.target.value)}><option value=''>All Site Types</option><option value='TURF_STADIUM'>Turf Stadium</option><option value='GRASS_FIELD'>Grass Field</option><option value='STADIUM_SITE'>Legacy Stadium Site</option><option value='GRASS_PARK_SITE'>Legacy Grass/Park Site</option></select>
-          {!isCommunityAdmin && <select className='rounded border p-2' value={savedLayoutFilter} onChange={(e) => setSavedLayoutFilter(e.target.value)}><option value=''>All Layouts</option><option value='2x53'>Two Large Fields</option><option value='3x30'>Three Small Fields</option><option value='TWO_LARGE'>Two Large</option><option value='ONE_MEDIUM_TWO_SMALL'>One Medium + Two Small</option><option value='TWO_MEDIUM'>Two Medium</option><option value='THREE_SMALL'>Three Small</option><option value='ONE_LARGE_ONE_MEDIUM'>One Large + One Medium</option><option value='ONE_LARGE_ONE_SMALL'>One Large + One Small</option></select>}
+          {!isCommunityAdmin && <select className='rounded border p-2' value={savedLayoutFilter} onChange={(e) => setSavedLayoutFilter(e.target.value)}><option value=''>All Layouts</option>{APPROVED_TURF_CONFIGURATIONS.map((config) => <option key={config.code} value={config.code}>{config.code} — {config.displayName}</option>)}</select>}
         </div>
         {!hostId ? <p className='text-slate-500'>Select a hosting site to view saved availability.</p> : !savedAvailability.length ? <p className='text-slate-500'>No saved availability has been entered for this hosting site.</p> : <div className='space-y-3'>{savedAvailability.map((entry: any, idx: number) => (
           <div key={`${entry.available_date}-${idx}`} className='rounded border bg-slate-50 p-3 text-sm'>
@@ -790,11 +792,11 @@ export default function HostingAvailabilityManager() {
         <h2 className='mb-2 font-semibold'>9. Availability Summary</h2>
         {!selectedDates.length || !selectedHost ? <p className='text-slate-500'>Select dates and hosting site to preview summary.</p> : (
           <div className='space-y-3'>
-            {selectedDates.map((date) => (visibleAreas.length ? visibleAreas : (selectedHost ? [{ id: selectedHost.id, name: selectedHost.name, hostLevel: true }] : [])).map((area: any) => {
-              const cfgs = area.hostLevel ? hostConfigsForSelectedHost.map((c: any) => ({ ...c, name: c.configuration_name })) : (configsByArea[area.id] || []);
+            {selectedDates.map((date) => (visibleAreas.length ? visibleAreas : (selectedHost ? [{ id: selectedHost.id, name: selectedHost.name, field_space_type: selectedHost.surface_type, hostLevel: true }] : [])).map((area: any) => {
+              const isTurfArea = isStadiumArea(area);
+              const cfgs = (area.hostLevel ? hostConfigsForSelectedHost.map((c: any) => ({ ...c, name: c.configuration_name })) : (configsByArea[area.id] || [])).filter((c: any) => !isTurfArea || isApprovedTurfConfigurationCode(c.name || c.configuration_name));
               const selectedCfg = cfgs.find((c: any) => c.id === getSelectedConfigId(area.id, date, cfgs[0]?.id || ''));
               const ranges = summaryRanges(area.id, date);
-              const isTurfArea = area.field_space_type === STADIUM_TYPE || area.field_space_type === 'TURF_STADIUM';
               if (!ranges.length) return null;
               return (
                 <div key={`summary-${area.id}-${date}`} className='rounded border bg-slate-50 p-3 text-sm'>
