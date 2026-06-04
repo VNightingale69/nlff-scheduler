@@ -10980,14 +10980,14 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                     'game_date': str(week_game_date) if week_game_date else None,
                     'division': full_division_label,
                     'doubleheader_team_selected': None,
-                    'doubleheader_team_selection_reason': 'no compatible large slots' if is_odd_division and no_byes and _normalize_field_size(required_field_type) == FIELD_SIZE_LARGE else None,
+                    'doubleheader_team_selection_reason': 'NO_COMPATIBLE_FIELD_SIZE' if is_odd_division and no_byes else None,
                     'adjacent_slot_pairs_available': 0,
                     'adjacent_slot_pairs_considered': {},
-                    'adjacent_slot_pairs_rejected_by_reason': [{'rejection_reason': 'no adjacent large slots'}] if is_odd_division and no_byes else [],
+                    'adjacent_slot_pairs_rejected_by_reason': [{'rejection_reason': 'NO_ADJACENT_SLOT_PAIR'}] if is_odd_division and no_byes else [],
                     'reserved_doubleheader_slots': {},
                     'doubleheader_placement_success': False,
                     'hard_failure_reason': 'DOUBLEHEADER_ADJACENT_SLOT_UNAVAILABLE' if is_odd_division and no_byes and max_new_games_without_slots else None,
-                    'doubleheader_team_selection_failure_reasons': ['no compatible large slots'] if is_odd_division and no_byes and _normalize_field_size(required_field_type) == FIELD_SIZE_LARGE else [],
+                    'doubleheader_team_selection_failure_reasons': ['NO_COMPATIBLE_FIELD_SIZE'] if is_odd_division and no_byes else [],
                     'doubleheader_placement_attempts': [],
                     'doubleheader_placement_failed': bool(is_odd_division and no_byes and max_new_games_without_slots),
                 }
@@ -11770,7 +11770,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     fallback_doubleheader_team_ids_attempted: list[uuid.UUID] = []
     placement_attempt_details: list[dict[str, object]] = []
     placement_attempt_counter = 0
-    target_detailed_division_week = int(week.week_number or 0) == 8 and selected_division_key == 'COED_6_7'
+    include_detailed_placement_attempts = bool(payload.get('include_detailed_placement_attempts'))
 
     def _team_name_for_attempt(team_id: uuid.UUID | None) -> str | None:
         return teams_by_id.get(team_id).name if team_id in teams_by_id else (str(team_id) if team_id else None)
@@ -11785,7 +11785,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     ) -> None:
         nonlocal placement_attempt_counter
         placement_attempt_counter += 1
-        if not target_detailed_division_week and len(placement_attempt_details) >= 100:
+        if not include_detailed_placement_attempts and len(placement_attempt_details) >= 100:
             return
         slot_for_output = selected_field_slot or slot
         placement_attempt_details.append({
@@ -12163,20 +12163,50 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             pairs.append(tuple(sorted((rest.pop(0), rest.pop(0)))))
         return pairs[:max_new_games]
 
+    DOUBLEHEADER_REJECTION_REASON_MAP = {
+        'selected-host violation': 'SELECTED_HOST_VIOLATION',
+        'invalid field size': 'NO_COMPATIBLE_FIELD_SIZE',
+        'field time conflict': 'FIELD_TIME_CONFLICT',
+        'team time conflict': 'TEAM_TIME_CONFLICT',
+        'invalid turf component': 'INVALID_TURF_COMPONENT',
+        'no adjacent slot pair': 'NO_ADJACENT_SLOT_PAIR',
+        'no same-location adjacent slots': 'NO_ADJACENT_SLOT_PAIR',
+        'not enough active opponents remained to build required odd-team weekly matchups': 'REQUIRED_MATCHUP_CONSTRAINT',
+        'doubleheader team already used beyond allowed limit': 'DOUBLEHEADER_ROTATION_LIMIT',
+        'true home-host violation': 'TRUE_HOME_HOST_VIOLATION',
+        'host owner as away violation': 'HOST_OWNER_AS_AWAY_VIOLATION',
+        'final validation failure': 'FINAL_VALIDATION_FAILURE',
+        'no eligible doubleheader team': 'NO_ELIGIBLE_DOUBLEHEADER_TEAM',
+        'no selected host available': 'NO_SELECTED_HOST_AVAILABLE',
+    }
+
+    def _doubleheader_rejection_code(reason: str | None) -> str:
+        if not reason:
+            return 'FINAL_VALIDATION_FAILURE'
+        normalized = str(reason).strip()
+        if normalized in set(DOUBLEHEADER_REJECTION_REASON_MAP.values()):
+            return normalized
+        return DOUBLEHEADER_REJECTION_REASON_MAP.get(normalized.lower(), normalized.upper().replace(' ', '_').replace('-', '_'))
+
     def _record_adjacent_pair_rejection(first: GameSlot | None, second: GameSlot | None, reason: str) -> None:
         if len(adjacent_slot_pair_rejection_reasons) >= 250:
             return
         slot_for_context = first or second
+        host = slot_for_context.host_location if slot_for_context and slot_for_context.host_location else None
         adjacent_slot_pair_rejection_reasons.append({
             'host_location_id': str(slot_for_context.host_location_id) if slot_for_context and slot_for_context.host_location_id else None,
-            'host_location_name': slot_for_context.host_location.name if slot_for_context and slot_for_context.host_location else None,
-            'host_location': slot_for_context.host_location.name if slot_for_context and slot_for_context.host_location else None,
+            'host_location_name': host.name if host else None,
+            'host_location': host.name if host else None,
             'slot_date': str(slot_for_context.slot_date) if slot_for_context and slot_for_context.slot_date else None,
             'first_start_time': str(first.start_time) if first and first.start_time else None,
             'second_start_time': str(second.start_time) if second and second.start_time else None,
+            'first_slot_id': str(first.id) if first else None,
+            'second_slot_id': str(second.id) if second else None,
             'start_time_pair': [str(first.start_time) if first and first.start_time else None, str(second.start_time) if second and second.start_time else None],
             'field_type': _normalize_field_size(slot_for_context.field_type) if slot_for_context else None,
-            'rejection_reason': reason,
+            'surface_type': str(host.surface_type) if host and host.surface_type is not None else None,
+            'rejection_reason': _doubleheader_rejection_code(reason),
+            'rejection_detail': reason,
         })
 
     def _adjacent_doubleheader_slot_pairs(slots: list[GameSlot]) -> list[tuple[GameSlot, GameSlot]]:
@@ -12209,14 +12239,14 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                     a_minutes = _minutes_from_time(a_slot.start_time)
                     b_minutes = _minutes_from_time(b_slot.start_time)
                     if a_minutes is None or b_minutes is None:
-                        _record_adjacent_pair_rejection(a_slot, b_slot, 'no adjacent large slots')
+                        _record_adjacent_pair_rejection(a_slot, b_slot, 'no adjacent slot pair')
                         continue
                     first, second = (a_slot, b_slot) if a_minutes < b_minutes else (b_slot, a_slot)
                     if b_slot.host_location_id != a_slot.host_location_id or b_slot.slot_date != a_slot.slot_date:
                         _record_adjacent_pair_rejection(first, second, 'selected-host violation')
                         continue
                     if abs(a_minutes - b_minutes) != GAME_DURATION_MINUTES:
-                        _record_adjacent_pair_rejection(first, second, 'no adjacent large slots')
+                        _record_adjacent_pair_rejection(first, second, 'no adjacent slot pair')
                         continue
                     if no_simultaneous_games_same_host:
                         first_host_key = (str(first.host_location_id), first.slot_date, first.start_time)
@@ -12244,7 +12274,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                         'field_type': _normalize_field_size(first.field_type) or str(first.field_type or ''),
                     })
         if not adjacent_pairs and not adjacent_slot_pair_rejection_reasons:
-            adjacent_slot_pair_rejection_reasons.append({'rejection_reason': 'no adjacent large slots'})
+            adjacent_slot_pair_rejection_reasons.append({'rejection_reason': 'NO_ADJACENT_SLOT_PAIR'})
         return adjacent_pairs
 
     def _doubleheader_pair_rejection_reasons(candidate_team_id: uuid.UUID, candidate_pairs: list[tuple[uuid.UUID, uuid.UUID]], first: GameSlot, second: GameSlot) -> list[str]:
@@ -12266,13 +12296,6 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                     reasons.append('team time conflict')
             if slot.host_location and _is_turf_stadium_host(slot.host_location) and not slot.turf_wave_id:
                 reasons.append('invalid turf component')
-            active_owned_participant_host_ids: set[uuid.UUID] = set()
-            for team_id in matchup:
-                team = teams_by_id.get(team_id)
-                if team and team.organization_id in selected_week_org_ids:
-                    active_owned_participant_host_ids.update(selected_week_host_ids_by_org.get(team.organization_id, set()))
-            if active_owned_participant_host_ids and slot.host_location_id not in active_owned_participant_host_ids:
-                reasons.append('true home-host violation')
         return sorted(set(reasons))
 
     if is_odd_division and no_byes:
@@ -12301,7 +12324,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         odd_double_header_candidate_ids = list(candidates)
         adjacent_slot_pairs = _adjacent_doubleheader_slot_pairs(remaining_slots)
         if not adjacent_slot_pairs:
-            double_header_reservation_failure_reasons.append('Unable to place required double-header because no same-location adjacent slots exist.')
+            double_header_reservation_failure_reasons.append('DOUBLEHEADER_ADJACENT_SLOT_UNAVAILABLE')
         for candidate_team_id in candidates:
             candidate_pairs = _odd_week_matchups_for_doubleheader_team(candidate_team_id)
             attempt_rejections = []
@@ -12337,15 +12360,33 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                 fallback_doubleheader_team_ids_attempted.append(candidate_team_id)
                 continue
             selected_adjacent_pair: tuple[GameSlot, GameSlot] | None = None
-            for first_slot, second_slot in adjacent_slot_pairs:
-                pair_rejections = _doubleheader_pair_rejection_reasons(candidate_team_id, candidate_pairs, first_slot, second_slot)
-                if pair_rejections:
-                    for rejection in pair_rejections:
-                        _record_adjacent_pair_rejection(first_slot, second_slot, rejection)
-                    attempt_rejections.extend(pair_rejections)
-                    continue
-                selected_adjacent_pair = (first_slot, second_slot)
-                break
+            candidate_team = teams_by_id.get(candidate_team_id)
+            candidate_owned_selected_host_ids = (
+                set(selected_week_host_ids_by_org.get(candidate_team.organization_id, set()))
+                if candidate_team and candidate_team.organization_id in selected_week_org_ids
+                else set()
+            )
+            owned_adjacent_pairs = [
+                pair for pair in adjacent_slot_pairs
+                if candidate_owned_selected_host_ids and pair[0].host_location_id in candidate_owned_selected_host_ids
+            ]
+            non_owned_adjacent_pairs = [
+                pair for pair in adjacent_slot_pairs
+                if not candidate_owned_selected_host_ids or pair[0].host_location_id not in candidate_owned_selected_host_ids
+            ]
+            pair_groups = [owned_adjacent_pairs, non_owned_adjacent_pairs] if owned_adjacent_pairs else [adjacent_slot_pairs]
+            for pair_group in pair_groups:
+                for first_slot, second_slot in pair_group:
+                    pair_rejections = _doubleheader_pair_rejection_reasons(candidate_team_id, candidate_pairs, first_slot, second_slot)
+                    if pair_rejections:
+                        for rejection in pair_rejections:
+                            _record_adjacent_pair_rejection(first_slot, second_slot, rejection)
+                        attempt_rejections.extend(pair_rejections)
+                        continue
+                    selected_adjacent_pair = (first_slot, second_slot)
+                    break
+                if selected_adjacent_pair is not None:
+                    break
             if selected_adjacent_pair is None:
                 fallback_doubleheader_team_ids_attempted.append(candidate_team_id)
                 if attempt_rejections:
@@ -12384,9 +12425,19 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             doubleheader_placement_attempts[-1]['selected_reserved_slot_ids'] = sorted(list(reserved_double_header_slot_ids))
             break
         if selected_double_header_team_id is None and candidates and not double_header_reservation_failure_reasons:
-            double_header_reservation_failure_reasons.append('No eligible doubleheader team found after evaluating candidate teams and adjacent slot constraints.')
+            double_header_reservation_failure_reasons.append('NO_ELIGIBLE_DOUBLEHEADER_TEAM')
         if not candidates and not double_header_reservation_failure_reasons:
-            double_header_reservation_failure_reasons.append('No eligible doubleheader team found.')
+            double_header_reservation_failure_reasons.append('NO_ELIGIBLE_DOUBLEHEADER_TEAM')
+    if is_odd_division and no_byes and (selected_double_header_team_id is None or not reserved_double_header_slot_ids):
+        if not selected_host_ids:
+            double_header_reservation_failure_reasons.append('NO_SELECTED_HOST_AVAILABLE')
+        elif not compatible_adjacent_slot_pairs_by_host:
+            double_header_reservation_failure_reasons.append('DOUBLEHEADER_ADJACENT_SLOT_UNAVAILABLE')
+        skipped.append({
+            'reason': 'ODD_TEAM_DIVISION_DOUBLEHEADER_FAILED',
+            'detail': '; '.join(sorted(set(double_header_reservation_failure_reasons))) or 'Required odd-team doubleheader could not reserve same-location adjacent selected-host slots before normal placement.',
+        })
+        remaining_slots = []
     while remaining_slots and len(plans) < max_new_games:
         if is_odd_division and no_byes and selected_double_header_team_id:
             available_team_ids = [tid for tid in teams_by_id if week_team_game_counts.get(tid, 0) < 1]
@@ -12453,6 +12504,10 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                         rejected_seen = rejected_move_counts_for_date.get(repeated_key, 0)
                         if rejected_seen >= AUTO_SCHEDULE_REPEATED_MOVE_WARN_THRESHOLD:
                             logger.warning('WARN: same move evaluated repeatedly date=%s matchup=%s slot_id=%s count=%s', week_game_date, _matchup_label(a, b), selected_field_slot.id, rejected_seen)
+                            continue
+                        if dh_team_needs_reservation and reserved_double_header_slot_ids and str(selected_field_slot.id) in reserved_double_header_slot_ids and selected_double_header_team_id not in pair:
+                            _record_placement_attempt(selected_field_slot, a, b, 'rejected', 'Reserved doubleheader slot must be used by selected doubleheader team.')
+                            rejected_move_counts_for_date[repeated_key] = rejected_seen + 1
                             continue
                         if required_matchup_pairs and pair not in required_matchup_pairs:
                             matchups_removed_by_filter.append({
@@ -13642,7 +13697,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                 for reason in double_header_reservation_failure_reasons:
                     _add_skipped(reason)
             else:
-                _add_skipped('Unable to place required double-header because no same-location adjacent slots exist.')
+                _add_skipped('DOUBLEHEADER_ADJACENT_SLOT_UNAVAILABLE')
         else:
             _add_skipped('Unable to schedule required games due to hard scheduling constraints.')
     rejected_games = len(skipped)
@@ -14062,7 +14117,23 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                 'required_matchups_generated': [row.get('matchup') for row in generated_matchups_before_filter] or [plan.get('proposed_matchup') for plan in plans],
                 'generated_matchups_before_filter': generated_matchups_before_filter,
                 'matchups_removed_by_filter': matchups_removed_by_filter,
+                'season_id': str(season_id),
+                'week_id': str(week_id),
+                'division_id': str(division_id),
                 'candidate_doubleheader_teams': [teams_by_id[tid].name for tid in odd_double_header_candidate_ids],
+                'eligible_doubleheader_teams': [
+                    {'team_id': str(tid), 'team_name': teams_by_id[tid].name, 'prior_doubleheader_count': int(double_header_counts.get(tid, 0) or 0)}
+                    for tid in odd_double_header_candidate_ids
+                ],
+                'selected_host_locations_considered': [
+                    {'host_location_id': str(host_id), 'host_location_name': host_rows_by_id.get(host_id).name if host_rows_by_id.get(host_id) else None}
+                    for host_id in sorted(selected_host_ids, key=str)
+                ],
+                'owned_selected_host_locations_considered': [
+                    {'host_location_id': str(host_id), 'host_location_name': host_rows_by_id.get(host_id).name if host_rows_by_id.get(host_id) else None}
+                    for host_ids in selected_week_host_ids_by_org.values()
+                    for host_id in sorted(host_ids, key=str)
+                ],
                 'compatible_adjacent_slot_pairs_by_host': compatible_adjacent_slot_pairs_by_host,
                 'adjacent_same_location_large_slot_pairs_available': sum(len(rows) for rows in compatible_adjacent_slot_pairs_by_host.values()) if _normalize_field_size(required_field_type) == FIELD_SIZE_LARGE else None,
                 'adjacent_same_location_large_slot_pairs_considered': compatible_adjacent_slot_pairs_by_host,
@@ -14076,9 +14147,9 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                 'adjacent_slot_pairs_rejected_by_reason': adjacent_slot_pair_rejection_reasons,
                 'reserved_doubleheader_slots': reserved_double_header_context.get('selected_slot_pair') or {},
                 'doubleheader_placement_success': bool(selected_double_header_team_id and week_team_game_counts.get(selected_double_header_team_id, 0) >= 2),
-                'hard_failure_reason': None if (not (is_odd_division and no_byes) or (selected_double_header_team_id and week_team_game_counts.get(selected_double_header_team_id, 0) >= 2)) else ('; '.join(double_header_reservation_failure_reasons) if double_header_reservation_failure_reasons else 'ODD_TEAM_DIVISION_DOUBLEHEADER_FAILED'),
+                'hard_failure_reason': None if (not (is_odd_division and no_byes) or (selected_double_header_team_id and week_team_game_counts.get(selected_double_header_team_id, 0) >= 2)) else (_doubleheader_rejection_code(double_header_reservation_failure_reasons[0]) if double_header_reservation_failure_reasons else 'ODD_TEAM_DIVISION_DOUBLEHEADER_FAILED'),
                 'doubleheader_team_selection_failure_reasons': double_header_reservation_failure_reasons if not selected_double_header_team_id else [],
-                'selected_host_locations_available': selected_host_ids,
+                'selected_host_locations_available': [str(host_id) for host_id in sorted(selected_host_ids, key=str)],
                 'turf_wave_large_components_available_by_time': {},
                 'doubleheader_placement_attempts': doubleheader_placement_attempts,
                 'fallback_doubleheader_teams_attempted': [teams_by_id[tid].name for tid in fallback_doubleheader_team_ids_attempted],
@@ -14109,6 +14180,10 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                 'selection_reason': doubleheader_team_selection_reason or ('; '.join(double_header_reservation_failure_reasons) if double_header_reservation_failure_reasons else None),
                 'placement_success': bool(selected_double_header_team_id and week_team_game_counts.get(selected_double_header_team_id, 0) >= 2),
                 'candidate_doubleheader_teams': [teams_by_id[tid].name for tid in odd_double_header_candidate_ids],
+                'eligible_doubleheader_teams': [
+                    {'team_id': str(tid), 'team_name': teams_by_id[tid].name, 'prior_doubleheader_count': int(double_header_counts.get(tid, 0) or 0)}
+                    for tid in odd_double_header_candidate_ids
+                ],
                 'compatible_adjacent_slot_pairs_by_host': compatible_adjacent_slot_pairs_by_host,
                 'adjacent_same_location_large_slot_pairs_available': sum(len(rows) for rows in compatible_adjacent_slot_pairs_by_host.values()) if _normalize_field_size(required_field_type) == FIELD_SIZE_LARGE else None,
                 'adjacent_same_location_large_slot_pairs_considered': compatible_adjacent_slot_pairs_by_host,
@@ -15498,7 +15573,7 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
     if total_created_for_week >= required_games_for_division_week:
         skipped = []
     elif is_odd_division and no_byes:
-        _add_skipped('Unable to place required double-header because no same-location adjacent slots exist.')
+        _add_skipped('DOUBLEHEADER_ADJACENT_SLOT_UNAVAILABLE')
     else:
         _add_skipped('Unable to schedule required games due to hard scheduling constraints.')
     unscheduled_teams = [
@@ -15932,6 +16007,25 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         normalize_division_name(f'{d.division_group or ""} {d.name or ""}'): d
         for d in all_divisions
     }
+
+    def _division_order_requires_odd_doubleheader_first(order_row: tuple[str, str]) -> int:
+        group, name = order_row
+        division_for_order = (
+            divisions_by_key.get(canonical_division_id(group, name))
+            or divisions_by_normalized_name.get(normalize_division_name(f'{group} {name}'))
+        )
+        if not division_for_order:
+            return 1
+        active_count = db.query(func.count(Team.id)).filter(
+            Team.division_id == division_for_order.id,
+            Team.is_active.is_(True),
+        ).scalar() or 0
+        return 0 if active_count % 2 == 1 and _diagnostic_no_bye_doubleheaders_enabled(division_for_order, season) else 1
+
+    division_order = sorted(
+        division_order,
+        key=lambda row: (_division_order_requires_odd_doubleheader_first(row), division_order.index(row)),
+    )
     weeks = db.query(Week).filter(Week.season_id == season_id).order_by(Week.week_number.asc(), Week.primary_game_date.asc()).all()
     _finish_phase(load_phase, records_evaluated=len(weeks) + len(all_divisions))
 
@@ -16281,11 +16375,18 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         missing_slot_sizes = diagnostics.get('missing_generated_slot_field_sizes') or []
         doubleheader_failures = [
             row for row in (diagnostics.get('division_week_placement_diagnostics') or [])
-            if isinstance(row, dict) and (row.get('doubleheader_placement_failed') or row.get('hard_failure_reason') in {'ODD_TEAM_DIVISION_DOUBLEHEADER_FAILED', 'DOUBLEHEADER_ADJACENT_SLOT_UNAVAILABLE'})
+            if isinstance(row, dict) and (row.get('doubleheader_placement_failed') or (row.get('doubleheader_required') and row.get('hard_failure_reason')))
         ]
         if unresolved_games > 0 and doubleheader_failures:
-            categories.add('DOUBLEHEADER_ADJACENT_SLOT_UNAVAILABLE')
             categories.add('ODD_TEAM_DIVISION_DOUBLEHEADER_FAILED')
+            for row in doubleheader_failures:
+                hard_reason = str(row.get('hard_failure_reason') or '')
+                if hard_reason == 'NO_ELIGIBLE_DOUBLEHEADER_TEAM':
+                    categories.add('DOUBLEHEADER_TEAM_SELECTION_FAILED')
+                elif hard_reason in {'TEAM_TIME_CONFLICT', 'FIELD_TIME_CONFLICT', 'FINAL_VALIDATION_FAILURE'}:
+                    categories.add('DOUBLEHEADER_RESERVED_SLOT_CONFLICT')
+                else:
+                    categories.add('DOUBLEHEADER_ADJACENT_SLOT_UNAVAILABLE')
         if unresolved_games > 0 and missing_slot_sizes:
             categories.add('no_generated_slots')
         scheduled_count = int(diagnostics.get('scheduled_games_count') or 0)
@@ -16322,8 +16423,10 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
             'placement_candidates_failed_validation',
             'database_commit_failed',
             'no_valid_assignments',
-            'DOUBLEHEADER_ADJACENT_SLOT_UNAVAILABLE',
             'ODD_TEAM_DIVISION_DOUBLEHEADER_FAILED',
+            'DOUBLEHEADER_ADJACENT_SLOT_UNAVAILABLE',
+            'DOUBLEHEADER_TEAM_SELECTION_FAILED',
+            'DOUBLEHEADER_RESERVED_SLOT_CONFLICT',
             'unknown',
         ]
         return [category for category in category_order if category in categories]
@@ -16833,6 +16936,9 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
                 'doubleheader_placement_success': bool(placement_preview_diagnostic.get('doubleheader_placement_success') or preview_dh.get('placement_success')),
                 'hard_failure_reason': placement_preview_diagnostic.get('hard_failure_reason') or missing_preview_diagnostic.get('hard_failure_reason'),
                 'selected_host_locations_available': placement_preview_diagnostic.get('selected_host_locations_available') if placement_preview_diagnostic else missing_preview_diagnostic.get('selected_host_locations_available'),
+                'selected_host_locations_considered': placement_preview_diagnostic.get('selected_host_locations_considered') if placement_preview_diagnostic else missing_preview_diagnostic.get('selected_host_locations_considered'),
+                'owned_selected_host_locations_considered': placement_preview_diagnostic.get('owned_selected_host_locations_considered') if placement_preview_diagnostic else missing_preview_diagnostic.get('owned_selected_host_locations_considered'),
+                'eligible_doubleheader_teams': placement_preview_diagnostic.get('eligible_doubleheader_teams') if placement_preview_diagnostic else missing_preview_diagnostic.get('eligible_doubleheader_teams'),
                 'turf_wave_large_components_available_by_time': placement_preview_diagnostic.get('turf_wave_large_components_available_by_time') if placement_preview_diagnostic else missing_preview_diagnostic.get('turf_wave_large_components_available_by_time'),
                 'doubleheader_team_selection_failure_reasons': placement_preview_diagnostic.get('doubleheader_team_selection_failure_reasons') if placement_preview_diagnostic else missing_preview_diagnostic.get('doubleheader_team_selection_failure_reasons'),
                 'doubleheader_placement_attempts': placement_preview_diagnostic.get('doubleheader_placement_attempts') if placement_preview_diagnostic else missing_preview_diagnostic.get('doubleheader_placement_attempts'),
@@ -16889,7 +16995,7 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
                 division_week_diagnostic.get('compatible_large_slots_available'),
                 division_week_diagnostic.get('skipped_placement_reasons'),
                 division_week_diagnostic.get('rejected_placement_reasons'),
-                division_week_diagnostic.get('placement_attempt_details') if (division_week_diagnostic.get('week') == 8 and str(division_week_diagnostic.get('division_name') or '').upper().startswith('COED 6TH/7TH')) else [],
+                division_week_diagnostic.get('placement_attempt_details'),
             )
             week_diagnostic = weekly_diagnostics_by_week_id.setdefault(week.id, {
                 'week': week.week_number,
