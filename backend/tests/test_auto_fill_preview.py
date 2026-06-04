@@ -1708,6 +1708,25 @@ class AutoFillPreviewTest(unittest.TestCase):
         starts = sorted(int(row['proposed_start_time'].split(':')[0]) for row in dh_games)
         self.assertEqual(starts[1] - starts[0], 1)
 
+    def test_odd_division_without_adjacent_pair_stops_before_normal_placement(self):
+        odd_team = Team(id=uuid.uuid4(), organization_id=self.org_w.id, division_id=self.division.id, name='Westosha White', is_active=True)
+        self.db.add(odd_team)
+        for hour in (11, 13):
+            fi = FieldInstance(id=uuid.uuid4(), host_location_id=self.host.id, hosting_availability_id=uuid.uuid4(), instance_date=self.week2.start_date, field_name=f'Non Adjacent {hour}', field_type='SMALL', is_active=True)
+            slot = GameSlot(id=uuid.uuid4(), field_instance_id=fi.id, host_location_id=self.host.id, slot_date=self.week2.start_date, start_time=time(hour, 0), end_time=time(hour + 1, 0), field_type='SMALL', status='OPEN')
+            self.db.add_all([fi, slot])
+        self.db.commit()
+
+        result = auto_fill_preview({'season_id': self.season.id, 'week_id': self.week2.id, 'division_id': self.division.id}, db=self.db)
+        placement = result['diagnostics']['division_week_placement']
+
+        self.assertEqual(result['max_allowed_game_count'], 3)
+        self.assertEqual(result['proposed_game_count'], 0)
+        self.assertTrue(placement['doubleheader_required'])
+        self.assertFalse(placement['doubleheader_placement_success'])
+        self.assertEqual(placement['hard_failure_reason'], 'DOUBLEHEADER_ADJACENT_SLOT_UNAVAILABLE')
+        self.assertIn('ODD_TEAM_DIVISION_DOUBLEHEADER_FAILED', [row['reason'] for row in result['skipped']])
+
     def test_apply_odd_division_uses_later_compatible_slot_when_adjacent_unavailable(self):
         odd_team = Team(id=uuid.uuid4(), organization_id=self.org_w.id, division_id=self.division.id, name='Westosha White', is_active=True)
         self.db.add(odd_team)
