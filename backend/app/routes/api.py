@@ -2561,6 +2561,7 @@ def _field_instance_diag(instance: FieldInstance | None) -> dict[str, object]:
         'host_location_id': _serialize_diagnostic_id(getattr(instance, 'host_location_id', None)),
         'hosting_availability_id': _serialize_diagnostic_id(getattr(instance, 'hosting_availability_id', None)),
         'instance_date': _format_diagnostic_date(getattr(instance, 'instance_date', None)),
+        'is_generated': bool(getattr(instance, 'is_generated', False)),
     }
 
 
@@ -2692,7 +2693,10 @@ def _regenerate_generated_slots(
     slot_date = availability.primary_game_date or availability.available_date
     host = availability.host_location or (availability.field.host_location if availability.field else None) or (availability.physical_field_area.host_location if availability.physical_field_area else None)
     host_location_name = host.name if host else None
-    before_instances = db.query(FieldInstance).filter(FieldInstance.hosting_availability_id == availability.id).all()
+    before_instances = db.query(FieldInstance).filter(
+        FieldInstance.hosting_availability_id == availability.id,
+        FieldInstance.is_generated.is_(True),
+    ).all()
     diagnostics = _generated_slot_regeneration_diagnostics(availability, host_location_id, host_location_name, len(before_instances))
 
     host_plan_rows = _host_plan_rows_for_week_date(db, availability.season_id, availability.week_id, slot_date)
@@ -2717,6 +2721,7 @@ def _regenerate_generated_slots(
 
     generated_slot_count_before = db.query(GameSlot.id).join(GameSlot.field_instance).filter(
         FieldInstance.hosting_availability_id == availability.id,
+        FieldInstance.is_generated.is_(True),
     ).count()
     prior_turf_waves = db.query(TurfWave).filter(TurfWave.hosting_availability_id == availability.id).order_by(TurfWave.start_time.asc(), TurfWave.id.asc()).all()
     turf_wave_regeneration_diagnostics = {
@@ -2745,6 +2750,7 @@ def _regenerate_generated_slots(
 
     existing_slots = db.query(GameSlot).join(GameSlot.field_instance).filter(
         FieldInstance.hosting_availability_id == availability.id,
+        FieldInstance.is_generated.is_(True),
     ).all()
     prior_generated_slot_ids = {slot.id for slot in existing_slots}
     locked_slots: list[GameSlot] = []
@@ -2782,6 +2788,26 @@ def _regenerate_generated_slots(
 
     stale_wave_ids = [wave_id for (wave_id,) in db.query(TurfWave.id).filter(TurfWave.hosting_availability_id == availability.id).all()]
     if stale_wave_ids:
+        non_generated_wave_refs = db.query(GameSlot.id, GameSlot.turf_wave_id, GameSlot.field_instance_id).outerjoin(
+            FieldInstance, FieldInstance.id == GameSlot.field_instance_id,
+        ).filter(
+            GameSlot.turf_wave_id.in_(stale_wave_ids),
+            or_(FieldInstance.id.is_(None), FieldInstance.is_generated.is_not(True)),
+        ).all()
+        if non_generated_wave_refs:
+            diagnostics['turf_waves_delete_blocked_by_non_generated_slot_refs'] = [
+                {
+                    'game_slot_id': _serialize_diagnostic_id(row.id),
+                    'turf_wave_id': _serialize_diagnostic_id(row.turf_wave_id),
+                    'field_instance_id': _serialize_diagnostic_id(row.field_instance_id),
+                }
+                for row in non_generated_wave_refs
+            ]
+            _abort_generated_slot_regeneration(
+                diagnostics,
+                'Generated slot regeneration could not safely delete turf waves because non-generated slots still reference them.',
+                status_code=409,
+            )
         diagnostics['turf_waves_deleted'] = db.query(TurfWave).filter(TurfWave.id.in_(stale_wave_ids)).delete(synchronize_session=False)
         turf_wave_regeneration_diagnostics['resequence_strategy_used'] = 'delete_and_recreate'
         diagnostics['warnings'].append(TURF_WAVE_REGENERATION_WARNINGS['delete_recreate'])
@@ -2805,7 +2831,10 @@ def _regenerate_generated_slots(
         raise
 
     def _metrics(new_slots: int = 0) -> dict[str, object]:
-        diagnostics['generated_field_instances_after'] = db.query(FieldInstance).filter(FieldInstance.hosting_availability_id == availability.id).count()
+        diagnostics['generated_field_instances_after'] = db.query(FieldInstance).filter(
+            FieldInstance.hosting_availability_id == availability.id,
+            FieldInstance.is_generated.is_(True),
+        ).count()
         diagnostics['generated_slots_created'] = int(new_slots or 0)
         diagnostics['field_instances_created'] = len(diagnostics.get('created_field_instances') or [])
         diagnostics['turf_waves_created'] = db.query(TurfWave).filter(TurfWave.hosting_availability_id == availability.id).count()
@@ -2813,6 +2842,7 @@ def _regenerate_generated_slots(
         turf_wave_regeneration_diagnostics['final_sequence_numbers_by_start_time'] = _turf_wave_sequence_map(final_waves)
         turf_wave_regeneration_diagnostics['generated_slot_count_after'] = db.query(GameSlot.id).join(GameSlot.field_instance).filter(
             FieldInstance.hosting_availability_id == availability.id,
+            FieldInstance.is_generated.is_(True),
         ).count()
         validation_passed, validation = _validate_turf_wave_regeneration(db, availability.id, prior_generated_slot_ids)
         turf_wave_regeneration_diagnostics['validation_passed'] = validation_passed
@@ -3029,6 +3059,7 @@ def _regenerate_generated_slots(
                     field_name=field_name,
                     field_type=field_type,
                     is_active=True,
+                    is_generated=True,
                 )
                 detail['proposed_field_instance_ids'] = [str(instance.id)]
                 block_instances.append(instance)
@@ -3068,7 +3099,7 @@ def _regenerate_generated_slots(
                     'proposed_component_size': _normalize_field_size(field_type),
                     'proposed_component_index': None,
                 })
-            instance = FieldInstance(id=uuid.uuid4(), host_location_id=host_location_id, hosting_availability_id=availability.id, instance_date=slot_date, field_name=final_name, field_type=field_type, is_active=True)
+            instance = FieldInstance(id=uuid.uuid4(), host_location_id=host_location_id, hosting_availability_id=availability.id, instance_date=slot_date, field_name=final_name, field_type=field_type, is_active=True, is_generated=True)
             instances.append(instance)
             proposed_names.add(final_name)
             db.add(instance)
@@ -3128,7 +3159,10 @@ def _regenerate_generated_slots(
             slot_date,
         )
         raise
-    diagnostics['generated_field_instances_after'] = db.query(FieldInstance).filter(FieldInstance.hosting_availability_id == availability.id).count()
+    diagnostics['generated_field_instances_after'] = db.query(FieldInstance).filter(
+        FieldInstance.hosting_availability_id == availability.id,
+        FieldInstance.is_generated.is_(True),
+    ).count()
     logger.info('Generated %s field instances for availability_id=%s host_location_id=%s diagnostics=%s', len(instances), availability.id, host_location_id, diagnostics)
     logger.info('Generated %s game slots for availability_id=%s host_location_id=%s', created_slots, availability.id, host_location_id)
     return _metrics(created_slots)
@@ -3164,11 +3198,23 @@ def _regenerate_hosting_day(
                 logger.error('Host %s (%s) availability %s error: %s', host_name, host_id, availability_id, msg)
                 continue
 
-            before_instances = db.query(FieldInstance).filter(FieldInstance.hosting_availability_id == availability_id).count()
-            before_slots = db.query(GameSlot).join(GameSlot.field_instance).filter(FieldInstance.hosting_availability_id == availability_id).count()
+            before_instances = db.query(FieldInstance).filter(
+                FieldInstance.hosting_availability_id == availability_id,
+                FieldInstance.is_generated.is_(True),
+            ).count()
+            before_slots = db.query(GameSlot).join(GameSlot.field_instance).filter(
+                FieldInstance.hosting_availability_id == availability_id,
+                FieldInstance.is_generated.is_(True),
+            ).count()
             slot_metrics = _regenerate_generated_slots(db, availability, host_id, (demand_by_availability_id or {}).get(availability_id), (turf_layout_blocks_by_availability_id or {}).get(availability_id))
-            after_instances = db.query(FieldInstance).filter(FieldInstance.hosting_availability_id == availability_id).count()
-            after_slots = db.query(GameSlot).join(GameSlot.field_instance).filter(FieldInstance.hosting_availability_id == availability_id).count()
+            after_instances = db.query(FieldInstance).filter(
+                FieldInstance.hosting_availability_id == availability_id,
+                FieldInstance.is_generated.is_(True),
+            ).count()
+            after_slots = db.query(GameSlot).join(GameSlot.field_instance).filter(
+                FieldInstance.hosting_availability_id == availability_id,
+                FieldInstance.is_generated.is_(True),
+            ).count()
             result.field_instances_created += max(after_instances, before_instances)
             result.slots_created += max(after_slots, before_slots)
             result.total_slots_evaluated += int(slot_metrics['total_slots_evaluated'])
