@@ -2452,6 +2452,41 @@ class AutoScheduleRequiredGameGroupDiagnosticsTest(unittest.TestCase):
         self.assertNotIn('no_required_game_groups', result['root_cause_categories'])
         self.assertIn('no_generated_slots', result['root_cause_categories'])
 
+    def test_auto_schedule_attaches_doubleheader_repair_diagnostics_after_initial_placement(self):
+        host = HostLocation(
+            id=uuid.uuid4(),
+            organization_id=self.org.id,
+            name='League Park',
+            surface_type='GRASS_FIELD',
+            max_small_fields=2,
+            is_active=True,
+        )
+        availability = HostingAvailability(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week.id,
+            organization_id=self.org.id,
+            host_location_id=host.id,
+            available_date=self.week.start_date,
+            primary_game_date=self.week.start_date,
+            start_time=time(9, 0),
+            end_time=time(11, 0),
+            is_available=True,
+            active=True,
+        )
+        self.db.add_all([host, availability])
+        self.db.commit()
+
+        result = auto_schedule_entire_season({'season_id': self.season.id}, db=self.db)
+
+        diagnostics = result['auto_schedule_diagnostics']
+        self.assertEqual(result['total_games_created'], 2)
+        self.assertIn('doubleheader_repair', diagnostics)
+        self.assertIs(diagnostics['doubleheader_repair'], result['doubleheader_repair'])
+        self.assertIn('doubleheader_repair_ran', result)
+        self.assertIn('final_validation_ran', result)
+        self.assertIn('final_validation_status', result)
+
     def test_all_games_already_scheduled_is_not_reported_as_no_required_groups(self):
         self.db.add_all([
             Game(
