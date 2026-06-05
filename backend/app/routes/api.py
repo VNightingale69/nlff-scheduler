@@ -483,6 +483,17 @@ def _build_revised_scheduling_hierarchy_diagnostics(db: Session, season_id: uuid
     true_home_scheduled = 0
     true_home_not_scheduled: list[dict[str, object]] = []
     host_diag_by_id: dict[uuid.UUID, dict[str, object]] = {}
+    # Organization/community metadata is already loaded with scheduled rows via
+    # each team's organization_id, but diagnostics also need display names for
+    # selected host communities that may not appear as the joined home-team
+    # organization in a particular row. Build the lookup from persisted
+    # organization metadata rather than hard-coding community names.
+    try:
+        org_names_by_id = {org.id: org.name for org in db.query(Organization).all()}
+    except Exception as exc:
+        logger.exception('revised scheduling diagnostics failed to load organization names season_id=%s', season_id)
+        org_names_by_id = {}
+        diagnostics_warnings.append(f'Diagnostics warning: organization-name lookup unavailable ({exc}).')
     games_by_date: dict[date, list[tuple[Game, GameSlot | None, FieldInstance | None, HostLocation | None, Team, Team, Division, object, object]]] = {}
     starts_by_date: dict[date, set[time]] = {}
 
@@ -1394,6 +1405,8 @@ def _build_revised_scheduling_hierarchy_diagnostics(db: Session, season_id: uuid
     grass_field_usage_diagnostics = _build_grass_field_usage_diagnostics(db, season_id)
 
     return {
+        'diagnostics_status': 'SUCCEEDED',
+        'diagnostics_error': None,
         'diagnostics_warnings': list(dict.fromkeys(diagnostics_warnings + bug_warnings)),
         'schedule_health_summary': dict(schedule_health_summary, true_home_host_violations=true_home_host_violation_count, host_owner_as_away_violations=host_owner_as_away_violation_count, validation_failures=int(schedule_health_summary.get('validation_failures') or 0) + true_home_host_violation_count),
         'turf_stadium_schedule_summary': turf_stadium_schedule_summary,
@@ -16766,7 +16779,8 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
             'moves_accepted': int(moves_accepted or 0),
             'moves_rejected': int(moves_rejected or 0),
             'candidates_considered': int(moves_considered or 0),
-            'candidates_accepted': int(moves_accepted or 0),
+            'candidates_accepted': min(int(moves_accepted or 0), int(moves_considered or 0)),
+            'scheduled_games_created': int(moves_accepted or 0),
             'candidates_rejected': int(moves_rejected or 0),
             'top_rejection_reasons': [],
         }
@@ -16788,7 +16802,8 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         if moves_rejected is not None:
             phase['moves_rejected'] = int(moves_rejected or 0)
         phase['candidates_considered'] = int(phase.get('moves_considered') or 0)
-        phase['candidates_accepted'] = int(phase.get('moves_accepted') or 0)
+        phase['scheduled_games_created'] = int(phase.get('moves_accepted') or 0)
+        phase['candidates_accepted'] = min(int(phase.get('moves_accepted') or 0), int(phase.get('moves_considered') or 0))
         phase['candidates_rejected'] = int(phase.get('moves_rejected') or 0)
         override_reasons = phase.pop('_rejection_reasons_override', None)
         if isinstance(override_reasons, dict):
@@ -16805,9 +16820,9 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         if elapsed_ms > AUTO_SCHEDULE_PHASE_WARN_MS:
             logger.warning('WARN: auto-schedule phase exceeded expected runtime. phase=%s elapsed_ms=%s', phase.get('phase_name'), elapsed_ms)
         log_method(
-            'auto_schedule_phase_complete phase=%s start_time=%s end_time=%s elapsed_ms=%s records_evaluated=%s candidates_considered=%s candidates_accepted=%s candidates_rejected=%s top_rejection_reasons=%s',
+            'auto_schedule_phase_complete phase=%s start_time=%s end_time=%s elapsed_ms=%s records_evaluated=%s candidates_considered=%s candidates_accepted=%s scheduled_games_created=%s candidates_rejected=%s top_rejection_reasons=%s',
             phase.get('phase_name'), phase.get('start_time'), phase.get('end_time'), phase.get('elapsed_ms'),
-            phase.get('records_evaluated'), phase.get('candidates_considered'), phase.get('candidates_accepted'), phase.get('candidates_rejected'), phase.get('top_rejection_reasons'),
+            phase.get('records_evaluated'), phase.get('candidates_considered'), phase.get('candidates_accepted'), phase.get('scheduled_games_created'), phase.get('candidates_rejected'), phase.get('top_rejection_reasons'),
         )
         return phase
 
@@ -18232,10 +18247,20 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         and not validation_errors
     )
     optional_budget_remaining = (perf_counter() - auto_schedule_started_perf) < int(runtime_limits.get('max_total_runtime_seconds') or 0)
+    optional_optimization_skipped = not bool(pre_compaction_complete and not dry_run and optional_budget_remaining)
+    optional_optimization_skip_reasons: list[str] = []
+    if not pre_compaction_complete:
+        optional_optimization_skip_reasons.append('pre_compaction_schedule_incomplete_or_invalid')
+    if dry_run:
+        optional_optimization_skip_reasons.append('dry_run')
     if not optional_budget_remaining:
+        optional_optimization_skip_reasons.append('runtime_protection')
         runtime_warning = 'WARN: optional optimization stopped to preserve runtime.'
         warnings.append(runtime_warning)
         logger.warning('%s season_id=%s', runtime_warning, season_id)
+    optional_optimization_skip_reason = '; '.join(optional_optimization_skip_reasons) if optional_optimization_skipped else None
+    auto_schedule_diagnostics['optional_optimization_skipped'] = optional_optimization_skipped
+    auto_schedule_diagnostics['optional_optimization_skip_reason'] = optional_optimization_skip_reason
     pull_forward_phase = _start_phase('pull-forward pass')
     turf_wave_compaction = _run_turf_wave_compaction_pass(
         db,
@@ -18261,6 +18286,8 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
             season_id,
             compaction_diagnostics=turf_wave_compaction,
         )
+        revised_hierarchy_diagnostics['diagnostics_status'] = revised_hierarchy_diagnostics.get('diagnostics_status') or 'SUCCEEDED'
+        revised_hierarchy_diagnostics['diagnostics_error'] = revised_hierarchy_diagnostics.get('diagnostics_error')
         auto_schedule_diagnostics['revised_scheduling_hierarchy_diagnostics'] = revised_hierarchy_diagnostics
         auto_schedule_diagnostics['Schedule Health Summary'] = revised_hierarchy_diagnostics.get('schedule_health_summary')
         auto_schedule_diagnostics['Turf Stadium Schedule Summary'] = revised_hierarchy_diagnostics.get('turf_stadium_schedule_summary')
@@ -18310,8 +18337,18 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
             warnings.append(str(diagnostic_warning))
     except Exception as exc:
         logger.exception('revised scheduling hierarchy diagnostics failed season_id=%s', season_id)
-        warning = f'Diagnostics warning: revised scheduling hierarchy diagnostics unavailable ({exc}).'
+        diagnostics_error = str(exc)
+        revised_hierarchy_diagnostics = {
+            'diagnostics_status': 'FAILED',
+            'diagnostics_error': diagnostics_error,
+            'diagnostics_warnings': [f'Diagnostics warning: revised scheduling hierarchy diagnostics unavailable ({diagnostics_error}).'],
+        }
+        warning = f'Diagnostics warning: revised scheduling hierarchy diagnostics unavailable ({diagnostics_error}).'
         warnings.append(warning)
+        validation_errors.append(f'REVISED_HIERARCHY_DIAGNOSTICS_FAILED: mandatory hierarchy validation unavailable ({diagnostics_error}).')
+        auto_schedule_diagnostics['revised_scheduling_hierarchy_diagnostics'] = revised_hierarchy_diagnostics
+        auto_schedule_diagnostics['revised_scheduling_hierarchy_diagnostics_status'] = 'FAILED'
+        auto_schedule_diagnostics['revised_scheduling_hierarchy_diagnostics_error'] = diagnostics_error
         auto_schedule_diagnostics.setdefault('diagnostics_warnings', []).append(warning)
     _finish_phase(
         true_home_phase,
@@ -18346,6 +18383,12 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         informational_notes.append('Host owner is away team for one or more games; host-owner home assignment is verification-only.')
     if int(host_location_verification.get('neutral_site_games') or 0) > 0:
         informational_notes.append('Neutral-site games were found during host-location verification.')
+
+    auto_schedule_diagnostics['revised_scheduling_hierarchy_diagnostics_status'] = revised_hierarchy_diagnostics.get('diagnostics_status') or ('SUCCEEDED' if revised_hierarchy_diagnostics else 'FAILED')
+    auto_schedule_diagnostics['revised_scheduling_hierarchy_diagnostics_error'] = revised_hierarchy_diagnostics.get('diagnostics_error')
+    auto_schedule_diagnostics['final_validation_ran'] = True
+    auto_schedule_diagnostics['final_validation_failures'] = list(validation_errors)
+    auto_schedule_diagnostics['final_validation_status'] = 'FAILED' if validation_errors else 'PASSED'
 
     expected_games_total = int(auto_schedule_diagnostics.get('expected_games_total') or 0)
     committed_games_count = int(auto_schedule_diagnostics.get('committed_games_count') or 0)
@@ -18433,6 +18476,11 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         'repeated_candidate_checks_skipped': int(turf_wave_compaction.get('repeated_candidate_checks_skipped') or 0) if 'turf_wave_compaction' in locals() else 0,
         'optimization_limits_hit': optimization_limits_hit,
         'timeout_triggered': timeout_triggered,
+        'optional_optimization_skipped': auto_schedule_diagnostics.get('optional_optimization_skipped'),
+        'optional_optimization_skip_reason': auto_schedule_diagnostics.get('optional_optimization_skip_reason'),
+        'final_validation_ran': auto_schedule_diagnostics.get('final_validation_ran'),
+        'final_validation_status': auto_schedule_diagnostics.get('final_validation_status'),
+        'final_validation_failures': auto_schedule_diagnostics.get('final_validation_failures') or [],
         'best_valid_schedule_returned': bool(turf_wave_compaction.get('best_valid_schedule_returned', True)) if 'turf_wave_compaction' in locals() else True,
         'top_rejection_reasons': ([
             {'reason': reason, 'count': count}
@@ -18470,6 +18518,11 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         'root_cause_categories': root_cause_categories,
         'auto_schedule_diagnostics': auto_schedule_diagnostics,
         'revised_scheduling_hierarchy_diagnostics': auto_schedule_diagnostics.get('revised_scheduling_hierarchy_diagnostics') or {},
+        'optional_optimization_skipped': auto_schedule_diagnostics.get('optional_optimization_skipped'),
+        'optional_optimization_skip_reason': auto_schedule_diagnostics.get('optional_optimization_skip_reason'),
+        'final_validation_ran': auto_schedule_diagnostics.get('final_validation_ran'),
+        'final_validation_status': auto_schedule_diagnostics.get('final_validation_status'),
+        'final_validation_failures': auto_schedule_diagnostics.get('final_validation_failures') or [],
         'host_location_vs_home_team_verification': host_location_verification,
         'slot_capacity_validation': slot_preflight,
         'games_skipped': sum(skipped_attempts_by_reason.values()),
