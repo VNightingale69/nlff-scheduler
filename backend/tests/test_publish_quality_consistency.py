@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import Base
 from app.models import Division, FieldInstance, Game, GameSlot, GameStatus, HostLocation, Organization, Season, Team, Week
-from app.routes.api import build_schedule_quality_report, publish_schedule
+from app.routes.api import _build_global_doubleheader_validation, _raise_if_single_doubleheader_manual_move, build_schedule_quality_report, publish_schedule
 
 
 class PublishQualityConsistencyTest(unittest.TestCase):
@@ -91,6 +91,52 @@ class PublishQualityConsistencyTest(unittest.TestCase):
         self.assertEqual(report['metrics']['doubleheader_split_location_count'], 1)
         self.assertTrue(any(error['code'] == 'non_back_to_back_double_headers' for error in report['hard_errors']))
         self.assertTrue(any(error['code'] == 'split_location_double_headers' for error in report['hard_errors']))
+
+    def test_global_doubleheader_validation_detects_away_team_participation_and_required_diagnostics(self):
+        self.db.query(Game).delete()
+        host_a = HostLocation(id=uuid.uuid4(), organization_id=self.org.id, name='Host A', is_active=True)
+        host_b = HostLocation(id=uuid.uuid4(), organization_id=self.org.id, name='Host B', is_active=True)
+        team_c = Team(id=uuid.uuid4(), organization_id=self.org.id, division_id=self.division.id, name='C', is_active=True)
+        self.db.add_all([host_a, host_b, team_c])
+        first = self._add_scheduled_game_with_slot(self.team_b, self.team_a, time(9, 0), host_a)
+        second = self._add_scheduled_game_with_slot(team_c, self.team_a, time(11, 0), host_b)
+        self.db.commit()
+
+        validation = _build_global_doubleheader_validation(self.db, self.season.id)
+
+        self.assertEqual(validation['doubleheader_not_back_to_back_count'], 1)
+        self.assertEqual(validation['doubleheader_split_location_count'], 1)
+        pair = validation['doubleheader_pairs'][0]
+        self.assertTrue(pair['inferred_pair'])
+        self.assertEqual(pair['team_id'], str(self.team_a.id))
+        self.assertEqual(pair['team_name'], self.team_a.name)
+        self.assertEqual(pair['division_id'], str(self.division.id))
+        self.assertEqual(pair['division_name'], self.division.name)
+        self.assertEqual(pair['game_date'], self.week.start_date.isoformat())
+        self.assertEqual(pair['game_1_id'], str(first.id))
+        self.assertEqual(pair['game_2_id'], str(second.id))
+        self.assertFalse(pair['same_location'])
+        self.assertFalse(pair['back_to_back'])
+        self.assertTrue(pair['compatible_field_type'])
+        self.assertTrue(pair['selected_host_compliant'])
+        self.assertFalse(pair['pair_valid'])
+        self.assertIn('DOUBLEHEADER_SPLIT_LOCATION', pair['validation_failure_reasons'])
+        self.assertIn('DOUBLEHEADER_NOT_BACK_TO_BACK', pair['validation_failure_reasons'])
+
+    def test_manual_single_game_move_rejects_any_inferred_doubleheader_pair_member(self):
+        self.db.query(Game).delete()
+        host = HostLocation(id=uuid.uuid4(), organization_id=self.org.id, name='Host A', is_active=True)
+        team_c = Team(id=uuid.uuid4(), organization_id=self.org.id, division_id=self.division.id, name='C', is_active=True)
+        self.db.add_all([host, team_c])
+        first = self._add_scheduled_game_with_slot(self.team_b, self.team_a, time(9, 0), host)
+        self._add_scheduled_game_with_slot(team_c, self.team_a, time(10, 0), host)
+        self.db.commit()
+
+        with self.assertRaises(Exception) as ctx:
+            _raise_if_single_doubleheader_manual_move(self.db, first, action_source='unit-test')
+
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertEqual(ctx.exception.detail['error'], 'DOUBLEHEADER_PAIR_SPLIT_MOVE_REJECTED')
 
     def test_publish_uses_same_quality_report_source(self):
         report = build_schedule_quality_report(self.db, self.season.id)
