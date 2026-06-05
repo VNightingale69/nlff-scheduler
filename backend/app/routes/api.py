@@ -83,8 +83,12 @@ DOUBLEHEADER_FINAL_FAILURE_CODES = {
     'DOUBLEHEADER_NOT_BACK_TO_BACK',
     'DOUBLEHEADER_SPLIT_LOCATION',
     'DOUBLEHEADER_FIELD_TYPE_MISMATCH',
-    'DOUBLEHEADER_PAIR_VALIDATION_FAILED',
+    'DOUBLEHEADER_SELECTED_HOST_VIOLATION',
+    'DOUBLEHEADER_TRUE_HOME_HOST_VIOLATION',
+    'DOUBLEHEADER_PAIR_TEAM_CONFLICT',
+    'DOUBLEHEADER_PAIR_FIELD_CONFLICT',
     'DOUBLEHEADER_TOO_MANY_GAMES_FOR_TEAM_DIVISION_DATE',
+    'DOUBLEHEADER_PAIR_VALIDATION_FAILED',
 }
 
 FINAL_VALIDATION_COUNTER_KEYS = (
@@ -401,6 +405,11 @@ def _build_global_doubleheader_validation(db: Session, season_id: uuid.UUID | st
         'doubleheader_field_type_mismatch_count': 0,
         'doubleheader_pair_validation_failure_count': 0,
         'doubleheader_too_many_games_count': 0,
+        'doubleheader_selected_host_violation_count': 0,
+        'doubleheader_true_home_host_violation_count': 0,
+        'doubleheader_pair_team_conflict_count': 0,
+        'doubleheader_pair_field_conflict_count': 0,
+        'doubleheader_host_owner_as_away_count': 0,
     }
 
     for (team_id, division_id, game_date), games in sorted(games_by_team_division_date.items(), key=lambda item: (item[0][2] or date.min, str(item[0][1]), str(item[0][0]))):
@@ -428,7 +437,8 @@ def _build_global_doubleheader_validation(db: Session, season_id: uuid.UUID | st
         _g1, slot_1, fi_1, host_1, home_1, away_1, div_1, _org_1, _status_1 = row_1
         _g2, slot_2, fi_2, host_2, home_2, away_2, div_2, _org_2, _status_2 = row_2
         team = home_1 if home_1.id == team_id else away_1 if away_1.id == team_id else db.get(Team, team_id)
-        required_size = _required_field_type_for_division(div_1)
+        division_context = getattr(team, 'division', None) or (db.get(Division, division_id) if division_id else div_1)
+        required_size = _required_field_type_for_division(division_context)
         field_type_1 = _normalize_field_size(slot_1.field_type if slot_1 else (fi_1.field_type if fi_1 else None))
         field_type_2 = _normalize_field_size(slot_2.field_type if slot_2 else (fi_2.field_type if fi_2 else None))
         host_id_1 = getattr(slot_1, 'host_location_id', None) or getattr(host_1, 'id', None) or game_1.host_location_id
@@ -469,7 +479,8 @@ def _build_global_doubleheader_validation(db: Session, season_id: uuid.UUID | st
         team_conflict = game_1.id in team_conflict_game_ids or game_2.id in team_conflict_game_ids
         field_conflict = game_1.id in field_conflict_game_ids or game_2.id in field_conflict_game_ids
         host_owner_as_away = not true_home_host_compliant
-        same_division = getattr(div_1, 'id', None) == getattr(div_2, 'id', None) == division_id
+        participating_division_ids = {getattr(home_1, 'division_id', None), getattr(away_1, 'division_id', None), getattr(home_2, 'division_id', None), getattr(away_2, 'division_id', None)}
+        same_division = participating_division_ids == {division_id}
         pair_valid = all([
             same_division,
             same_location,
@@ -492,15 +503,19 @@ def _build_global_doubleheader_validation(db: Session, season_id: uuid.UUID | st
             failure_reasons.append('DOUBLEHEADER_FIELD_TYPE_MISMATCH')
             counts['doubleheader_field_type_mismatch_count'] += 1
         if not selected_host_compliant:
-            failure_reasons.append('DOUBLEHEADER_PAIR_SELECTED_HOST_VIOLATION')
+            failure_reasons.append('DOUBLEHEADER_SELECTED_HOST_VIOLATION')
+            counts['doubleheader_selected_host_violation_count'] += 1
         if not true_home_host_compliant:
-            failure_reasons.append('DOUBLEHEADER_PAIR_TRUE_HOME_HOST_VIOLATION')
+            failure_reasons.append('DOUBLEHEADER_TRUE_HOME_HOST_VIOLATION')
+            counts['doubleheader_true_home_host_violation_count'] += 1
         if team_conflict:
             failure_reasons.append('DOUBLEHEADER_PAIR_TEAM_CONFLICT')
+            counts['doubleheader_pair_team_conflict_count'] += 1
         if field_conflict:
             failure_reasons.append('DOUBLEHEADER_PAIR_FIELD_CONFLICT')
+            counts['doubleheader_pair_field_conflict_count'] += 1
         if host_owner_as_away:
-            failure_reasons.append('DOUBLEHEADER_PAIR_HOST_OWNER_AS_AWAY')
+            counts['doubleheader_host_owner_as_away_count'] += 1
         if not same_division:
             failure_reasons.append('DOUBLEHEADER_PAIR_VALIDATION_FAILED')
         if not pair_valid:
@@ -513,8 +528,8 @@ def _build_global_doubleheader_validation(db: Session, season_id: uuid.UUID | st
             'team_id': str(team_id),
             'team_name': team.name if team else None,
             'division_id': str(division_id) if division_id else None,
-            'division_name': div_1.name if div_1 else None,
-            'division_group': div_1.division_group if div_1 else None,
+            'division_name': division_context.name if division_context else None,
+            'division_group': division_context.division_group if division_context else None,
             'game_date': game_date.isoformat() if game_date else None,
             'game_1_id': str(game_1.id),
             'game_1_start_time': _format_diagnostic_time(game_1.kickoff_time),
@@ -836,6 +851,11 @@ def _build_revised_scheduling_hierarchy_diagnostics(db: Session, season_id: uuid
         'doubleheader_field_type_mismatch_count': int(global_doubleheader_validation.get('doubleheader_field_type_mismatch_count') or 0),
         'doubleheader_pair_validation_failure_count': int(global_doubleheader_validation.get('doubleheader_pair_validation_failure_count') or 0),
         'doubleheader_too_many_games_count': int(global_doubleheader_validation.get('doubleheader_too_many_games_count') or 0),
+        'doubleheader_selected_host_violation_count': int(global_doubleheader_validation.get('doubleheader_selected_host_violation_count') or 0),
+        'doubleheader_true_home_host_violation_count': int(global_doubleheader_validation.get('doubleheader_true_home_host_violation_count') or 0),
+        'doubleheader_pair_team_conflict_count': int(global_doubleheader_validation.get('doubleheader_pair_team_conflict_count') or 0),
+        'doubleheader_pair_field_conflict_count': int(global_doubleheader_validation.get('doubleheader_pair_field_conflict_count') or 0),
+        'doubleheader_host_owner_as_away_count': int(global_doubleheader_validation.get('doubleheader_host_owner_as_away_count') or 0),
         'host_owner_as_away_games': len(host_owner_as_away_games),
         'invalid_field_size_assignments': len(invalid_field_size_assignments),
         'invalid_wave_configuration_games': len(invalid_wave_configuration_games),
@@ -1632,6 +1652,11 @@ def _build_revised_scheduling_hierarchy_diagnostics(db: Session, season_id: uuid
         'doubleheader_field_type_mismatch_count': int(global_doubleheader_validation.get('doubleheader_field_type_mismatch_count') or 0),
         'doubleheader_pair_validation_failure_count': int(global_doubleheader_validation.get('doubleheader_pair_validation_failure_count') or 0),
         'doubleheader_too_many_games_count': int(global_doubleheader_validation.get('doubleheader_too_many_games_count') or 0),
+        'doubleheader_selected_host_violation_count': int(global_doubleheader_validation.get('doubleheader_selected_host_violation_count') or 0),
+        'doubleheader_true_home_host_violation_count': int(global_doubleheader_validation.get('doubleheader_true_home_host_violation_count') or 0),
+        'doubleheader_pair_team_conflict_count': int(global_doubleheader_validation.get('doubleheader_pair_team_conflict_count') or 0),
+        'doubleheader_pair_field_conflict_count': int(global_doubleheader_validation.get('doubleheader_pair_field_conflict_count') or 0),
+        'doubleheader_host_owner_as_away_count': int(global_doubleheader_validation.get('doubleheader_host_owner_as_away_count') or 0),
         'doubleheader_pairs': list(global_doubleheader_validation.get('doubleheader_pairs') or []),
         'doubleheader_moves_considered': int((compaction_diagnostics or {}).get('doubleheader_moves_considered') or (compaction_diagnostics or {}).get('attempted_doubleheader_pair_moves') or 0),
         'attempted_doubleheader_pair_moves': int((compaction_diagnostics or {}).get('attempted_doubleheader_pair_moves') or 0),
@@ -8597,6 +8622,10 @@ def build_schedule_quality_report(db: Session, season_id: uuid.UUID) -> dict[str
     field_type_mismatch_double_headers = int(global_doubleheader_validation.get('doubleheader_field_type_mismatch_count') or 0)
     doubleheader_pair_validation_failures = int(global_doubleheader_validation.get('doubleheader_pair_validation_failure_count') or 0)
     doubleheader_too_many_games = int(global_doubleheader_validation.get('doubleheader_too_many_games_count') or 0)
+    doubleheader_selected_host_violations = int(global_doubleheader_validation.get('doubleheader_selected_host_violation_count') or 0)
+    doubleheader_true_home_host_violations = int(global_doubleheader_validation.get('doubleheader_true_home_host_violation_count') or 0)
+    doubleheader_pair_team_conflicts = int(global_doubleheader_validation.get('doubleheader_pair_team_conflict_count') or 0)
+    doubleheader_pair_field_conflicts = int(global_doubleheader_validation.get('doubleheader_pair_field_conflict_count') or 0)
 
     repeat_matchups = 0
     for (team_a, _team_b), count in matchup_counts.items():
@@ -8632,6 +8661,10 @@ def build_schedule_quality_report(db: Session, season_id: uuid.UUID) -> dict[str
         'doubleheader_field_type_mismatch_count': field_type_mismatch_double_headers,
         'doubleheader_pair_validation_failure_count': doubleheader_pair_validation_failures,
         'doubleheader_too_many_games_count': doubleheader_too_many_games,
+        'doubleheader_selected_host_violation_count': doubleheader_selected_host_violations,
+        'doubleheader_true_home_host_violation_count': doubleheader_true_home_host_violations,
+        'doubleheader_pair_team_conflict_count': doubleheader_pair_team_conflicts,
+        'doubleheader_pair_field_conflict_count': doubleheader_pair_field_conflicts,
         'odd_team_divisions': len(odd_team_divisions),
         'uneven_double_header_distribution': uneven_double_header_distribution,
     }
@@ -8645,6 +8678,11 @@ def build_schedule_quality_report(db: Session, season_id: uuid.UUID) -> dict[str
         + ([{'code': 'split_location_double_headers', 'count': split_location_double_headers, 'issues': global_doubleheader_validation.get('failures') or []}] if split_location_double_headers > 0 else [])
         + ([{'code': 'doubleheader_field_type_mismatch', 'count': field_type_mismatch_double_headers, 'issues': global_doubleheader_validation.get('failures') or []}] if field_type_mismatch_double_headers > 0 else [])
         + ([{'code': 'doubleheader_too_many_games', 'count': doubleheader_too_many_games, 'issues': global_doubleheader_validation.get('failures') or []}] if doubleheader_too_many_games > 0 else [])
+        + ([{'code': 'doubleheader_selected_host_violations', 'count': doubleheader_selected_host_violations, 'issues': global_doubleheader_validation.get('failures') or []}] if doubleheader_selected_host_violations > 0 else [])
+        + ([{'code': 'doubleheader_true_home_host_violations', 'count': doubleheader_true_home_host_violations, 'issues': global_doubleheader_validation.get('failures') or []}] if doubleheader_true_home_host_violations > 0 else [])
+        + ([{'code': 'doubleheader_pair_team_conflicts', 'count': doubleheader_pair_team_conflicts, 'issues': global_doubleheader_validation.get('failures') or []}] if doubleheader_pair_team_conflicts > 0 else [])
+        + ([{'code': 'doubleheader_pair_field_conflicts', 'count': doubleheader_pair_field_conflicts, 'issues': global_doubleheader_validation.get('failures') or []}] if doubleheader_pair_field_conflicts > 0 else [])
+        + ([{'code': 'doubleheader_pair_validation_failed', 'count': doubleheader_pair_validation_failures, 'issues': global_doubleheader_validation.get('failures') or []}] if doubleheader_pair_validation_failures > 0 else [])
     )
     legacy_hard_errors = [e for e in hard_errors if not (isinstance(e, dict) and 'issues' in e and not e['issues'])]
     final_validation = _build_final_schedule_validation_result(db, season_id)
@@ -9261,23 +9299,10 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         # Optimizer candidates in this pass are single-game moves.  Any game that
         # is already part of a data-inferred team/division/date doubleheader must
         # be protected from single-game movement; pair movement requires a separate
-        # atomic validator that can move both games together.
-        division_id = game.home_team.division_id if game.home_team else None
-        for team_id in (game.home_team_id, game.away_team_id):
-            team = db.get(Team, team_id)
-            team_division_id = getattr(team, 'division_id', None) or division_id
-            games = db.query(Game).join(Game.status).join(
-                Team, Game.home_team_id == Team.id
-            ).filter(
-                Game.season_id == season_id,
-                GameStatus.code != 'UNSCHEDULED',
-                Game.game_date == game.game_date,
-                Team.division_id == team_division_id,
-                or_(Game.home_team_id == team_id, Game.away_team_id == team_id),
-            ).all()
-            if len(games) >= 2:
-                return True
-        return False
+        # atomic validator that can move both games together.  Use the same global
+        # participation-based validator as diagnostics/reporting so home-only joins
+        # cannot miss away-team doubleheaders.
+        return _game_doubleheader_pair_context(db, game) is not None
 
     def _record_rejection_reason(reason: str) -> None:
         counts = diagnostics.get('rejected_moves_by_reason')
@@ -18592,6 +18617,10 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
             ('DOUBLEHEADER_NOT_BACK_TO_BACK', 'doubleheader_not_back_to_back_count'),
             ('DOUBLEHEADER_SPLIT_LOCATION', 'doubleheader_split_location_count'),
             ('DOUBLEHEADER_FIELD_TYPE_MISMATCH', 'doubleheader_field_type_mismatch_count'),
+            ('DOUBLEHEADER_SELECTED_HOST_VIOLATION', 'doubleheader_selected_host_violation_count'),
+            ('DOUBLEHEADER_TRUE_HOME_HOST_VIOLATION', 'doubleheader_true_home_host_violation_count'),
+            ('DOUBLEHEADER_PAIR_TEAM_CONFLICT', 'doubleheader_pair_team_conflict_count'),
+            ('DOUBLEHEADER_PAIR_FIELD_CONFLICT', 'doubleheader_pair_field_conflict_count'),
             ('DOUBLEHEADER_PAIR_VALIDATION_FAILED', 'doubleheader_pair_validation_failure_count'),
             ('DOUBLEHEADER_TOO_MANY_GAMES_FOR_TEAM_DIVISION_DATE', 'doubleheader_too_many_games_count'),
         ):
@@ -18674,6 +18703,10 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         'doubleheader_not_back_to_back_count',
         'doubleheader_split_location_count',
         'doubleheader_field_type_mismatch_count',
+        'doubleheader_selected_host_violation_count',
+        'doubleheader_true_home_host_violation_count',
+        'doubleheader_pair_team_conflict_count',
+        'doubleheader_pair_field_conflict_count',
         'doubleheader_pair_validation_failure_count',
         'doubleheader_too_many_games_count',
     ))
