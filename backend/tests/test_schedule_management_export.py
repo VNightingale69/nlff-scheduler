@@ -56,5 +56,22 @@ class ScheduleManagementExportTest(unittest.TestCase):
         )
 
 
+class ScheduleManagementExportIntegrityGuardTest(unittest.TestCase):
+    def test_export_row_downgrades_scheduled_without_complete_assignment(self):
+        values = _schedule_export_row_values(
+            SimpleNamespace(game_date=date(2026, 8, 9), kickoff_time=time(9, 0)),
+            None,
+            None,
+            SimpleNamespace(name='Westosha Stadium'),
+            SimpleNamespace(name='Home'),
+            SimpleNamespace(name='Away'),
+            SimpleNamespace(division_group='Coed', name='2-3'),
+            SimpleNamespace(code='SCHEDULED'),
+        )
+
+        self.assertEqual(values[-1], 'VALIDATION_FAILED')
+        self.assertEqual(values[6], '')
+        self.assertEqual(values[7], '')
+
 if __name__ == '__main__':
     unittest.main()

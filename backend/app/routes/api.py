@@ -155,6 +155,393 @@ def _final_validation_failure(code: str, count: int, message: str, details: obje
     return row
 
 
+
+
+SCHEDULED_GAME_INTEGRITY_FAILURE_CODES = {
+    'SCHEDULED_GAME_MISSING_HOST_LOCATION',
+    'SCHEDULED_GAME_MISSING_FIELD',
+    'SCHEDULED_GAME_MISSING_FIELD_TYPE',
+    'SCHEDULED_GAME_MISSING_GAME_SLOT',
+    'SCHEDULED_GAME_SLOT_NOT_FOUND',
+    'SCHEDULED_GAME_FIELD_INSTANCE_NOT_FOUND',
+    'SCHEDULED_GAME_SLOT_HOST_MISMATCH',
+    'SCHEDULED_GAME_SLOT_DATE_MISMATCH',
+    'SCHEDULED_GAME_SLOT_TIME_MISMATCH',
+    'SCHEDULED_GAME_FIELD_TYPE_MISMATCH',
+    'SCHEDULED_GAME_SELECTED_HOST_VIOLATION',
+    'SCHEDULED_GAME_FIELD_CONFLICT',
+    'SCHEDULED_GAME_TEAM_CONFLICT',
+    'GENERATED_SLOT_INTEGRITY_FAILURE',
+}
+
+
+SCHEDULED_GAME_REPAIR_UNSCHEDULE_REASON = 'SCHEDULED_GAME_ORPHANED_AND_UNSCHEDULED'
+
+
+def _is_scheduled_status_code(value: object) -> bool:
+    return str(value or '').strip().upper() == 'SCHEDULED'
+
+
+def _get_unscheduled_status_id(db: Session) -> uuid.UUID | None:
+    status = db.query(GameStatus).filter(func.lower(GameStatus.code) == 'unscheduled').order_by(GameStatus.created_at.asc()).first()
+    if status:
+        return status.id
+    status = GameStatus(code='UNSCHEDULED', label='Unscheduled', is_active=True)
+    db.add(status)
+    db.flush()
+    return status.id
+
+
+def _scheduled_status_id(db: Session) -> uuid.UUID | None:
+    status = db.query(GameStatus).filter(func.lower(GameStatus.code) == 'scheduled').order_by(GameStatus.created_at.asc()).first()
+    return status.id if status else None
+
+
+def _slot_for_game(db: Session, game_id: uuid.UUID | None) -> GameSlot | None:
+    if not game_id:
+        return None
+    return db.query(GameSlot).filter(GameSlot.assigned_game_id == game_id).order_by(GameSlot.created_at.asc()).first()
+
+
+def _field_instance_for_assignment(db: Session, game: Game, slot: GameSlot | None) -> FieldInstance | None:
+    field_instance_id = getattr(slot, 'field_instance_id', None) or getattr(game, 'field_instance_id', None)
+    return db.get(FieldInstance, field_instance_id) if field_instance_id else None
+
+
+def _scheduled_game_status_query(db: Session, season_id: uuid.UUID | str | None = None):
+    query = db.query(Game, GameStatus).join(Game.status).filter(func.lower(GameStatus.code) == 'scheduled')
+    if season_id:
+        query = query.filter(Game.season_id == season_id)
+    return query
+
+
+def _scheduled_game_integrity_context(db: Session, game: Game) -> tuple[GameSlot | None, FieldInstance | None, HostLocation | None, Team | None, Team | None, Division | None]:
+    slot = _slot_for_game(db, game.id)
+    fi = _field_instance_for_assignment(db, game, slot)
+    host_id = getattr(slot, 'host_location_id', None) or getattr(game, 'host_location_id', None) or getattr(fi, 'host_location_id', None)
+    host = db.get(HostLocation, host_id) if host_id else None
+    home = db.get(Team, game.home_team_id) if getattr(game, 'home_team_id', None) else None
+    away = db.get(Team, game.away_team_id) if getattr(game, 'away_team_id', None) else None
+    division = db.get(Division, home.division_id) if home and getattr(home, 'division_id', None) else None
+    return slot, fi, host, home, away, division
+
+
+def _diagnostic_team_name(team: Team | None) -> str | None:
+    return getattr(team, 'name', None) if team else None
+
+
+def _scheduled_game_integrity_detail(
+    db: Session,
+    game: Game,
+    status_before: str,
+    status_after: str,
+    slot: GameSlot | None,
+    fi: FieldInstance | None,
+    host: HostLocation | None,
+    home: Team | None,
+    away: Team | None,
+    division: Division | None,
+    failures: list[str],
+) -> dict[str, object]:
+    required_type = _required_field_type_for_division(division)
+    field_type = getattr(slot, 'field_type', None) or getattr(fi, 'field_type', None)
+    return {
+        'game_id': str(game.id),
+        'season_id': str(game.season_id) if game.season_id else None,
+        'week_id': str(game.week_id) if game.week_id else None,
+        'game_date': _format_diagnostic_date(game.game_date),
+        'division_id': str(getattr(division, 'id', '')) if getattr(division, 'id', None) else None,
+        'division_name': getattr(division, 'name', None),
+        'division_group': getattr(division, 'division_group', None),
+        'required_field_layout_type': required_type,
+        'home_team_id': str(game.home_team_id) if game.home_team_id else None,
+        'home_team_name': _diagnostic_team_name(home),
+        'away_team_id': str(game.away_team_id) if game.away_team_id else None,
+        'away_team_name': _diagnostic_team_name(away),
+        'status_before': status_before,
+        'status_after': status_after,
+        'start_time': _format_diagnostic_time(game.kickoff_time),
+        'host_location_id': str(getattr(host, 'id', None) or getattr(game, 'host_location_id', None) or '') or None,
+        'host_location_name': getattr(host, 'name', None),
+        'field_instance_id': str(getattr(fi, 'id', None) or getattr(game, 'field_instance_id', None) or '') or None,
+        'game_slot_id': str(getattr(slot, 'id', None)) if slot else None,
+        'field_type': field_type,
+        'missing_host_location': 'SCHEDULED_GAME_MISSING_HOST_LOCATION' in failures,
+        'missing_field_assignment': any(code in failures for code in ('SCHEDULED_GAME_MISSING_FIELD', 'SCHEDULED_GAME_MISSING_GAME_SLOT', 'SCHEDULED_GAME_SLOT_NOT_FOUND', 'SCHEDULED_GAME_FIELD_INSTANCE_NOT_FOUND')),
+        'missing_field_type': 'SCHEDULED_GAME_MISSING_FIELD_TYPE' in failures,
+        'slot_host_mismatch': 'SCHEDULED_GAME_SLOT_HOST_MISMATCH' in failures,
+        'slot_date_mismatch': 'SCHEDULED_GAME_SLOT_DATE_MISMATCH' in failures,
+        'slot_time_mismatch': 'SCHEDULED_GAME_SLOT_TIME_MISMATCH' in failures,
+        'field_type_mismatch': 'SCHEDULED_GAME_FIELD_TYPE_MISMATCH' in failures,
+        'failure_reasons': failures,
+        'repair_attempted': False,
+        'repair_success': False,
+        'repair_strategy': None,
+        'repair_failure_reason': None,
+        'repair_candidates': [],
+    }
+
+
+def _scheduled_game_integrity_failures(
+    db: Session,
+    game: Game,
+    slot: GameSlot | None,
+    fi: FieldInstance | None,
+    host: HostLocation | None,
+    home: Team | None,
+    away: Team | None,
+    division: Division | None,
+) -> list[str]:
+    failures: list[str] = []
+    required_type = _required_field_type_for_division(division)
+    assignment_host_id = getattr(slot, 'host_location_id', None) or getattr(fi, 'host_location_id', None) or getattr(game, 'host_location_id', None)
+    field_type = _normalize_field_size(getattr(slot, 'field_type', None) or getattr(fi, 'field_type', None))
+    if not game.game_date:
+        failures.append('SCHEDULED_GAME_SLOT_DATE_MISMATCH')
+    if not game.kickoff_time:
+        failures.append('SCHEDULED_GAME_SLOT_TIME_MISMATCH')
+    if not getattr(game, 'host_location_id', None) and not getattr(slot, 'host_location_id', None):
+        failures.append('SCHEDULED_GAME_MISSING_HOST_LOCATION')
+    if not slot and not fi:
+        failures.append('SCHEDULED_GAME_MISSING_GAME_SLOT')
+    if slot and not db.get(GameSlot, slot.id):
+        failures.append('SCHEDULED_GAME_SLOT_NOT_FOUND')
+    if not fi:
+        failures.append('SCHEDULED_GAME_MISSING_FIELD')
+        if getattr(game, 'field_instance_id', None) or getattr(slot, 'field_instance_id', None):
+            failures.append('SCHEDULED_GAME_FIELD_INSTANCE_NOT_FOUND')
+    if not field_type:
+        failures.append('SCHEDULED_GAME_MISSING_FIELD_TYPE')
+    if slot and fi and slot.field_instance_id != fi.id:
+        failures.append('SCHEDULED_GAME_FIELD_INSTANCE_NOT_FOUND')
+    if slot and game.host_location_id and slot.host_location_id != game.host_location_id:
+        failures.append('SCHEDULED_GAME_SLOT_HOST_MISMATCH')
+    if fi and assignment_host_id and fi.host_location_id != assignment_host_id:
+        failures.append('SCHEDULED_GAME_SLOT_HOST_MISMATCH')
+    if slot and game.game_date and slot.slot_date != game.game_date:
+        failures.append('SCHEDULED_GAME_SLOT_DATE_MISMATCH')
+    if fi and game.game_date and fi.instance_date != game.game_date:
+        failures.append('SCHEDULED_GAME_SLOT_DATE_MISMATCH')
+    if slot and game.kickoff_time and slot.start_time != game.kickoff_time:
+        failures.append('SCHEDULED_GAME_SLOT_TIME_MISMATCH')
+    if field_type and required_type and field_type != required_type:
+        failures.append('SCHEDULED_GAME_FIELD_TYPE_MISMATCH')
+    if game.season_id and game.game_date and assignment_host_id:
+        allowed_hosts = _host_plan_allowed_host_ids_for_week(db, game.season_id, game.week_id, game.game_date)
+        if allowed_hosts is not None and assignment_host_id not in allowed_hosts:
+            failures.append('SCHEDULED_GAME_SELECTED_HOST_VIOLATION')
+    if host and away and _host_owner_community_id(host) and _team_community_id(away) == _host_owner_community_id(host):
+        failures.append('HOST_OWNER_AS_AWAY')
+
+    other_games = db.query(Game).join(Game.status).filter(
+        Game.id != game.id,
+        Game.season_id == game.season_id,
+        Game.game_date == game.game_date,
+        Game.kickoff_time == game.kickoff_time,
+        func.lower(GameStatus.code) == 'scheduled',
+    ).all() if game.game_date and game.kickoff_time else []
+    for other in other_games:
+        if game.home_team_id in {other.home_team_id, other.away_team_id} or game.away_team_id in {other.home_team_id, other.away_team_id}:
+            failures.append('SCHEDULED_GAME_TEAM_CONFLICT')
+            break
+    if fi and game.game_date and game.kickoff_time:
+        other_slot = db.query(GameSlot).join(Game, GameSlot.assigned_game_id == Game.id).join(Game.status).filter(
+            Game.id != game.id,
+            Game.season_id == game.season_id,
+            Game.game_date == game.game_date,
+            Game.kickoff_time == game.kickoff_time,
+            GameSlot.field_instance_id == fi.id,
+            func.lower(GameStatus.code) == 'scheduled',
+        ).first()
+        other_game_field = db.query(Game.id).join(Game.status).filter(
+            Game.id != game.id,
+            Game.season_id == game.season_id,
+            Game.game_date == game.game_date,
+            Game.kickoff_time == game.kickoff_time,
+            Game.field_instance_id == fi.id,
+            func.lower(GameStatus.code) == 'scheduled',
+        ).first()
+        if other_slot or other_game_field:
+            failures.append('SCHEDULED_GAME_FIELD_CONFLICT')
+    return list(dict.fromkeys(failures))
+
+
+def _candidate_slot_rejection_reason(db: Session, game: Game, slot: GameSlot, division: Division | None, home: Team | None, away: Team | None) -> str | None:
+    required_type = _required_field_type_for_division(division)
+    if slot.status != 'OPEN' or slot.assigned_game_id is not None:
+        return 'slot_not_open'
+    if not slot.host_location_id or not slot.field_instance_id or not slot.field_type:
+        return 'candidate_missing_slot_metadata'
+    if game.game_date and slot.slot_date != game.game_date:
+        return 'candidate_date_mismatch'
+    if _normalize_field_size(slot.field_type) != required_type:
+        return 'candidate_field_type_mismatch'
+    fi = db.get(FieldInstance, slot.field_instance_id)
+    if not fi or not fi.is_active:
+        return 'candidate_field_instance_not_found_or_inactive'
+    if fi.host_location_id != slot.host_location_id or fi.instance_date != slot.slot_date:
+        return 'candidate_field_instance_mismatch'
+    allowed_hosts = _host_plan_allowed_host_ids_for_week(db, game.season_id, game.week_id, slot.slot_date)
+    if allowed_hosts is not None and slot.host_location_id not in allowed_hosts:
+        return 'candidate_selected_host_violation'
+    host = db.get(HostLocation, slot.host_location_id)
+    if host and away and _host_owner_community_id(host) and _team_community_id(away) == _host_owner_community_id(host):
+        return 'candidate_host_owner_as_away'
+    team_conflict = db.query(Game.id).join(Game.status).filter(
+        Game.id != game.id,
+        Game.season_id == game.season_id,
+        Game.game_date == slot.slot_date,
+        Game.kickoff_time == slot.start_time,
+        func.lower(GameStatus.code) == 'scheduled',
+        or_(Game.home_team_id.in_([game.home_team_id, game.away_team_id]), Game.away_team_id.in_([game.home_team_id, game.away_team_id])),
+    ).first()
+    if team_conflict:
+        return 'candidate_team_conflict'
+    field_conflict = db.query(GameSlot.id).join(Game, GameSlot.assigned_game_id == Game.id).join(Game.status).filter(
+        Game.id != game.id,
+        Game.season_id == game.season_id,
+        Game.game_date == slot.slot_date,
+        Game.kickoff_time == slot.start_time,
+        GameSlot.field_instance_id == slot.field_instance_id,
+        func.lower(GameStatus.code) == 'scheduled',
+    ).first()
+    if field_conflict:
+        return 'candidate_field_conflict'
+    return None
+
+
+def _scheduled_game_repair_candidates(db: Session, game: Game, division: Division | None, home: Team | None, away: Team | None, current_host_id: uuid.UUID | None) -> list[tuple[str, GameSlot]]:
+    required_type = _required_field_type_for_division(division)
+    base = db.query(GameSlot).filter(
+        GameSlot.season_id == game.season_id,
+        GameSlot.slot_date == game.game_date,
+        GameSlot.field_type == required_type,
+        GameSlot.status == 'OPEN',
+        GameSlot.assigned_game_id.is_(None),
+    )
+    if game.week_id:
+        base = base.filter(or_(GameSlot.week_id == game.week_id, GameSlot.week_id.is_(None)))
+    all_slots = base.order_by(GameSlot.start_time.asc(), GameSlot.created_at.asc()).all()
+    selected_ids = _host_plan_allowed_host_ids_for_week(db, game.season_id, game.week_id, game.game_date)
+    if selected_ids is not None:
+        all_slots = [slot for slot in all_slots if slot.host_location_id in selected_ids]
+    priority: list[tuple[str, GameSlot]] = []
+    seen: set[uuid.UUID] = set()
+    if current_host_id:
+        for slot in all_slots:
+            if slot.host_location_id == current_host_id and slot.id not in seen:
+                priority.append(('same_host_open_compatible_slot', slot)); seen.add(slot.id)
+    home_org_id = _team_community_id(home)
+    true_home_host_ids = {host_id for host_id, in db.query(HostLocation.id).filter(HostLocation.organization_id == home_org_id).all()} if home_org_id else set()
+    for slot in all_slots:
+        if slot.host_location_id in true_home_host_ids and slot.id not in seen:
+            priority.append(('true_home_host_open_compatible_slot', slot)); seen.add(slot.id)
+    for slot in all_slots:
+        if slot.id not in seen:
+            priority.append(('any_selected_host_open_compatible_slot', slot)); seen.add(slot.id)
+    return priority
+
+
+def _apply_slot_to_game(game: Game, slot: GameSlot) -> None:
+    game.host_location_id = slot.host_location_id
+    game.field_instance_id = slot.field_instance_id
+    game.game_date = slot.slot_date
+    game.kickoff_time = slot.start_time
+    slot.status = 'ASSIGNED'
+    slot.assigned_game_id = game.id
+
+
+def _run_generated_slot_integrity_validation_and_repair(db: Session, season_id: uuid.UUID | str | None = None, *, repair: bool = True) -> dict[str, object]:
+    diagnostics: dict[str, object] = {
+        'generated_slot_integrity_check_ran': True,
+        'generated_slot_integrity_status': 'COMPLETE',
+        'generated_slot_integrity_failure_count': 0,
+        'invalid_scheduled_game_count': 0,
+        'repaired_scheduled_game_count': 0,
+        'unscheduled_orphan_game_count': 0,
+        'invalid_scheduled_games': [],
+    }
+    unscheduled_status_id = _get_unscheduled_status_id(db)
+    rows = _scheduled_game_status_query(db, season_id).all()
+    for game, status in rows:
+        slot, fi, host, home, away, division = _scheduled_game_integrity_context(db, game)
+        failures = _scheduled_game_integrity_failures(db, game, slot, fi, host, home, away, division)
+        if not failures:
+            continue
+        status_before = status.code
+        detail = _scheduled_game_integrity_detail(db, game, status_before, status_before, slot, fi, host, home, away, division, failures)
+        diagnostics['invalid_scheduled_games'].append(detail)
+        if not repair:
+            continue
+        detail['repair_attempted'] = True
+        current_host_id = getattr(slot, 'host_location_id', None) or getattr(game, 'host_location_id', None) or getattr(host, 'id', None)
+        old_slot = slot
+        repair_success = False
+        for strategy, candidate in _scheduled_game_repair_candidates(db, game, division, home, away, current_host_id):
+            rejection = _candidate_slot_rejection_reason(db, game, candidate, division, home, away)
+            candidate_row = {
+                'candidate_host_location_id': str(candidate.host_location_id) if candidate.host_location_id else None,
+                'candidate_field_instance_id': str(candidate.field_instance_id) if candidate.field_instance_id else None,
+                'candidate_game_slot_id': str(candidate.id),
+                'candidate_start_time': _format_diagnostic_time(candidate.start_time),
+                'candidate_field_type': candidate.field_type,
+                'accepted': rejection is None,
+                'rejection_reason': rejection,
+            }
+            detail['repair_candidates'].append(candidate_row)
+            if rejection:
+                continue
+            if old_slot and old_slot.id != candidate.id:
+                old_slot.status = 'OPEN'
+                old_slot.assigned_game_id = None
+            _apply_slot_to_game(game, candidate)
+            db.flush()
+            repaired_slot, repaired_fi, repaired_host, repaired_home, repaired_away, repaired_division = _scheduled_game_integrity_context(db, game)
+            post_failures = _scheduled_game_integrity_failures(db, game, repaired_slot, repaired_fi, repaired_host, repaired_home, repaired_away, repaired_division)
+            if post_failures:
+                if old_slot and old_slot.id != candidate.id:
+                    old_slot.status = 'ASSIGNED'
+                    old_slot.assigned_game_id = game.id
+                candidate.status = 'OPEN'
+                candidate.assigned_game_id = None
+                detail['repair_failure_reason'] = ','.join(post_failures)
+                continue
+            repair_candidates = list(detail.get('repair_candidates') or [])
+            repaired_detail = _scheduled_game_integrity_detail(db, game, status_before, status_before, repaired_slot, repaired_fi, repaired_host, repaired_home, repaired_away, repaired_division, failures)
+            detail.update(repaired_detail)
+            detail['repair_attempted'] = True
+            detail['repair_success'] = True
+            detail['repair_strategy'] = strategy
+            detail['repair_candidates'] = repair_candidates
+            diagnostics['repaired_scheduled_game_count'] = int(diagnostics['repaired_scheduled_game_count']) + 1
+            repair_success = True
+            break
+        if repair_success:
+            continue
+        if old_slot:
+            old_slot.status = 'OPEN'
+            old_slot.assigned_game_id = None
+        if unscheduled_status_id:
+            game.game_status_id = unscheduled_status_id
+            detail['status_after'] = 'UNSCHEDULED'
+        game.host_location_id = None
+        game.field_instance_id = None
+        detail['repair_failure_reason'] = detail.get('repair_failure_reason') or SCHEDULED_GAME_REPAIR_UNSCHEDULE_REASON
+        detail['failure_reasons'] = list(dict.fromkeys(list(detail.get('failure_reasons') or []) + [SCHEDULED_GAME_REPAIR_UNSCHEDULE_REASON]))
+        diagnostics['unscheduled_orphan_game_count'] = int(diagnostics['unscheduled_orphan_game_count']) + 1
+        db.flush()
+    diagnostics['invalid_scheduled_game_count'] = len(diagnostics['invalid_scheduled_games'])
+    remaining_invalid = []
+    for game, status in _scheduled_game_status_query(db, season_id).all():
+        slot, fi, host, home, away, division = _scheduled_game_integrity_context(db, game)
+        failures = _scheduled_game_integrity_failures(db, game, slot, fi, host, home, away, division)
+        if failures:
+            remaining_invalid.append(_scheduled_game_integrity_detail(db, game, status.code, status.code, slot, fi, host, home, away, division, failures))
+    diagnostics['remaining_invalid_scheduled_games'] = remaining_invalid
+    diagnostics['generated_slot_integrity_failure_count'] = len(remaining_invalid)
+    diagnostics['generated_slot_integrity_status'] = 'BLOCKED' if remaining_invalid else 'COMPLETE'
+    return diagnostics
+
 def _build_final_schedule_validation_result(
     db: Session,
     season_id: uuid.UUID | str | None,
@@ -173,24 +560,24 @@ def _build_final_schedule_validation_result(
     """
     counters = {key: 0 for key in FINAL_VALIDATION_COUNTER_KEYS}
     failures: list[dict[str, object]] = []
+    generated_slot_integrity = _run_generated_slot_integrity_validation_and_repair(db, season_id, repair=True)
     rows = _schedule_management_rows(db, {'season_id': season_id} if season_id else {})
 
     team_time_seen: dict[tuple[uuid.UUID, date, time], dict[str, object]] = {}
     field_time_seen: dict[tuple[uuid.UUID | None, uuid.UUID | None, date, time], dict[str, object]] = {}
     selected_host_violations: list[dict[str, object]] = []
     field_type_mismatches: list[dict[str, object]] = []
-    generated_slot_integrity_failures: list[dict[str, object]] = []
+    generated_slot_integrity_failures: list[dict[str, object]] = list(generated_slot_integrity.get('remaining_invalid_scheduled_games') or [])
     overflow_host_ids_used: set[str] = set()
 
     for g, slot, fi, host, home, away, div, _org, _status in rows:
         game_id = str(g.id)
-        if not slot or not fi or not g.game_date or not g.kickoff_time:
-            generated_slot_integrity_failures.append({'game_id': game_id, 'reason': 'scheduled game is missing assigned slot, field, date, or kickoff time'})
-        if slot and div and slot.field_type != _required_field_type_for_division(div):
-            field_type_mismatches.append({'game_id': game_id, 'actual_field_type': slot.field_type, 'required_field_type': _required_field_type_for_division(div)})
-        if slot and g.game_date:
+        field_type = getattr(slot, 'field_type', None) or getattr(fi, 'field_type', None)
+        if field_type and div and _normalize_field_size(field_type) != _required_field_type_for_division(div):
+            field_type_mismatches.append({'game_id': game_id, 'actual_field_type': field_type, 'required_field_type': _required_field_type_for_division(div)})
+        if g.game_date:
             allowed_hosts = _host_plan_allowed_host_ids_for_week(db, season_id, g.week_id, g.game_date)
-            actual_host_id = slot.host_location_id or g.host_location_id
+            actual_host_id = getattr(slot, 'host_location_id', None) or g.host_location_id or getattr(fi, 'host_location_id', None)
             if allowed_hosts is not None and actual_host_id and actual_host_id not in allowed_hosts:
                 selected_host_violations.append({'game_id': game_id, 'host_location_id': str(actual_host_id), 'week_id': str(g.week_id) if g.week_id else None, 'game_date': g.game_date.isoformat()})
             if host and _classify_host_for_date(db, host) == HOST_ROLE_OVERFLOW_GRASS:
@@ -213,7 +600,7 @@ def _build_final_schedule_validation_result(
     counters['field_type_mismatch_count'] = len(field_type_mismatches)
     counters['selected_host_violation_count'] = len(selected_host_violations)
     counters['overflow_location_used_count'] = len(overflow_host_ids_used)
-    counters['generated_slot_integrity_failure_count'] = len(generated_slot_integrity_failures)
+    counters['generated_slot_integrity_failure_count'] = _safe_int(generated_slot_integrity.get('generated_slot_integrity_failure_count'))
 
     regular_season_required_week_diagnostics: list[dict[str, object]] = []
     required_games_expected_count = 0
@@ -243,7 +630,7 @@ def _build_final_schedule_validation_result(
                         Game.season_id == season_id,
                         Game.week_id == getattr(week, 'id', None),
                         Team.division_id == division_id,
-                        GameStatus.code != 'UNSCHEDULED',
+                        func.lower(GameStatus.code) != 'unscheduled',
                         GameStatus.is_active.is_(True),
                     ).count()
                     missing_games = max(0, expected_games - int(scheduled_games or 0))
@@ -381,6 +768,13 @@ def _build_final_schedule_validation_result(
         'host_location_vs_home_team_verification': host_verification,
         'required_games_expected_count': required_games_expected_count,
         'regular_season_required_week_diagnostics': regular_season_required_week_diagnostics,
+        'Generated Slot Integrity Diagnostics': generated_slot_integrity,
+        'generated_slot_integrity_diagnostics': generated_slot_integrity,
+        'generated_slot_integrity_check_ran': generated_slot_integrity.get('generated_slot_integrity_check_ran'),
+        'generated_slot_integrity_status': generated_slot_integrity.get('generated_slot_integrity_status'),
+        'invalid_scheduled_game_count': generated_slot_integrity.get('invalid_scheduled_game_count'),
+        'repaired_scheduled_game_count': generated_slot_integrity.get('repaired_scheduled_game_count'),
+        'unscheduled_orphan_game_count': generated_slot_integrity.get('unscheduled_orphan_game_count'),
     }
     result.update(counters)
     return result
@@ -9619,7 +10013,7 @@ def build_schedule_quality_report(db: Session, season_id: uuid.UUID) -> dict[str
         'warnings': warnings,
         'metrics': metrics,
         'final_validation': final_validation,
-        **{key: final_validation.get(key) for key in ('final_validation_ran', 'final_validation_status', 'final_validation_failure_count', 'final_validation_failures', 'diagnostics_error')},
+        **{key: final_validation.get(key) for key in ('final_validation_ran', 'final_validation_status', 'final_validation_failure_count', 'final_validation_failures', 'diagnostics_error', 'generated_slot_integrity_check_ran', 'generated_slot_integrity_status', 'generated_slot_integrity_failure_count', 'invalid_scheduled_game_count', 'repaired_scheduled_game_count', 'unscheduled_orphan_game_count', 'generated_slot_integrity_diagnostics', 'Generated Slot Integrity Diagnostics')},
     }
 
 
@@ -12027,11 +12421,17 @@ def publish_schedule(season_id: uuid.UUID, db: Session = Depends(get_db)):
     season = db.query(Season).filter(Season.id == season_id).first()
     if not season: raise HTTPException(404, 'Season not found')
     validation = build_schedule_quality_report(db, season_id)
-    if validation['hard_errors']:
-        raise HTTPException(status_code=400, detail={'error': 'publish_validation_failed', **validation})
+    integrity = validation.get('generated_slot_integrity_diagnostics') or (validation.get('final_validation') or {}).get('generated_slot_integrity_diagnostics') or {}
+    if (
+        validation.get('final_validation_status') != 'COMPLETE'
+        or _safe_int(integrity.get('generated_slot_integrity_failure_count')) > 0
+        or _safe_int(integrity.get('invalid_scheduled_game_count')) > _safe_int(integrity.get('repaired_scheduled_game_count')) + _safe_int(integrity.get('unscheduled_orphan_game_count'))
+        or validation['hard_errors']
+    ):
+        raise HTTPException(status_code=400, detail={'error': 'publish_validation_failed', **validation, 'generated_slot_integrity_diagnostics': integrity})
     season.schedule_status = 'published'
     db.commit()
-    return {'ok': True, 'season_id': str(season_id), 'schedule_status': season.schedule_status, 'warnings': validation['warnings'], 'overall_health': validation['overall_health']}
+    return {'ok': True, 'season_id': str(season_id), 'schedule_status': season.schedule_status, 'warnings': validation['warnings'], 'overall_health': validation['overall_health'], 'generated_slot_integrity_diagnostics': integrity}
 
 
 @router.post('/seasons/{season_id}/unpublish-schedule', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
@@ -17860,6 +18260,7 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
     if created_games == 0:
         db.rollback()
         raise HTTPException(400, 'No valid scheduling combinations were found for the selected division/week.')
+    generated_slot_integrity = _run_generated_slot_integrity_validation_and_repair(db, season_id, repair=True)
     try:
         db.commit()
     except Exception:
@@ -17884,6 +18285,7 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         'created_games': created_games,
         'assigned_slots': assigned_slots,
         'skipped': skipped,
+        'generated_slot_integrity_diagnostics': generated_slot_integrity,
         'final_validation': {
             'active_team_count': len(teams),
             'required_game_count': required_games_for_division_week,
@@ -19712,6 +20114,12 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         }
         final_validation_result.update({key: 0 for key in FINAL_VALIDATION_COUNTER_KEYS})
     _apply_final_validation_to_diagnostics(auto_schedule_diagnostics, final_validation_result)
+    if not dry_run:
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            logger.exception('generated slot integrity repair commit failed season_id=%s', season_id)
 
     expected_games_total = int(auto_schedule_diagnostics.get('expected_games_total') or 0)
     committed_games_count = int(auto_schedule_diagnostics.get('committed_games_count') or 0)
@@ -21257,7 +21665,7 @@ def _schedule_management_rows(db: Session, filters: dict | None = None, organiza
     filters = filters or {}
     home = aliased(Team)
     away = aliased(Team)
-    q = db.query(Game, GameSlot, FieldInstance, HostLocation, home, away, Division, Organization, GameStatus).join(Game.status).join(home, Game.home_team_id == home.id).join(away, Game.away_team_id == away.id).join(Division, home.division_id == Division.id).join(Organization, home.organization_id == Organization.id).outerjoin(GameSlot, GameSlot.assigned_game_id == Game.id).outerjoin(FieldInstance, FieldInstance.id == GameSlot.field_instance_id).outerjoin(HostLocation, HostLocation.id == GameSlot.host_location_id)
+    q = db.query(Game, GameSlot, FieldInstance, HostLocation, home, away, Division, Organization, GameStatus).join(Game.status).join(home, Game.home_team_id == home.id).join(away, Game.away_team_id == away.id).join(Division, home.division_id == Division.id).join(Organization, home.organization_id == Organization.id).outerjoin(GameSlot, GameSlot.assigned_game_id == Game.id).outerjoin(FieldInstance, or_(FieldInstance.id == GameSlot.field_instance_id, and_(GameSlot.id.is_(None), FieldInstance.id == Game.field_instance_id))).outerjoin(HostLocation, or_(HostLocation.id == GameSlot.host_location_id, and_(GameSlot.id.is_(None), HostLocation.id == Game.host_location_id), and_(GameSlot.id.is_(None), Game.host_location_id.is_(None), HostLocation.id == FieldInstance.host_location_id)))
     q = q.filter(func.lower(GameStatus.code) != 'unscheduled')
     if filters.get('date'): q = q.filter(Game.game_date == filters['date'])
     if filters.get('division_id'): q = q.filter(Division.id == filters['division_id'])
@@ -21267,7 +21675,7 @@ def _schedule_management_rows(db: Session, filters: dict | None = None, organiza
         else:
             q = q.filter(home.organization_id == filters['organization_id'])
     if filters.get('host_location_id'): q = q.filter(HostLocation.id == filters['host_location_id'])
-    if filters.get('field_type'): q = q.filter(GameSlot.field_type == filters['field_type'])
+    if filters.get('field_type'): q = q.filter(or_(GameSlot.field_type == filters['field_type'], FieldInstance.field_type == filters['field_type']))
     if filters.get('field_id'): q = q.filter(FieldInstance.id == filters['field_id'])
     if filters.get('team_id'): q = q.filter((home.id == filters['team_id']) | (away.id == filters['team_id']))
     if filters.get('week_id'): q = q.filter(Game.week_id == filters['week_id'])
@@ -21873,6 +22281,8 @@ def schedule_publish_diagnostics(season_id: uuid.UUID | None = None, db: Session
     if not season:
         raise HTTPException(404, 'No season found')
 
+    final_validation = _build_final_schedule_validation_result(db, season.id)
+    integrity = final_validation.get('generated_slot_integrity_diagnostics') or {}
     counts = dict(
         db.query(func.lower(GameStatus.code), func.count(Game.id))
         .join(Game, Game.game_status_id == GameStatus.id)
@@ -21893,6 +22303,13 @@ def schedule_publish_diagnostics(season_id: uuid.UUID | None = None, db: Session
         'published_games': published,
         'draft_games': draft,
         'archived_games': archived,
+        'final_validation_status': final_validation.get('final_validation_status'),
+        'schedule_quality_status': final_validation.get('schedule_quality_status'),
+        'generated_slot_integrity_diagnostics': integrity,
+        'generated_slot_integrity_failure_count': integrity.get('generated_slot_integrity_failure_count'),
+        'scheduled_game_missing_host_location_count': sum(1 for row in (integrity.get('remaining_invalid_scheduled_games') or []) if row.get('missing_host_location')),
+        'scheduled_game_missing_field_count': sum(1 for row in (integrity.get('remaining_invalid_scheduled_games') or []) if row.get('missing_field_assignment')),
+        'scheduled_game_missing_field_type_count': sum(1 for row in (integrity.get('remaining_invalid_scheduled_games') or []) if row.get('missing_field_type')),
     }
 
 @router.get('/schedule-management/quality-report', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
@@ -22076,7 +22493,7 @@ def schedule_management_games(season_id: uuid.UUID | None = None, date: date | N
             'id': str(g.id), 'date': g.game_date.isoformat(), 'time': g.kickoff_time.strftime('%H:%M:%S'), 'division_id': str(div.id), 'division_name': div.name,
             'home_team_id': str(home.id), 'home_team_name': home.name, 'away_team_id': str(away.id), 'away_team_name': away.name,
             'organization_id': str(org.id), 'organization_name': org.name, 'host_location_id': (str(host.id) if host else None), 'host_location_name': (host.name if host else None),
-            'field_id': (str(fi.id) if fi else None), 'field': (_turf_field_export_label(slot, fi) if slot and slot.turf_wave_id else (fi.field_name if fi else None)), 'field_type': (slot.field_type if slot else None), 'status': status.code, 'slot_id': (str(slot.id) if slot else None), 'is_slot_active': (fi.is_active if fi else False),
+            'field_id': (str(fi.id) if fi else None), 'field': (_turf_field_export_label(slot, fi) if slot and slot.turf_wave_id else (fi.field_name if fi else None)), 'field_type': ((slot.field_type if slot else None) or (fi.field_type if fi else None)), 'status': status.code, 'slot_id': (str(slot.id) if slot else None), 'is_slot_active': (fi.is_active if fi else False),
             'turf_wave_id': str(slot.turf_wave_id) if slot and slot.turf_wave_id else None,
             'turf_wave_start_time': wave.start_time.isoformat() if wave else None,
             'turf_configuration_code': turf_configuration_code if turf_configuration_code in TURF_APPROVED_LAYOUT_CODES else None,
@@ -22134,6 +22551,11 @@ def move_game_schedule(game_id: uuid.UUID, payload: dict, db: Session = Depends(
     game.field_instance_id = new_slot.field_instance_id
     game.game_date = new_slot.slot_date; game.kickoff_time = new_slot.start_time
     db.flush()
+    integrity_slot, integrity_fi, integrity_host, integrity_home, integrity_away, integrity_division = _scheduled_game_integrity_context(db, game)
+    integrity_failures = _scheduled_game_integrity_failures(db, game, integrity_slot, integrity_fi, integrity_host, integrity_home, integrity_away, integrity_division)
+    if integrity_failures:
+        db.rollback()
+        raise HTTPException(status_code=400, detail={'error': 'GENERATED_SLOT_INTEGRITY_FAILURE', 'failure_reasons': integrity_failures})
     final_doubleheader = _build_global_doubleheader_validation(db, game.season_id)
     if any(str(game.id) in {str(row.get('game_1_id')), str(row.get('game_2_id'))} for row in final_doubleheader.get('failures') or []):
         db.rollback()
@@ -22215,6 +22637,10 @@ def _format_schedule_export_status(value: str | None) -> str:
 
 
 def _schedule_export_row_values(g, slot, fi, host, home, away, div, status) -> list[str]:
+    field_type = getattr(slot, 'field_type', None) or getattr(fi, 'field_type', None)
+    row_status = status.code
+    if _is_scheduled_status_code(row_status) and (not host or not fi or not field_type):
+        row_status = 'VALIDATION_FAILED'
     return [
         _format_schedule_export_date(g.game_date),
         _format_schedule_export_time(g.kickoff_time),
@@ -22223,13 +22649,18 @@ def _schedule_export_row_values(g, slot, fi, host, home, away, div, status) -> l
         away.name,
         host.name if host else '',
         _turf_field_export_label(slot, fi) if slot and getattr(slot, 'turf_wave_id', None) else (fi.field_name if fi else ''),
-        _format_schedule_export_status(slot.field_type if slot else ''),
-        _format_schedule_export_status(status.code),
+        _format_schedule_export_status(field_type),
+        _format_schedule_export_status(row_status),
     ]
 
 
 @router.get('/schedule-management/export.csv', dependencies=[Depends(get_current_user)])
 def export_schedule_management_csv(date: date | None = None, division_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, host_location_id: uuid.UUID | None = None, field_type: str | None = None, field_id: uuid.UUID | None = None, team_id: uuid.UUID | None = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    validation_season_id = None
+    active_season = db.query(Season).filter(Season.is_active.is_(True)).order_by(Season.start_date.desc()).first()
+    validation_season_id = active_season.id if active_season else None
+    if validation_season_id:
+        _run_generated_slot_integrity_validation_and_repair(db, validation_season_id, repair=True)
     rows = _schedule_management_rows(db, {'date': date, 'division_id': division_id, 'organization_id': organization_id, 'host_location_id': host_location_id, 'field_type': field_type, 'field_id': field_id, 'team_id': team_id})
     out = io.StringIO()
     w = csv.writer(out)
@@ -22241,10 +22672,7 @@ def export_schedule_management_csv(date: date | None = None, division_id: uuid.U
         w.writerow(_schedule_export_row_values(g, slot, fi, host, home, away, div, status))
 
     export_validation_warnings: list[dict[str, object]] = []
-    validation_season_id = next((g.season_id for g, *_ in rows if getattr(g, 'season_id', None)), None)
-    if not validation_season_id:
-        active_season = db.query(Season).filter(Season.is_active.is_(True)).order_by(Season.start_date.desc()).first()
-        validation_season_id = active_season.id if active_season else None
+    validation_season_id = next((g.season_id for g, *_ in rows if getattr(g, 'season_id', None)), validation_season_id)
     if validation_season_id:
         final_validation = _build_final_schedule_validation_result(db, validation_season_id)
         for failure in final_validation.get('final_validation_failures') or []:
@@ -22274,9 +22702,70 @@ def export_schedule_management_csv(date: date | None = None, division_id: uuid.U
         logger.warning('export_schedule_management_csv incomplete_division_week_schedules=%s', export_validation_warnings)
     logger.info('export_schedule_management_csv division_entries=%s', sorted(export_division_names))
     return StreamingResponse(iter([out.getvalue()]), media_type='text/csv', headers={'Content-Disposition':'attachment; filename="schedule-export.csv"'})
+
+
+def _raise_if_invalid_scheduled_game_payload(db: Session, payload: GameCreate, *, game_id: uuid.UUID | None = None) -> None:
+    status = db.query(GameStatus).filter(GameStatus.id == payload.game_status_id).first()
+    if not status or not _is_scheduled_status_code(status.code):
+        return
+    failures: list[str] = []
+    if not payload.host_location_id:
+        failures.append('SCHEDULED_GAME_MISSING_HOST_LOCATION')
+    if not payload.field_instance_id:
+        failures.append('SCHEDULED_GAME_MISSING_FIELD')
+    fi = db.get(FieldInstance, payload.field_instance_id) if payload.field_instance_id else None
+    if payload.field_instance_id and not fi:
+        failures.append('SCHEDULED_GAME_FIELD_INSTANCE_NOT_FOUND')
+    if fi and not fi.field_type:
+        failures.append('SCHEDULED_GAME_MISSING_FIELD_TYPE')
+    if fi and payload.host_location_id and fi.host_location_id != payload.host_location_id:
+        failures.append('SCHEDULED_GAME_SLOT_HOST_MISMATCH')
+    if fi and payload.game_date and fi.instance_date != payload.game_date:
+        failures.append('SCHEDULED_GAME_SLOT_DATE_MISMATCH')
+    division = db.get(Division, payload.division_id) if payload.division_id else None
+    if fi and _normalize_field_size(fi.field_type) != _required_field_type_for_division(division):
+        failures.append('SCHEDULED_GAME_FIELD_TYPE_MISMATCH')
+    if payload.season_id and payload.game_date and payload.host_location_id:
+        allowed_hosts = _host_plan_allowed_host_ids_for_week(db, payload.season_id, payload.week_id, payload.game_date)
+        if allowed_hosts is not None and payload.host_location_id not in allowed_hosts:
+            failures.append('SCHEDULED_GAME_SELECTED_HOST_VIOLATION')
+    if payload.game_date and payload.kickoff_time:
+        team_conflict = db.query(Game.id).join(Game.status).filter(
+            Game.id != game_id if game_id else True,
+            Game.season_id == payload.season_id,
+            Game.game_date == payload.game_date,
+            Game.kickoff_time == payload.kickoff_time,
+            func.lower(GameStatus.code) == 'scheduled',
+            or_(Game.home_team_id.in_([payload.home_team_id, payload.away_team_id]), Game.away_team_id.in_([payload.home_team_id, payload.away_team_id])),
+        ).first()
+        if team_conflict:
+            failures.append('SCHEDULED_GAME_TEAM_CONFLICT')
+        if fi:
+            field_conflict = db.query(GameSlot.id).join(Game, GameSlot.assigned_game_id == Game.id).join(Game.status).filter(
+                Game.id != game_id if game_id else True,
+                Game.season_id == payload.season_id,
+                Game.game_date == payload.game_date,
+                Game.kickoff_time == payload.kickoff_time,
+                GameSlot.field_instance_id == fi.id,
+                func.lower(GameStatus.code) == 'scheduled',
+            ).first()
+            game_field_conflict = db.query(Game.id).join(Game.status).filter(
+                Game.id != game_id if game_id else True,
+                Game.season_id == payload.season_id,
+                Game.game_date == payload.game_date,
+                Game.kickoff_time == payload.kickoff_time,
+                Game.field_instance_id == fi.id,
+                func.lower(GameStatus.code) == 'scheduled',
+            ).first()
+            if field_conflict or game_field_conflict:
+                failures.append('SCHEDULED_GAME_FIELD_CONFLICT')
+    if failures:
+        raise HTTPException(status_code=400, detail={'error': 'GENERATED_SLOT_INTEGRITY_FAILURE', 'failure_reasons': list(dict.fromkeys(failures))})
+
 @router.post('/games', response_model=GameSaveResponse, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def create_game(payload:GameCreate, db:Session=Depends(get_db)):
     validation=validate_game(db,payload); status=db.query(GameStatus).filter(GameStatus.id==payload.game_status_id).first()
+    _raise_if_invalid_scheduled_game_payload(db, payload)
     if not status: raise HTTPException(400,'Invalid game status')
     if status.code=='published' and validation.hard_conflicts: raise HTTPException(status_code=400, detail={'error':'hard_conflicts','validation':validation.model_dump()})
     obj=Game(**payload.model_dump(exclude={'division_id'})); db.add(obj); db.flush()
@@ -22293,6 +22782,7 @@ def update_game(game_id:uuid.UUID,payload:GameCreate, db:Session=Depends(get_db)
     if not obj: raise HTTPException(404,'Game not found')
     _raise_if_single_doubleheader_manual_move(db, obj, action_source='admin-game-update')
     validation=validate_game(db,payload,game_id=game_id); status=db.query(GameStatus).filter(GameStatus.id==payload.game_status_id).first()
+    _raise_if_invalid_scheduled_game_payload(db, payload, game_id=game_id)
     if not status: raise HTTPException(400,'Invalid game status')
     if status.code=='published' and validation.hard_conflicts: raise HTTPException(status_code=400, detail={'error':'hard_conflicts','validation':validation.model_dump()})
     for k,v in payload.model_dump(exclude={'division_id'}).items(): setattr(obj,k,v)
