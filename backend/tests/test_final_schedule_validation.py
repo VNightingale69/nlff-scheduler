@@ -83,6 +83,74 @@ class FinalScheduleValidationTest(unittest.TestCase):
         self.assertNotIn('Test Single', required_games_by_division)
         self.assertNotIn('Test Empty', required_games_by_division)
 
+    def test_final_validation_excludes_non_regular_season_weeks_from_required_games(self):
+        self._add_division_with_active_teams(4, 'Even')
+        blackout_week = Week(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_number=2,
+            start_date=date(2026, 9, 12),
+            end_date=date(2026, 9, 18),
+            primary_game_date=date(2026, 9, 12),
+            date_type='BLACKOUT',
+            status='active',
+        )
+        playoff_week = Week(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_number=3,
+            start_date=date(2026, 9, 19),
+            end_date=date(2026, 9, 25),
+            primary_game_date=date(2026, 9, 19),
+            date_type='PLAYOFF',
+            status='active',
+        )
+        championship_week = Week(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_number=4,
+            label='Championship',
+            start_date=date(2026, 9, 26),
+            end_date=date(2026, 10, 2),
+            primary_game_date=date(2026, 9, 26),
+            date_type='REGULAR_SEASON',
+            status='active',
+        )
+        no_game_week = Week(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_number=5,
+            start_date=date(2026, 10, 3),
+            end_date=date(2026, 10, 9),
+            primary_game_date=date(2026, 10, 3),
+            date_type='REGULAR_SEASON',
+            status='NO_GAMES',
+        )
+        self.db.add_all([blackout_week, playoff_week, championship_week, no_game_week])
+        self.db.commit()
+
+        result = _build_final_schedule_validation_result(self.db, self.season.id)
+
+        self.assertEqual(result['required_games_expected_count'], 2)
+        self.assertEqual(result['required_games_missing_count'], 2)
+        missing_failure = next(
+            failure for failure in result['final_validation_failures']
+            if failure['code'] == 'REQUIRED_GAMES_MISSING'
+        )
+        self.assertEqual(len(missing_failure['details']), 1)
+        self.assertEqual(missing_failure['details'][0]['week'], 1)
+        diagnostics_by_week = {row['week']: row for row in result['regular_season_required_week_diagnostics']}
+        self.assertTrue(diagnostics_by_week[1]['regular_season_required'])
+        self.assertTrue(diagnostics_by_week[1]['required_games_calculated'])
+        self.assertFalse(diagnostics_by_week[2]['regular_season_required'])
+        self.assertEqual(diagnostics_by_week[2]['exclusion_reason'], 'BLACKOUT_WEEK')
+        self.assertFalse(diagnostics_by_week[3]['regular_season_required'])
+        self.assertEqual(diagnostics_by_week[3]['exclusion_reason'], 'PLAYOFF_WEEK')
+        self.assertFalse(diagnostics_by_week[4]['regular_season_required'])
+        self.assertEqual(diagnostics_by_week[4]['exclusion_reason'], 'CHAMPIONSHIP_WEEK')
+        self.assertFalse(diagnostics_by_week[5]['regular_season_required'])
+        self.assertEqual(diagnostics_by_week[5]['exclusion_reason'], 'NO_GAME_WEEK')
+
     def test_final_validation_reports_error_status_for_diagnostics_errors(self):
         result = _build_final_schedule_validation_result(
             self.db,

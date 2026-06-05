@@ -215,13 +215,19 @@ def _build_final_schedule_validation_result(
     counters['overflow_location_used_count'] = len(overflow_host_ids_used)
     counters['generated_slot_integrity_failure_count'] = len(generated_slot_integrity_failures)
 
+    regular_season_required_week_diagnostics: list[dict[str, object]] = []
+    required_games_expected_count = 0
     if season_id:
         missing_required_rows: list[dict[str, object]] = []
         try:
             weeks = db.query(Week).filter(Week.season_id == season_id).order_by(Week.week_number.asc()).all()
             divisions = db.query(Division).filter(Division.is_active.is_(True)).all()
             for week in weeks:
-                if int(getattr(week, 'week_number', 0) or 0) > 99:
+                regular_season_required = _is_regular_season_required_week(week)
+                regular_season_required_week_diagnostics.append(
+                    _regular_season_required_week_diagnostic(week, required_games_calculated=regular_season_required)
+                )
+                if not regular_season_required:
                     continue
                 for division in divisions:
                     division_id = getattr(division, 'id', None)
@@ -232,6 +238,7 @@ def _build_final_schedule_validation_result(
                     expected_games = _division_required_games(active_team_count, division)
                     if expected_games <= 0:
                         continue
+                    required_games_expected_count += expected_games
                     scheduled_games = db.query(Game.id).join(Game.status).join(Team, Game.home_team_id == Team.id).filter(
                         Game.season_id == season_id,
                         Game.week_id == getattr(week, 'id', None),
@@ -244,8 +251,15 @@ def _build_final_schedule_validation_result(
                         week_game_date = _week_game_date(week)
                         division_label = f"{getattr(division, 'division_group', '') or ''} {getattr(division, 'name', '') or ''}".strip() or str(division_id)
                         missing_required_rows.append({
+                            'week_id': str(getattr(week, 'id', '')) if getattr(week, 'id', None) else None,
                             'week': getattr(week, 'week_number', None),
-                            'week_start_date': str(week_game_date) if week_game_date else None,
+                            'game_date': _date_only_iso(week_game_date),
+                            'week_start_date': _date_only_iso(getattr(week, 'start_date', None)),
+                            'week_type': getattr(week, 'week_type', None) or getattr(week, 'date_type', None),
+                            'date_type': getattr(week, 'date_type', None),
+                            'season_phase': getattr(week, 'season_phase', None) or getattr(week, 'phase', None),
+                            'status': getattr(week, 'status', None),
+                            'regular_season_required': True,
                             'division': division_label,
                             'required_games': expected_games,
                             'scheduled_games': int(scheduled_games or 0),
@@ -365,6 +379,8 @@ def _build_final_schedule_validation_result(
         'optional_optimization_skip_reason': optional_optimization_skip_reason,
         'true_home_host_rule_passed': true_home_rule,
         'host_location_vs_home_team_verification': host_verification,
+        'required_games_expected_count': required_games_expected_count,
+        'regular_season_required_week_diagnostics': regular_season_required_week_diagnostics,
     }
     result.update(counters)
     return result
@@ -2149,6 +2165,20 @@ WEEK_DATE_TYPES = {'REGULAR_SEASON', 'BLACKOUT', 'PLAYOFF'}
 REGULAR_SEASON_DATE_TYPE = 'REGULAR_SEASON'
 BLACKOUT_DATE_TYPE = 'BLACKOUT'
 PLAYOFF_DATE_TYPE = 'PLAYOFF'
+REGULAR_SEASON_REQUIRED_EXCLUSION_REASONS = {
+    'BLACKOUT_WEEK',
+    'NO_GAME_WEEK',
+    'PLAYOFF_WEEK',
+    'CHAMPIONSHIP_WEEK',
+    'TOURNAMENT_ONLY_WEEK',
+    'NOT_REGULAR_SEASON_REQUIRED',
+    'WEEK_INACTIVE',
+    'UNKNOWN_NON_REQUIRED_WEEK_TYPE',
+}
+WEEK_INACTIVE_STATUS_VALUES = {'INACTIVE', 'CANCELLED', 'CANCELED', 'DISABLED', 'ARCHIVED'}
+NO_GAME_WEEK_VALUES = {'NO_GAME', 'NO_GAMES', 'NO-GAME', 'NO-GAMES', 'BYE', 'BYE_WEEK', 'OFF', 'BREAK'}
+TOURNAMENT_ONLY_WEEK_VALUES = {'TOURNAMENT', 'TOURNAMENT_ONLY', 'BRACKET', 'BRACKET_ONLY'}
+CHAMPIONSHIP_WEEK_VALUES = {'CHAMPIONSHIP', 'CHAMPIONSHIP_WEEK', 'CHAMPION'}
 
 
 def _normalize_week_date_type(value: object | None) -> str:
@@ -2169,6 +2199,104 @@ def _week_date_type(week: Week | None) -> str:
 
 def _is_regular_season_week(week: Week | None) -> bool:
     return _week_date_type(week) == REGULAR_SEASON_DATE_TYPE
+
+
+def _normalize_week_metadata_token(value: object | None) -> str:
+    return str(value or '').strip().upper().replace(' ', '_')
+
+
+def _week_metadata_tokens(week: Week | None) -> set[str]:
+    if not week:
+        return set()
+    return {
+        token
+        for token in (
+            _normalize_week_metadata_token(getattr(week, 'date_type', None)),
+            _normalize_week_metadata_token(getattr(week, 'status', None)),
+            _normalize_week_metadata_token(getattr(week, 'week_type', None)),
+            _normalize_week_metadata_token(getattr(week, 'season_phase', None)),
+            _normalize_week_metadata_token(getattr(week, 'phase', None)),
+        )
+        if token
+    }
+
+
+def _week_text_metadata(week: Week | None) -> str:
+    if not week:
+        return ''
+    return ' '.join(str(getattr(week, attr, '') or '') for attr in ('label', 'notes', 'status', 'date_type')).lower()
+
+
+def _regular_season_required_week_decision(week: Week | None) -> tuple[bool, str | None]:
+    """Return whether a week should require regular-season division games.
+
+    The final validator must use week metadata, not existing games, to decide
+    whether a regular-season slate is required.  Unknown or postseason/no-game
+    metadata is treated as non-required so false REQUIRED_GAMES_MISSING failures
+    are not emitted for blackout, bye, playoff, championship, or bracket-only
+    dates.
+    """
+    if not week:
+        return False, 'NOT_REGULAR_SEASON_REQUIRED'
+
+    tokens = _week_metadata_tokens(week)
+    text_metadata = _week_text_metadata(week)
+
+    if any(bool(getattr(week, attr, False)) for attr in ('is_active', 'active')) is False and any(hasattr(week, attr) for attr in ('is_active', 'active')):
+        return False, 'WEEK_INACTIVE'
+    if tokens.intersection(WEEK_INACTIVE_STATUS_VALUES):
+        return False, 'WEEK_INACTIVE'
+    if any(bool(getattr(week, attr, False)) for attr in ('is_blackout', 'blackout')) or BLACKOUT_DATE_TYPE in tokens or 'blackout' in text_metadata:
+        return False, 'BLACKOUT_WEEK'
+    if any(bool(getattr(week, attr, False)) for attr in ('is_no_games', 'is_no_game', 'no_games')) or tokens.intersection(NO_GAME_WEEK_VALUES) or 'no game' in text_metadata or 'no-game' in text_metadata:
+        return False, 'NO_GAME_WEEK'
+    if any(bool(getattr(week, attr, False)) for attr in ('is_championship', 'championship')) or tokens.intersection(CHAMPIONSHIP_WEEK_VALUES) or 'championship' in text_metadata:
+        return False, 'CHAMPIONSHIP_WEEK'
+    if any(bool(getattr(week, attr, False)) for attr in ('is_playoff', 'playoff')) or PLAYOFF_DATE_TYPE in tokens or 'playoff' in text_metadata:
+        return False, 'PLAYOFF_WEEK'
+    if any(bool(getattr(week, attr, False)) for attr in ('is_tournament', 'tournament_only')) or tokens.intersection(TOURNAMENT_ONLY_WEEK_VALUES) or 'tournament' in text_metadata or 'bracket' in text_metadata:
+        return False, 'TOURNAMENT_ONLY_WEEK'
+
+    raw_date_type = _normalize_week_metadata_token(getattr(week, 'date_type', None))
+    if raw_date_type and raw_date_type not in WEEK_DATE_TYPES:
+        return False, 'UNKNOWN_NON_REQUIRED_WEEK_TYPE'
+
+    try:
+        if _week_date_type(week) != REGULAR_SEASON_DATE_TYPE:
+            return False, 'NOT_REGULAR_SEASON_REQUIRED'
+    except HTTPException:
+        return False, 'UNKNOWN_NON_REQUIRED_WEEK_TYPE'
+
+    if any(hasattr(week, attr) for attr in ('is_regular_season', 'regular_season')) and not any(bool(getattr(week, attr, False)) for attr in ('is_regular_season', 'regular_season')):
+        return False, 'NOT_REGULAR_SEASON_REQUIRED'
+
+    return True, None
+
+
+def _is_regular_season_required_week(week: Week | None) -> bool:
+    required, _reason = _regular_season_required_week_decision(week)
+    return required
+
+
+def _regular_season_required_week_diagnostic(week: Week | None, *, required_games_calculated: bool) -> dict[str, object]:
+    required, reason = _regular_season_required_week_decision(week)
+    week_game_date = _week_game_date(week)
+    if reason and reason not in REGULAR_SEASON_REQUIRED_EXCLUSION_REASONS:
+        reason = 'NOT_REGULAR_SEASON_REQUIRED'
+    return {
+        'week_id': str(getattr(week, 'id', '')) if getattr(week, 'id', None) else None,
+        'week': getattr(week, 'week_number', None),
+        'game_date': _date_only_iso(week_game_date),
+        'week_start_date': _date_only_iso(getattr(week, 'start_date', None)),
+        'week_type': getattr(week, 'week_type', None) or getattr(week, 'date_type', None),
+        'date_type': getattr(week, 'date_type', None),
+        'season_phase': getattr(week, 'season_phase', None) or getattr(week, 'phase', None),
+        'status': getattr(week, 'status', None),
+        'label': getattr(week, 'label', None),
+        'regular_season_required': required,
+        'exclusion_reason': None if required else (reason or 'NOT_REGULAR_SEASON_REQUIRED'),
+        'required_games_calculated': bool(required_games_calculated),
+    }
 
 
 def _week_label(week: Week | None) -> str | None:
