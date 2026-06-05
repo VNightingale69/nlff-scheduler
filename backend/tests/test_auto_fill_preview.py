@@ -1451,6 +1451,9 @@ class AutoFillPreviewTest(unittest.TestCase):
         self.assertEqual(applied['proposed_count'], 4)
         self.assertEqual(applied['created_count'], 4)
         self.assertEqual(applied['skipped_count'], 0)
+        self.assertIn('turf_wave_source_of_truth_diagnostics', applied)
+        self.assertFalse(applied['turf_wave_source_of_truth_diagnostics']['turf_wave_source_of_truth_repair_ran'])
+        self.assertEqual(applied['turf_wave_source_of_truth_diagnostics']['turf_wave_source_of_truth_repair_status'], 'NOT_RUN')
 
     def test_same_community_prefers_home_slot_over_away_slot(self):
         away_host = HostLocation(id=uuid.uuid4(), organization_id=self.org_a.id, name='Antioch Park', is_active=True)
