@@ -123,6 +123,209 @@ FINAL_VALIDATION_COUNTER_KEYS = (
     'generated_slot_integrity_failure_count',
 )
 
+
+
+FINAL_VALIDATION_FAILURE_CATEGORIES = {
+    'REQUIRED_GAMES_MISSING': 'REQUIRED_GAME_MISSING',
+    'REQUIRED_DIVISION_WEEK_GAMES_MISSING': 'REQUIRED_GAME_MISSING',
+    'TEAM_TIME_CONFLICT': 'TEAM_TIME_CONFLICT',
+    'FIELD_TIME_CONFLICT': 'FIELD_TIME_CONFLICT',
+    'FIELD_TYPE_MISMATCH': 'FIELD_TYPE_MISMATCH',
+    'SCHEDULED_GAME_MISSING_HOST_LOCATION': 'GENERATED_SLOT_INTEGRITY',
+    'SCHEDULED_GAME_MISSING_FIELD': 'GENERATED_SLOT_INTEGRITY',
+    'SCHEDULED_GAME_MISSING_FIELD_TYPE': 'GENERATED_SLOT_INTEGRITY',
+    'SCHEDULED_GAME_MISSING_GAME_SLOT': 'GENERATED_SLOT_INTEGRITY',
+    'SCHEDULED_GAME_SLOT_NOT_FOUND': 'GENERATED_SLOT_INTEGRITY',
+    'SCHEDULED_GAME_FIELD_INSTANCE_NOT_FOUND': 'GENERATED_SLOT_INTEGRITY',
+    'SCHEDULED_GAME_SLOT_HOST_MISMATCH': 'GENERATED_SLOT_INTEGRITY',
+    'SCHEDULED_GAME_SLOT_DATE_MISMATCH': 'GENERATED_SLOT_INTEGRITY',
+    'SCHEDULED_GAME_SLOT_TIME_MISMATCH': 'GENERATED_SLOT_INTEGRITY',
+    'GENERATED_SLOT_INTEGRITY_FAILURE': 'GENERATED_SLOT_INTEGRITY',
+    'SELECTED_HOST_VIOLATION': 'SELECTED_HOST_VIOLATION',
+    'OVERFLOW_LOCATION_USED': 'OVERFLOW_HOST_VIOLATION',
+    'HOST_OWNER_AS_AWAY': 'HOST_OWNER_AS_AWAY',
+    'TRUE_HOME_HOST_VIOLATION': 'TRUE_HOME_HOST_VIOLATION',
+    **{code: 'DOUBLEHEADER_VALIDATION' for code in DOUBLEHEADER_FINAL_FAILURE_CODES},
+    'TURF_WAVE_EARLIER_AVAILABLE_HOUR_SKIPPED': 'TURF_WAVE_VALIDATION',
+    'TURF_WAVE_NON_CONTIGUOUS_USED_TIME': 'TURF_WAVE_VALIDATION',
+    'TURF_WAVE_USED_LATER_WITH_EMPTY_EARLIER_WAVE': 'TURF_WAVE_VALIDATION',
+    'TURF_WAVE_PULL_FORWARD_REQUIRED': 'TURF_WAVE_VALIDATION',
+    'TURF_WAVE_PULL_FORWARD_UNRESOLVED': 'TURF_WAVE_VALIDATION',
+    'TURF_WAVE_LABEL_MISMATCH': 'TURF_WAVE_VALIDATION',
+    'TURF_WAVE_SEQUENCE_GAP': 'TURF_WAVE_VALIDATION',
+    'TURF_WAVE_SEQUENCE_OUT_OF_ORDER': 'TURF_WAVE_VALIDATION',
+    'TURF_WAVE_DUPLICATE_SEQUENCE': 'TURF_WAVE_VALIDATION',
+    'TURF_WAVE_CHRONOLOGICAL_VALIDATION_FAILED': 'TURF_WAVE_VALIDATION',
+    'TURF_WAVE_CANONICAL_MAPPING_MISSING': 'TURF_WAVE_VALIDATION',
+    'TURF_WAVE_MIXED_LABELS_FOR_SAME_TIME': 'TURF_WAVE_VALIDATION',
+    'VALIDATION_DETAIL_COUNT_MISMATCH': 'VALIDATION_DETAIL_MISMATCH',
+    'QUALITY_REPORT_FINAL_VALIDATION_MISMATCH': 'VALIDATION_SOURCE_MISMATCH',
+    'FINAL_VALIDATION_SOURCE_MISMATCH': 'VALIDATION_SOURCE_MISMATCH',
+    'VALIDATION_RESULT_MISSING': 'DIAGNOSTICS_REPORTING_FAILURE',
+    'DIAGNOSTICS_DETAIL_MISSING': 'DIAGNOSTICS_REPORTING_FAILURE',
+    'REPORTING_RECONCILIATION_FAILED': 'DIAGNOSTICS_REPORTING_FAILURE',
+}
+
+DIAGNOSTICS_REPORTING_FAILURE_CODES = {
+    'VALIDATION_DETAIL_COUNT_MISMATCH',
+    'QUALITY_REPORT_FINAL_VALIDATION_MISMATCH',
+    'FINAL_VALIDATION_SOURCE_MISMATCH',
+    'VALIDATION_RESULT_MISSING',
+    'DIAGNOSTICS_DETAIL_MISSING',
+    'REPORTING_RECONCILIATION_FAILED',
+}
+
+SCOPE_DETAIL_COUNT_KEYS_BY_CODE = {
+    'REQUIRED_GAMES_MISSING': ('missing_games',),
+    'REQUIRED_DIVISION_WEEK_GAMES_MISSING': ('missing_games',),
+    'TURF_WAVE_EARLIER_AVAILABLE_HOUR_SKIPPED': ('skipped_earlier_wave_count',),
+    'TURF_WAVE_NON_CONTIGUOUS_USED_TIME': ('non_contiguous_used_time_count', 'skipped_earlier_wave_count'),
+    'TURF_WAVE_USED_LATER_WITH_EMPTY_EARLIER_WAVE': ('later_used_with_empty_earlier_wave_count', 'skipped_earlier_wave_count'),
+    'TURF_WAVE_PULL_FORWARD_REQUIRED': ('pull_forward_required_count', 'skipped_earlier_wave_count'),
+    'TURF_WAVE_PULL_FORWARD_UNRESOLVED': ('unresolved_turf_gaps_count', 'skipped_earlier_wave_count'),
+}
+
+
+def _validation_category_for_code(code: str | None) -> str:
+    return FINAL_VALIDATION_FAILURE_CATEGORIES.get(str(code or '').upper(), 'DIAGNOSTICS_REPORTING_FAILURE')
+
+
+def _has_record_or_scope_reference(detail: dict[str, object]) -> bool:
+    if any(detail.get(key) for key in ('game_id', 'game_1_id', 'game_2_id', 'team_id', 'field_instance_id', 'game_slot_id', 'turf_wave_id', 'hosting_availability_id', 'host_plan_selection_id')):
+        return True
+    if detail.get('validation_run_id'):
+        return True
+    if detail.get('season_id') and detail.get('week_id') and detail.get('division_id'):
+        return True
+    if detail.get('season_id') and detail.get('game_date') and (detail.get('host_location_id') or detail.get('division_id')):
+        return True
+    if detail.get('host_location_id') and detail.get('game_date'):
+        return True
+    if detail.get('hosting_availability_id'):
+        return True
+    return False
+
+
+def _detail_count_for_failure(code: str, details: object) -> int:
+    if isinstance(details, list):
+        if code in SCOPE_DETAIL_COUNT_KEYS_BY_CODE:
+            total = 0
+            used_weight = False
+            for row in details:
+                if not isinstance(row, dict):
+                    continue
+                for key in SCOPE_DETAIL_COUNT_KEYS_BY_CODE[code]:
+                    if row.get(key) is not None:
+                        total += _safe_int(row.get(key))
+                        used_weight = True
+                        break
+            if used_weight:
+                return total
+        return sum(1 for row in details if isinstance(row, dict) and _has_record_or_scope_reference(row))
+    if isinstance(details, dict):
+        if code in SCOPE_DETAIL_COUNT_KEYS_BY_CODE:
+            for key in SCOPE_DETAIL_COUNT_KEYS_BY_CODE[code]:
+                if details.get(key) is not None:
+                    return _safe_int(details.get(key))
+        return 1 if _has_record_or_scope_reference(details) or details.get('validation_scope') else 0
+    return 0
+
+
+def _diagnostics_reporting_failure(code: str, message: str, *, season_id: uuid.UUID | str | None, validation_scope: str | None, source_validator: str, details: dict[str, object] | None = None, run_id: object | None = None) -> dict[str, object]:
+    now = datetime.utcnow().isoformat()
+    detail = {
+        'failure_id': f"{code.lower()}-{uuid.uuid4()}",
+        'failure_code': code,
+        'failure_category': _validation_category_for_code(code),
+        'severity': 'DIAGNOSTICS_REPORTING_FAILURE',
+        'blocking': True,
+        'validation_scope': validation_scope or 'validation_audit',
+        'season_id': str(season_id) if season_id else None,
+        'validation_run_id': str(run_id) if run_id else None,
+        'source_validator': source_validator,
+        'specific_reason': message,
+        'recommended_action': 'Rerun final validation and review diagnostics detail generation.',
+        'created_at': now,
+        'generated_at': now,
+        **(details or {}),
+    }
+    return {
+        'code': code,
+        'count': 1,
+        'message': message,
+        'severity': 'DIAGNOSTICS_REPORTING_FAILURE',
+        'blocking': True,
+        'failure_category': detail['failure_category'],
+        'validation_scope': detail['validation_scope'],
+        'source_validator': source_validator,
+        'details': [detail],
+    }
+
+
+def _normalize_final_validation_failures(failures: list[dict[str, object]], *, season_id: uuid.UUID | str | None, validation_scope: str, run_id: object | None, generated_at: str) -> tuple[list[dict[str, object]], list[dict[str, object]], list[str]]:
+    normalized: list[dict[str, object]] = []
+    diagnostics: list[dict[str, object]] = []
+    mismatched_codes: list[str] = []
+    for failure in failures:
+        if not isinstance(failure, dict):
+            diagnostics.append(_diagnostics_reporting_failure('DIAGNOSTICS_DETAIL_MISSING', 'Final validation emitted a non-structured failure.', season_id=season_id, validation_scope=validation_scope, source_validator='FINAL_VALIDATION', details={'raw_failure': str(failure)}, run_id=run_id))
+            continue
+        code = str(failure.get('code') or failure.get('failure_code') or 'DIAGNOSTICS_DETAIL_MISSING').upper()
+        category = _validation_category_for_code(code)
+        expected_count = _safe_int(failure.get('count') or 1)
+        details = failure.get('details')
+        detail_rows = details if isinstance(details, list) else ([details] if isinstance(details, dict) else [])
+        enriched_details: list[object] = []
+        for index, row in enumerate(detail_rows):
+            if not isinstance(row, dict):
+                enriched_details.append(row)
+                continue
+            detail = dict(row)
+            detail.setdefault('failure_id', f"{code.lower()}-{uuid.uuid5(uuid.NAMESPACE_URL, f'{run_id}:{code}:{index}:{sorted((str(k), str(v)) for k, v in detail.items())}')}")
+            detail.setdefault('failure_code', code)
+            detail.setdefault('failure_category', category)
+            detail.setdefault('severity', failure.get('severity') or 'HARD_RULE_FAILURE')
+            detail.setdefault('blocking', bool(failure.get('blocking', True)))
+            detail.setdefault('validation_scope', validation_scope)
+            detail.setdefault('season_id', str(season_id) if season_id else detail.get('season_id'))
+            detail.setdefault('source_validator', failure.get('source_validator') or 'FINAL_VALIDATION')
+            detail.setdefault('specific_reason', failure.get('message') or code)
+            detail.setdefault('repair_attempted', failure.get('repair_attempted'))
+            detail.setdefault('repair_success', failure.get('repair_success'))
+            detail.setdefault('recommended_action', failure.get('recommended_action'))
+            detail.setdefault('generated_at', generated_at)
+            detail.setdefault('created_at', generated_at)
+            enriched_details.append(detail)
+        failure = {
+            **failure,
+            'code': code,
+            'failure_code': code,
+            'failure_category': category,
+            'severity': failure.get('severity') or ('DIAGNOSTICS_REPORTING_FAILURE' if code in DIAGNOSTICS_REPORTING_FAILURE_CODES else 'HARD_RULE_FAILURE'),
+            'blocking': bool(failure.get('blocking', True)),
+            'validation_scope': failure.get('validation_scope') or validation_scope,
+            'source_validator': failure.get('source_validator') or 'FINAL_VALIDATION',
+            'details': enriched_details,
+        }
+        detail_count = _detail_count_for_failure(code, enriched_details)
+        if code not in DIAGNOSTICS_REPORTING_FAILURE_CODES and expected_count > 0 and detail_count != expected_count:
+            mismatched_codes.append(code)
+            diagnostics.append(_diagnostics_reporting_failure(
+                'VALIDATION_DETAIL_COUNT_MISMATCH',
+                'Schedule validation could not be fully audited because a hard-rule count did not reconcile to specific records or scopes.',
+                season_id=season_id,
+                validation_scope=validation_scope,
+                source_validator=str(failure.get('source_validator') or 'FINAL_VALIDATION'),
+                details={'expected_count': expected_count, 'detail_count': detail_count, 'failure_code': code, 'mismatch_reason': 'hard-rule counter did not equal detailed records/scopes'},
+                run_id=run_id,
+            ))
+            continue
+        if code in DIAGNOSTICS_REPORTING_FAILURE_CODES:
+            diagnostics.append(failure)
+        else:
+            normalized.append(failure)
+    return normalized, diagnostics, mismatched_codes
+
 FINAL_VALIDATION_HARD_COUNTER_KEYS = tuple(
     key for key in FINAL_VALIDATION_COUNTER_KEYS
     if key not in {'required_games_missing_count', 'validation_failure_count', 'true_home_host_exception_count'}
@@ -170,6 +373,8 @@ def _final_validation_failure(code: str, count: int, message: str, details: obje
 
 
 def _final_validation_blocking_failures(final_validation: dict[str, object] | None) -> list[dict[str, object]]:
+    if isinstance(final_validation, dict) and isinstance(final_validation.get('hard_rule_failures'), list):
+        return list(final_validation.get('hard_rule_failures') or [])
     failures: list[dict[str, object]] = []
     for failure in (final_validation or {}).get('final_validation_failures') or []:
         if not isinstance(failure, dict):
@@ -182,7 +387,7 @@ def _final_validation_blocking_failures(final_validation: dict[str, object] | No
             })
             continue
         severity = str(failure.get('severity') or '').upper()
-        if severity == 'HARD_RULE_FAILURE' or bool(failure.get('blocking')):
+        if severity == 'HARD_RULE_FAILURE':
             failures.append({**failure, 'severity': 'HARD_RULE_FAILURE', 'blocking': True})
     return failures
 
@@ -279,6 +484,8 @@ def _final_validation_game_detail(g: Game, slot: GameSlot | None, fi: FieldInsta
         'kickoff_time': _format_diagnostic_time(getattr(g, 'kickoff_time', None)),
         'division_id': str(getattr(div, 'id', '') or '') if div else None,
         'division_name': (f"{getattr(div, 'division_group', '') or ''} {getattr(div, 'name', '') or ''}".strip() if div else None),
+        'division_group': getattr(div, 'division_group', None) if div else None,
+        'required_field_layout_type': getattr(div, 'required_field_layout_type', None) if div else None,
         'home_team_id': str(getattr(home, 'id', '') or '') if home else None,
         'home_team_name': getattr(home, 'name', None) if home else None,
         'away_team_id': str(getattr(away, 'id', '') or '') if away else None,
@@ -289,6 +496,9 @@ def _final_validation_game_detail(g: Game, slot: GameSlot | None, fi: FieldInsta
         'field_name': getattr(fi, 'field_name', None) if fi else None,
         'field_type': (getattr(slot, 'field_type', None) if slot else None) or (getattr(fi, 'field_type', None) if fi else None),
         'game_slot_id': str(getattr(slot, 'id', '') or '') if slot else None,
+        'slot_date': _format_diagnostic_date(getattr(slot, 'slot_date', None)) if slot else None,
+        'start_time': _format_diagnostic_time(getattr(slot, 'start_time', None)) if slot else None,
+        'end_time': _format_diagnostic_time(getattr(slot, 'end_time', None)) if slot else None,
         'specific_reason': specific_reason,
     }
 
@@ -1056,7 +1266,8 @@ def _build_final_schedule_validation_result(
                     if division_id is None:
                         logger.warning('final validation skipped division with missing id season_id=%s', season_id)
                         continue
-                    active_team_count = db.query(Team.id).filter(Team.division_id == division_id, Team.is_active.is_(True)).count()
+                    active_teams = db.query(Team).filter(Team.division_id == division_id, Team.is_active.is_(True)).order_by(Team.name.asc(), Team.id.asc()).all()
+                    active_team_count = len(active_teams)
                     expected_games = _division_required_games(active_team_count, division)
                     if expected_games <= 0:
                         continue
@@ -1082,7 +1293,18 @@ def _build_final_schedule_validation_result(
                             'season_phase': getattr(week, 'season_phase', None) or getattr(week, 'phase', None),
                             'status': getattr(week, 'status', None),
                             'regular_season_required': True,
+                            'failure_code': 'REQUIRED_GAMES_MISSING',
+                            'failure_category': 'REQUIRED_GAME_MISSING',
+                            'validation_scope': 'season_week_division',
+                            'season_id': str(season_id),
+                            'division_id': str(division_id),
                             'division': division_label,
+                            'division_name': division_label,
+                            'division_group': getattr(division, 'division_group', None),
+                            'active_team_count': active_team_count,
+                            'active_team_ids': [str(team.id) for team in active_teams],
+                            'active_team_names': [team.name for team in active_teams],
+                            'expected_games': expected_games,
                             'required_games': expected_games,
                             'scheduled_games': int(scheduled_games or 0),
                             'missing_games': missing_games,
@@ -1104,14 +1326,40 @@ def _build_final_schedule_validation_result(
     if selected_host_violations:
         failures.append(_final_validation_failure('SELECTED_HOST_VIOLATION', len(selected_host_violations), 'Scheduled game uses a host outside selected host-plan availability.', selected_host_violations))
     if overflow_host_ids_used:
-        failures.append(_final_validation_failure('OVERFLOW_LOCATION_USED', len(overflow_host_ids_used), 'Overflow locations are used in the final schedule.', sorted(overflow_host_ids_used)))
+        overflow_details = []
+        for host_id in sorted(overflow_host_ids_used):
+            host_obj = db.get(HostLocation, uuid.UUID(host_id)) if host_id else None
+            overflow_details.append({
+                'failure_code': 'OVERFLOW_LOCATION_USED',
+                'failure_category': 'OVERFLOW_HOST_VIOLATION',
+                'validation_scope': 'season_host_location',
+                'season_id': str(season_id) if season_id else None,
+                'host_location_id': host_id,
+                'host_location_name': getattr(host_obj, 'name', None) if host_obj else None,
+                'surface_type': getattr(host_obj, 'surface_type', None) if host_obj else None,
+                'specific_reason': 'Overflow host has at least one final scheduled game.',
+            })
+        failures.append(_final_validation_failure('OVERFLOW_LOCATION_USED', len(overflow_details), 'Overflow locations are used in the final schedule.', overflow_details))
     if generated_slot_integrity_failures:
         failures.append(_final_validation_failure('GENERATED_SLOT_INTEGRITY_FAILURE', len(generated_slot_integrity_failures), 'Scheduled games must retain complete generated-slot/date/time/field integrity.', generated_slot_integrity_failures))
 
     host_verification = _build_host_location_vs_home_team_verification(db, season_id) if season_id else {}
     counters['host_owner_as_away_count'] = _safe_int(host_verification.get('host_owner_is_away_team'))
     if counters['host_owner_as_away_count']:
-        failures.append(_final_validation_failure('HOST_OWNER_AS_AWAY', counters['host_owner_as_away_count'], 'A host-owning team is away at its selected owned host.'))
+        host_owner_details = []
+        for row in host_verification.get('host_owner_is_away_games') or []:
+            if isinstance(row, dict):
+                host_owner_details.append({
+                    **row,
+                    'failure_code': 'HOST_OWNER_AS_AWAY',
+                    'failure_category': 'HOST_OWNER_AS_AWAY',
+                    'season_id': str(season_id) if season_id else None,
+                    'game_date': row.get('date'),
+                    'kickoff_time': row.get('start_time'),
+                    'host_location_name': row.get('location'),
+                    'specific_reason': 'The organization that owns the selected host is the away team organization.',
+                })
+        failures.append(_final_validation_failure('HOST_OWNER_AS_AWAY', counters['host_owner_as_away_count'], 'A host-owning team is away at its selected owned host.', host_owner_details))
 
     # Final validation must not reuse pre-repair hierarchy diagnostics; rebuild hard-rule diagnostics from the final database state.
     placement_hierarchy_diagnostics = revised_hierarchy_diagnostics or {}
@@ -1127,7 +1375,17 @@ def _build_final_schedule_validation_result(
     counters['true_home_host_violation_count'] = _safe_int(true_home.get('total_home_host_violations') or true_home.get('TRUE_HOME_HOST_VIOLATION'))
     counters['true_home_host_exception_count'] = _safe_int(true_home.get('total_home_host_exceptions'))
     if counters['true_home_host_violation_count']:
-        failures.append(_final_validation_failure('TRUE_HOME_HOST_VIOLATION', counters['true_home_host_violation_count'], 'True home-host hard rule violations remain.'))
+        true_home_details = []
+        for row in true_home.get('violations') or true_home.get('reason_true_home_host_game_not_scheduled') or []:
+            if isinstance(row, dict):
+                true_home_details.append({
+                    **row,
+                    'failure_code': 'TRUE_HOME_HOST_VIOLATION',
+                    'failure_category': 'TRUE_HOME_HOST_VIOLATION',
+                    'season_id': str(season_id) if season_id else None,
+                    'specific_reason': row.get('exception_reason') or row.get('reason') or 'True home-host rule violation remains in final validation.',
+                })
+        failures.append(_final_validation_failure('TRUE_HOME_HOST_VIOLATION', counters['true_home_host_violation_count'], 'True home-host hard rule violations remain.', true_home_details))
 
     doubleheader = hierarchy.get('doubleheader_diagnostics') or _build_global_doubleheader_validation(db, season_id)
     for key in (
@@ -1138,6 +1396,7 @@ def _build_final_schedule_validation_result(
         'doubleheader_too_many_games_count',
     ):
         counters[key] = _safe_int(doubleheader.get(key))
+    doubleheader_failure_rows = [row for row in (doubleheader.get('failures') or []) if isinstance(row, dict)]
     for code, key in (
         ('DOUBLEHEADER_NOT_BACK_TO_BACK', 'doubleheader_not_back_to_back_count'),
         ('DOUBLEHEADER_SPLIT_LOCATION', 'doubleheader_split_location_count'),
@@ -1146,7 +1405,15 @@ def _build_final_schedule_validation_result(
         ('DOUBLEHEADER_TOO_MANY_GAMES_FOR_TEAM_DIVISION_DATE', 'doubleheader_too_many_games_count'),
     ):
         if counters[key]:
-            failures.append(_final_validation_failure(code, counters[key], 'Doubleheader hard-rule validation failed.', doubleheader.get('failures') or []))
+            code_details = [{**row, 'failure_code': code, 'failure_category': 'DOUBLEHEADER_VALIDATION', 'season_id': str(season_id) if season_id else row.get('season_id'), 'specific_reason': row.get('reason') or row.get('specific_reason') or 'Doubleheader hard-rule validation failed.'} for row in doubleheader_failure_rows if str(row.get('code') or row.get('failure_code') or code).upper() == code]
+            if not code_details and counters[key] == len(doubleheader_failure_rows):
+                code_details = [{**row, 'failure_code': code, 'failure_category': 'DOUBLEHEADER_VALIDATION', 'season_id': str(season_id) if season_id else row.get('season_id'), 'specific_reason': row.get('reason') or row.get('specific_reason') or 'Doubleheader hard-rule validation failed.'} for row in doubleheader_failure_rows]
+            failures.append(_final_validation_failure(code, counters[key], 'Doubleheader hard-rule validation failed.', code_details))
+    covered_doubleheader_codes = {'DOUBLEHEADER_NOT_BACK_TO_BACK', 'DOUBLEHEADER_SPLIT_LOCATION', 'DOUBLEHEADER_FIELD_TYPE_MISMATCH', 'DOUBLEHEADER_PAIR_VALIDATION_FAILED', 'DOUBLEHEADER_TOO_MANY_GAMES_FOR_TEAM_DIVISION_DATE'}
+    for code in sorted(DOUBLEHEADER_FINAL_FAILURE_CODES - covered_doubleheader_codes):
+        code_details = [{**row, 'failure_code': code, 'failure_category': 'DOUBLEHEADER_VALIDATION', 'season_id': str(season_id) if season_id else row.get('season_id'), 'specific_reason': row.get('reason') or row.get('specific_reason') or 'Doubleheader hard-rule validation failed.'} for row in doubleheader_failure_rows if str(row.get('code') or row.get('failure_code') or '').upper() == code]
+        if code_details:
+            failures.append(_final_validation_failure(code, len(code_details), 'Doubleheader hard-rule validation failed.', code_details))
 
     turf = _build_turf_wave_chronological_validation(db, season_id) if season_id else (hierarchy.get('turf_wave_diagnostics') or {})
     if turf_wave_source_of_truth_repair:
@@ -1203,20 +1470,57 @@ def _build_final_schedule_validation_result(
     if non_mapping_repair_failures:
         failures.append(_final_validation_failure('TURF_WAVE_LABEL_MISMATCH', len(non_mapping_repair_failures), 'Turf wave labels could not be repaired from canonical metadata.', non_mapping_repair_failures))
 
-    extra_failure_count = 0
     for failure in extra_failures or []:
-        extra_failure_count += 1
-        failures.append(_final_validation_failure('EXTRA_FINAL_VALIDATION_FAILURE', 1, str(failure)))
+        failures.append(_diagnostics_reporting_failure(
+            'DIAGNOSTICS_DETAIL_MISSING',
+            str(failure),
+            season_id=season_id,
+            validation_scope=validation_scope,
+            source_validator='FINAL_VALIDATION',
+            details={'raw_failure': str(failure)},
+            run_id=final_validation_run_id,
+        ))
 
-    hard_failure_count = sum(counters[key] for key in FINAL_VALIDATION_HARD_COUNTER_KEYS) + extra_failure_count
-    counters['validation_failure_count'] = hard_failure_count
     if final_source_reconciliation.get('count_mismatch'):
-        diagnostics_error = diagnostics_error or str(final_source_reconciliation.get('mismatch_reason') or 'final source-of-truth count mismatch')
+        failures.append(_diagnostics_reporting_failure(
+            'FINAL_VALIDATION_SOURCE_MISMATCH',
+            str(final_source_reconciliation.get('mismatch_reason') or 'final source-of-truth count mismatch'),
+            season_id=season_id,
+            validation_scope=validation_scope,
+            source_validator='FINAL_VALIDATION',
+            details={
+                'expected_count': final_source_reconciliation.get('final_scheduled_games_query_count'),
+                'detail_count': final_source_reconciliation.get('final_validation_games_checked_count'),
+                'failure_code': 'FINAL_VALIDATION_SOURCE_MISMATCH',
+                'mismatch_reason': final_source_reconciliation.get('mismatch_reason'),
+            },
+            run_id=final_validation_run_id,
+        ))
 
+    hard_rule_failures, diagnostics_reporting_failures, failure_codes_with_count_mismatch = _normalize_final_validation_failures(
+        failures,
+        season_id=season_id,
+        validation_scope=validation_scope,
+        run_id=final_validation_run_id,
+        generated_at=final_validation_timestamp,
+    )
+    failures = [*hard_rule_failures, *diagnostics_reporting_failures]
+    hard_failure_count = sum(_safe_int(failure.get('count')) for failure in hard_rule_failures)
+    diagnostics_reporting_failure_count = sum(_safe_int(failure.get('count')) for failure in diagnostics_reporting_failures)
+    detail_count_reconciliation_passed = not failure_codes_with_count_mismatch and diagnostics_reporting_failure_count == 0
+    counters['validation_failure_count'] = hard_failure_count
+    if diagnostics_reporting_failure_count:
+        diagnostics_error = diagnostics_error or 'Schedule validation could not be fully audited.'
+
+    only_required_games_missing = hard_failure_count > 0 and hard_failure_count == _safe_int(counters.get('required_games_missing_count'))
     if diagnostics_error:
-        final_status = 'ERROR'
-        schedule_quality_status = 'ERROR'
-        diagnostics_status = 'ERROR'
+        final_status = 'NEEDS_REVIEW' if hard_failure_count == 0 else 'VALIDATION_FAILED'
+        schedule_quality_status = 'NEEDS_REVIEW' if hard_failure_count == 0 else 'BLOCKED'
+        diagnostics_status = 'FAILED'
+    elif only_required_games_missing:
+        final_status = 'PARTIAL_SUCCESS'
+        schedule_quality_status = 'PARTIAL_SUCCESS'
+        diagnostics_status = 'PARTIAL_SUCCESS'
     elif hard_failure_count > 0:
         final_status = 'VALIDATION_FAILED'
         schedule_quality_status = 'BLOCKED'
@@ -1236,6 +1540,13 @@ def _build_final_schedule_validation_result(
         'final_validation_status': final_status,
         'final_validation_failure_count': hard_failure_count,
         'final_validation_failures': failures,
+        'hard_rule_failures': hard_rule_failures,
+        'hard_rule_failure_count': hard_failure_count,
+        'diagnostics_reporting_failures': diagnostics_reporting_failures,
+        'diagnostics_reporting_failure_count': diagnostics_reporting_failure_count,
+        'detail_count_reconciliation_passed': detail_count_reconciliation_passed,
+        'failure_codes_with_count_mismatch': failure_codes_with_count_mismatch,
+        'validation_audit_status': 'PASSED' if detail_count_reconciliation_passed else 'FAILED',
         'schedule_quality_status': schedule_quality_status,
         'diagnostics_status': diagnostics_status,
         'diagnostics_error': diagnostics_error,
@@ -1279,6 +1590,18 @@ def _build_final_schedule_validation_result(
         'unscheduled_orphan_game_count': generated_slot_integrity.get('unscheduled_orphan_game_count'),
     }
     result.update(counters)
+    logger.info(
+        'final_validation_completed season_id=%s run_id=%s final_validation_status=%s total_hard_rule_failure_count=%s total_failure_detail_records=%s detail_count_reconciliation_passed=%s failure_codes_with_count_mismatch=%s diagnostics_reporting_failure_count=%s validation_source=%s',
+        season_id,
+        final_validation_run_id,
+        final_status,
+        hard_failure_count,
+        sum(_detail_count_for_failure(str(failure.get('code') or ''), failure.get('details') or []) for failure in hard_rule_failures),
+        detail_count_reconciliation_passed,
+        failure_codes_with_count_mismatch,
+        diagnostics_reporting_failure_count,
+        result.get('final_validation_source'),
+    )
     return result
 
 
@@ -11077,8 +11400,10 @@ def build_schedule_quality_report(db: Session, season_id: uuid.UUID, final_valid
     validation_scope = str(final_validation.get('validation_scope') or _infer_validation_scope(db, season_id)[0])
     schedule_quality_scope = validation_scope
     hard_rule_failures = _final_validation_blocking_failures(final_validation)
+    diagnostics_reporting_failures = list(final_validation.get('diagnostics_reporting_failures') or []) if isinstance(final_validation, dict) else []
+    diagnostics_reporting_failure_count = _safe_int(final_validation.get('diagnostics_reporting_failure_count')) if isinstance(final_validation, dict) else 0
     final_status = str(final_validation.get('final_validation_status') or 'VALIDATION_RESULT_MISSING')
-    final_failure_count = _safe_int(final_validation.get('final_validation_failure_count'))
+    final_failure_count = _safe_int(final_validation.get('hard_rule_failure_count') or final_validation.get('final_validation_failure_count'))
     schedule_quality_hard_rule_failure_count = final_failure_count
     final_games_checked_count = _safe_int(final_validation.get('final_validation_games_checked_count') or len(rows))
     schedule_quality_games_checked_count = len(rows)
@@ -11166,7 +11491,15 @@ def build_schedule_quality_report(db: Session, season_id: uuid.UUID, final_valid
     }
     diagnostics: list[dict[str, object]] = []
     if not reconciliation_passed:
-        diagnostics.append({'code': 'QUALITY_REPORT_FINAL_VALIDATION_MISMATCH', **reconciliation})
+        diagnostics.append(_diagnostics_reporting_failure(
+            'QUALITY_REPORT_FINAL_VALIDATION_MISMATCH',
+            'Schedule Quality Report could not reconcile to final validation details.',
+            season_id=season_id,
+            validation_scope=validation_scope,
+            source_validator='SCHEDULE_QUALITY_FROM_FINAL_VALIDATION',
+            details={**reconciliation, 'expected_count': final_failure_count, 'detail_count': schedule_quality_hard_rule_failure_count, 'failure_code': 'QUALITY_REPORT_FINAL_VALIDATION_MISMATCH'},
+            run_id=final_validation.get('final_validation_run_id') or final_validation.get('run_id'),
+        ))
 
     if not final_validation.get('final_validation_ran'):
         schedule_quality_status = 'VALIDATION_REQUIRED'
@@ -11191,9 +11524,14 @@ def build_schedule_quality_report(db: Session, season_id: uuid.UUID, final_valid
         stale_quality_report_prevented = False
 
     logger.info(
-        'schedule_quality_report_generated season_id=%s final_validation_run_id=%s quality_report_source=%s hard_rule_source=%s final_validation_failure_count=%s schedule_quality_hard_rule_failure_count=%s final_validation_games_checked_count=%s schedule_quality_games_checked_count=%s validation_scope=%s schedule_quality_scope=%s reconciliation_passed=%s stale_quality_report_prevented=%s',
+        'schedule_quality_report_generated season_id=%s final_validation_run_id=%s hard_rule_failure_count=%s hard_rule_detail_record_count=%s schedule_quality_source=%s reconciliation_passed=%s diagnostics_reporting_failure_count=%s quality_report_source=%s hard_rule_source=%s final_validation_failure_count=%s schedule_quality_hard_rule_failure_count=%s final_validation_games_checked_count=%s schedule_quality_games_checked_count=%s validation_scope=%s schedule_quality_scope=%s stale_quality_report_prevented=%s',
         season_id,
         final_validation.get('final_validation_run_id') or final_validation.get('run_id'),
+        schedule_quality_hard_rule_failure_count,
+        sum(_detail_count_for_failure(str(failure.get('code') or ''), failure.get('details') or []) for failure in hard_rule_failures),
+        FINAL_SCHEDULE_SOURCE_NAME,
+        reconciliation_passed,
+        diagnostics_reporting_failure_count,
         'FINAL_VALIDATION_RESULT',
         'FINAL_VALIDATION',
         final_failure_count,
@@ -11202,7 +11540,6 @@ def build_schedule_quality_report(db: Session, season_id: uuid.UUID, final_valid
         schedule_quality_games_checked_count,
         validation_scope,
         schedule_quality_scope,
-        reconciliation_passed,
         stale_quality_report_prevented,
     )
 
@@ -11210,6 +11547,9 @@ def build_schedule_quality_report(db: Session, season_id: uuid.UUID, final_valid
         'overall_health': overall_health,
         'schedule_quality_status': schedule_quality_status,
         'diagnostics_status': final_validation.get('diagnostics_status'),
+        'diagnostics_reporting_failures': diagnostics_reporting_failures,
+        'diagnostics_reporting_failure_count': diagnostics_reporting_failure_count,
+        'validation_audit_status': final_validation.get('validation_audit_status'),
         'hard_errors': hard_rule_failures,
         'hard_rule_failures': hard_rule_failures,
         'hard_rule_failure_count': schedule_quality_hard_rule_failure_count,
@@ -11219,6 +11559,7 @@ def build_schedule_quality_report(db: Session, season_id: uuid.UUID, final_valid
         'repaired_issues': [],
         'issue_classifications': {
             'HARD_RULE_FAILURE': hard_rule_failures,
+            'DIAGNOSTICS_REPORTING_FAILURE': diagnostics_reporting_failures + diagnostics,
             'WARNING': warnings,
             'INFO': informational_items,
             'OPTIMIZATION_OPPORTUNITY': optimization_opportunities,
@@ -11243,7 +11584,7 @@ def build_schedule_quality_report(db: Session, season_id: uuid.UUID, final_valid
         'stale_quality_report_prevented': stale_quality_report_prevented,
         'message': 'Final validation must run before Schedule Quality Report can show hard-rule status.' if not final_validation.get('final_validation_ran') else None,
         'final_validation': final_validation,
-        **{key: final_validation.get(key) for key in ('final_validation_ran', 'final_validation_status', 'final_validation_failure_count', 'final_validation_failures', 'diagnostics_error', 'generated_slot_integrity_check_ran', 'generated_slot_integrity_status', 'generated_slot_integrity_failure_count', 'invalid_scheduled_game_count', 'repaired_scheduled_game_count', 'unscheduled_orphan_game_count', 'generated_slot_integrity_diagnostics', 'Generated Slot Integrity Diagnostics')},
+        **{key: final_validation.get(key) for key in ('final_validation_ran', 'final_validation_status', 'final_validation_failure_count', 'final_validation_failures', 'hard_rule_failure_count', 'detail_count_reconciliation_passed', 'failure_codes_with_count_mismatch', 'diagnostics_error', 'generated_slot_integrity_check_ran', 'generated_slot_integrity_status', 'generated_slot_integrity_failure_count', 'invalid_scheduled_game_count', 'repaired_scheduled_game_count', 'unscheduled_orphan_game_count', 'generated_slot_integrity_diagnostics', 'Generated Slot Integrity Diagnostics')},
     }
 
 
@@ -23606,6 +23947,13 @@ def schedule_publish_diagnostics(season_id: uuid.UUID | None = None, db: Session
         'archived_games': archived,
         'final_validation_status': final_validation.get('final_validation_status'),
         'schedule_quality_status': final_validation.get('schedule_quality_status'),
+        'publish_eligibility_source': 'PUBLISH_ELIGIBILITY_FROM_FINAL_VALIDATION',
+        'publish_block_reason': ('Schedule validation could not be fully audited.' if final_validation.get('diagnostics_reporting_failure_count') else ('Actual scheduling-rule failures require review.' if final_validation.get('hard_rule_failure_count') else None)),
+        'hard_rule_failure_count': final_validation.get('hard_rule_failure_count') or final_validation.get('final_validation_failure_count'),
+        'hard_rule_failures': final_validation.get('hard_rule_failures') or [],
+        'diagnostics_reporting_failure_count': final_validation.get('diagnostics_reporting_failure_count') or 0,
+        'diagnostics_reporting_failures': final_validation.get('diagnostics_reporting_failures') or [],
+        'validation_audit_status': final_validation.get('validation_audit_status'),
         'generated_slot_integrity_diagnostics': integrity,
         'generated_slot_integrity_failure_count': integrity.get('generated_slot_integrity_failure_count'),
         'scheduled_game_missing_host_location_count': sum(1 for row in (integrity.get('remaining_invalid_scheduled_games') or []) if row.get('missing_host_location')),
@@ -24005,7 +24353,25 @@ def export_schedule_management_csv(date: date | None = None, division_id: uuid.U
                     ])
         for failure in final_validation.get('final_validation_failures') or []:
             if isinstance(failure, dict) and failure.get('code') != 'REQUIRED_GAMES_MISSING':
-                w.writerow(['', '', 'FINAL_VALIDATION', f"EXPORT VALIDATION: {failure.get('code')} - {failure.get('message')}", '', '', '', '', str(final_validation.get('final_validation_status') or 'VALIDATION_FAILED')])
+                details = failure.get('details') if isinstance(failure.get('details'), list) else []
+                if details:
+                    for detail in details:
+                        if not isinstance(detail, dict):
+                            continue
+                        locator = detail.get('game_id') or detail.get('team_id') or detail.get('game_slot_id') or detail.get('field_instance_id') or detail.get('host_location_id') or detail.get('validation_run_id') or ''
+                        w.writerow([
+                            str(detail.get('game_date') or detail.get('slot_date') or ''),
+                            str(detail.get('kickoff_time') or detail.get('start_time') or ''),
+                            str(detail.get('division_name') or detail.get('validation_scope') or 'FINAL_VALIDATION'),
+                            f"EXPORT VALIDATION: {failure.get('code')} - {detail.get('specific_reason') or failure.get('message')}",
+                            str(detail.get('home_team_name') or detail.get('team_name') or ''),
+                            str(detail.get('away_team_name') or ''),
+                            str(detail.get('host_location_name') or locator),
+                            str(detail.get('field_name') or detail.get('field_type') or ''),
+                            str(failure.get('severity') or final_validation.get('final_validation_status') or 'VALIDATION_FAILED'),
+                        ])
+                else:
+                    w.writerow(['', '', 'FINAL_VALIDATION', f"EXPORT VALIDATION AUDIT ISSUE: {failure.get('code')} - Schedule validation details unavailable.", '', '', '', '', str(final_validation.get('diagnostics_status') or 'NEEDS_REVIEW')])
     if export_validation_warnings:
         logger.warning('export_schedule_management_csv incomplete_division_week_schedules=%s', export_validation_warnings)
     logger.info('export_schedule_management_csv division_entries=%s', sorted(export_division_names))

@@ -260,13 +260,18 @@ export default function ManualScheduleBuilderPage() {
   const setManualScheduleBannerFromValidation = (action: string, finalValidation: any) => {
     const status = String(finalValidation?.final_validation_status || '').toUpperCase();
     const qualityStatus = String(finalValidation?.schedule_quality_status || '').toUpperCase();
-    const failureCount = Number(finalValidation?.final_validation_failure_count || 0);
+    const failureCount = Number(finalValidation?.hard_rule_failure_count ?? finalValidation?.final_validation_failure_count ?? 0);
+    const diagnosticsFailureCount = Number(finalValidation?.diagnostics_reporting_failure_count || 0);
     const missingCount = Number(finalValidation?.required_games_missing_count || 0);
     if (status === 'COMPLETE' && qualityStatus === 'COMPLETE') {
       setSuccess(`${action} Final validation COMPLETE.`);
       return;
     }
-    setError(`${action} Schedule is ${status || qualityStatus || 'not complete'}: ${failureCount} hard-rule failures, ${missingCount} required games missing. Review Schedule Quality Report.`);
+    if (diagnosticsFailureCount > 0 && failureCount === 0) {
+      setError(`${action} Schedule validation could not be fully audited: ${diagnosticsFailureCount} diagnostics/reporting issue(s). Review Schedule Quality Report before publishing.`);
+      return;
+    }
+    setError(`${action} Schedule is ${status || qualityStatus || 'not complete'}: ${failureCount} detailed hard-rule failure(s), ${missingCount} required games missing. Review Schedule Quality Report for affected records/scopes.`);
   };
 
 
@@ -683,9 +688,14 @@ export default function ManualScheduleBuilderPage() {
                   } else if (finalStatus === 'COMPLETE') {
                     setSuccess(`${baseMessage} ${Number(res.committed_games_count ?? res.total_games_created ?? 0)} games scheduled. Final validation COMPLETE.`);
                   } else {
-                    const failureCount = Number(finalValidation.final_validation_failure_count || res.final_validation_failure_count || 0);
+                    const failureCount = Number(finalValidation.hard_rule_failure_count ?? finalValidation.final_validation_failure_count ?? res.final_validation_failure_count ?? 0);
+                    const diagnosticsFailureCount = Number(finalValidation.diagnostics_reporting_failure_count || 0);
                     const missing = Number(finalValidation.required_games_missing_count || 0);
-                    setError(`${baseMessage} Final status ${finalStatus || 'UNKNOWN'}; ${failureCount} hard-rule failures, ${missing} required games missing.${rootCauses ? ` Root causes: ${rootCauses}.` : ''}`);
+                    if (diagnosticsFailureCount > 0 && failureCount === 0) {
+                      setError(`${baseMessage} Schedule validation could not be fully audited; ${diagnosticsFailureCount} diagnostics/reporting issue(s). Review Schedule Quality Report.${rootCauses ? ` Root causes: ${rootCauses}.` : ''}`);
+                    } else {
+                      setError(`${baseMessage} Final status ${finalStatus || 'UNKNOWN'}; ${failureCount} detailed hard-rule failure(s), ${missing} required games missing.${rootCauses ? ` Root causes: ${rootCauses}.` : ''}`);
+                    }
                   }
                 } catch (e: unknown) {
                   setError(`Auto-schedule failed: ${extractError(e)}`);
