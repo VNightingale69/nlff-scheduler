@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import Base
 from app.models import Division, FieldInstance, Game, GameSlot, GameStatus, HostLocation, HostingAvailability, Organization, Season, Team, TurfWave, Week
-from app.routes.api import _build_final_schedule_validation_result, _division_required_games
+from app.routes.api import _build_final_schedule_validation_result, _division_required_games, load_final_scheduled_games_for_validation
 
 
 class FinalScheduleValidationTest(unittest.TestCase):
@@ -251,6 +251,88 @@ class FinalScheduleValidationTest(unittest.TestCase):
         self.assertIn('TURF_WAVE_USED_LATER_WITH_EMPTY_EARLIER_WAVE', failure_codes)
         self.assertIn('TURF_WAVE_PULL_FORWARD_REQUIRED', failure_codes)
         self.assertGreater(result['turf_wave_earlier_available_hour_skipped_count'], 0)
+
+
+    def test_final_validation_reloads_database_source_and_excludes_non_final_statuses(self):
+        division = self._add_division_with_active_teams(2, 'Reload')
+        scheduled = GameStatus(id=uuid.uuid4(), code='SCHEDULED', label='Scheduled', is_active=True)
+        validation_failed = GameStatus(id=uuid.uuid4(), code='VALIDATION_FAILED', label='Validation Failed', is_active=True)
+        host = HostLocation(id=uuid.uuid4(), organization_id=self.org.id, name='Host', surface_type='GRASS_FIELD')
+        availability = HostingAvailability(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week.id,
+            organization_id=self.org.id,
+            host_location_id=host.id,
+            available_date=self.week.start_date,
+            primary_game_date=self.week.start_date,
+            start_time=time(9, 0),
+            end_time=time(12, 0),
+            is_available=True,
+            active=True,
+        )
+        field = FieldInstance(
+            id=uuid.uuid4(),
+            host_location_id=host.id,
+            hosting_availability_id=availability.id,
+            instance_date=self.week.start_date,
+            field_name='Field 1',
+            field_type='SMALL',
+            is_active=True,
+            is_generated=True,
+        )
+        teams = self.db.query(Team).filter(Team.division_id == division.id).order_by(Team.name.asc()).all()
+        final_game = Game(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week.id,
+            home_team_id=teams[0].id,
+            away_team_id=teams[1].id,
+            host_location_id=host.id,
+            field_instance_id=field.id,
+            game_status_id=scheduled.id,
+            game_date=self.week.start_date,
+            kickoff_time=time(9, 0),
+        )
+        stale_game = Game(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week.id,
+            home_team_id=teams[1].id,
+            away_team_id=teams[0].id,
+            host_location_id=host.id,
+            field_instance_id=field.id,
+            game_status_id=validation_failed.id,
+            game_date=self.week.start_date,
+            kickoff_time=time(10, 0),
+        )
+        slot = GameSlot(
+            id=uuid.uuid4(),
+            field_instance_id=field.id,
+            host_location_id=host.id,
+            season_id=self.season.id,
+            week_id=self.week.id,
+            slot_date=self.week.start_date,
+            start_time=time(9, 0),
+            end_time=time(10, 0),
+            field_type='SMALL',
+            status='BOOKED',
+            assigned_game_id=final_game.id,
+        )
+        self.db.add_all([scheduled, validation_failed, host, availability, field, final_game, stale_game, slot])
+        self.db.commit()
+
+        final_rows = load_final_scheduled_games_for_validation(self.db, self.season.id)
+        result = _build_final_schedule_validation_result(self.db, self.season.id, preview_games_count=2, committed_games_count=1)
+
+        self.assertEqual(len(final_rows), 1)
+        self.assertEqual(result['final_scheduled_games_query_count'], 1)
+        self.assertEqual(result['final_validation_games_checked_count'], 1)
+        self.assertEqual(result['preview_games_count'], 2)
+        self.assertTrue(result['preview_games_are_stale'])
+        self.assertEqual(result['final_validation_source'], 'database_final_scheduled_games')
+        self.assertEqual(result['schedule_quality_source'], 'database_final_scheduled_games')
+        self.assertNotIn(stale_game.id, {row[0].id for row in final_rows})
 
     def test_final_validation_reports_error_status_for_diagnostics_errors(self):
         result = _build_final_schedule_validation_result(
