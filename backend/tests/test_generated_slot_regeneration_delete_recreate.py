@@ -90,7 +90,7 @@ class GeneratedSlotRegenerationDeleteRecreateTest(unittest.TestCase):
             host_location_id=self.host.id,
             hosting_availability_id=self.availability.id,
             instance_date=self.availability.available_date,
-            field_name='Wave 1 TWO_SMALL_ONE_MEDIUM 0900 Small Field 1',
+            field_name='Wave 1 TWO_SMALL_ONE_MEDIUM Small Field 1',
             field_type='SMALL',
             is_active=True,
             is_generated=False,
@@ -113,7 +113,7 @@ class GeneratedSlotRegenerationDeleteRecreateTest(unittest.TestCase):
 
         self.assertTrue(manual.is_active)
         self.assertFalse(manual.is_generated)
-        self.assertIn('Wave 1 TWO_SMALL_ONE_MEDIUM 0900 Small Field 1 @ 0900', generated_names)
+        self.assertIn('Wave 1 TWO_SMALL_ONE_MEDIUM Small Field 1 @ 0900', generated_names)
         self.assertEqual(len(all_names), len(set(all_names)))
         self.assertTrue(metrics['diagnostics']['field_name_uniqueness_validation_passed'])
 

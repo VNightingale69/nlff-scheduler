@@ -7,6 +7,7 @@ from app.routes.api import (
     _format_schedule_export_status,
     _format_schedule_export_time,
     _schedule_export_row_values,
+    _turf_field_export_label,
 )
 
 
@@ -42,6 +43,16 @@ class ScheduleManagementExportTest(unittest.TestCase):
                 'SMALL',
                 'SCHEDULED',
             ],
+        )
+
+    def test_turf_export_label_uses_wave_metadata_not_stale_field_name(self):
+        wave = SimpleNamespace(sequence_number=1, preferred_layout_code='TWO_SMALL_ONE_MEDIUM')
+        slot = SimpleNamespace(field_type='SMALL', turf_wave_id='wave-id', turf_wave=wave)
+        field = SimpleNamespace(field_name='Wave 2 TWO_SMALL_ONE_MEDIUM Small Field 1')
+
+        self.assertEqual(
+            _turf_field_export_label(slot, field),
+            'Wave 1 TWO_SMALL_ONE_MEDIUM Small Field 1',
         )
 
 
