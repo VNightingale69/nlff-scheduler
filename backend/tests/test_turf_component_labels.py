@@ -3,12 +3,17 @@ import uuid
 from datetime import date, time
 from types import SimpleNamespace
 
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import StaticPool
 
-from app.database import Base
-from app.models import Division, FieldInstance, Game, GameSlot, GameStatus, HostLocation, HostingAvailability, Organization, Season, Team, TurfWave, Week
-from app.routes.api import _canonical_turf_field_export_label, _schedule_export_row_values, _validate_turf_component_labels
+from app.auth import ROLE_LEAGUE_ADMIN
+from app.database import Base, get_db
+from app.main import app
+from app.models import Division, FieldInstance, Game, GameSlot, GameStatus, HostLocation, HostingAvailability, Organization, Role, Season, Team, TurfWave, User, Week
+from app.routes.api import _canonical_turf_field_export_label, _schedule_export_row_values, _to_game_read, _validate_turf_component_labels
+from app.security import create_access_token, hash_password
 from app.turf_configurations import approved_turf_configuration_metadata
 
 
@@ -25,21 +30,47 @@ LAYOUTS = (
 
 class TurfComponentLabelSourceOfTruthTest(unittest.TestCase):
     def setUp(self):
-        engine = create_engine('sqlite+pysqlite:///:memory:', future=True)
+        engine = create_engine(
+            'sqlite+pysqlite:///:memory:',
+            connect_args={'check_same_thread': False},
+            poolclass=StaticPool,
+            future=True,
+        )
         Base.metadata.create_all(engine)
-        self.db: Session = sessionmaker(bind=engine)()
+        self.SessionLocal = sessionmaker(bind=engine)
+        self.db: Session = self.SessionLocal()
         self.season = Season(id=uuid.UUID(int=1), name='Season', start_date=date(2026, 9, 1), end_date=date(2026, 11, 1), is_active=True)
         self.week = Week(id=uuid.UUID(int=2), season_id=self.season.id, week_number=1, start_date=date(2026, 9, 5), end_date=date(2026, 9, 11), primary_game_date=date(2026, 9, 5))
         self.org = Organization(id=uuid.UUID(int=3), name='Org', is_active=True)
         self.status = GameStatus(id=uuid.UUID(int=4), code='SCHEDULED', label='Scheduled', is_active=True)
+        self.league_role = Role(id=uuid.UUID(int=40), name=ROLE_LEAGUE_ADMIN, is_active=True)
+        self.league_user = User(
+            id=uuid.UUID(int=41),
+            email='league@example.com',
+            full_name='League Admin',
+            password_hash=hash_password('Password123!'),
+            role_id=self.league_role.id,
+            organization_id=None,
+            is_active=True,
+        )
         self.host = HostLocation(id=uuid.UUID(int=5), organization_id=self.org.id, name='Turf Host', surface_type='TURF_STADIUM', is_active=True)
         self.availability = HostingAvailability(
             id=uuid.UUID(int=6), season_id=self.season.id, week_id=self.week.id, organization_id=self.org.id,
             host_location_id=self.host.id, available_date=date(2026, 9, 5), start_time=time(9, 0), end_time=time(16, 0),
             active=True, is_available=True,
         )
-        self.db.add_all([self.season, self.week, self.org, self.status, self.host, self.availability])
+        self.db.add_all([self.season, self.week, self.org, self.status, self.league_role, self.league_user, self.host, self.availability])
         self.db.flush()
+
+        def override_get_db():
+            db = self.SessionLocal()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        app.dependency_overrides[get_db] = override_get_db
+        self.client = TestClient(app)
         self.divisions = {}
         for offset, field_type in enumerate(('SMALL', 'MEDIUM', 'LARGE'), start=10):
             division = Division(id=uuid.UUID(int=offset), division_group='Test', name=field_type, required_field_layout_type=field_type, is_active=True)
@@ -50,7 +81,11 @@ class TurfComponentLabelSourceOfTruthTest(unittest.TestCase):
         self.object_counter = 1000
 
     def tearDown(self):
+        app.dependency_overrides.clear()
         self.db.close()
+
+    def _token(self):
+        return {'Authorization': f'Bearer {create_access_token(str(self.league_user.id))}'}
 
     def _uuid(self):
         self.object_counter += 1
@@ -139,6 +174,49 @@ class TurfComponentLabelSourceOfTruthTest(unittest.TestCase):
         self.assertIn('Wave 3 TWO_SMALL_ONE_MEDIUM Small Field 1', labels)
         self.assertIn('Wave 3 TWO_SMALL_ONE_MEDIUM Small Field 2', labels)
         self.assertIn('Wave 3 TWO_SMALL_ONE_MEDIUM Medium Field 1', labels)
+
+    def test_game_read_accepts_db_and_uses_canonical_turf_component_label(self):
+        rows = self._build_wave('TWO_MEDIUM')
+        game, slot, fi, host, home, away, division, _org, _status = rows[1]
+
+        serialized = _to_game_read(
+            game,
+            db=self.db,
+            generated_slot=slot,
+            field_instance_name=fi.field_name,
+            host_location_name=host.name,
+            home_team_name=home.name,
+            away_team_name=away.name,
+            division_name=division.name,
+            division_group=division.division_group,
+        )
+
+        self.assertEqual(serialized.field_instance_name, 'Wave 1 TWO_MEDIUM Medium Field 2')
+
+    def test_game_read_without_db_does_not_crash_for_turf_slot(self):
+        game, slot, fi, host, home, away, division, _org, _status = self._build_wave('TWO_MEDIUM')[0]
+
+        serialized = _to_game_read(
+            game,
+            generated_slot=slot,
+            field_instance_name=fi.field_name,
+            host_location_name=host.name,
+            home_team_name=home.name,
+            away_team_name=away.name,
+            division_name=division.name,
+            division_group=division.division_group,
+        )
+
+        self.assertTrue(serialized.field_instance_name.startswith('Wave 1 TWO_MEDIUM Medium Field'))
+
+    def test_list_games_returns_200_and_uses_canonical_turf_component_labels(self):
+        self._build_wave('TWO_MEDIUM')
+
+        response = self.client.get('/api/games?page_size=300', headers=self._token())
+
+        self.assertEqual(response.status_code, 200, response.text)
+        labels = sorted(item['field_instance_name'] for item in response.json()['items'])
+        self.assertEqual(labels, ['Wave 1 TWO_MEDIUM Medium Field 1', 'Wave 1 TWO_MEDIUM Medium Field 2'])
 
 
 if __name__ == '__main__':
