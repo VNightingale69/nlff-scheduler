@@ -14194,6 +14194,8 @@ def update_week(week_id: uuid.UUID, payload: dict, db: Session = Depends(get_db)
 
 def _to_game_read(
     g: Game,
+    *,
+    db: Session | None = None,
     generated_slot: GameSlot | None = None,
     field_instance_name: str | None = None,
     host_location_name: str | None = None,
@@ -14202,8 +14204,28 @@ def _to_game_read(
     division_name: str | None = None,
     division_group: str | None = None,
 ) -> GameRead:
-    if db is not None and generated_slot and getattr(generated_slot, 'turf_wave_id', None):
-        field_instance_name = _canonical_turf_field_export_label(db, generated_slot, generated_slot.field_instance)
+    if generated_slot and getattr(generated_slot, 'turf_wave_id', None):
+        slot_field_instance = getattr(generated_slot, 'field_instance', None)
+        try:
+            resolved_field_instance_name = (
+                _canonical_turf_field_export_label(db, generated_slot, slot_field_instance)
+                if db is not None
+                else _turf_field_export_label(generated_slot, slot_field_instance)
+            )
+            if resolved_field_instance_name:
+                field_instance_name = resolved_field_instance_name
+        except Exception:
+            logger.exception(
+                'game_read_turf_label_resolution_failed game_id=%s game_slot_id=%s turf_wave_id=%s',
+                getattr(g, 'id', None),
+                getattr(generated_slot, 'id', None),
+                getattr(generated_slot, 'turf_wave_id', None),
+            )
+            field_instance_name = (
+                _turf_field_export_label(generated_slot, slot_field_instance)
+                or field_instance_name
+                or getattr(slot_field_instance, 'field_name', None)
+            )
     return GameRead(
         id=g.id,
         created_at=g.created_at,
@@ -14557,7 +14579,7 @@ def assign_generated_slot(payload: dict, db: Session = Depends(get_db)):
     db.commit(); db.refresh(game)
     final_validation = _build_final_schedule_validation_result(db, season.id)
     return {
-        'game': _to_game_read(game),
+        'game': _to_game_read(game, db=db, generated_slot=slot),
         'generated_slot_id': slot.id,
         'status': final_validation.get('final_validation_status') or 'SCHEDULED',
         'schedule_quality_status': final_validation.get('schedule_quality_status'),
@@ -24593,7 +24615,7 @@ def create_game(payload:GameCreate, db:Session=Depends(get_db)):
         db.rollback()
         raise HTTPException(status_code=400, detail={'error': 'DOUBLEHEADER_PAIR_VALIDATION_FAILED', 'doubleheader_validation': final_doubleheader})
     db.commit(); db.refresh(obj)
-    return GameSaveResponse(game=_to_game_read(obj), validation=validation)
+    return GameSaveResponse(game=_to_game_read(obj, db=db), validation=validation)
 
 @router.put('/games/{game_id}', response_model=GameSaveResponse, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def update_game(game_id:uuid.UUID,payload:GameCreate, db:Session=Depends(get_db)):
@@ -24611,7 +24633,7 @@ def update_game(game_id:uuid.UUID,payload:GameCreate, db:Session=Depends(get_db)
         db.rollback()
         raise HTTPException(status_code=400, detail={'error': 'DOUBLEHEADER_PAIR_VALIDATION_FAILED', 'doubleheader_validation': final_doubleheader})
     db.commit(); db.refresh(obj)
-    return GameSaveResponse(game=_to_game_read(obj), validation=validation)
+    return GameSaveResponse(game=_to_game_read(obj, db=db), validation=validation)
 
 
 @router.patch('/games/{game_id}', response_model=GameSaveResponse, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
