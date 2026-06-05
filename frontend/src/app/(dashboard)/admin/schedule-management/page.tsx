@@ -10,7 +10,7 @@ import { formatDisplayDate, formatDisplayTime } from '@/lib/displayFormat';
 const tabs = ['By Date', 'By Host Location', 'By Team', 'By Division'] as const;
 type TabKey = (typeof tabs)[number];
 
-type Severity = 'OK' | 'Info' | 'Warning' | 'Issue';
+type Severity = 'OK' | 'Info' | 'Warning' | 'Issue' | 'Hard Rule Failure' | 'Optimization' | 'Repaired';
 
 export default function ScheduleManagementPage() {
   const token = getToken();
@@ -133,6 +133,8 @@ export default function ScheduleManagementPage() {
     if (status === 'OK') return 'bg-emerald-100 text-emerald-700';
     if (status === 'Info') return 'bg-sky-100 text-sky-700';
     if (status === 'Warning') return 'bg-amber-100 text-amber-700';
+    if (status === 'Optimization') return 'bg-indigo-100 text-indigo-700';
+    if (status === 'Repaired') return 'bg-emerald-100 text-emerald-700';
     return 'bg-red-100 text-red-700';
   };
 
@@ -167,12 +169,12 @@ export default function ScheduleManagementPage() {
     const lowUtilization = (quality.field_utilization || []).filter((r: any) => r.status !== 'OK');
 
     const issueSummary = [
-      { key: 'conflicts', label: 'Conflicts', count: conflicts.length, severity: conflicts.length > 0 ? 'Issue' : 'OK', details: conflicts.map((c: any) => c.message) },
+      { key: 'conflicts', label: 'Schedule Conflict Warnings', count: conflicts.length, severity: conflicts.length > 0 ? 'Warning' : 'OK', details: conflicts.map((c: any) => c.message) },
       { key: 'repeat_matchups', label: 'Repeat Matchups', count: repeat.length, severity: repeat.length > 0 ? 'Info' : 'OK', details: repeat.map((r: any) => `${r.team_a} vs ${r.team_b} (${r.games} games)`) },
-      { key: 'zero_games', label: 'Teams with Zero Games', count: zeroGames.length, severity: zeroGames.length > 0 ? 'Issue' : 'OK', details: zeroGames.map((r: any) => `${r.team_name} (${r.division_name})`) },
+      { key: 'zero_games', label: 'Teams with Zero Games', count: zeroGames.length, severity: zeroGames.length > 0 ? 'Warning' : 'OK', details: zeroGames.map((r: any) => `${r.team_name} (${r.division_name})`) },
       { key: 'uneven_counts', label: 'Uneven Game Counts', count: uneven.length, severity: uneven.length > 0 ? 'Info' : 'OK', details: uneven.map((r: any) => `${r.team_name}: ${r.games_scheduled} games (division avg ${r.division_average})`) },
       { key: 'double_headers', label: 'Double Headers', count: doubleHeaders.length, severity: doubleHeaders.length > 0 ? 'Info' : 'OK', details: doubleHeaders.map((r: any) => `${r.team_name} on ${formatDisplayDate(r.date)}: ${r.games} games`) },
-      { key: 'non_back_to_back_double_headers', label: 'Non-Back-to-Back Double Headers', count: nonBackToBack.length, severity: nonBackToBack.length > 0 ? 'Issue' : 'OK', details: nonBackToBack.map((r: any) => `${r.team_name} on ${formatDisplayDate(r.date)}`) },
+      { key: 'non_back_to_back_double_headers', label: 'Non-Back-to-Back Double Headers (Advisory)', count: nonBackToBack.length, severity: nonBackToBack.length > 0 ? 'Warning' : 'OK', details: nonBackToBack.map((r: any) => `${r.team_name} on ${formatDisplayDate(r.date)}`) },
       { key: 'low_field_utilization', label: 'Low Field Utilization', count: lowUtilization.length, severity: lowUtilization.length > 0 ? 'Info' : 'OK', details: lowUtilization.flatMap((r: any) => {
         if (r.surface_type !== 'TURF_STADIUM') {
           return [`${r.host_location_name} ${formatDisplayDate(r.date)}: ${r.utilization_percent}%`];
@@ -188,7 +190,8 @@ export default function ScheduleManagementPage() {
       }) },
     ] as Array<{ key: string; label: string; count: number; severity: Severity; details: string[] }>;
 
-    const hardErrorCount = Number(quality.final_validation_failure_count ?? issueSummary.filter((i) => i.severity === 'Issue').reduce((s, i) => s + i.count, 0));
+    const hardRuleFailures = (quality.hard_rule_failures || quality.hard_errors || quality.final_validation_failures || []) as any[];
+    const hardErrorCount = Number(quality.hard_rule_failure_count ?? quality.final_validation_failure_count ?? hardRuleFailures.reduce((sum, item) => sum + Number(item?.count || 1), 0));
     const sharedStatus = String(quality.schedule_quality_status || quality.final_validation_status || '').toUpperCase();
 
     let healthLabel = quality.overall_health || 'Excellent';
@@ -202,12 +205,13 @@ export default function ScheduleManagementPage() {
       healthClass = 'bg-amber-100 text-amber-900 border-amber-300';
     }
 
-    return { issueSummary, healthLabel, healthClass, sharedStatus, hardErrorCount };
+    return { issueSummary, healthLabel, healthClass, sharedStatus, hardErrorCount, hardRuleFailures };
   }, [quality, conflicts]);
 
   const exportQualityReportCsv = () => {
     if (!qualityDashboard) return;
     const rows: string[][] = [['Category', 'Count', 'Severity', 'Details']];
+    rows.push(['Hard Rule Failures (Final Validation)', String(qualityDashboard.hardErrorCount), 'Hard Rule Failure', (qualityDashboard.hardRuleFailures || []).map((item: any) => `${item.code || 'FINAL_VALIDATION'}: ${item.message || ''}`).join(' | ')]);
     for (const item of qualityDashboard.issueSummary) {
       rows.push([item.label, String(item.count), item.severity, item.details.join(' | ')]);
     }
@@ -338,8 +342,29 @@ export default function ScheduleManagementPage() {
               <p className='mt-1 text-sm'>Final validation: {quality.final_validation_status || 'unknown'} · Schedule quality: {quality.schedule_quality_status || 'unknown'} · Hard-rule failures: {qualityDashboard.hardErrorCount}</p>
             </div>
 
+
             <section className='space-y-2'>
-              <h3 className='font-semibold'>Issue Summary</h3>
+              <h3 className='font-semibold'>Hard Rule Failures</h3>
+              <p className='text-sm text-slate-600'>Source: final_validation_result · Blocks publish when count &gt; 0.</p>
+              {qualityDashboard.hardRuleFailures.length === 0 ? (
+                <div className='rounded border border-emerald-200 bg-emerald-50 p-2 text-sm text-emerald-800'>No final-validation hard-rule failures.</div>
+              ) : (
+                <div className='space-y-2'>
+                  {qualityDashboard.hardRuleFailures.map((failure: any, index: number) => (
+                    <details key={`${failure.code || 'hard-rule'}-${index}`} className='rounded border border-red-200 bg-red-50 p-2'>
+                      <summary className='flex cursor-pointer items-center justify-between gap-2'>
+                        <span>{failure.code || 'FINAL_VALIDATION_FAILURE'}: {Number(failure.count || 1)}</span>
+                        <span className={`rounded px-2 py-0.5 text-sm ${statusClass('Hard Rule Failure')}`}>HARD_RULE_FAILURE</span>
+                      </summary>
+                      <p className='mt-2 text-sm'>{failure.message || 'Final validation hard-rule failure.'}</p>
+                    </details>
+                  ))}
+                </div>
+              )}
+            </section>
+
+            <section className='space-y-2'>
+              <h3 className='font-semibold'>Warnings and Advisory Quality Findings</h3>
               {qualityDashboard.issueSummary.map((item) => (
                 <details key={item.key} className='rounded border p-2'>
                   <summary className='flex cursor-pointer items-center justify-between'>
