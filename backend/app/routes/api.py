@@ -125,6 +125,26 @@ def _safe_int(value: object) -> int:
         return 0
 
 
+def _division_required_games(active_team_count: int | None, division: Division | None = None) -> int:
+    """Return the required games for a division/week from active team count.
+
+    Odd active-team divisions require one doubleheader so every active team can
+    be scheduled without a bye.  The optional division parameter is reserved for
+    future metadata-driven rules but intentionally does not affect today's
+    global calculation.
+    """
+    del division
+    if active_team_count is None:
+        return 0
+    try:
+        team_count = int(active_team_count)
+    except (TypeError, ValueError):
+        return 0
+    if team_count < 2:
+        return 0
+    return (team_count + 1) // 2
+
+
 def _final_validation_failure(code: str, count: int, message: str, details: object | None = None) -> dict[str, object]:
     row: dict[str, object] = {'code': code, 'count': int(count), 'message': message}
     if details is not None:
@@ -194,33 +214,44 @@ def _build_final_schedule_validation_result(
 
     if season_id:
         missing_required_rows: list[dict[str, object]] = []
-        weeks = db.query(Week).filter(Week.season_id == season_id).order_by(Week.week_number.asc()).all()
-        divisions = db.query(Division).filter(Division.is_active.is_(True)).all()
-        for week in weeks:
-            if int(week.week_number or 0) > 99:
-                continue
-            for division in divisions:
-                active_team_count = db.query(Team.id).filter(Team.division_id == division.id, Team.is_active.is_(True)).count()
-                expected_games = _division_required_games(active_team_count, division)
-                if expected_games <= 0:
+        try:
+            weeks = db.query(Week).filter(Week.season_id == season_id).order_by(Week.week_number.asc()).all()
+            divisions = db.query(Division).filter(Division.is_active.is_(True)).all()
+            for week in weeks:
+                if int(getattr(week, 'week_number', 0) or 0) > 99:
                     continue
-                scheduled_games = db.query(Game.id).join(Game.status).join(Team, Game.home_team_id == Team.id).filter(
-                    Game.season_id == season_id,
-                    Game.week_id == week.id,
-                    Team.division_id == division.id,
-                    GameStatus.code != 'UNSCHEDULED',
-                    GameStatus.is_active.is_(True),
-                ).count()
-                missing_games = max(0, expected_games - int(scheduled_games or 0))
-                if missing_games > 0:
-                    missing_required_rows.append({
-                        'week': week.week_number,
-                        'week_start_date': str(_week_game_date(week)) if _week_game_date(week) else None,
-                        'division': f'{division.division_group} {division.name}'.strip(),
-                        'required_games': expected_games,
-                        'scheduled_games': int(scheduled_games or 0),
-                        'missing_games': missing_games,
-                    })
+                for division in divisions:
+                    division_id = getattr(division, 'id', None)
+                    if division_id is None:
+                        logger.warning('final validation skipped division with missing id season_id=%s', season_id)
+                        continue
+                    active_team_count = db.query(Team.id).filter(Team.division_id == division_id, Team.is_active.is_(True)).count()
+                    expected_games = _division_required_games(active_team_count, division)
+                    if expected_games <= 0:
+                        continue
+                    scheduled_games = db.query(Game.id).join(Game.status).join(Team, Game.home_team_id == Team.id).filter(
+                        Game.season_id == season_id,
+                        Game.week_id == getattr(week, 'id', None),
+                        Team.division_id == division_id,
+                        GameStatus.code != 'UNSCHEDULED',
+                        GameStatus.is_active.is_(True),
+                    ).count()
+                    missing_games = max(0, expected_games - int(scheduled_games or 0))
+                    if missing_games > 0:
+                        week_game_date = _week_game_date(week)
+                        division_label = f"{getattr(division, 'division_group', '') or ''} {getattr(division, 'name', '') or ''}".strip() or str(division_id)
+                        missing_required_rows.append({
+                            'week': getattr(week, 'week_number', None),
+                            'week_start_date': str(week_game_date) if week_game_date else None,
+                            'division': division_label,
+                            'required_games': expected_games,
+                            'scheduled_games': int(scheduled_games or 0),
+                            'missing_games': missing_games,
+                        })
+        except Exception as exc:
+            logger.exception('final validation required-game diagnostics failed season_id=%s', season_id)
+            diagnostics_error = diagnostics_error or f'required-game diagnostics unavailable ({exc})'
+            failures.append(_final_validation_failure('REQUIRED_GAME_DIAGNOSTICS_ERROR', 1, 'Required-game diagnostics could not be constructed.', str(exc)))
         counters['required_games_missing_count'] = sum(_safe_int(row.get('missing_games')) for row in missing_required_rows)
         if missing_required_rows:
             failures.append(_final_validation_failure('REQUIRED_GAMES_MISSING', counters['required_games_missing_count'], 'Required division/week games are missing.', missing_required_rows))
@@ -292,9 +323,9 @@ def _build_final_schedule_validation_result(
     hard_failure_count = sum(counters[key] for key in FINAL_VALIDATION_HARD_COUNTER_KEYS) + extra_failure_count
     counters['validation_failure_count'] = hard_failure_count
     if diagnostics_error:
-        final_status = 'FAILED'
+        final_status = 'ERROR'
         schedule_quality_status = 'ERROR'
-        diagnostics_status = 'FAILED'
+        diagnostics_status = 'ERROR'
     elif hard_failure_count > 0:
         final_status = 'VALIDATION_FAILED'
         schedule_quality_status = 'BLOCKED'
@@ -2348,6 +2379,8 @@ def _diagnostic_no_bye_doubleheaders_enabled(division: Division | None = None, s
 
 def _diagnostic_expected_games_for_team_count(active_team_count: int | None, *, no_bye_doubleheaders_enabled: bool = True) -> int:
     team_count = max(int(active_team_count or 0), 0)
+    if team_count < 2:
+        return 0
     if team_count % 2 == 0:
         return team_count // 2
     if no_bye_doubleheaders_enabled:
@@ -17585,11 +17618,8 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
     def _division_no_bye_doubleheaders_enabled(division: Division | None) -> bool:
         return _diagnostic_no_bye_doubleheaders_enabled(division, season)
 
-    def _division_required_games(active_team_count: int, division: Division | None = None) -> int:
-        return _diagnostic_expected_games_for_team_count(
-            active_team_count,
-            no_bye_doubleheaders_enabled=_division_no_bye_doubleheaders_enabled(division),
-        )
+    def _division_games_required_for_auto_schedule(active_team_count: int, division: Division | None = None) -> int:
+        return _division_required_games(active_team_count, division)
 
     def _division_active_teams_expected_to_play(active_team_count: int, division: Division | None = None) -> int:
         return _diagnostic_active_teams_expected_to_play(
@@ -17900,7 +17930,7 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
                     compatible_generated_slots_total += int(count or 0)
             for division in active_divisions:
                 division_label = _division_label(division)
-                required_games = _division_required_games(active_team_count_by_division.get(division.id, 0), division)
+                required_games = _division_games_required_for_auto_schedule(active_team_count_by_division.get(division.id, 0), division)
                 expected_games_by_week[week_key] = expected_games_by_week.get(week_key, 0) + required_games
                 required_game_groups_total += required_games
                 existing = _actual_created_game_count_for_week(division.id, week.id)
@@ -18215,7 +18245,7 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
             apply_skipped: list[dict[str, object]] = []
             generated_game_groups = 0
             active_team_count = _active_team_count(division.id)
-            required_games = _division_required_games(active_team_count, division)
+            required_games = _division_games_required_for_auto_schedule(active_team_count, division)
             progress_row['games_required'] = int(progress_row.get('games_required') or 0) + required_games
             unscheduled_teams: list[str] = []
             unresolved_conflicts: list[dict[str, object]] = []
@@ -18930,15 +18960,35 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
 
     auto_schedule_diagnostics['revised_scheduling_hierarchy_diagnostics_status'] = revised_hierarchy_diagnostics.get('diagnostics_status') or ('SUCCEEDED' if revised_hierarchy_diagnostics else 'FAILED')
     auto_schedule_diagnostics['revised_scheduling_hierarchy_diagnostics_error'] = revised_hierarchy_diagnostics.get('diagnostics_error')
-    final_validation_result = _build_final_schedule_validation_result(
-        db,
-        season_id,
-        diagnostics_error=revised_hierarchy_diagnostics.get('diagnostics_error'),
-        optional_optimization_skipped=auto_schedule_diagnostics.get('optional_optimization_skipped'),
-        optional_optimization_skip_reason=auto_schedule_diagnostics.get('optional_optimization_skip_reason'),
-        revised_hierarchy_diagnostics=revised_hierarchy_diagnostics,
-        extra_failures=list(validation_errors),
-    )
+    try:
+        final_validation_result = _build_final_schedule_validation_result(
+            db,
+            season_id,
+            diagnostics_error=revised_hierarchy_diagnostics.get('diagnostics_error'),
+            optional_optimization_skipped=auto_schedule_diagnostics.get('optional_optimization_skipped'),
+            optional_optimization_skip_reason=auto_schedule_diagnostics.get('optional_optimization_skip_reason'),
+            revised_hierarchy_diagnostics=revised_hierarchy_diagnostics,
+            extra_failures=list(validation_errors),
+        )
+    except Exception as exc:
+        logger.exception('final validation diagnostics construction failed season_id=%s', season_id)
+        diagnostics_error = f'final validation diagnostics unavailable ({exc})'
+        final_validation_result = {
+            'final_validation_ran': True,
+            'final_validation_status': 'ERROR',
+            'final_validation_failure_count': 1,
+            'final_validation_failures': [
+                _final_validation_failure('FINAL_VALIDATION_DIAGNOSTICS_ERROR', 1, 'Final validation diagnostics could not be constructed.', str(exc))
+            ],
+            'schedule_quality_status': 'ERROR',
+            'diagnostics_status': 'ERROR',
+            'diagnostics_error': diagnostics_error,
+            'optional_optimization_skipped': auto_schedule_diagnostics.get('optional_optimization_skipped'),
+            'optional_optimization_skip_reason': auto_schedule_diagnostics.get('optional_optimization_skip_reason'),
+            'true_home_host_rule_passed': 'not_run',
+            'host_location_vs_home_team_verification': host_location_verification,
+        }
+        final_validation_result.update({key: 0 for key in FINAL_VALIDATION_COUNTER_KEYS})
     _apply_final_validation_to_diagnostics(auto_schedule_diagnostics, final_validation_result)
 
     expected_games_total = int(auto_schedule_diagnostics.get('expected_games_total') or 0)
