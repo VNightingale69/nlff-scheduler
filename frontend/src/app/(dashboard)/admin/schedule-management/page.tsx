@@ -12,6 +12,28 @@ type TabKey = (typeof tabs)[number];
 
 type Severity = 'OK' | 'Info' | 'Warning' | 'Issue' | 'Hard Rule Failure' | 'Optimization' | 'Repaired';
 
+
+const formatFailureDetail = (detail: any): string => {
+  if (!detail || typeof detail !== 'object') return String(detail || 'No detail available');
+  const parts = [
+    detail.specific_reason,
+    detail.game_id ? `Game ${detail.game_id}` : null,
+    detail.team_name || detail.conflicting_team_name ? `Team ${detail.team_name || detail.conflicting_team_name}` : null,
+    detail.division_name || detail.division ? `Division ${detail.division_name || detail.division}` : null,
+    detail.game_date ? `Date ${detail.game_date}` : null,
+    detail.kickoff_time || detail.start_time ? `Time ${detail.kickoff_time || detail.start_time}` : null,
+    detail.host_location_name ? `Host ${detail.host_location_name}` : null,
+    detail.field_name ? `Field ${detail.field_name}` : null,
+    detail.game_slot_id ? `Slot ${detail.game_slot_id}` : null,
+    detail.field_instance_id ? `Field instance ${detail.field_instance_id}` : null,
+    detail.week_id ? `Week ${detail.week_id}` : null,
+    detail.missing_games !== undefined ? `Missing games ${detail.missing_games}` : null,
+    detail.expected_count !== undefined ? `Expected ${detail.expected_count}` : null,
+    detail.detail_count !== undefined ? `Details ${detail.detail_count}` : null,
+  ].filter(Boolean);
+  return parts.join(' · ') || JSON.stringify(detail);
+};
+
 export default function ScheduleManagementPage() {
   const token = getToken();
   const searchParams = useSearchParams();
@@ -190,8 +212,9 @@ export default function ScheduleManagementPage() {
       }) },
     ] as Array<{ key: string; label: string; count: number; severity: Severity; details: string[] }>;
 
-    const hardRuleFailures = (quality.hard_rule_failures || quality.hard_errors || quality.final_validation_failures || []) as any[];
-    const hardErrorCount = Number(quality.hard_rule_failure_count ?? quality.final_validation_failure_count ?? hardRuleFailures.reduce((sum, item) => sum + Number(item?.count || 1), 0));
+    const hardRuleFailures = (quality.hard_rule_failures || quality.hard_errors || []) as any[];
+    const diagnosticsReportingFailures = (quality.diagnostics_reporting_failures || quality.final_validation?.diagnostics_reporting_failures || []) as any[];
+    const hardErrorCount = Number(quality.hard_rule_failure_count ?? quality.final_validation?.hard_rule_failure_count ?? hardRuleFailures.reduce((sum, item) => sum + Number(item?.count || 1), 0));
     const sharedStatus = String(quality.schedule_quality_status || quality.final_validation_status || '').toUpperCase();
 
     let healthLabel = quality.overall_health || 'Excellent';
@@ -205,13 +228,14 @@ export default function ScheduleManagementPage() {
       healthClass = 'bg-amber-100 text-amber-900 border-amber-300';
     }
 
-    return { issueSummary, healthLabel, healthClass, sharedStatus, hardErrorCount, hardRuleFailures };
+    return { issueSummary, healthLabel, healthClass, sharedStatus, hardErrorCount, hardRuleFailures, diagnosticsReportingFailures };
   }, [quality, conflicts]);
 
   const exportQualityReportCsv = () => {
     if (!qualityDashboard) return;
     const rows: string[][] = [['Category', 'Count', 'Severity', 'Details']];
-    rows.push(['Hard Rule Failures (Final Validation)', String(qualityDashboard.hardErrorCount), 'Hard Rule Failure', (qualityDashboard.hardRuleFailures || []).map((item: any) => `${item.code || 'FINAL_VALIDATION'}: ${item.message || ''}`).join(' | ')]);
+    rows.push(['Hard Rule Failures (Final Validation)', String(qualityDashboard.hardErrorCount), 'Hard Rule Failure', (qualityDashboard.hardRuleFailures || []).map((item: any) => `${item.code || 'FINAL_VALIDATION'}: ${(item.details || []).map(formatFailureDetail).join('; ') || item.message || ''}`).join(' | ')]);
+    rows.push(['Diagnostics/Reporting Audit Failures', String((qualityDashboard.diagnosticsReportingFailures || []).length), 'Diagnostics Reporting Failure', (qualityDashboard.diagnosticsReportingFailures || []).map((item: any) => `${item.code || 'DIAGNOSTICS'}: ${(item.details || []).map(formatFailureDetail).join('; ') || item.message || ''}`).join(' | ')]);
     for (const item of qualityDashboard.issueSummary) {
       rows.push([item.label, String(item.count), item.severity, item.details.join(' | ')]);
     }
@@ -339,13 +363,13 @@ export default function ScheduleManagementPage() {
           <>
             <div className={`rounded border p-3 ${qualityDashboard.healthClass}`}>
               <h3 className='font-semibold'>Overall Schedule Health Score: {qualityDashboard.healthLabel}</h3>
-              <p className='mt-1 text-sm'>Final validation: {quality.final_validation_status || 'unknown'} · Schedule quality: {quality.schedule_quality_status || 'unknown'} · Hard-rule failures: {qualityDashboard.hardErrorCount}</p>
+              <p className='mt-1 text-sm'>Final validation: {quality.final_validation_status || 'unknown'} · Schedule quality: {quality.schedule_quality_status || 'unknown'} · Hard-rule failures: {qualityDashboard.hardErrorCount} · Audit: {quality.validation_audit_status || quality.final_validation?.validation_audit_status || 'unknown'}</p>
             </div>
 
 
             <section className='space-y-2'>
               <h3 className='font-semibold'>Hard Rule Failures</h3>
-              <p className='text-sm text-slate-600'>Source: final_validation_result · Blocks publish when count &gt; 0.</p>
+              <p className='text-sm text-slate-600'>Source: final_validation_result. Counts below are only schedule-rule failures with record/scope details; diagnostics/reporting audit failures are shown separately.</p>
               {qualityDashboard.hardRuleFailures.length === 0 ? (
                 <div className='rounded border border-emerald-200 bg-emerald-50 p-2 text-sm text-emerald-800'>No final-validation hard-rule failures.</div>
               ) : (
@@ -357,6 +381,28 @@ export default function ScheduleManagementPage() {
                         <span className={`rounded px-2 py-0.5 text-sm ${statusClass('Hard Rule Failure')}`}>HARD_RULE_FAILURE</span>
                       </summary>
                       <p className='mt-2 text-sm'>{failure.message || 'Final validation hard-rule failure.'}</p>
+                      <div className='mt-2 space-y-1 text-xs text-red-950'>
+                        {(failure.details || []).length === 0 ? <p>Schedule validation details unavailable for this count.</p> : (failure.details || []).map((detail: any, detailIndex: number) => (
+                          <p key={detail.failure_id || detailIndex} className='rounded bg-white/70 p-2'>{formatFailureDetail(detail)}</p>
+                        ))}
+                      </div>
+                    </details>
+                  ))}
+                </div>
+              )}
+            </section>
+
+            <section className='space-y-2'>
+              <h3 className='font-semibold'>Diagnostics / Reporting Audit Failures</h3>
+              {qualityDashboard.diagnosticsReportingFailures.length === 0 ? (
+                <div className='rounded border border-emerald-200 bg-emerald-50 p-2 text-sm text-emerald-800'>Validation audit details reconciled.</div>
+              ) : (
+                <div className='space-y-2'>
+                  {qualityDashboard.diagnosticsReportingFailures.map((failure: any, index: number) => (
+                    <details key={`${failure.code || 'diagnostics'}-${index}`} className='rounded border border-amber-300 bg-amber-50 p-2'>
+                      <summary className='cursor-pointer font-semibold'>{failure.code || 'DIAGNOSTICS_REPORTING_FAILURE'}: Schedule validation could not be fully audited</summary>
+                      <p className='mt-2 text-sm'>{failure.message || 'Validation audit incomplete.'}</p>
+                      <div className='mt-2 space-y-1 text-xs'>{(failure.details || []).map((detail: any, detailIndex: number) => <p key={detail.failure_id || detailIndex} className='rounded bg-white/70 p-2'>{formatFailureDetail(detail)}</p>)}</div>
                     </details>
                   ))}
                 </div>
