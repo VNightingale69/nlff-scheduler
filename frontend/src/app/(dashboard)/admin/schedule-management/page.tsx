@@ -188,17 +188,21 @@ export default function ScheduleManagementPage() {
       }) },
     ] as Array<{ key: string; label: string; count: number; severity: Severity; details: string[] }>;
 
-    const hardErrorCount = issueSummary.filter((i) => i.severity === 'Issue').reduce((s, i) => s + i.count, 0);
+    const hardErrorCount = Number(quality.final_validation_failure_count ?? issueSummary.filter((i) => i.severity === 'Issue').reduce((s, i) => s + i.count, 0));
+    const sharedStatus = String(quality.schedule_quality_status || quality.final_validation_status || '').toUpperCase();
 
-    let healthLabel = 'Excellent';
+    let healthLabel = quality.overall_health || 'Excellent';
     let healthClass = 'bg-emerald-100 text-emerald-800 border-emerald-300';
 
-    if (hardErrorCount > 0) {
+    if (sharedStatus === 'BLOCKED' || sharedStatus === 'VALIDATION_FAILED' || hardErrorCount > 0) {
       healthLabel = 'Blocked';
       healthClass = 'bg-red-100 text-red-800 border-red-300';
+    } else if (sharedStatus === 'PARTIAL_SUCCESS') {
+      healthLabel = 'Partial';
+      healthClass = 'bg-amber-100 text-amber-900 border-amber-300';
     }
 
-    return { issueSummary, healthLabel, healthClass };
+    return { issueSummary, healthLabel, healthClass, sharedStatus, hardErrorCount };
   }, [quality, conflicts]);
 
   const exportQualityReportCsv = () => {
@@ -331,6 +335,7 @@ export default function ScheduleManagementPage() {
           <>
             <div className={`rounded border p-3 ${qualityDashboard.healthClass}`}>
               <h3 className='font-semibold'>Overall Schedule Health Score: {qualityDashboard.healthLabel}</h3>
+              <p className='mt-1 text-sm'>Final validation: {quality.final_validation_status || 'unknown'} · Schedule quality: {quality.schedule_quality_status || 'unknown'} · Hard-rule failures: {qualityDashboard.hardErrorCount}</p>
             </div>
 
             <section className='space-y-2'>
