@@ -108,10 +108,13 @@ FINAL_VALIDATION_COUNTER_KEYS = (
     'doubleheader_pair_validation_failure_count',
     'doubleheader_too_many_games_count',
     'turf_wave_label_mismatch_count',
+    'turf_wave_mixed_labels_for_same_time_count',
     'turf_wave_sequence_gap_count',
     'turf_wave_duplicate_sequence_count',
     'turf_wave_sequence_out_of_order_count',
     'turf_wave_chronological_validation_failed_count',
+    'turf_wave_canonical_mapping_missing_count',
+    'turf_wave_label_repair_failed_count',
     'generated_slot_integrity_failure_count',
 )
 
@@ -542,6 +545,135 @@ def _run_generated_slot_integrity_validation_and_repair(db: Session, season_id: 
     diagnostics['generated_slot_integrity_status'] = 'BLOCKED' if remaining_invalid else 'COMPLETE'
     return diagnostics
 
+
+def _repair_turf_wave_source_of_truth(db: Session, season_id: uuid.UUID | str | None = None) -> dict[str, object]:
+    """Normalize turf wave sequence rows and stored display labels from canonical metadata."""
+    source = _build_canonical_turf_wave_source_of_truth(db, season_id)
+    mapping: dict[tuple[uuid.UUID, date, time], dict[str, object]] = source.get('mapping') or {}
+    repairs: list[dict[str, object]] = []
+    labels_repaired_count = 0
+
+    # Resequence stored TurfWave rows from canonical host/date/start order without
+    # letting old sequence values influence labels or validation.
+    availability_ids = sorted({
+        value.get('hosting_availability_id')
+        for value in mapping.values()
+        if value.get('hosting_availability_id')
+    }, key=str)
+    for availability_id in availability_ids:
+        waves = db.query(TurfWave).filter(TurfWave.hosting_availability_id == availability_id).order_by(TurfWave.start_time, TurfWave.id).all()
+        desired_by_id: dict[uuid.UUID, int] = {}
+        for wave in waves:
+            desired = mapping.get((wave.host_location_id, wave.host_date, wave.start_time))
+            if desired:
+                desired_by_id[wave.id] = int(desired.get('wave_number') or 0)
+        desired_values = list(desired_by_id.values())
+        if (
+            desired_by_id
+            and len(desired_values) == len(set(desired_values))
+            and any(int(wave.sequence_number or 0) != desired_by_id.get(wave.id, wave.sequence_number) for wave in waves)
+        ):
+            offset = max([int(wave.sequence_number or 0) for wave in waves] or [0]) + 1000
+            for wave in waves:
+                if wave.id in desired_by_id:
+                    wave.sequence_number = int(wave.sequence_number or 0) + offset
+            db.flush()
+            for wave in waves:
+                if wave.id in desired_by_id:
+                    wave.sequence_number = desired_by_id[wave.id]
+            db.flush()
+
+    scheduled_query = db.query(Game, GameSlot, FieldInstance, HostLocation).join(
+        GameSlot, GameSlot.assigned_game_id == Game.id
+    ).join(
+        FieldInstance, FieldInstance.id == GameSlot.field_instance_id
+    ).join(
+        HostLocation, HostLocation.id == GameSlot.host_location_id
+    ).join(
+        GameStatus, GameStatus.id == Game.game_status_id
+    ).filter(
+        func.lower(GameStatus.code) != 'unscheduled'
+    )
+    if season_id:
+        scheduled_query = scheduled_query.filter(Game.season_id == season_id)
+
+    for game, slot, instance, host in scheduled_query.order_by(Game.game_date, Game.kickoff_time, Game.id).all():
+        if not _is_turf_stadium_host(host):
+            continue
+        key = (slot.host_location_id, slot.slot_date, slot.start_time)
+        canonical = mapping.get(key)
+        old_label = getattr(instance, 'field_name', None)
+        parsed = _parse_turf_wave_number_from_label(old_label)
+        detail = {
+            'game_id': str(game.id),
+            'old_field_label': old_label,
+            'new_field_label': None,
+            'host_location_id': str(slot.host_location_id) if slot.host_location_id else None,
+            'game_date': slot.slot_date.isoformat() if slot.slot_date else None,
+            'start_time': slot.start_time.isoformat() if slot.start_time else None,
+            'old_wave_number': parsed,
+            'canonical_wave_number': int(canonical.get('wave_number') or 0) if canonical else None,
+            'field_type': _normalize_field_size(slot.field_type or instance.field_type),
+            'component_label': None,
+            'repair_success': False,
+            'repair_failure_reason': None,
+        }
+        if not canonical:
+            detail['repair_failure_reason'] = 'TURF_WAVE_CANONICAL_MAPPING_MISSING'
+            repairs.append(detail)
+            continue
+        layout = canonical.get('preferred_layout_code')
+        component_label = (canonical.get('component_by_slot_id') or {}).get(slot.id)
+        detail['component_label'] = component_label
+        if not layout or not component_label:
+            detail['repair_failure_reason'] = 'TURF_WAVE_CANONICAL_MAPPING_MISSING'
+            repairs.append(detail)
+            continue
+        new_label = f"Wave {int(canonical.get('wave_number') or 0)} {layout} {component_label}"
+        detail['new_field_label'] = new_label
+        if old_label != new_label:
+            owner = db.query(FieldInstance).filter(
+                FieldInstance.hosting_availability_id == instance.hosting_availability_id,
+                FieldInstance.field_name == new_label,
+                FieldInstance.id != instance.id,
+            ).first()
+            if owner:
+                detail['repair_failure_reason'] = 'FIELD_INSTANCE_NAME_COLLISION_PREVENTED'
+                repairs.append(detail)
+                continue
+            instance.field_name = new_label
+            labels_repaired_count += 1
+        detail['repair_success'] = True
+        repairs.append(detail)
+    db.flush()
+
+    diagnostics = source.get('diagnostics') or []
+    by_host_date = {(row.get('host_location_id'), row.get('game_date')): row for row in diagnostics if isinstance(row, dict)}
+    for detail in repairs:
+        row = by_host_date.get((detail.get('host_location_id'), detail.get('game_date')))
+        if row is not None:
+            row['games_checked_count'] = int(row.get('games_checked_count') or 0) + 1
+            if detail.get('old_field_label') != detail.get('new_field_label') and detail.get('repair_success'):
+                row['labels_repaired_count'] = int(row.get('labels_repaired_count') or 0) + 1
+            if not detail.get('repair_success'):
+                row['exported_labels_match'] = False
+                row['validation_failure_reason'] = detail.get('repair_failure_reason') or row.get('validation_failure_reason')
+
+    return {
+        'turf_wave_source_of_truth_repair_ran': True,
+        'labels_repaired_count': labels_repaired_count,
+        'repaired_turf_labels': repairs,
+        'source_of_truth_diagnostics': diagnostics,
+        'canonical_mapping_missing_count': sum(1 for detail in repairs if detail.get('repair_failure_reason') == 'TURF_WAVE_CANONICAL_MAPPING_MISSING'),
+        'label_repair_failed_count': sum(1 for detail in repairs if not detail.get('repair_success')),
+        **{key: value for key, value in source.items() if key != 'mapping'},
+    }
+
+
+def _parse_turf_wave_number_from_label(label: str | None) -> int | None:
+    match = re.search(r'\bWave\s+(\d+)\b', str(label or ''), flags=re.IGNORECASE)
+    return int(match.group(1)) if match else None
+
 def _build_final_schedule_validation_result(
     db: Session,
     season_id: uuid.UUID | str | None,
@@ -561,6 +693,14 @@ def _build_final_schedule_validation_result(
     counters = {key: 0 for key in FINAL_VALIDATION_COUNTER_KEYS}
     failures: list[dict[str, object]] = []
     generated_slot_integrity = _run_generated_slot_integrity_validation_and_repair(db, season_id, repair=True)
+    turf_wave_source_of_truth_repair = _repair_turf_wave_source_of_truth(db, season_id) if season_id else {
+        'turf_wave_source_of_truth_repair_ran': False,
+        'labels_repaired_count': 0,
+        'repaired_turf_labels': [],
+        'source_of_truth_diagnostics': [],
+        'canonical_mapping_missing_count': 0,
+        'label_repair_failed_count': 0,
+    }
     rows = _schedule_management_rows(db, {'season_id': season_id} if season_id else {})
 
     team_time_seen: dict[tuple[uuid.UUID, date, time], dict[str, object]] = {}
@@ -711,15 +851,22 @@ def _build_final_schedule_validation_result(
         if counters[key]:
             failures.append(_final_validation_failure(code, counters[key], 'Doubleheader hard-rule validation failed.', doubleheader.get('failures') or []))
 
-    turf = hierarchy.get('turf_wave_diagnostics') or {}
+    turf = _build_turf_wave_chronological_validation(db, season_id) if season_id else (hierarchy.get('turf_wave_diagnostics') or {})
+    if turf_wave_source_of_truth_repair:
+        turf = {**turf, 'Turf Wave Source-of-Truth Diagnostics': turf_wave_source_of_truth_repair.get('source_of_truth_diagnostics'), 'repaired_turf_labels': turf_wave_source_of_truth_repair.get('repaired_turf_labels')}
     counters['turf_wave_label_mismatch_count'] = _safe_int(turf.get('turf_wave_label_mismatch_count') or turf.get('NON_CONTIGUOUS_TURF_WAVE_USAGE'))
+    counters['turf_wave_mixed_labels_for_same_time_count'] = _safe_int(turf.get('turf_wave_mixed_labels_for_same_time_count'))
     counters['turf_wave_sequence_gap_count'] = _safe_int(turf.get('turf_wave_sequence_gap_count') or turf.get('EARLIER_COMPATIBLE_WAVE_UNUSED'))
     counters['turf_wave_duplicate_sequence_count'] = _safe_int(turf.get('turf_wave_duplicate_sequence_count'))
     counters['turf_wave_sequence_out_of_order_count'] = _safe_int(turf.get('turf_wave_sequence_out_of_order_count'))
     counters['turf_wave_chronological_validation_failed_count'] = _safe_int(turf.get('turf_wave_chronological_validation_failed_count'))
+    counters['turf_wave_canonical_mapping_missing_count'] = _safe_int(turf_wave_source_of_truth_repair.get('canonical_mapping_missing_count'))
+    counters['turf_wave_label_repair_failed_count'] = _safe_int(turf_wave_source_of_truth_repair.get('label_repair_failed_count'))
     turf_sequence_details = turf.get('chronological_sequence_validation') or turf.get('host_date_sequence_validation')
     if counters['turf_wave_label_mismatch_count']:
         failures.append(_final_validation_failure('TURF_WAVE_LABEL_MISMATCH', counters['turf_wave_label_mismatch_count'], 'Turf wave labels do not match final slot usage.', turf_sequence_details))
+    if counters.get('turf_wave_mixed_labels_for_same_time_count'):
+        failures.append(_final_validation_failure('TURF_WAVE_MIXED_LABELS_FOR_SAME_TIME', counters['turf_wave_mixed_labels_for_same_time_count'], 'A turf host/date/start time has mixed wave labels.', turf_sequence_details))
     if counters['turf_wave_sequence_gap_count']:
         failures.append(_final_validation_failure('TURF_WAVE_SEQUENCE_GAP', counters['turf_wave_sequence_gap_count'], 'Turf wave sequence numbers are not contiguous within a turf host/date.', turf_sequence_details))
     if counters['turf_wave_duplicate_sequence_count']:
@@ -728,6 +875,12 @@ def _build_final_schedule_validation_result(
         failures.append(_final_validation_failure('TURF_WAVE_SEQUENCE_OUT_OF_ORDER', counters['turf_wave_sequence_out_of_order_count'], 'Turf wave sequence numbers do not match chronological start time order.', turf_sequence_details))
     if counters['turf_wave_chronological_validation_failed_count']:
         failures.append(_final_validation_failure('TURF_WAVE_CHRONOLOGICAL_VALIDATION_FAILED', counters['turf_wave_chronological_validation_failed_count'], 'Turf wave chronological validation failed.', turf_sequence_details))
+    if counters.get('turf_wave_canonical_mapping_missing_count'):
+        failures.append(_final_validation_failure('TURF_WAVE_CANONICAL_MAPPING_MISSING', counters['turf_wave_canonical_mapping_missing_count'], 'Scheduled turf games could not be mapped to canonical host/date/start wave metadata.', turf_wave_source_of_truth_repair.get('repaired_turf_labels') or []))
+    repair_failures = [detail for detail in (turf_wave_source_of_truth_repair.get('repaired_turf_labels') or []) if not detail.get('repair_success')]
+    non_mapping_repair_failures = [detail for detail in repair_failures if detail.get('repair_failure_reason') != 'TURF_WAVE_CANONICAL_MAPPING_MISSING']
+    if non_mapping_repair_failures:
+        failures.append(_final_validation_failure('TURF_WAVE_LABEL_MISMATCH', len(non_mapping_repair_failures), 'Turf wave labels could not be repaired from canonical metadata.', non_mapping_repair_failures))
 
     extra_failure_count = 0
     for failure in extra_failures or []:
@@ -770,6 +923,8 @@ def _build_final_schedule_validation_result(
         'regular_season_required_week_diagnostics': regular_season_required_week_diagnostics,
         'Generated Slot Integrity Diagnostics': generated_slot_integrity,
         'generated_slot_integrity_diagnostics': generated_slot_integrity,
+        'Turf Wave Source-of-Truth Diagnostics': turf_wave_source_of_truth_repair,
+        'turf_wave_source_of_truth_diagnostics': turf_wave_source_of_truth_repair,
         'generated_slot_integrity_check_ran': generated_slot_integrity.get('generated_slot_integrity_check_ran'),
         'generated_slot_integrity_status': generated_slot_integrity.get('generated_slot_integrity_status'),
         'invalid_scheduled_game_count': generated_slot_integrity.get('invalid_scheduled_game_count'),
@@ -3964,146 +4119,261 @@ def _turf_wave_sequences_are_chronological_and_contiguous(waves: list[TurfWave])
     return [int(wave.sequence_number or 0) for wave in ordered] == list(range(1, len(ordered) + 1))
 
 
-def _build_turf_wave_chronological_validation(db: Session, season_id: uuid.UUID | None = None) -> dict[str, object]:
-    """Validate turf wave sequence/labels by host location and hosting availability date."""
-    query = db.query(TurfWave, HostLocation, HostingAvailability).join(
-        HostLocation, HostLocation.id == TurfWave.host_location_id
-    ).join(
-        HostingAvailability, HostingAvailability.id == TurfWave.hosting_availability_id
+def _effective_turf_slot_host_date_start(slot: GameSlot | None, field_instance: FieldInstance | None = None) -> tuple[uuid.UUID | None, date | None, time | None]:
+    if not slot:
+        return None, None, None
+    instance = field_instance or getattr(slot, 'field_instance', None)
+    return (
+        getattr(slot, 'host_location_id', None) or getattr(instance, 'host_location_id', None),
+        getattr(slot, 'slot_date', None) or getattr(instance, 'instance_date', None),
+        getattr(slot, 'start_time', None),
     )
-    if season_id:
-        query = query.filter(HostingAvailability.season_id == season_id)
-    rows = query.order_by(TurfWave.host_location_id, TurfWave.host_date, TurfWave.hosting_availability_id, TurfWave.start_time, TurfWave.id).all()
-    grouped: dict[tuple[uuid.UUID, date, uuid.UUID], dict[str, object]] = {}
-    for wave, host, availability in rows:
-        if not _is_turf_stadium_host(host):
-            continue
-        key = (wave.host_location_id, wave.host_date, wave.hosting_availability_id)
-        grouped.setdefault(key, {'host': host, 'availability': availability, 'waves': []})['waves'].append(wave)
 
-    selected_query = db.query(HostPlanSelection, HostLocation, HostingAvailability).join(
-        HostLocation, HostLocation.id == HostPlanSelection.host_location_id
-    ).outerjoin(HostingAvailability, HostingAvailability.id == HostPlanSelection.availability_id).filter(
-        HostPlanSelection.status == 'SELECTED'
-    )
-    if season_id:
-        selected_query = selected_query.filter(HostPlanSelection.season_id == season_id)
-    for selection, host, availability in selected_query.all():
-        if not _is_turf_stadium_host(host):
-            continue
-        selected_date = selection.game_date
-        selected_availability = availability
-        if not selected_availability:
-            selected_availability = db.query(HostingAvailability).filter(
-                HostingAvailability.host_location_id == selection.host_location_id,
-                HostingAvailability.is_available.is_(True),
-                or_(HostingAvailability.primary_game_date == selected_date, HostingAvailability.available_date == selected_date),
-            ).order_by(HostingAvailability.start_time, HostingAvailability.id).first()
-        if selected_availability:
-            key = (selection.host_location_id, selected_date, selected_availability.id)
-            grouped.setdefault(key, {'host': host, 'availability': selected_availability, 'waves': []})
 
+def _component_label_from_size_and_index(field_type: str | None, index: int | None) -> str | None:
+    size = _normalize_field_size(field_type)
+    if size not in FIELD_SIZE_ORDER:
+        return None
+    return f'{size.title()} Field {max(int(index or 1), 1)}'
+
+
+def _build_canonical_turf_wave_source_of_truth(db: Session, season_id: uuid.UUID | str | None = None, *, host_location_id: uuid.UUID | None = None, host_date: date | None = None) -> dict[str, object]:
+    """Build host/date/start-scoped turf wave metadata from final slot assignments."""
+    grouped: dict[tuple[uuid.UUID, date], dict[str, object]] = {}
+    waves_by_start: dict[tuple[uuid.UUID, date, time], list[TurfWave]] = {}
+    slots_by_start: dict[tuple[uuid.UUID, date, time], list[GameSlot]] = {}
+
+    wave_query = db.query(TurfWave, HostLocation, HostingAvailability).join(HostLocation, HostLocation.id == TurfWave.host_location_id).join(HostingAvailability, HostingAvailability.id == TurfWave.hosting_availability_id)
+    if season_id:
+        wave_query = wave_query.filter(HostingAvailability.season_id == season_id)
+    if host_location_id:
+        wave_query = wave_query.filter(TurfWave.host_location_id == host_location_id)
+    if host_date:
+        wave_query = wave_query.filter(TurfWave.host_date == host_date)
+    for wave, host, _availability in wave_query.order_by(TurfWave.host_location_id, TurfWave.host_date, TurfWave.start_time, TurfWave.id).all():
+        if not _is_turf_stadium_host(host) or not wave.host_location_id or not wave.host_date or not wave.start_time:
+            continue
+        group_key = (wave.host_location_id, wave.host_date)
+        grouped.setdefault(group_key, {'host': host, 'availability_ids': set(), 'start_times': set(), 'waves': []})
+        grouped[group_key]['availability_ids'].add(wave.hosting_availability_id)
+        grouped[group_key]['start_times'].add(wave.start_time)
+        grouped[group_key]['waves'].append(wave)
+        waves_by_start.setdefault((wave.host_location_id, wave.host_date, wave.start_time), []).append(wave)
+
+    slot_query = db.query(GameSlot, FieldInstance, HostLocation).join(FieldInstance, FieldInstance.id == GameSlot.field_instance_id).join(HostLocation, HostLocation.id == GameSlot.host_location_id)
+    if season_id:
+        slot_query = slot_query.filter(or_(GameSlot.season_id == season_id, GameSlot.week_id.in_(db.query(Week.id).filter(Week.season_id == season_id))))
+    if host_location_id:
+        slot_query = slot_query.filter(GameSlot.host_location_id == host_location_id)
+    if host_date:
+        slot_query = slot_query.filter(GameSlot.slot_date == host_date)
+    for slot, instance, host in slot_query.order_by(GameSlot.host_location_id, GameSlot.slot_date, GameSlot.start_time, FieldInstance.field_type, FieldInstance.id, GameSlot.id).all():
+        if not _is_turf_stadium_host(host) or not slot.host_location_id or not slot.slot_date or not slot.start_time:
+            continue
+        group_key = (slot.host_location_id, slot.slot_date)
+        grouped.setdefault(group_key, {'host': host, 'availability_ids': set(), 'start_times': set(), 'waves': []})
+        grouped[group_key]['availability_ids'].add(instance.hosting_availability_id)
+        grouped[group_key]['start_times'].add(slot.start_time)
+        slots_by_start.setdefault((slot.host_location_id, slot.slot_date, slot.start_time), []).append(slot)
+
+    mapping: dict[tuple[uuid.UUID, date, time], dict[str, object]] = {}
     diagnostics: list[dict[str, object]] = []
     duplicate_count = 0
     gap_count = 0
     out_of_order_count = 0
-    label_mismatch_count = 0
-    failed_count = 0
-    for (_host_id, _host_date, _availability_id), data in sorted(grouped.items(), key=lambda item: (str(item[0][1]), str(item[0][0]), str(item[0][2]))):
-        host = data['host']
-        availability = data['availability']
-        waves = sorted(data['waves'], key=lambda wave: (wave.start_time, str(wave.id)))
-        sequence_numbers = [int(wave.sequence_number or 0) for wave in waves]
-        expected = list(range(1, len(waves) + 1))
-        duplicate_sequences = sorted({number for number in sequence_numbers if sequence_numbers.count(number) > 1})
-        sequence_contiguous = sorted(sequence_numbers) == expected
-        sequence_chronological = sequence_numbers == expected
-        exported_labels_match = True
-        label_mismatches: list[dict[str, object]] = []
-        chronological_wave_sequence: list[dict[str, object]] = []
-        for expected_number, wave in enumerate(waves, start=1):
-            layout = _normalize_configuration_name(wave.preferred_layout_code)
-            slots = db.query(GameSlot).join(FieldInstance, FieldInstance.id == GameSlot.field_instance_id).filter(
-                GameSlot.turf_wave_id == wave.id,
-                FieldInstance.hosting_availability_id == wave.hosting_availability_id,
-            ).order_by(GameSlot.start_time, FieldInstance.field_type, FieldInstance.id, GameSlot.id).all()
-            instances_by_id = {slot.field_instance.id: slot.field_instance for slot in slots if slot.field_instance is not None}
-            instances = sorted(
-                instances_by_id.values(),
-                key=lambda instance: (_field_size_sequence_rank(instance.field_type), str(instance.id)),
-            )
+    for (group_host_id, group_date), data in sorted(grouped.items(), key=lambda item: (item[0][1], str(item[0][0]))):
+        host = data.get('host')
+        start_times = sorted(data.get('start_times') or [])
+        canonical_wave_mapping: list[dict[str, object]] = []
+        layout_code_by_wave: dict[int, str | None] = {}
+        for wave_number, start_value in enumerate(start_times, start=1):
+            key = (group_host_id, group_date, start_value)
+            start_slots = slots_by_start.get(key, [])
+            start_waves = sorted(waves_by_start.get(key, []), key=lambda wave: str(wave.id))
+            inferred_layout = _turf_layout_code_for_counts(_turf_slot_counts_from_slots(start_slots))
+            wave_layout = next((_normalize_configuration_name(wave.preferred_layout_code) for wave in start_waves if _normalize_configuration_name(wave.preferred_layout_code) in TURF_APPROVED_LAYOUT_CODES), None)
+            layout = inferred_layout or wave_layout
+            first_wave = start_waves[0] if start_waves else None
+            first_slot = start_slots[0] if start_slots else None
             component_counts = {size: 0 for size in FIELD_SIZE_ORDER}
-            labels: list[str] = []
-            for instance in instances:
-                size = _normalize_field_size(instance.field_type)
+            component_by_slot_id: dict[uuid.UUID, str] = {}
+            for component_slot in sorted(start_slots, key=lambda candidate: (_field_size_sequence_rank(candidate.field_type), str(candidate.field_instance_id), str(candidate.id))):
+                size = _normalize_field_size(component_slot.field_type)
                 if size not in component_counts:
                     continue
                 component_counts[size] += 1
-                expected_label = f'Wave {int(wave.sequence_number or 0)} {layout} {size.title()} Field {component_counts[size]}'
-                labels.append(expected_label)
-                if instance.field_name != expected_label:
-                    exported_labels_match = False
-                    label_mismatches.append({
-                        'turf_wave_id': str(wave.id),
-                        'field_instance_id': str(instance.id),
-                        'actual_label': instance.field_name,
-                        'expected_label': expected_label,
-                        'expected_chronological_sequence_number': expected_number,
-                        'stored_sequence_number': int(wave.sequence_number or 0),
-                    })
-            chronological_wave_sequence.append({
-                'turf_wave_id': str(wave.id),
-                'expected_sequence_number': expected_number,
-                'stored_sequence_number': int(wave.sequence_number or 0),
-                'start_time': wave.start_time.isoformat() if wave.start_time else None,
+                component_label = _component_label_from_size_and_index(size, component_counts[size])
+                if component_label:
+                    component_by_slot_id[component_slot.id] = component_label
+            value = {
+                'wave_number': wave_number,
                 'preferred_layout_code': layout,
-                'export_field_labels': labels,
+                'start_time': start_value,
+                'end_time': getattr(first_wave, 'end_time', None) or getattr(first_slot, 'end_time', None),
+                'host_location_id': group_host_id,
+                'game_date': group_date,
+                'hosting_availability_id': getattr(first_wave, 'hosting_availability_id', None) or (getattr(getattr(first_slot, 'field_instance', None), 'hosting_availability_id', None) if first_slot else None),
+                'turf_wave_id': getattr(first_wave, 'id', None) or getattr(first_slot, 'turf_wave_id', None),
+                'component_by_slot_id': component_by_slot_id,
+            }
+            mapping[key] = value
+            layout_code_by_wave[wave_number] = layout
+            canonical_wave_mapping.append({
+                'host_location_id': str(group_host_id),
+                'game_date': group_date.isoformat(),
+                'start_time': start_value.isoformat(),
+                'wave_number': wave_number,
+                'preferred_layout_code': layout,
+                'end_time': value['end_time'].isoformat() if value.get('end_time') else None,
+                'hosting_availability_id': str(value['hosting_availability_id']) if value.get('hosting_availability_id') else None,
+                'turf_wave_id': str(value['turf_wave_id']) if value.get('turf_wave_id') else None,
             })
-        reason = None
-        if duplicate_sequences:
-            duplicate_count += 1
-        if not sequence_contiguous:
-            gap_count += 1
-        if not sequence_chronological:
-            out_of_order_count += 1
-        if not exported_labels_match:
-            label_mismatch_count += 1
-        if duplicate_sequences:
-            reason = 'TURF_WAVE_DUPLICATE_SEQUENCE'
-        elif not sequence_contiguous:
-            reason = 'TURF_WAVE_SEQUENCE_GAP'
-        elif not sequence_chronological:
-            reason = 'TURF_WAVE_SEQUENCE_OUT_OF_ORDER'
-        elif not exported_labels_match:
-            reason = 'TURF_WAVE_LABEL_MISMATCH'
-        if not (sequence_contiguous and sequence_chronological and exported_labels_match and not duplicate_sequences):
-            failed_count += 1
+        waves = sorted(data.get('waves') or [], key=lambda wave: (wave.start_time, str(wave.id)))
+        stored = [int(wave.sequence_number or 0) for wave in waves]
+        expected = [int(mapping[(group_host_id, group_date, wave.start_time)]['wave_number']) for wave in waves if wave.start_time in start_times]
+        duplicate_sequences = bool(stored and len(stored) != len(set(stored)))
+        sequence_gap_detected = bool(stored and sorted(stored) != list(range(1, len(stored) + 1)))
+        sequence_out_of_order_detected = bool(stored and stored != expected)
+        duplicate_count += int(duplicate_sequences)
+        gap_count += int(sequence_gap_detected)
+        out_of_order_count += int(sequence_out_of_order_detected)
         diagnostics.append({
-            'hosting_availability_id': str(getattr(availability, 'id', _availability_id)),
-            'host_location_id': str(getattr(host, 'id', _host_id)),
+            'hosting_availability_id': next((str(item) for item in sorted(data.get('availability_ids') or [], key=str)), None),
+            'host_location_id': str(group_host_id),
             'host_location_name': getattr(host, 'name', None),
-            'host_date': _host_date.isoformat() if _host_date else None,
+            'game_date': group_date.isoformat(),
+            'host_date': group_date.isoformat(),
             'surface_type': getattr(host, 'surface_type', None),
-            'chronological_wave_sequence': chronological_wave_sequence,
-            'wave_sequence_numbers': sequence_numbers,
-            'wave_start_times': [wave.start_time.isoformat() if wave.start_time else None for wave in waves],
-            'wave_layout_codes': [_normalize_configuration_name(wave.preferred_layout_code) for wave in waves],
-            'sequence_contiguous': sequence_contiguous,
-            'sequence_chronological': sequence_chronological,
-            'exported_labels_match': exported_labels_match,
-            'validation_failure_reason': reason,
-            'label_mismatches': label_mismatches,
+            'canonical_wave_mapping': canonical_wave_mapping,
+            'start_times_in_order': [start_value.isoformat() for start_value in start_times],
+            'assigned_wave_numbers': list(range(1, len(start_times) + 1)),
+            'layout_code_by_wave': {str(number): layout for number, layout in layout_code_by_wave.items()},
+            'games_checked_count': 0,
+            'labels_repaired_count': 0,
+            'mixed_labels_detected_count': 0,
+            'sequence_gap_detected': sequence_gap_detected,
+            'sequence_out_of_order_detected': sequence_out_of_order_detected,
+            'exported_labels_match': True,
+            'validation_failure_reason': 'TURF_WAVE_DUPLICATE_SEQUENCE' if duplicate_sequences else ('TURF_WAVE_SEQUENCE_GAP' if sequence_gap_detected else ('TURF_WAVE_SEQUENCE_OUT_OF_ORDER' if sequence_out_of_order_detected else None)),
         })
     return {
-        'host_date_sequence_validation': diagnostics,
-        'chronological_sequence_validation': diagnostics,
+        'mapping': mapping,
+        'diagnostics': diagnostics,
         'turf_wave_duplicate_sequence_count': duplicate_count,
         'turf_wave_sequence_gap_count': gap_count,
         'turf_wave_sequence_out_of_order_count': out_of_order_count,
-        'turf_wave_label_mismatch_count': label_mismatch_count,
-        'turf_wave_chronological_validation_failed_count': failed_count,
+        'turf_wave_canonical_mapping_missing_count': 0,
     }
 
+
+def _canonical_turf_wave_value_for_slot(db: Session, slot: GameSlot | None, field_instance: FieldInstance | None = None) -> dict[str, object] | None:
+    host_id, slot_date, start_time_value = _effective_turf_slot_host_date_start(slot, field_instance)
+    if not host_id or not slot_date or not start_time_value:
+        return None
+    source = _build_canonical_turf_wave_source_of_truth(db, getattr(slot, 'season_id', None), host_location_id=host_id, host_date=slot_date)
+    return (source.get('mapping') or {}).get((host_id, slot_date, start_time_value))
+
+
+def _canonical_turf_field_export_label(db: Session, slot: GameSlot | None, field_instance: FieldInstance | None = None) -> str | None:
+    value = _canonical_turf_wave_value_for_slot(db, slot, field_instance)
+    if not value:
+        return _turf_field_export_label(slot, field_instance)
+    layout = value.get('preferred_layout_code')
+    component_label = (value.get('component_by_slot_id') or {}).get(getattr(slot, 'id', None)) if slot else None
+    if not component_label:
+        component_label = _turf_field_component_label(slot, field_instance)
+    if not layout or not component_label:
+        return _turf_field_export_label(slot, field_instance)
+    return f"Wave {int(value.get('wave_number') or 0)} {layout} {component_label}"
+
+def _build_turf_wave_chronological_validation(db: Session, season_id: uuid.UUID | None = None) -> dict[str, object]:
+    """Validate turf wave sequence/labels from canonical host/date/start metadata."""
+    source = _build_canonical_turf_wave_source_of_truth(db, season_id)
+    diagnostics = source.get('diagnostics') or []
+
+    label_mismatch_count = 0
+    mixed_label_count = 0
+    canonical_missing_count = 0
+    labels_by_host_date_start: dict[tuple[str | None, str | None, str | None], set[str]] = {}
+
+    scheduled_query = db.query(Game, GameSlot, FieldInstance, HostLocation).join(
+        GameSlot, GameSlot.assigned_game_id == Game.id
+    ).join(
+        FieldInstance, FieldInstance.id == GameSlot.field_instance_id
+    ).join(
+        HostLocation, HostLocation.id == GameSlot.host_location_id
+    ).join(
+        GameStatus, GameStatus.id == Game.game_status_id
+    ).filter(func.lower(GameStatus.code) != 'unscheduled')
+    if season_id:
+        scheduled_query = scheduled_query.filter(Game.season_id == season_id)
+
+    diagnostics_by_host_date = {(row.get('host_location_id'), row.get('game_date')): row for row in diagnostics if isinstance(row, dict)}
+    mapping = source.get('mapping') or {}
+    for game, slot, instance, host in scheduled_query.order_by(Game.game_date, Game.kickoff_time, Game.id).all():
+        if not _is_turf_stadium_host(host):
+            continue
+        key = (slot.host_location_id, slot.slot_date, slot.start_time)
+        canonical = mapping.get(key)
+        row = diagnostics_by_host_date.get((str(slot.host_location_id), slot.slot_date.isoformat() if slot.slot_date else None))
+        if row is not None:
+            row['games_checked_count'] = int(row.get('games_checked_count') or 0) + 1
+        if not canonical:
+            canonical_missing_count += 1
+            if row is not None:
+                row['exported_labels_match'] = False
+                row['validation_failure_reason'] = 'TURF_WAVE_CANONICAL_MAPPING_MISSING'
+            continue
+        expected_label = _canonical_turf_field_export_label(db, slot, instance)
+        stored_label = getattr(instance, 'field_name', None)
+        if expected_label and stored_label and stored_label != expected_label:
+            # Stored labels are stale display cache only; export/UI use expected_label.
+            if row is not None:
+                row.setdefault('repaired_label_cache_mismatches', []).append({
+                    'game_id': str(game.id),
+                    'old_field_label': stored_label,
+                    'new_field_label': expected_label,
+                    'host_location_id': str(slot.host_location_id),
+                    'game_date': slot.slot_date.isoformat() if slot.slot_date else None,
+                    'start_time': slot.start_time.isoformat() if slot.start_time else None,
+                    'old_wave_number': _parse_turf_wave_number_from_label(stored_label),
+                    'canonical_wave_number': int(canonical.get('wave_number') or 0),
+                    'field_type': _normalize_field_size(slot.field_type or instance.field_type),
+                    'component_label': (canonical.get('component_by_slot_id') or {}).get(slot.id),
+                    'repair_success': False,
+                    'repair_failure_reason': 'STALE_STORED_LABEL_IGNORED_BY_CANONICAL_EXPORT',
+                })
+        label_key = (str(slot.host_location_id), slot.slot_date.isoformat() if slot.slot_date else None, slot.start_time.isoformat() if slot.start_time else None)
+        labels_by_host_date_start.setdefault(label_key, set()).add(f"Wave {int(canonical.get('wave_number') or 0)}")
+
+    for label_key, labels in labels_by_host_date_start.items():
+        if len(labels) > 1:
+            mixed_label_count += 1
+            row = diagnostics_by_host_date.get((label_key[0], label_key[1]))
+            if row is not None:
+                row['mixed_labels_detected_count'] = int(row.get('mixed_labels_detected_count') or 0) + 1
+                row['exported_labels_match'] = False
+                row['validation_failure_reason'] = 'TURF_WAVE_MIXED_LABELS_FOR_SAME_TIME'
+
+    failed_count = sum(
+        1 for row in diagnostics
+        if row.get('validation_failure_reason')
+        or row.get('sequence_gap_detected')
+        or row.get('sequence_out_of_order_detected')
+        or not row.get('exported_labels_match', True)
+    )
+    return {
+        'host_date_sequence_validation': diagnostics,
+        'chronological_sequence_validation': diagnostics,
+        'Turf Wave Source-of-Truth Diagnostics': diagnostics,
+        'turf_wave_duplicate_sequence_count': int(source.get('turf_wave_duplicate_sequence_count') or 0),
+        'turf_wave_sequence_gap_count': int(source.get('turf_wave_sequence_gap_count') or 0),
+        'turf_wave_sequence_out_of_order_count': int(source.get('turf_wave_sequence_out_of_order_count') or 0),
+        'turf_wave_label_mismatch_count': label_mismatch_count,
+        'turf_wave_mixed_labels_for_same_time_count': mixed_label_count,
+        'turf_wave_canonical_mapping_missing_count': canonical_missing_count,
+        'turf_wave_chronological_validation_failed_count': failed_count,
+    }
 
 def _validate_turf_wave_regeneration(
     db: Session,
@@ -9328,7 +9598,7 @@ def list_generated_slots(host_location_id: uuid.UUID, available_date: str | None
         'host_location_id': row.GameSlot.host_location_id,
         'host_location_name': row.host_location_name,
         'field_instance_id': row.GameSlot.field_instance_id,
-        'field_instance_name': row.field_name,
+        'field_instance_name': (_canonical_turf_field_export_label(db, row.GameSlot, row.GameSlot.field_instance) if getattr(row.GameSlot, 'turf_wave_id', None) else row.field_name),
         'field_size': _normalize_field_size(row.GameSlot.field_type) or row.GameSlot.field_type,
         'field_type': row.GameSlot.field_type,
         'start_time': row.GameSlot.start_time,
@@ -9386,7 +9656,7 @@ def list_generated_game_slots(host_location_id: uuid.UUID | None = None, availab
         'host_location_id': row.GameSlot.host_location_id,
         'host_location_name': row.host_location_name,
         'field_instance_id': row.GameSlot.field_instance_id,
-        'field_instance_name': row.field_name,
+        'field_instance_name': (_canonical_turf_field_export_label(db, row.GameSlot, row.GameSlot.field_instance) if getattr(row.GameSlot, 'turf_wave_id', None) else row.field_name),
         'field_size': _normalize_field_size(row.GameSlot.field_type) or row.GameSlot.field_type,
         'field_type': row.GameSlot.field_type,
         'start_time': row.GameSlot.start_time,
@@ -18286,6 +18556,8 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         'assigned_slots': assigned_slots,
         'skipped': skipped,
         'generated_slot_integrity_diagnostics': generated_slot_integrity,
+        'Turf Wave Source-of-Truth Diagnostics': turf_wave_source_of_truth_repair,
+        'turf_wave_source_of_truth_diagnostics': turf_wave_source_of_truth_repair,
         'final_validation': {
             'active_team_count': len(teams),
             'required_game_count': required_games_for_division_week,
@@ -20412,7 +20684,7 @@ def list_public_games(season_id: uuid.UUID | None = None, host_location_id: uuid
     start = max(page - 1, 0) * page_size
     items = rows[start:start + page_size]
     return PagedResponse(
-        items=[_public_game_read_from_schedule_row(row) for row in items],
+        items=[_public_game_read_from_schedule_row(row, db) for row in items],
         total=total,
         page=page,
         page_size=page_size,
@@ -21812,7 +22084,7 @@ def _score_fields(score: GameScore | None, game: Game | None = None, public: boo
     }
 
 
-def _score_game_dict(row, include_history: bool = False) -> dict:
+def _score_game_dict(row, include_history: bool = False, db: Session | None = None) -> dict:
     g, slot, fi, host, home, away, div, org, status = row
     score = getattr(g, 'score', None)
     wave = slot.turf_wave if slot and slot.turf_wave_id else None
@@ -21825,7 +22097,7 @@ def _score_game_dict(row, include_history: bool = False) -> dict:
         'host_location_id': str(host.id) if host else None,
         'host_location_name': host.name if host else '',
         'field_id': str(fi.id) if fi else None,
-        'field_name': _turf_field_export_label(slot, fi) if slot and slot.turf_wave_id else (fi.field_name if fi else ''),
+        'field_name': (_canonical_turf_field_export_label(db, slot, fi) if db is not None else _turf_field_export_label(slot, fi)) if slot and slot.turf_wave_id else (fi.field_name if fi else ''),
         'field_type': slot.field_type if slot else None,
         'turf_wave_id': str(slot.turf_wave_id) if slot and slot.turf_wave_id else None,
         'turf_wave_start_time': wave.start_time.isoformat() if wave else None,
@@ -21879,7 +22151,7 @@ def community_scores(week_id: uuid.UUID | None = None, division_id: uuid.UUID | 
         'host_location_id': host_location_id,
     }, organization_filter_any_team=True)
     rows = _apply_score_filters(rows, status)
-    return {'items': [_score_game_dict(row, include_history=True) for row in rows], 'total': len(rows)}
+    return {'items': [_score_game_dict(row, include_history=True, db=db) for row in rows], 'total': len(rows)}
 
 
 @router.post('/community/games/{game_id}/score', dependencies=[Depends(require_roles(ROLE_COMMUNITY_ADMIN))])
@@ -21927,7 +22199,7 @@ def admin_scores(week_id: uuid.UUID | None = None, division_id: uuid.UUID | None
         'date': date,
     }, organization_filter_any_team=True)
     rows = _apply_score_filters(rows, status)
-    return {'items': [_score_game_dict(row) for row in rows], 'total': len(rows)}
+    return {'items': [_score_game_dict(row, db=db) for row in rows], 'total': len(rows)}
 
 
 @router.put('/admin/games/{game_id}/score', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
@@ -21969,13 +22241,13 @@ def admin_approve_score(game_id: uuid.UUID, payload: ScoreApprovePayload | None 
 @router.get('/admin/scores/missing', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def admin_missing_scores(db: Session = Depends(get_db)):
     rows = [row for row in _score_rows(db) if _game_has_started(row[0]) and _effective_score_status(row[0], getattr(row[0], 'score', None)) != SCORE_STATUS_APPROVED]
-    return {'items': [_score_game_dict(row) for row in rows], 'total': len(rows)}
+    return {'items': [_score_game_dict(row, db=db) for row in rows], 'total': len(rows)}
 
 
 @router.get('/admin/scores/flagged', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def admin_flagged_scores(db: Session = Depends(get_db)):
     rows = [row for row in _score_rows(db) if _effective_score_status(row[0], getattr(row[0], 'score', None)) == SCORE_STATUS_FLAGGED]
-    return {'items': [_score_game_dict(row, include_history=True) for row in rows], 'total': len(rows)}
+    return {'items': [_score_game_dict(row, include_history=True, db=db) for row in rows], 'total': len(rows)}
 
 
 @router.get('/admin/games/{game_id}/score-history', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
@@ -22032,7 +22304,7 @@ def _turf_field_export_label(slot: GameSlot | None, field_instance: FieldInstanc
         return getattr(field_instance or getattr(slot, 'field_instance', None), 'field_name', None)
     return f'Wave {int(wave.sequence_number or 0)} {layout} {component_label}'
 
-def _public_game_read_from_schedule_row(row) -> PublicGameRead:
+def _public_game_read_from_schedule_row(row, db: Session | None = None) -> PublicGameRead:
     g, slot, fi, host, home, away, div, org, status = row
     wave = slot.turf_wave if slot and slot.turf_wave_id else None
     turf_configuration_code = _normalize_configuration_name(wave.preferred_layout_code) if wave else None
@@ -22043,7 +22315,7 @@ def _public_game_read_from_schedule_row(row) -> PublicGameRead:
         host_location_id=host.id if host else None,
         host_location_name=host.name if host else '',
         field_id=fi.id if fi else None,
-        field_name=_turf_field_export_label(slot, fi) if slot and slot.turf_wave_id else (fi.field_name if fi else ''),
+        field_name=(_canonical_turf_field_export_label(db, slot, fi) if db is not None else _turf_field_export_label(slot, fi)) if slot and slot.turf_wave_id else (fi.field_name if fi else ''),
         field_type=slot.field_type if slot else None,
         turf_wave_id=slot.turf_wave_id if slot else None,
         turf_wave_start_time=wave.start_time if wave else None,
@@ -22493,7 +22765,7 @@ def schedule_management_games(season_id: uuid.UUID | None = None, date: date | N
             'id': str(g.id), 'date': g.game_date.isoformat(), 'time': g.kickoff_time.strftime('%H:%M:%S'), 'division_id': str(div.id), 'division_name': div.name,
             'home_team_id': str(home.id), 'home_team_name': home.name, 'away_team_id': str(away.id), 'away_team_name': away.name,
             'organization_id': str(org.id), 'organization_name': org.name, 'host_location_id': (str(host.id) if host else None), 'host_location_name': (host.name if host else None),
-            'field_id': (str(fi.id) if fi else None), 'field': (_turf_field_export_label(slot, fi) if slot and slot.turf_wave_id else (fi.field_name if fi else None)), 'field_type': ((slot.field_type if slot else None) or (fi.field_type if fi else None)), 'status': status.code, 'slot_id': (str(slot.id) if slot else None), 'is_slot_active': (fi.is_active if fi else False),
+            'field_id': (str(fi.id) if fi else None), 'field': (_canonical_turf_field_export_label(db, slot, fi) if slot and slot.turf_wave_id else (fi.field_name if fi else None)), 'field_type': ((slot.field_type if slot else None) or (fi.field_type if fi else None)), 'status': status.code, 'slot_id': (str(slot.id) if slot else None), 'is_slot_active': (fi.is_active if fi else False),
             'turf_wave_id': str(slot.turf_wave_id) if slot and slot.turf_wave_id else None,
             'turf_wave_start_time': wave.start_time.isoformat() if wave else None,
             'turf_configuration_code': turf_configuration_code if turf_configuration_code in TURF_APPROVED_LAYOUT_CODES else None,
@@ -22636,7 +22908,7 @@ def _format_schedule_export_status(value: str | None) -> str:
     return str(value or '').strip().upper()
 
 
-def _schedule_export_row_values(g, slot, fi, host, home, away, div, status) -> list[str]:
+def _schedule_export_row_values(g, slot, fi, host, home, away, div, status, db: Session | None = None) -> list[str]:
     field_type = getattr(slot, 'field_type', None) or getattr(fi, 'field_type', None)
     row_status = status.code
     if _is_scheduled_status_code(row_status) and (not host or not fi or not field_type):
@@ -22648,7 +22920,7 @@ def _schedule_export_row_values(g, slot, fi, host, home, away, div, status) -> l
         home.name,
         away.name,
         host.name if host else '',
-        _turf_field_export_label(slot, fi) if slot and getattr(slot, 'turf_wave_id', None) else (fi.field_name if fi else ''),
+        (_canonical_turf_field_export_label(db, slot, fi) if db is not None else _turf_field_export_label(slot, fi)) if slot and getattr(slot, 'turf_wave_id', None) else (fi.field_name if fi else ''),
         _format_schedule_export_status(field_type),
         _format_schedule_export_status(row_status),
     ]
@@ -22669,7 +22941,7 @@ def export_schedule_management_csv(date: date | None = None, division_id: uuid.U
     exported_dates = {g.game_date for g, *_ in rows if g.game_date}
     for g, slot, fi, host, home, away, div, org, status in rows:
         export_division_names.add(f'{div.division_group} {div.name}'.strip())
-        w.writerow(_schedule_export_row_values(g, slot, fi, host, home, away, div, status))
+        w.writerow(_schedule_export_row_values(g, slot, fi, host, home, away, div, status, db))
 
     export_validation_warnings: list[dict[str, object]] = []
     validation_season_id = next((g.season_id for g, *_ in rows if getattr(g, 'season_id', None)), validation_season_id)
