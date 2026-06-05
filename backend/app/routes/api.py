@@ -2488,6 +2488,13 @@ GENERATED_SLOT_REGENERATION_BUG_WARNINGS = {
     'pending_rollback_guard': 'BUG: SQLAlchemy session used after flush failure without rollback.',
 }
 
+TURF_WAVE_REGENERATION_WARNINGS = {
+    'non_contiguous_before_regeneration': 'TURF_WAVE_SEQUENCE_NON_CONTIGUOUS_BEFORE_REGENERATION',
+    'temporary_offset': 'TURF_WAVE_RESEQUENCE_USED_TEMPORARY_OFFSET',
+    'delete_recreate': 'TURF_WAVE_REGENERATION_DELETED_AND_RECREATED',
+    'validation_failed': 'TURF_WAVE_SEQUENCE_VALIDATION_FAILED',
+}
+
 
 def _generated_slot_regeneration_diagnostics(
     availability: HostingAvailability,
@@ -2526,6 +2533,63 @@ def _field_instance_diag(instance: FieldInstance | None) -> dict[str, object]:
         'hosting_availability_id': _serialize_diagnostic_id(getattr(instance, 'hosting_availability_id', None)),
         'instance_date': _format_diagnostic_date(getattr(instance, 'instance_date', None)),
     }
+
+
+def _turf_wave_sequence_map(waves: list[TurfWave]) -> list[dict[str, object]]:
+    return [
+        {
+            'turf_wave_id': _serialize_diagnostic_id(wave.id),
+            'start_time': _format_diagnostic_time(wave.start_time),
+            'sequence_number': int(wave.sequence_number or 0),
+            'preferred_layout_code': wave.preferred_layout_code,
+        }
+        for wave in sorted(waves, key=lambda wave: (wave.start_time, str(wave.id)))
+    ]
+
+
+def _turf_wave_sequences_are_chronological_and_contiguous(waves: list[TurfWave]) -> bool:
+    ordered = sorted(waves, key=lambda wave: (wave.start_time, str(wave.id)))
+    return [int(wave.sequence_number or 0) for wave in ordered] == list(range(1, len(ordered) + 1))
+
+
+def _validate_turf_wave_regeneration(db: Session, availability_id: uuid.UUID) -> tuple[bool, dict[str, object]]:
+    waves = db.query(TurfWave).filter(TurfWave.hosting_availability_id == availability_id).order_by(TurfWave.start_time.asc(), TurfWave.id.asc()).all()
+    sequence_numbers = [int(wave.sequence_number or 0) for wave in waves]
+    duplicate_sequence_numbers = sorted({number for number in sequence_numbers if sequence_numbers.count(number) > 1})
+    expected_sequence_numbers = list(range(1, len(waves) + 1))
+    chronological_sequence_numbers = [int(wave.sequence_number or 0) for wave in waves]
+    wave_ids = {wave.id for wave in waves}
+    slot_rows = db.query(GameSlot.id, GameSlot.turf_wave_id, GameSlot.field_instance_id).join(
+        FieldInstance, FieldInstance.id == GameSlot.field_instance_id
+    ).filter(FieldInstance.hosting_availability_id == availability_id).all()
+    stale_slot_rows = [row for row in slot_rows if row.turf_wave_id and row.turf_wave_id not in wave_ids]
+    wrong_field_rows = []
+    if wave_ids:
+        wrong_field_rows = db.query(GameSlot.id, GameSlot.turf_wave_id, FieldInstance.hosting_availability_id).join(
+            FieldInstance, FieldInstance.id == GameSlot.field_instance_id
+        ).filter(
+            GameSlot.turf_wave_id.in_(wave_ids),
+            FieldInstance.hosting_availability_id != availability_id,
+        ).all()
+    validation = {
+        'duplicate_sequence_numbers': duplicate_sequence_numbers,
+        'expected_sequence_numbers': expected_sequence_numbers,
+        'actual_sequence_numbers_by_start_time': chronological_sequence_numbers,
+        'chronological_sequence_numbers': chronological_sequence_numbers == expected_sequence_numbers,
+        'contiguous_sequence_numbers': sorted(sequence_numbers) == expected_sequence_numbers,
+        'generated_slots_reference_current_waves': not stale_slot_rows,
+        'generated_slots_reference_correct_field_instances': not wrong_field_rows,
+        'stale_generated_slot_ids': [_serialize_diagnostic_id(row.id) for row in stale_slot_rows],
+        'wrong_field_instance_slot_ids': [_serialize_diagnostic_id(row.id) for row in wrong_field_rows],
+    }
+    validation_passed = (
+        not duplicate_sequence_numbers
+        and validation['chronological_sequence_numbers']
+        and validation['contiguous_sequence_numbers']
+        and validation['generated_slots_reference_current_waves']
+        and validation['generated_slots_reference_correct_field_instances']
+    )
+    return validation_passed, validation
 
 
 def _generated_field_name(base_name: str, existing_names: set[str], proposed_names: set[str], start_time_value: time | None) -> tuple[str, bool]:
@@ -2603,6 +2667,34 @@ def _regenerate_generated_slots(
             'diagnostics': diagnostics,
         }
 
+    generated_slot_count_before = db.query(GameSlot.id).join(GameSlot.field_instance).filter(
+        FieldInstance.hosting_availability_id == availability.id,
+    ).count()
+    prior_turf_waves = db.query(TurfWave).filter(TurfWave.hosting_availability_id == availability.id).order_by(TurfWave.start_time.asc(), TurfWave.id.asc()).all()
+    turf_wave_regeneration_diagnostics = {
+        'hosting_availability_id': _serialize_diagnostic_id(availability.id),
+        'host_location_id': _serialize_diagnostic_id(host_location_id),
+        'host_date': _format_diagnostic_date(slot_date),
+        'prior_sequence_numbers_by_start_time': _turf_wave_sequence_map(prior_turf_waves),
+        'final_sequence_numbers_by_start_time': [],
+        'resequence_strategy_used': None,
+        'generated_slot_count_before': generated_slot_count_before,
+        'generated_slot_count_after': generated_slot_count_before,
+        'validation_passed': None,
+        'validation': {},
+    }
+    diagnostics['turf_wave_regeneration'] = turf_wave_regeneration_diagnostics
+    if prior_turf_waves and not _turf_wave_sequences_are_chronological_and_contiguous(prior_turf_waves):
+        diagnostics['warnings'].append(TURF_WAVE_REGENERATION_WARNINGS['non_contiguous_before_regeneration'])
+        logger.warning(
+            '%s hosting_availability_id=%s host_location_id=%s host_date=%s prior_sequence_numbers_by_start_time=%s',
+            TURF_WAVE_REGENERATION_WARNINGS['non_contiguous_before_regeneration'],
+            availability.id,
+            host_location_id,
+            slot_date,
+            turf_wave_regeneration_diagnostics['prior_sequence_numbers_by_start_time'],
+        )
+
     existing_slots = db.query(GameSlot).join(GameSlot.field_instance).filter(
         FieldInstance.hosting_availability_id == availability.id,
     ).all()
@@ -2658,8 +2750,72 @@ def _regenerate_generated_slots(
         if removable_wave_ids:
             db.query(TurfWave).filter(TurfWave.id.in_(removable_wave_ids)).delete(synchronize_session=False)
 
+    if stale_wave_ids:
+        remaining_wave_ids = [wave_id for (wave_id,) in db.query(TurfWave.id).filter(TurfWave.hosting_availability_id == availability.id).all()]
+        if not remaining_wave_ids:
+            turf_wave_regeneration_diagnostics['resequence_strategy_used'] = 'delete_recreate'
+            diagnostics['warnings'].append(TURF_WAVE_REGENERATION_WARNINGS['delete_recreate'])
+            logger.warning(
+                '%s hosting_availability_id=%s host_location_id=%s host_date=%s deleted_wave_count=%s',
+                TURF_WAVE_REGENERATION_WARNINGS['delete_recreate'],
+                availability.id,
+                host_location_id,
+                slot_date,
+                len(stale_wave_ids),
+            )
+        else:
+            offset = max([number for (number,) in db.query(TurfWave.sequence_number).filter(TurfWave.hosting_availability_id == availability.id).all()] or [0]) + 1000
+            db.query(TurfWave).filter(TurfWave.hosting_availability_id == availability.id).update(
+                {TurfWave.sequence_number: TurfWave.sequence_number + offset},
+                synchronize_session=False,
+            )
+            db.flush()
+            turf_wave_regeneration_diagnostics['resequence_strategy_used'] = 'temporary_offset'
+            diagnostics['warnings'].append(TURF_WAVE_REGENERATION_WARNINGS['temporary_offset'])
+            logger.warning(
+                '%s hosting_availability_id=%s host_location_id=%s host_date=%s offset=%s remaining_wave_count=%s',
+                TURF_WAVE_REGENERATION_WARNINGS['temporary_offset'],
+                availability.id,
+                host_location_id,
+                slot_date,
+                offset,
+                len(remaining_wave_ids),
+            )
+        db.flush()
+
     def _metrics(new_slots: int = 0) -> dict[str, object]:
         diagnostics['generated_field_instances_after'] = db.query(FieldInstance).filter(FieldInstance.hosting_availability_id == availability.id).count()
+        if _is_turf_stadium_host(host):
+            final_waves = db.query(TurfWave).filter(TurfWave.hosting_availability_id == availability.id).order_by(TurfWave.start_time.asc(), TurfWave.id.asc()).all()
+            turf_wave_regeneration_diagnostics['final_sequence_numbers_by_start_time'] = _turf_wave_sequence_map(final_waves)
+            turf_wave_regeneration_diagnostics['generated_slot_count_after'] = db.query(GameSlot.id).join(GameSlot.field_instance).filter(
+                FieldInstance.hosting_availability_id == availability.id,
+            ).count()
+            validation_passed, validation = _validate_turf_wave_regeneration(db, availability.id)
+            turf_wave_regeneration_diagnostics['validation_passed'] = validation_passed
+            turf_wave_regeneration_diagnostics['validation'] = validation
+            if not validation_passed:
+                diagnostics['warnings'].append(TURF_WAVE_REGENERATION_WARNINGS['validation_failed'])
+                logger.warning(
+                    '%s hosting_availability_id=%s host_location_id=%s host_date=%s validation=%s',
+                    TURF_WAVE_REGENERATION_WARNINGS['validation_failed'],
+                    availability.id,
+                    host_location_id,
+                    slot_date,
+                    validation,
+                )
+            logger.info(
+                'turf_wave_regeneration hosting_availability_id=%s host_location_id=%s host_date=%s prior_sequence_numbers_by_start_time=%s final_sequence_numbers_by_start_time=%s resequence_strategy_used=%s generated_slot_count_before=%s generated_slot_count_after=%s validation_passed=%s',
+                availability.id,
+                host_location_id,
+                slot_date,
+                turf_wave_regeneration_diagnostics['prior_sequence_numbers_by_start_time'],
+                turf_wave_regeneration_diagnostics['final_sequence_numbers_by_start_time'],
+                turf_wave_regeneration_diagnostics['resequence_strategy_used'],
+                turf_wave_regeneration_diagnostics['generated_slot_count_before'],
+                turf_wave_regeneration_diagnostics['generated_slot_count_after'],
+                turf_wave_regeneration_diagnostics['validation_passed'],
+            )
         return {
             'total_slots_evaluated': len(existing_slots),
             'slots_regenerated': removed_slots,
@@ -2774,25 +2930,10 @@ def _regenerate_generated_slots(
             if block_start_dt >= end_dt:
                 break
 
-        existing_waves = db.query(TurfWave).filter(
-            TurfWave.host_location_id == host_location_id,
-            TurfWave.host_date == slot_date,
-        ).all()
-        wave_order_rows = [
-            {'id': wave.id, 'start_time': wave.start_time, 'is_new': False, 'wave': wave}
-            for wave in existing_waves
-        ] + [
-            {'id': block['id'], 'start_time': block['start_dt'].time(), 'is_new': True, 'block': block}
-            for block in planned_blocks
-        ]
         wave_number_by_id = {
-            row['id']: index
-            for index, row in enumerate(sorted(wave_order_rows, key=lambda row: (row['start_time'], str(row['id']))), start=1)
+            block['id']: index
+            for index, block in enumerate(sorted(planned_blocks, key=lambda block: (block['start_dt'].time(), str(block['id']))), start=1)
         }
-        for wave in existing_waves:
-            desired_number = wave_number_by_id.get(wave.id)
-            if desired_number and wave.sequence_number != desired_number:
-                wave.sequence_number = desired_number
 
         for block in planned_blocks:
             wave_id = block['id']
@@ -5005,71 +5146,93 @@ def _highest_priority_host_ids_for_org(host_ids: set[uuid.UUID], host_role_by_id
 
 
 def _renumber_turf_waves_for_host_date(db: Session, host_location_id: uuid.UUID | None, host_date: date | None) -> None:
-    """Keep turf wave identity scoped to one selected turf-capable host/date.
+    """Keep turf wave identity chronological within each hosting availability.
 
-    Wave numbers are chronological time-block numbers. They intentionally do not
-    encode configuration and are never global across host locations. Grass and
-    non-turf-capable hosts are ignored. Field-instance label updates remain
-    collision-safe per hosting availability, but the displayed wave number is
-    the host/date-local chronological number.
+    The uniqueness constraint is scoped to ``hosting_availability_id`` and
+    ``sequence_number``, so resequencing is also scoped to each availability.
+    Existing rows are first moved to a temporary offset when their final values
+    would change, preventing transient duplicate sequence numbers during swaps
+    or compaction from sparse values.
     """
     if not host_location_id or not host_date:
         return
     host = db.query(HostLocation).filter(HostLocation.id == host_location_id).first()
     if not _is_turf_stadium_host(host):
         return
-    waves = db.query(TurfWave).filter(
-        TurfWave.host_location_id == host_location_id,
-        TurfWave.host_date == host_date,
-    ).order_by(TurfWave.start_time.asc(), TurfWave.id.asc()).all()
-    wave_number_by_id = {wave.id: index for index, wave in enumerate(waves, start=1)}
-    for wave in waves:
-        expected_number = wave_number_by_id.get(wave.id)
-        if expected_number and wave.sequence_number != expected_number:
-            wave.sequence_number = expected_number
+    availability_ids = [
+        availability_id
+        for (availability_id,) in db.query(TurfWave.hosting_availability_id).filter(
+            TurfWave.host_location_id == host_location_id,
+            TurfWave.host_date == host_date,
+        ).distinct().all()
+        if availability_id
+    ]
+    for availability_id in availability_ids:
+        waves = db.query(TurfWave).filter(
+            TurfWave.hosting_availability_id == availability_id,
+        ).order_by(TurfWave.start_time.asc(), TurfWave.id.asc()).all()
+        wave_number_by_id = {wave.id: index for index, wave in enumerate(waves, start=1)}
+        needs_resequence = any(wave.sequence_number != wave_number_by_id.get(wave.id) for wave in waves)
+        if needs_resequence:
+            offset = max([int(wave.sequence_number or 0) for wave in waves] or [0]) + 1000
+            for wave in waves:
+                wave.sequence_number = int(wave.sequence_number or 0) + offset
+            db.flush()
+            logger.warning(
+                '%s hosting_availability_id=%s host_location_id=%s host_date=%s offset=%s prior_sequence_numbers_by_start_time=%s',
+                TURF_WAVE_REGENERATION_WARNINGS['temporary_offset'],
+                availability_id,
+                host_location_id,
+                host_date,
+                offset,
+                _turf_wave_sequence_map(waves),
+            )
+            for wave in waves:
+                wave.sequence_number = wave_number_by_id[wave.id]
+            db.flush()
 
-    existing_names_by_availability: dict[uuid.UUID, dict[str, uuid.UUID]] = {}
-    for wave in waves:
-        if wave.hosting_availability_id not in existing_names_by_availability:
-            existing_names_by_availability[wave.hosting_availability_id] = {
+        existing_names_by_availability: dict[uuid.UUID, dict[str, uuid.UUID]] = {
+            availability_id: {
                 name: field_instance_id
                 for field_instance_id, name in db.query(FieldInstance.id, FieldInstance.field_name).filter(
-                    FieldInstance.hosting_availability_id == wave.hosting_availability_id,
+                    FieldInstance.hosting_availability_id == availability_id,
                 ).all()
             }
-        names_by_availability = existing_names_by_availability[wave.hosting_availability_id]
-        wave_index = wave_number_by_id.get(wave.id, wave.sequence_number)
-        layout = _normalize_configuration_name(wave.preferred_layout_code)
-        wave_slots = db.query(GameSlot).filter(GameSlot.turf_wave_id == wave.id).all()
-        instances = sorted(
-            {slot.field_instance for slot in wave_slots if slot.field_instance is not None},
-            key=lambda instance: (_field_size_sequence_rank(instance.field_type), str(instance.id)),
-        )
-        component_counts = {size: 0 for size in FIELD_SIZE_ORDER}
-        for instance in instances:
-            size = _normalize_field_size(instance.field_type)
-            if size not in component_counts:
-                continue
-            component_counts[size] += 1
-            desired_name = f'Wave {wave_index} {layout} {size.title()} Field {component_counts[size]}'
-            owner_id = names_by_availability.get(desired_name)
-            if owner_id and owner_id != instance.id:
-                logger.warning(
-                    '%s availability_id=%s host_location_id=%s existing_field_instance_id=%s proposed_field_instance_id=%s field_name=%s',
-                    GENERATED_SLOT_REGENERATION_BUG_WARNINGS['rename_collision'],
-                    wave.hosting_availability_id,
-                    host_location_id,
-                    owner_id,
-                    instance.id,
-                    desired_name,
-                )
-                continue
-            old_name = instance.field_name
-            if old_name != desired_name:
-                if old_name in names_by_availability and names_by_availability[old_name] == instance.id:
-                    del names_by_availability[old_name]
-                instance.field_name = desired_name
-                names_by_availability[desired_name] = instance.id
+        }
+        names_by_availability = existing_names_by_availability[availability_id]
+        for wave in waves:
+            wave_index = wave_number_by_id.get(wave.id, wave.sequence_number)
+            layout = _normalize_configuration_name(wave.preferred_layout_code)
+            wave_slots = db.query(GameSlot).filter(GameSlot.turf_wave_id == wave.id).all()
+            instances = sorted(
+                {slot.field_instance for slot in wave_slots if slot.field_instance is not None},
+                key=lambda instance: (_field_size_sequence_rank(instance.field_type), str(instance.id)),
+            )
+            component_counts = {size: 0 for size in FIELD_SIZE_ORDER}
+            for instance in instances:
+                size = _normalize_field_size(instance.field_type)
+                if size not in component_counts:
+                    continue
+                component_counts[size] += 1
+                desired_name = f'Wave {wave_index} {layout} {size.title()} Field {component_counts[size]}'
+                owner_id = names_by_availability.get(desired_name)
+                if owner_id and owner_id != instance.id:
+                    logger.warning(
+                        '%s availability_id=%s host_location_id=%s existing_field_instance_id=%s proposed_field_instance_id=%s field_name=%s',
+                        GENERATED_SLOT_REGENERATION_BUG_WARNINGS['rename_collision'],
+                        wave.hosting_availability_id,
+                        host_location_id,
+                        owner_id,
+                        instance.id,
+                        desired_name,
+                    )
+                    continue
+                old_name = instance.field_name
+                if old_name != desired_name:
+                    if old_name in names_by_availability and names_by_availability[old_name] == instance.id:
+                        del names_by_availability[old_name]
+                    instance.field_name = desired_name
+                    names_by_availability[desired_name] = instance.id
 
 
 def _hourly_start_times(start_value: time | None, end_value: time | None, slot_date: date | None) -> list[time]:

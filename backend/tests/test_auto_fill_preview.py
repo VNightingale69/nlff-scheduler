@@ -137,6 +137,98 @@ class AutoFillPreviewTest(unittest.TestCase):
         self.assertEqual('Wave 1 TWO_SMALL_ONE_MEDIUM Medium Field 1', medium.field_name)
         self.assertEqual('Wave 2 THREE_SMALL Small Field 1', later_small.field_name)
 
+    def test_turf_regeneration_recreates_sparse_waves_contiguously_without_touching_other_availability(self):
+        self.host.surface_type = 'TURF_STADIUM'
+        self.host.host_role = 'TURF_STADIUM'
+        availability = HostingAvailability(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week2.id,
+            organization_id=self.org_w.id,
+            host_location_id=self.host.id,
+            available_date=self.week2.start_date,
+            primary_game_date=self.week2.start_date,
+            start_time=time(9, 0),
+            end_time=time(12, 0),
+            active=True,
+            is_available=True,
+            auto_select_turf_layout=True,
+            lock_selected_layout=False,
+        )
+        other_availability = HostingAvailability(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week2.id,
+            organization_id=self.org_w.id,
+            host_location_id=self.host.id,
+            available_date=self.week2.start_date + timedelta(days=1),
+            primary_game_date=self.week2.start_date + timedelta(days=1),
+            start_time=time(9, 0),
+            end_time=time(10, 0),
+            active=True,
+            is_available=True,
+        )
+        self.db.add_all([availability, other_availability])
+        self.db.add(HostPlanSelection(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week2.id,
+            game_date=self.week2.start_date,
+            community_id=self.org_w.id,
+            host_location_id=self.host.id,
+            availability_id=availability.id,
+            status='SELECTED',
+        ))
+        old_waves = []
+        for start, end, sequence in ((time(9, 0), time(10, 0), 1), (time(10, 0), time(11, 0), 4), (time(11, 0), time(12, 0), 6)):
+            wave = TurfWave(
+                id=uuid.uuid4(),
+                host_location_id=self.host.id,
+                hosting_availability_id=availability.id,
+                week_id=self.week2.id,
+                host_date=self.week2.start_date,
+                sequence_number=sequence,
+                wave_intent='MIXED',
+                preferred_layout_code='TWO_SMALL_ONE_MEDIUM',
+                start_time=start,
+                end_time=end,
+            )
+            instance = FieldInstance(id=uuid.uuid4(), host_location_id=self.host.id, hosting_availability_id=availability.id, instance_date=self.week2.start_date, field_name=f'Old Field {sequence}', field_type='SMALL', is_active=True)
+            self.db.add_all([wave, instance])
+            self.db.flush()
+            self.db.add(GameSlot(id=uuid.uuid4(), field_instance_id=instance.id, host_location_id=self.host.id, season_id=self.season.id, week_id=self.week2.id, slot_date=self.week2.start_date, start_time=start, end_time=end, field_type='SMALL', status='OPEN', turf_wave_id=wave.id))
+            old_waves.append(wave.id)
+        other_wave = TurfWave(
+            id=uuid.uuid4(),
+            host_location_id=self.host.id,
+            hosting_availability_id=other_availability.id,
+            week_id=self.week2.id,
+            host_date=self.week2.start_date + timedelta(days=1),
+            sequence_number=9,
+            wave_intent='SMALL',
+            preferred_layout_code='THREE_SMALL',
+            start_time=time(9, 0),
+            end_time=time(10, 0),
+        )
+        self.db.add(other_wave)
+        self.db.commit()
+
+        first_metrics = _regenerate_generated_slots(self.db, availability, self.host.id, { 'SMALL': 0, 'MEDIUM': 0, 'LARGE': 0 })
+        self.db.commit()
+        second_metrics = _regenerate_generated_slots(self.db, availability, self.host.id, { 'SMALL': 0, 'MEDIUM': 0, 'LARGE': 0 })
+        self.db.commit()
+
+        waves = self.db.query(TurfWave).filter(TurfWave.hosting_availability_id == availability.id).order_by(TurfWave.start_time).all()
+        self.assertEqual([time(9, 0), time(10, 0), time(11, 0)], [wave.start_time for wave in waves])
+        self.assertEqual([1, 2, 3], [wave.sequence_number for wave in waves])
+        self.assertFalse(set(old_waves) & {wave.id for wave in waves})
+        self.assertEqual(9, self.db.query(TurfWave).filter(TurfWave.id == other_wave.id).one().sequence_number)
+        self.assertTrue(first_metrics['diagnostics']['turf_wave_regeneration']['validation_passed'])
+        self.assertTrue(second_metrics['diagnostics']['turf_wave_regeneration']['validation_passed'])
+        self.assertIn('TURF_WAVE_SEQUENCE_NON_CONTIGUOUS_BEFORE_REGENERATION', first_metrics['diagnostics']['warnings'])
+        self.assertIn('TURF_WAVE_REGENERATION_DELETED_AND_RECREATED', first_metrics['diagnostics']['warnings'])
+
+
     def test_selected_turf_stadium_generates_one_wave_for_every_available_hour(self):
         self.host.surface_type = 'TURF_STADIUM'
         self.host.host_role = 'TURF_STADIUM'
