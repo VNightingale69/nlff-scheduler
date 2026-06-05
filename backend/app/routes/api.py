@@ -186,6 +186,105 @@ SCHEDULED_GAME_INTEGRITY_FAILURE_CODES = {
 SCHEDULED_GAME_REPAIR_UNSCHEDULE_REASON = 'SCHEDULED_GAME_ORPHANED_AND_UNSCHEDULED'
 
 
+
+FINAL_SCHEDULE_EXCLUDED_STATUS_CODES = {
+    'UNSCHEDULED',
+    'DRAFT',
+    'ARCHIVED',
+    'DELETED',
+    'PLACEHOLDER',
+    'VALIDATION_FAILED',
+    'INACTIVE',
+}
+FINAL_SCHEDULE_FALLBACK_STATUS_CODES = {'SCHEDULED'}
+FINAL_SCHEDULE_SOURCE_NAME = 'database_final_scheduled_games'
+
+
+def _canonical_active_scheduled_status_codes(db: Session) -> set[str]:
+    """Return app-configured active game statuses that represent final schedule rows."""
+    codes = {
+        str(code or '').strip().upper()
+        for (code,) in db.query(GameStatus.code).filter(GameStatus.is_active.is_(True)).all()
+        if str(code or '').strip()
+    }
+    scheduled_codes = {code for code in codes if code not in FINAL_SCHEDULE_EXCLUDED_STATUS_CODES}
+    return scheduled_codes or set(FINAL_SCHEDULE_FALLBACK_STATUS_CODES)
+
+
+def _final_schedule_status_filter(db: Session):
+    return func.upper(GameStatus.code).in_(_canonical_active_scheduled_status_codes(db))
+
+
+def _final_validation_game_detail(g: Game, slot: GameSlot | None, fi: FieldInstance | None, host: HostLocation | None, home: Team | None, away: Team | None, div: Division | None, *, failure_code: str, failure_category: str, specific_reason: str) -> dict[str, object]:
+    return {
+        'failure_code': failure_code,
+        'failure_category': failure_category,
+        'game_id': str(getattr(g, 'id', '') or ''),
+        'season_id': str(getattr(g, 'season_id', '') or '') if getattr(g, 'season_id', None) else None,
+        'week_id': str(getattr(g, 'week_id', '') or '') if getattr(g, 'week_id', None) else None,
+        'game_date': _format_diagnostic_date(getattr(g, 'game_date', None)),
+        'kickoff_time': _format_diagnostic_time(getattr(g, 'kickoff_time', None)),
+        'division_id': str(getattr(div, 'id', '') or '') if div else None,
+        'division_name': (f"{getattr(div, 'division_group', '') or ''} {getattr(div, 'name', '') or ''}".strip() if div else None),
+        'home_team_id': str(getattr(home, 'id', '') or '') if home else None,
+        'home_team_name': getattr(home, 'name', None) if home else None,
+        'away_team_id': str(getattr(away, 'id', '') or '') if away else None,
+        'away_team_name': getattr(away, 'name', None) if away else None,
+        'host_location_id': str(getattr(host, 'id', '') or getattr(g, 'host_location_id', '') or '') or None,
+        'host_location_name': getattr(host, 'name', None) if host else None,
+        'field_instance_id': str(getattr(fi, 'id', '') or getattr(g, 'field_instance_id', '') or '') or None,
+        'field_name': getattr(fi, 'field_name', None) if fi else None,
+        'field_type': (getattr(slot, 'field_type', None) if slot else None) or (getattr(fi, 'field_type', None) if fi else None),
+        'game_slot_id': str(getattr(slot, 'id', '') or '') if slot else None,
+        'specific_reason': specific_reason,
+    }
+
+
+def load_final_scheduled_games_for_validation(db: Session, season_id: uuid.UUID | str | None, filters: dict | None = None, *, refresh: bool = True):
+    """Reload the final database-backed scheduled games used by validation/reporting/export.
+
+    This is the reusable source-of-truth query for final validation consumers. It
+    flushes pending ORM changes, expires stale loaded entities, and then queries
+    only active final schedule statuses from the database so mandatory repair
+    passes cannot leave validation pointed at stale preview or pre-repair rows.
+    """
+    if refresh:
+        db.flush()
+        db.expire_all()
+    shared_filters = dict(filters or {})
+    if season_id:
+        shared_filters['season_id'] = season_id
+    shared_filters['final_scheduled_only'] = True
+    return _schedule_management_rows(db, shared_filters)
+
+
+def _build_final_source_reconciliation(*, rows_count: int, validation_games_checked_count: int, schedule_quality_games_checked_count: int | None = None, export_games_count: int | None = None, preview_games_count: int | None = None, committed_games_count: int | None = None, run_id: object | None = None, export_source: str | None = None) -> dict[str, object]:
+    schedule_quality_count = rows_count if schedule_quality_games_checked_count is None else schedule_quality_games_checked_count
+    diagnostics = {
+        'final_committed_games_count': committed_games_count,
+        'final_scheduled_games_query_count': rows_count,
+        'final_validation_games_checked_count': validation_games_checked_count,
+        'schedule_quality_games_checked_count': schedule_quality_count,
+        'export_games_count': export_games_count,
+        'preview_games_count': preview_games_count,
+        'preview_games_are_stale': bool(preview_games_count is not None and preview_games_count != rows_count),
+        'final_validation_source': FINAL_SCHEDULE_SOURCE_NAME,
+        'schedule_quality_source': FINAL_SCHEDULE_SOURCE_NAME,
+        'export_source': export_source,
+        'run_id': str(run_id) if run_id is not None else None,
+        'validation_query_used': True,
+    }
+    mismatches: list[str] = []
+    if rows_count != validation_games_checked_count:
+        mismatches.append('final_scheduled_games_query_count != final_validation_games_checked_count')
+    if schedule_quality_count != rows_count:
+        mismatches.append('schedule_quality_games_checked_count != final_scheduled_games_query_count')
+    if export_games_count is not None and export_games_count != rows_count:
+        mismatches.append('export_games_count != final_scheduled_games_query_count')
+    diagnostics['count_mismatch'] = bool(mismatches)
+    diagnostics['mismatch_reason'] = '; '.join(mismatches) if mismatches else None
+    return diagnostics
+
 def _is_scheduled_status_code(value: object) -> bool:
     return str(value or '').strip().upper() == 'SCHEDULED'
 
@@ -624,7 +723,8 @@ def _repair_turf_wave_source_of_truth(db: Session, season_id: uuid.UUID | str | 
     ).join(
         GameStatus, GameStatus.id == Game.game_status_id
     ).filter(
-        func.lower(GameStatus.code) != 'unscheduled'
+        GameStatus.is_active.is_(True),
+        _final_schedule_status_filter(db),
     )
     if season_id:
         scheduled_query = scheduled_query.filter(Game.season_id == season_id)
@@ -731,6 +831,12 @@ def _build_final_schedule_validation_result(
     extra_failures: list[object] | None = None,
     turf_pull_forward_repair_diagnostics: dict[str, object] | None = None,
     run_turf_pull_forward_repair: bool = True,
+    preview_games_count: int | None = None,
+    committed_games_count: int | None = None,
+    schedule_quality_games_checked_count: int | None = None,
+    export_games_count: int | None = None,
+    export_source: str | None = None,
+    run_id: object | None = None,
 ) -> dict[str, object]:
     """Single source of truth for final schedule status and hard-rule counters.
 
@@ -788,12 +894,44 @@ def _build_final_schedule_validation_result(
                     str(exc),
                 )
             ]
-    rows = _schedule_management_rows(db, {'season_id': season_id} if season_id else {})
+    rows = load_final_scheduled_games_for_validation(db, season_id) if season_id else []
+    final_source_reconciliation = _build_final_source_reconciliation(
+        rows_count=len(rows),
+        validation_games_checked_count=len(rows),
+        schedule_quality_games_checked_count=schedule_quality_games_checked_count,
+        export_games_count=export_games_count,
+        preview_games_count=preview_games_count,
+        committed_games_count=committed_games_count,
+        run_id=run_id,
+        export_source=export_source,
+    )
+    logger.info(
+        'phase=final validation source reload season_id=%s run_id=%s final_scheduled_games_loaded=%s preview_games_count=%s committed_games_count=%s validation_games_checked=%s source_query_used=true stale_preview_validation_prevented=%s',
+        season_id,
+        run_id,
+        len(rows),
+        preview_games_count,
+        committed_games_count,
+        len(rows),
+        bool(preview_games_count is not None and preview_games_count != len(rows)),
+    )
+    if final_source_reconciliation.get('count_mismatch'):
+        logger.warning(
+            'final_validation_source_count_mismatch season_id=%s final_scheduled_games_query_count=%s final_validation_games_checked_count=%s schedule_quality_games_checked_count=%s export_games_count=%s mismatch_reason=%s',
+            season_id,
+            final_source_reconciliation.get('final_scheduled_games_query_count'),
+            final_source_reconciliation.get('final_validation_games_checked_count'),
+            final_source_reconciliation.get('schedule_quality_games_checked_count'),
+            final_source_reconciliation.get('export_games_count'),
+            final_source_reconciliation.get('mismatch_reason'),
+        )
 
     team_time_seen: dict[tuple[uuid.UUID, date, time], dict[str, object]] = {}
     field_time_seen: dict[tuple[uuid.UUID | None, uuid.UUID | None, date, time], dict[str, object]] = {}
     selected_host_violations: list[dict[str, object]] = []
     field_type_mismatches: list[dict[str, object]] = []
+    team_time_conflicts: list[dict[str, object]] = []
+    field_time_conflicts: list[dict[str, object]] = []
     generated_slot_integrity_failures: list[dict[str, object]] = list(generated_slot_integrity.get('remaining_invalid_scheduled_games') or [])
     overflow_host_ids_used: set[str] = set()
 
@@ -801,28 +939,42 @@ def _build_final_schedule_validation_result(
         game_id = str(g.id)
         field_type = getattr(slot, 'field_type', None) or getattr(fi, 'field_type', None)
         if field_type and div and _normalize_field_size(field_type) != _required_field_type_for_division(div):
-            field_type_mismatches.append({'game_id': game_id, 'actual_field_type': field_type, 'required_field_type': _required_field_type_for_division(div)})
+            field_type_mismatches.append({
+                **_final_validation_game_detail(g, slot, fi, host, home, away, div, failure_code='FIELD_TYPE_MISMATCH', failure_category='game', specific_reason='Scheduled game field type does not match division required field layout type.'),
+                'actual_field_type': field_type,
+                'required_field_type': _required_field_type_for_division(div),
+            })
         if g.game_date:
             allowed_hosts = _host_plan_allowed_host_ids_for_week(db, season_id, g.week_id, g.game_date)
             actual_host_id = getattr(slot, 'host_location_id', None) or g.host_location_id or getattr(fi, 'host_location_id', None)
             if allowed_hosts is not None and actual_host_id and actual_host_id not in allowed_hosts:
-                selected_host_violations.append({'game_id': game_id, 'host_location_id': str(actual_host_id), 'week_id': str(g.week_id) if g.week_id else None, 'game_date': g.game_date.isoformat()})
+                selected_host_violations.append({
+                    **_final_validation_game_detail(g, slot, fi, host, home, away, div, failure_code='SELECTED_HOST_VIOLATION', failure_category='game', specific_reason='Scheduled game uses a host outside selected host-plan availability.'),
+                    'allowed_host_location_ids': sorted(str(host_id) for host_id in allowed_hosts),
+                    'actual_host_location_id': str(actual_host_id),
+                })
             if host and _classify_host_for_date(db, host) == HOST_ROLE_OVERFLOW_GRASS:
                 overflow_host_ids_used.add(str(host.id))
         for team in (home, away):
             if not g.game_date or not g.kickoff_time:
                 continue
             key = (team.id, g.game_date, g.kickoff_time)
+            detail = _final_validation_game_detail(g, slot, fi, host, home, away, div, failure_code='TEAM_TIME_CONFLICT', failure_category='game', specific_reason='Team is double-booked at the same date and kickoff time.')
+            detail['conflicting_team_id'] = str(team.id)
+            detail['conflicting_team_name'] = getattr(team, 'name', None)
             if key in team_time_seen:
                 counters['team_time_conflict_count'] += 1
+                team_time_conflicts.append({**detail, 'conflicting_record': team_time_seen[key]})
             else:
-                team_time_seen[key] = {'game_id': game_id, 'team_id': str(team.id)}
+                team_time_seen[key] = detail
         if g.game_date and g.kickoff_time:
             field_key = (getattr(slot, 'host_location_id', None) or g.host_location_id, getattr(slot, 'field_instance_id', None) or g.field_instance_id, g.game_date, g.kickoff_time)
+            detail = _final_validation_game_detail(g, slot, fi, host, home, away, div, failure_code='FIELD_TIME_CONFLICT', failure_category='game', specific_reason='Field is double-booked at the same date and kickoff time.')
             if field_key in field_time_seen:
                 counters['field_time_conflict_count'] += 1
+                field_time_conflicts.append({**detail, 'conflicting_record': field_time_seen[field_key]})
             else:
-                field_time_seen[field_key] = {'game_id': game_id}
+                field_time_seen[field_key] = detail
 
     counters['field_type_mismatch_count'] = len(field_type_mismatches)
     counters['selected_host_violation_count'] = len(selected_host_violations)
@@ -857,8 +1009,8 @@ def _build_final_schedule_validation_result(
                         Game.season_id == season_id,
                         Game.week_id == getattr(week, 'id', None),
                         Team.division_id == division_id,
-                        func.lower(GameStatus.code) != 'unscheduled',
                         GameStatus.is_active.is_(True),
+                        _final_schedule_status_filter(db),
                     ).count()
                     missing_games = max(0, expected_games - int(scheduled_games or 0))
                     if missing_games > 0:
@@ -888,9 +1040,9 @@ def _build_final_schedule_validation_result(
             failures.append(_final_validation_failure('REQUIRED_GAMES_MISSING', counters['required_games_missing_count'], 'Required division/week games are missing.', missing_required_rows))
 
     if counters['team_time_conflict_count']:
-        failures.append(_final_validation_failure('TEAM_TIME_CONFLICT', counters['team_time_conflict_count'], 'One or more teams are double-booked at the same time.'))
+        failures.append(_final_validation_failure('TEAM_TIME_CONFLICT', counters['team_time_conflict_count'], 'One or more teams are double-booked at the same time.', team_time_conflicts))
     if counters['field_time_conflict_count']:
-        failures.append(_final_validation_failure('FIELD_TIME_CONFLICT', counters['field_time_conflict_count'], 'One or more fields are double-booked at the same time.'))
+        failures.append(_final_validation_failure('FIELD_TIME_CONFLICT', counters['field_time_conflict_count'], 'One or more fields are double-booked at the same time.', field_time_conflicts))
     if field_type_mismatches:
         failures.append(_final_validation_failure('FIELD_TYPE_MISMATCH', len(field_type_mismatches), 'Scheduled game field type does not match its division requirement.', field_type_mismatches))
     if selected_host_violations:
@@ -905,9 +1057,11 @@ def _build_final_schedule_validation_result(
     if counters['host_owner_as_away_count']:
         failures.append(_final_validation_failure('HOST_OWNER_AS_AWAY', counters['host_owner_as_away_count'], 'A host-owning team is away at its selected owned host.'))
 
-    hierarchy = revised_hierarchy_diagnostics or {}
+    # Final validation must not reuse pre-repair hierarchy diagnostics; rebuild hard-rule diagnostics from the final database state.
+    placement_hierarchy_diagnostics = revised_hierarchy_diagnostics or {}
+    hierarchy = {}
     try:
-        if season_id and not hierarchy:
+        if season_id:
             hierarchy = _build_revised_scheduling_hierarchy_diagnostics(db, season_id)
     except Exception as exc:
         diagnostics_error = diagnostics_error or str(exc)
@@ -1000,6 +1154,9 @@ def _build_final_schedule_validation_result(
 
     hard_failure_count = sum(counters[key] for key in FINAL_VALIDATION_HARD_COUNTER_KEYS) + extra_failure_count
     counters['validation_failure_count'] = hard_failure_count
+    if final_source_reconciliation.get('count_mismatch'):
+        diagnostics_error = diagnostics_error or str(final_source_reconciliation.get('mismatch_reason') or 'final source-of-truth count mismatch')
+
     if diagnostics_error:
         final_status = 'ERROR'
         schedule_quality_status = 'ERROR'
@@ -1026,12 +1183,26 @@ def _build_final_schedule_validation_result(
         'schedule_quality_status': schedule_quality_status,
         'diagnostics_status': diagnostics_status,
         'diagnostics_error': diagnostics_error,
+        'final_source_reconciliation': final_source_reconciliation,
+        'final_committed_games_count': final_source_reconciliation.get('final_committed_games_count'),
+        'final_scheduled_games_query_count': final_source_reconciliation.get('final_scheduled_games_query_count'),
+        'final_validation_games_checked_count': final_source_reconciliation.get('final_validation_games_checked_count'),
+        'schedule_quality_games_checked_count': final_source_reconciliation.get('schedule_quality_games_checked_count'),
+        'export_games_count': final_source_reconciliation.get('export_games_count'),
+        'preview_games_count': final_source_reconciliation.get('preview_games_count'),
+        'preview_games_are_stale': final_source_reconciliation.get('preview_games_are_stale'),
+        'final_validation_source': final_source_reconciliation.get('final_validation_source'),
+        'schedule_quality_source': final_source_reconciliation.get('schedule_quality_source'),
+        'export_source': final_source_reconciliation.get('export_source'),
+        'validation_query_used': final_source_reconciliation.get('validation_query_used'),
+        'run_id': final_source_reconciliation.get('run_id'),
         'optional_optimization_skipped': optional_optimization_skipped,
         'optional_optimization_skip_reason': optional_optimization_skip_reason,
         'true_home_host_rule_passed': true_home_rule,
         'host_location_vs_home_team_verification': host_verification,
         'required_games_expected_count': required_games_expected_count,
         'regular_season_required_week_diagnostics': regular_season_required_week_diagnostics,
+        'placement_hierarchy_diagnostics_source': 'placement_diagnostics_not_final_validation' if placement_hierarchy_diagnostics else None,
         'Generated Slot Integrity Diagnostics': generated_slot_integrity,
         'generated_slot_integrity_diagnostics': generated_slot_integrity,
         'Turf Wave Source-of-Truth Diagnostics': turf_wave_source_of_truth_repair,
@@ -1091,7 +1262,7 @@ def _build_global_doubleheader_validation(db: Session, season_id: uuid.UUID | st
         FieldInstance, FieldInstance.id == GameSlot.field_instance_id
     ).outerjoin(
         HostLocation, HostLocation.id == GameSlot.host_location_id
-    ).filter(func.lower(GameStatus.code) != 'unscheduled')
+    ).filter(GameStatus.is_active.is_(True), _final_schedule_status_filter(db))
     if season_id:
         query = query.filter(Game.season_id == season_id)
     rows = query.order_by(Game.game_date, Game.kickoff_time).all()
@@ -4421,7 +4592,7 @@ def _build_turf_wave_contiguous_time_diagnostics(db: Session, season_id: uuid.UU
         HostLocation, HostLocation.id == GameSlot.host_location_id
     ).join(
         GameStatus, GameStatus.id == Game.game_status_id
-    ).filter(func.lower(GameStatus.code) != 'unscheduled')
+    ).filter(GameStatus.is_active.is_(True), _final_schedule_status_filter(db))
     if season_id:
         scheduled_query = scheduled_query.filter(Game.season_id == season_id)
 
@@ -10828,7 +10999,7 @@ def update_season(season_id: uuid.UUID, payload: dict, db: Session = Depends(get
 
 
 def build_schedule_quality_report(db: Session, season_id: uuid.UUID) -> dict[str, object]:
-    rows = _schedule_management_rows(db, {'season_id': season_id})
+    rows = load_final_scheduled_games_for_validation(db, season_id)
     teams = db.query(Team).filter(Team.is_active.is_(True)).all()
     season_team_ids = {t.id for t in teams if db.query(Game).filter(Game.season_id == season_id, (Game.home_team_id == t.id) | (Game.away_team_id == t.id)).first() is not None}
     team_game_counts = {tid: 0 for tid in season_team_ids}
@@ -10964,7 +11135,7 @@ def build_schedule_quality_report(db: Session, season_id: uuid.UUID) -> dict[str
         + ([{'code': 'doubleheader_pair_validation_failed', 'count': doubleheader_pair_validation_failures, 'issues': global_doubleheader_validation.get('failures') or []}] if doubleheader_pair_validation_failures > 0 else [])
     )
     legacy_hard_errors = [e for e in hard_errors if not (isinstance(e, dict) and 'issues' in e and not e['issues'])]
-    final_validation = _build_final_schedule_validation_result(db, season_id)
+    final_validation = _build_final_schedule_validation_result(db, season_id, schedule_quality_games_checked_count=len(rows))
     hard_errors = final_validation.get('final_validation_failures') or legacy_hard_errors
     schedule_quality_status = final_validation.get('schedule_quality_status') or 'BLOCKED'
     if schedule_quality_status == 'BLOCKED':
@@ -10986,6 +11157,8 @@ def build_schedule_quality_report(db: Session, season_id: uuid.UUID) -> dict[str
         'hard_errors': hard_errors,
         'warnings': warnings,
         'metrics': metrics,
+        'schedule_quality_source': FINAL_SCHEDULE_SOURCE_NAME,
+        'schedule_quality_games_checked_count': len(rows),
         'final_validation': final_validation,
         **{key: final_validation.get(key) for key in ('final_validation_ran', 'final_validation_status', 'final_validation_failure_count', 'final_validation_failures', 'diagnostics_error', 'generated_slot_integrity_check_ran', 'generated_slot_integrity_status', 'generated_slot_integrity_failure_count', 'invalid_scheduled_game_count', 'repaired_scheduled_game_count', 'unscheduled_orphan_game_count', 'generated_slot_integrity_diagnostics', 'Generated Slot Integrity Diagnostics')},
     }
@@ -19331,8 +19504,13 @@ def _auto_schedule_division_order(db: Session | None = None) -> list[tuple[str, 
 def auto_schedule_entire_season(payload: dict, current_user: User = Depends(require_roles(ROLE_LEAGUE_ADMIN)), db: Session = Depends(get_db)):
     auto_schedule_started_perf = perf_counter()
     auto_schedule_started_at = datetime.utcnow()
+    auto_schedule_run_id = uuid.uuid4()
     phase_metrics: list[dict[str, object]] = []
-    auto_schedule_diagnostics: dict[str, object] | None = {}
+    auto_schedule_diagnostics: dict[str, object] | None = {
+        'run_id': str(auto_schedule_run_id),
+        'validation_state_cleared': True,
+        'placement_diagnostics_classification': 'placement_warnings_not_final_failures',
+    }
 
     def _ensure_auto_schedule_diagnostics() -> dict[str, object]:
         nonlocal auto_schedule_diagnostics
@@ -21113,9 +21291,12 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
             optional_optimization_skipped=auto_schedule_diagnostics.get('optional_optimization_skipped'),
             optional_optimization_skip_reason=auto_schedule_diagnostics.get('optional_optimization_skip_reason'),
             revised_hierarchy_diagnostics=revised_hierarchy_diagnostics,
-            extra_failures=list(validation_errors),
+            extra_failures=None,
             turf_pull_forward_repair_diagnostics=turf_pull_forward_repair_diagnostics if 'turf_pull_forward_repair_diagnostics' in locals() else None,
             run_turf_pull_forward_repair=not ('turf_pull_forward_repair_diagnostics' in locals()),
+            preview_games_count=preview_games_count,
+            committed_games_count=auto_schedule_diagnostics.get('committed_games_count'),
+            run_id=auto_schedule_run_id,
         )
     except Exception as exc:
         logger.exception('final validation diagnostics construction failed season_id=%s', season_id)
@@ -22697,7 +22878,10 @@ def _schedule_management_rows(db: Session, filters: dict | None = None, organiza
     home = aliased(Team)
     away = aliased(Team)
     q = db.query(Game, GameSlot, FieldInstance, HostLocation, home, away, Division, Organization, GameStatus).join(Game.status).join(home, Game.home_team_id == home.id).join(away, Game.away_team_id == away.id).join(Division, home.division_id == Division.id).join(Organization, home.organization_id == Organization.id).outerjoin(GameSlot, GameSlot.assigned_game_id == Game.id).outerjoin(FieldInstance, or_(FieldInstance.id == GameSlot.field_instance_id, and_(GameSlot.id.is_(None), FieldInstance.id == Game.field_instance_id))).outerjoin(HostLocation, or_(HostLocation.id == GameSlot.host_location_id, and_(GameSlot.id.is_(None), HostLocation.id == Game.host_location_id), and_(GameSlot.id.is_(None), Game.host_location_id.is_(None), HostLocation.id == FieldInstance.host_location_id)))
-    q = q.filter(func.lower(GameStatus.code) != 'unscheduled')
+    if filters.get('final_scheduled_only'):
+        q = q.filter(GameStatus.is_active.is_(True), _final_schedule_status_filter(db))
+    else:
+        q = q.filter(func.lower(GameStatus.code) != 'unscheduled')
     if filters.get('date'): q = q.filter(Game.game_date == filters['date'])
     if filters.get('division_id'): q = q.filter(Division.id == filters['division_id'])
     if filters.get('organization_id'):
@@ -22713,6 +22897,8 @@ def _schedule_management_rows(db: Session, filters: dict | None = None, organiza
     if filters.get('status_code'): q = q.filter(func.lower(GameStatus.code) == str(filters['status_code']).strip().lower())
     if filters.get('season_id'): q = q.filter(Game.season_id == filters['season_id'])
     rows = q.order_by(Game.game_date, Game.kickoff_time).all()
+    if filters.get('final_scheduled_only'):
+        return rows
     valid_rows = [row for row in rows if _schedule_row_has_selected_host(db, row[0], row[1], row[3])]
     invalid_count = len(rows) - len(valid_rows)
     if invalid_count > 0:
@@ -22724,6 +22910,7 @@ def get_scheduled_games_for_season(db: Session, season_id: uuid.UUID | None, fil
     shared_filters = dict(filters or {})
     if season_id:
         shared_filters['season_id'] = season_id
+    shared_filters['final_scheduled_only'] = True
     return _schedule_management_rows(db, shared_filters, organization_filter_any_team=organization_filter_any_team)
 
 
@@ -23692,7 +23879,8 @@ def export_schedule_management_csv(date: date | None = None, division_id: uuid.U
     validation_season_id = active_season.id if active_season else None
     if validation_season_id:
         _run_generated_slot_integrity_validation_and_repair(db, validation_season_id, repair=True)
-    rows = _schedule_management_rows(db, {'date': date, 'division_id': division_id, 'organization_id': organization_id, 'host_location_id': host_location_id, 'field_type': field_type, 'field_id': field_id, 'team_id': team_id})
+    export_filters = {'date': date, 'division_id': division_id, 'organization_id': organization_id, 'host_location_id': host_location_id, 'field_type': field_type, 'field_id': field_id, 'team_id': team_id}
+    rows = get_scheduled_games_for_season(db, validation_season_id, export_filters) if validation_season_id else _schedule_management_rows(db, export_filters)
     out = io.StringIO()
     w = csv.writer(out)
     w.writerow(['Date', 'Time', 'Normalized Division Key', 'Home Team', 'Away Team', 'Host Location', 'Field', 'Field Type', 'Status'])
@@ -23705,7 +23893,13 @@ def export_schedule_management_csv(date: date | None = None, division_id: uuid.U
     export_validation_warnings: list[dict[str, object]] = []
     validation_season_id = next((g.season_id for g, *_ in rows if getattr(g, 'season_id', None)), validation_season_id)
     if validation_season_id:
-        final_validation = _build_final_schedule_validation_result(db, validation_season_id)
+        export_filters_applied = any(value not in (None, '') for value in export_filters.values())
+        final_validation = _build_final_schedule_validation_result(
+            db,
+            validation_season_id,
+            export_games_count=None if export_filters_applied else len(rows),
+            export_source=FINAL_SCHEDULE_SOURCE_NAME,
+        )
         for failure in final_validation.get('final_validation_failures') or []:
             if not isinstance(failure, dict):
                 continue
