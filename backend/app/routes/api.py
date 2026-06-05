@@ -978,9 +978,14 @@ def _build_final_schedule_validation_result(
         failures.append(_final_validation_failure('TURF_WAVE_PULL_FORWARD_REQUIRED', counters['turf_wave_pull_forward_required_count'], 'A mandatory turf pull-forward repair is required or remains blocked by hard constraints.', contiguous_details))
     if counters.get('turf_wave_pull_forward_unresolved_count'):
         failures.append(_final_validation_failure('TURF_WAVE_PULL_FORWARD_UNRESOLVED', counters['turf_wave_pull_forward_unresolved_count'], 'Mandatory turf pull-forward repair ran but unresolved turf gaps remain.', turf_pull_forward_repair))
-    if season_id and run_turf_pull_forward_repair and not bool(turf_pull_forward_repair.get('turf_pull_forward_repair_ran')):
+    turf_pull_forward_ran = bool(turf_pull_forward_repair.get('turf_pull_forward_repair_ran'))
+    turf_pull_forward_status = str(turf_pull_forward_repair.get('turf_pull_forward_repair_status') or '')
+    if season_id and (run_turf_pull_forward_repair or turf_pull_forward_repair_diagnostics is not None) and not turf_pull_forward_ran:
         counters['turf_wave_pull_forward_unresolved_count'] = max(1, _safe_int(counters.get('turf_wave_pull_forward_unresolved_count')))
         failures.append(_final_validation_failure('TURF_PULL_FORWARD_REPAIR_NOT_RUN', 1, 'Mandatory turf pull-forward repair did not run before final validation.', turf_pull_forward_repair))
+    if season_id and turf_pull_forward_status == 'FAILED':
+        counters['turf_wave_pull_forward_unresolved_count'] = max(1, _safe_int(counters.get('turf_wave_pull_forward_unresolved_count')))
+        failures.append(_final_validation_failure('TURF_PULL_FORWARD_REPAIR_FAILED', 1, 'Mandatory turf pull-forward repair failed before final validation.', turf_pull_forward_repair))
     if counters.get('turf_wave_canonical_mapping_missing_count'):
         failures.append(_final_validation_failure('TURF_WAVE_CANONICAL_MAPPING_MISSING', counters['turf_wave_canonical_mapping_missing_count'], 'Scheduled turf games could not be mapped to canonical host/date/start wave metadata.', turf_wave_source_of_truth_repair.get('repaired_turf_labels') or []))
     repair_failures = [detail for detail in (turf_wave_source_of_truth_repair.get('repaired_turf_labels') or []) if not detail.get('repair_success')]
@@ -1031,6 +1036,7 @@ def _build_final_schedule_validation_result(
         'generated_slot_integrity_diagnostics': generated_slot_integrity,
         'Turf Wave Source-of-Truth Diagnostics': turf_wave_source_of_truth_repair,
         'turf_wave_source_of_truth_diagnostics': turf_wave_source_of_truth_repair,
+        'turf_pull_forward_repair': turf_pull_forward_repair,
         'Turf Pull-Forward Repair Diagnostics': turf_pull_forward_repair,
         'turf_pull_forward_repair_diagnostics': turf_pull_forward_repair,
         'turf_pull_forward_repair_ran': turf_pull_forward_repair.get('turf_pull_forward_repair_ran'),
@@ -4577,6 +4583,7 @@ def _default_turf_pull_forward_repair_diagnostics(*, ran: bool = False, status: 
         'pull_forward_moves_rejected': 0,
         'unresolved_turf_gaps_count': 0,
         'labels_repaired_count': 0,
+        'diagnostics_error': error,
         'host_date_diagnostics': [],
         'unresolved_skipped_waves': [],
         'later_games_considered': [],
@@ -4584,8 +4591,6 @@ def _default_turf_pull_forward_repair_diagnostics(*, ran: bool = False, status: 
     }
     if reason:
         diagnostics['repair_failure_reason'] = reason
-    if error:
-        diagnostics['diagnostics_error'] = error
     return diagnostics
 
 
@@ -19255,10 +19260,6 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         'generated_slot_integrity_diagnostics': generated_slot_integrity,
         'Turf Wave Source-of-Truth Diagnostics': turf_wave_source_of_truth_repair,
         'turf_wave_source_of_truth_diagnostics': turf_wave_source_of_truth_repair,
-        'Turf Pull-Forward Repair Diagnostics': turf_pull_forward_repair,
-        'turf_pull_forward_repair_diagnostics': turf_pull_forward_repair,
-        'turf_pull_forward_repair_ran': turf_pull_forward_repair.get('turf_pull_forward_repair_ran'),
-        'turf_pull_forward_repair_status': turf_pull_forward_repair.get('turf_pull_forward_repair_status'),
         'final_validation': {
             'active_team_count': len(teams),
             'required_game_count': required_games_for_division_week,
@@ -20922,11 +20923,11 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
     auto_schedule_diagnostics['turf_wave_compaction'] = turf_wave_compaction
     turf_pull_forward_phase = _start_phase('mandatory turf pull-forward repair')
     try:
-        turf_pull_forward_repair = _run_turf_pull_forward_repair(db, season_id) if not dry_run else _default_turf_pull_forward_repair_diagnostics(ran=False, status='SKIPPED_DRY_RUN', reason='dry_run')
+        turf_pull_forward_repair_diagnostics = _run_turf_pull_forward_repair(db, season_id) if not dry_run else _default_turf_pull_forward_repair_diagnostics(ran=False, status='SKIPPED_DRY_RUN', reason='dry_run')
     except Exception as exc:
         logger.exception('mandatory_turf_pull_forward_repair_failed season_id=%s', season_id)
         diagnostics_error = f'turf pull-forward repair unavailable ({exc})'
-        turf_pull_forward_repair = _default_turf_pull_forward_repair_diagnostics(
+        turf_pull_forward_repair_diagnostics = _default_turf_pull_forward_repair_diagnostics(
             ran=False,
             status='FAILED',
             reason='TURF_PULL_FORWARD_REPAIR_FAILED',
@@ -20935,17 +20936,23 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         validation_errors.append(f'TURF_PULL_FORWARD_REPAIR_FAILED: mandatory turf pull-forward repair unavailable ({exc}).')
     _finish_phase(
         turf_pull_forward_phase,
-        records_evaluated=int(turf_pull_forward_repair.get('pull_forward_candidates_considered') or 0),
-        moves_considered=int(turf_pull_forward_repair.get('pull_forward_candidates_considered') or 0),
-        moves_accepted=int(turf_pull_forward_repair.get('pull_forward_moves_accepted') or 0),
-        moves_rejected=int(turf_pull_forward_repair.get('pull_forward_moves_rejected') or 0),
+        records_evaluated=int(turf_pull_forward_repair_diagnostics.get('pull_forward_candidates_considered') or 0),
+        moves_considered=int(turf_pull_forward_repair_diagnostics.get('pull_forward_candidates_considered') or 0),
+        moves_accepted=int(turf_pull_forward_repair_diagnostics.get('pull_forward_moves_accepted') or 0),
+        moves_rejected=int(turf_pull_forward_repair_diagnostics.get('pull_forward_moves_rejected') or 0),
     )
-    auto_schedule_diagnostics['Turf Pull-Forward Repair Diagnostics'] = turf_pull_forward_repair
-    auto_schedule_diagnostics['turf_pull_forward_repair_diagnostics'] = turf_pull_forward_repair
-    auto_schedule_diagnostics['turf_pull_forward_repair_ran'] = turf_pull_forward_repair.get('turf_pull_forward_repair_ran')
-    auto_schedule_diagnostics['turf_pull_forward_repair_status'] = turf_pull_forward_repair.get('turf_pull_forward_repair_status')
-    if not bool(turf_pull_forward_repair.get('turf_pull_forward_repair_ran')) and not dry_run:
+    try:
+        auto_schedule_diagnostics['turf_pull_forward_repair'] = turf_pull_forward_repair_diagnostics
+        auto_schedule_diagnostics['Turf Pull-Forward Repair Diagnostics'] = turf_pull_forward_repair_diagnostics
+        auto_schedule_diagnostics['turf_pull_forward_repair_diagnostics'] = turf_pull_forward_repair_diagnostics
+        auto_schedule_diagnostics['turf_pull_forward_repair_ran'] = turf_pull_forward_repair_diagnostics.get('turf_pull_forward_repair_ran')
+        auto_schedule_diagnostics['turf_pull_forward_repair_status'] = turf_pull_forward_repair_diagnostics.get('turf_pull_forward_repair_status')
+    except Exception as exc:
+        _mark_diagnostics_attachment_failure(exc, 'turf_pull_forward_repair')
+    if not bool(turf_pull_forward_repair_diagnostics.get('turf_pull_forward_repair_ran')) and not dry_run:
         validation_errors.append('TURF_PULL_FORWARD_REPAIR_NOT_RUN: mandatory turf pull-forward repair did not run.')
+    if turf_pull_forward_repair_diagnostics.get('turf_pull_forward_repair_status') == 'FAILED' and not dry_run:
+        validation_errors.append('TURF_PULL_FORWARD_REPAIR_FAILED: mandatory turf pull-forward repair failed.')
     revised_hierarchy_diagnostics: dict[str, object] = {}
     true_home_phase = _start_phase('home-host enforcement')
     turf_utilization_phase = _start_phase('turf wave utilization pass')
@@ -21107,8 +21114,8 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
             optional_optimization_skip_reason=auto_schedule_diagnostics.get('optional_optimization_skip_reason'),
             revised_hierarchy_diagnostics=revised_hierarchy_diagnostics,
             extra_failures=list(validation_errors),
-            turf_pull_forward_repair_diagnostics=turf_pull_forward_repair if 'turf_pull_forward_repair' in locals() else None,
-            run_turf_pull_forward_repair=not ('turf_pull_forward_repair' in locals()),
+            turf_pull_forward_repair_diagnostics=turf_pull_forward_repair_diagnostics if 'turf_pull_forward_repair_diagnostics' in locals() else None,
+            run_turf_pull_forward_repair=not ('turf_pull_forward_repair_diagnostics' in locals()),
         )
     except Exception as exc:
         logger.exception('final validation diagnostics construction failed season_id=%s', season_id)
@@ -21239,6 +21246,7 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         'doubleheader_repair': auto_schedule_diagnostics.get('doubleheader_repair'),
         'doubleheader_repair_ran': auto_schedule_diagnostics.get('doubleheader_repair_ran'),
         'doubleheader_repair_status': auto_schedule_diagnostics.get('doubleheader_repair_status'),
+        'turf_pull_forward_repair': auto_schedule_diagnostics.get('turf_pull_forward_repair'),
         'turf_pull_forward_repair_ran': auto_schedule_diagnostics.get('turf_pull_forward_repair_ran'),
         'turf_pull_forward_repair_status': auto_schedule_diagnostics.get('turf_pull_forward_repair_status'),
         'turf_pull_forward_repair_diagnostics': auto_schedule_diagnostics.get('turf_pull_forward_repair_diagnostics'),
@@ -21288,6 +21296,7 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         'doubleheader_repair': auto_schedule_diagnostics.get('doubleheader_repair'),
         'doubleheader_repair_ran': auto_schedule_diagnostics.get('doubleheader_repair_ran'),
         'doubleheader_repair_status': auto_schedule_diagnostics.get('doubleheader_repair_status'),
+        'turf_pull_forward_repair': auto_schedule_diagnostics.get('turf_pull_forward_repair'),
         'turf_pull_forward_repair_ran': auto_schedule_diagnostics.get('turf_pull_forward_repair_ran'),
         'turf_pull_forward_repair_status': auto_schedule_diagnostics.get('turf_pull_forward_repair_status'),
         'turf_pull_forward_repair_diagnostics': auto_schedule_diagnostics.get('turf_pull_forward_repair_diagnostics'),
