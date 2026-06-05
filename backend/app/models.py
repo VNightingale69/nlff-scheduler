@@ -308,6 +308,7 @@ class FieldInstance(Base, TimestampMixin):
     field_name: Mapped[str] = mapped_column(String(120), nullable=False)
     field_type: Mapped[str] = mapped_column(String(10), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    is_generated: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     host_location = relationship('HostLocation')
     hosting_availability = relationship('HostingAvailability')
     __table_args__ = (UniqueConstraint('hosting_availability_id', 'field_name', name='uq_field_instance_availability_name'),)
