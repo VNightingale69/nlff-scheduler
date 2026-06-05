@@ -546,6 +546,33 @@ def _run_generated_slot_integrity_validation_and_repair(db: Session, season_id: 
     return diagnostics
 
 
+def _default_turf_wave_source_of_truth_repair(
+    *,
+    status: str = 'NOT_RUN',
+    reason: str | None = None,
+    error: str | None = None,
+) -> dict[str, object]:
+    diagnostics = {
+        'turf_wave_source_of_truth_repair_ran': False,
+        'turf_wave_source_of_truth_repair_status': status,
+        'labels_repaired_count': 0,
+        'mixed_labels_detected_count': 0,
+        'sequence_gap_detected': False,
+        'sequence_out_of_order_detected': False,
+        'validation_failure_reason': reason,
+        'repaired_turf_labels': [],
+        'source_of_truth_diagnostics': [],
+        'canonical_mapping_missing_count': 0,
+        'label_repair_failed_count': 0,
+        'turf_wave_canonical_mapping_missing_count': 0,
+        'turf_wave_label_repair_failed_count': 0,
+        'diagnostics_status': status,
+    }
+    if error is not None:
+        diagnostics['diagnostics_error'] = error
+    return diagnostics
+
+
 def _repair_turf_wave_source_of_truth(db: Session, season_id: uuid.UUID | str | None = None) -> dict[str, object]:
     """Normalize turf wave sequence rows and stored display labels from canonical metadata."""
     source = _build_canonical_turf_wave_source_of_truth(db, season_id)
@@ -659,13 +686,27 @@ def _repair_turf_wave_source_of_truth(db: Session, season_id: uuid.UUID | str | 
                 row['exported_labels_match'] = False
                 row['validation_failure_reason'] = detail.get('repair_failure_reason') or row.get('validation_failure_reason')
 
+    validation_failure_reason = next((row.get('validation_failure_reason') for row in diagnostics if isinstance(row, dict) and row.get('validation_failure_reason')), None)
+    mixed_labels_detected_count = sum(int(row.get('mixed_labels_detected_count') or 0) for row in diagnostics if isinstance(row, dict))
+    sequence_gap_detected = any(bool(row.get('sequence_gap_detected')) for row in diagnostics if isinstance(row, dict))
+    sequence_out_of_order_detected = any(bool(row.get('sequence_out_of_order_detected')) for row in diagnostics if isinstance(row, dict))
+    canonical_mapping_missing_count = sum(1 for detail in repairs if detail.get('repair_failure_reason') == 'TURF_WAVE_CANONICAL_MAPPING_MISSING')
+    label_repair_failed_count = sum(1 for detail in repairs if not detail.get('repair_success'))
     return {
+        **_default_turf_wave_source_of_truth_repair(status='COMPLETE', reason=validation_failure_reason),
         'turf_wave_source_of_truth_repair_ran': True,
+        'turf_wave_source_of_truth_repair_status': 'COMPLETE',
         'labels_repaired_count': labels_repaired_count,
+        'mixed_labels_detected_count': mixed_labels_detected_count,
+        'sequence_gap_detected': sequence_gap_detected,
+        'sequence_out_of_order_detected': sequence_out_of_order_detected,
+        'validation_failure_reason': validation_failure_reason,
         'repaired_turf_labels': repairs,
         'source_of_truth_diagnostics': diagnostics,
-        'canonical_mapping_missing_count': sum(1 for detail in repairs if detail.get('repair_failure_reason') == 'TURF_WAVE_CANONICAL_MAPPING_MISSING'),
-        'label_repair_failed_count': sum(1 for detail in repairs if not detail.get('repair_success')),
+        'canonical_mapping_missing_count': canonical_mapping_missing_count,
+        'label_repair_failed_count': label_repair_failed_count,
+        'turf_wave_canonical_mapping_missing_count': canonical_mapping_missing_count,
+        'turf_wave_label_repair_failed_count': label_repair_failed_count,
         **{key: value for key, value in source.items() if key != 'mapping'},
     }
 
@@ -693,14 +734,27 @@ def _build_final_schedule_validation_result(
     counters = {key: 0 for key in FINAL_VALIDATION_COUNTER_KEYS}
     failures: list[dict[str, object]] = []
     generated_slot_integrity = _run_generated_slot_integrity_validation_and_repair(db, season_id, repair=True)
-    turf_wave_source_of_truth_repair = _repair_turf_wave_source_of_truth(db, season_id) if season_id else {
-        'turf_wave_source_of_truth_repair_ran': False,
-        'labels_repaired_count': 0,
-        'repaired_turf_labels': [],
-        'source_of_truth_diagnostics': [],
-        'canonical_mapping_missing_count': 0,
-        'label_repair_failed_count': 0,
-    }
+    turf_wave_source_of_truth_repair = _default_turf_wave_source_of_truth_repair(
+        reason='season_id was not provided to final validation' if not season_id else None,
+    )
+    if season_id:
+        try:
+            turf_wave_source_of_truth_repair = _repair_turf_wave_source_of_truth(db, season_id)
+        except Exception as exc:
+            logger.exception('turf_wave_source_of_truth_repair_failed season_id=%s', season_id)
+            turf_wave_source_of_truth_repair = _default_turf_wave_source_of_truth_repair(
+                status='FAILED',
+                reason='TURF_WAVE_SOURCE_OF_TRUTH_REPAIR_FAILED',
+                error=str(exc),
+            )
+            extra_failures = list(extra_failures or []) + [
+                _final_validation_failure(
+                    'TURF_WAVE_SOURCE_OF_TRUTH_REPAIR_FAILED',
+                    1,
+                    'Turf wave source-of-truth repair diagnostics could not be constructed.',
+                    str(exc),
+                )
+            ]
     rows = _schedule_management_rows(db, {'season_id': season_id} if season_id else {})
 
     team_time_seen: dict[tuple[uuid.UUID, date, time], dict[str, object]] = {}
@@ -17297,6 +17351,9 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
     division_id = payload.get('division_id')
     proposals = payload.get('proposals') or []
     host_activation_summary, host_activation_diagnostics_warnings = _host_activation_summary_from_payload(payload)
+    turf_wave_source_of_truth_repair = _default_turf_wave_source_of_truth_repair(
+        reason='Deferred until season-level final validation after all placement and repair phases complete.'
+    )
     two_location_rule_relaxed = False
     for proposal in proposals or []:
         reason = (proposal.get('reason') or '').lower()
@@ -17321,6 +17378,8 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
             'created_games': 0,
             'assigned_slots': 0,
             'skipped': [],
+            'Turf Wave Source-of-Truth Diagnostics': turf_wave_source_of_truth_repair,
+            'turf_wave_source_of_truth_diagnostics': turf_wave_source_of_truth_repair,
             'diagnostics': {
                 'weekly_host_planning_report': {
                     'host_activation_summary': host_activation_summary,
