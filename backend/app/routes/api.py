@@ -2484,8 +2484,8 @@ def _attach_configuration_instances(config: HostLocationConfiguration) -> HostLo
 GENERATED_SLOT_REGENERATION_BUG_WARNINGS = {
     'duplicate_field_name': 'BUG: duplicate generated field_name detected before flush.',
     'duplicate_component_identity': 'BUG: generated turf component identity duplicated.',
-    'rename_collision': 'BUG: attempted to rename field_instance into existing field_name.',
-    'pending_rollback_guard': 'BUG: SQLAlchemy session used after flush failure without rollback.',
+    'rename_collision': 'FIELD_INSTANCE_NAME_COLLISION_PREVENTED',
+    'pending_rollback_guard': 'REGENERATION_ROLLBACK_AFTER_INTEGRITY_ERROR',
 }
 
 TURF_WAVE_REGENERATION_WARNINGS = {
@@ -2493,6 +2493,10 @@ TURF_WAVE_REGENERATION_WARNINGS = {
     'temporary_offset': 'TURF_WAVE_RESEQUENCE_USED_TEMPORARY_OFFSET',
     'delete_recreate': 'TURF_WAVE_REGENERATION_DELETED_AND_RECREATED',
     'validation_failed': 'TURF_WAVE_SEQUENCE_VALIDATION_FAILED',
+    'wave_unique_prevented': 'TURF_WAVE_REGENERATION_UNIQUE_CONSTRAINT_PREVENTED',
+    'field_name_collision_prevented': 'FIELD_INSTANCE_NAME_COLLISION_PREVENTED',
+    'rollback_after_integrity_error': 'REGENERATION_ROLLBACK_AFTER_INTEGRITY_ERROR',
+    'regeneration_validation_failed': 'REGENERATION_VALIDATION_FAILED',
 }
 
 
@@ -2509,6 +2513,18 @@ def _generated_slot_regeneration_diagnostics(
         'host_location_name': host_location_name,
         'generated_field_instances_before': before_count,
         'generated_field_instances_after': before_count,
+        'regeneration_strategy': 'delete_and_recreate',
+        'host_date': _format_diagnostic_date(getattr(availability, 'primary_game_date', None) or getattr(availability, 'available_date', None)),
+        'generated_slots_deleted': 0,
+        'field_instances_deleted_or_retired': 0,
+        'field_instances_deleted': 0,
+        'field_instances_retired': 0,
+        'turf_waves_deleted': 0,
+        'turf_waves_created': 0,
+        'field_instances_created': 0,
+        'generated_slots_created': 0,
+        'wave_sequence_validation_passed': None,
+        'field_name_uniqueness_validation_passed': None,
         'preserved_referenced_field_instances': [],
         'deleted_unreferenced_field_instances': [],
         'created_field_instances': [],
@@ -2552,17 +2568,28 @@ def _turf_wave_sequences_are_chronological_and_contiguous(waves: list[TurfWave])
     return [int(wave.sequence_number or 0) for wave in ordered] == list(range(1, len(ordered) + 1))
 
 
-def _validate_turf_wave_regeneration(db: Session, availability_id: uuid.UUID) -> tuple[bool, dict[str, object]]:
+def _validate_turf_wave_regeneration(
+    db: Session,
+    availability_id: uuid.UUID,
+    prior_generated_slot_ids: set[uuid.UUID] | None = None,
+) -> tuple[bool, dict[str, object]]:
     waves = db.query(TurfWave).filter(TurfWave.hosting_availability_id == availability_id).order_by(TurfWave.start_time.asc(), TurfWave.id.asc()).all()
     sequence_numbers = [int(wave.sequence_number or 0) for wave in waves]
     duplicate_sequence_numbers = sorted({number for number in sequence_numbers if sequence_numbers.count(number) > 1})
     expected_sequence_numbers = list(range(1, len(waves) + 1))
     chronological_sequence_numbers = [int(wave.sequence_number or 0) for wave in waves]
     wave_ids = {wave.id for wave in waves}
+    field_name_rows = db.query(FieldInstance.id, FieldInstance.field_name).filter(FieldInstance.hosting_availability_id == availability_id).all()
+    field_names = [row.field_name for row in field_name_rows]
+    duplicate_field_names = sorted({name for name in field_names if field_names.count(name) > 1})
     slot_rows = db.query(GameSlot.id, GameSlot.turf_wave_id, GameSlot.field_instance_id).join(
         FieldInstance, FieldInstance.id == GameSlot.field_instance_id
     ).filter(FieldInstance.hosting_availability_id == availability_id).all()
+    field_instance_ids = {row.id for row in field_name_rows}
     stale_slot_rows = [row for row in slot_rows if row.turf_wave_id and row.turf_wave_id not in wave_ids]
+    invalid_field_slot_rows = [row for row in slot_rows if row.field_instance_id not in field_instance_ids]
+    prior_generated_slot_ids = prior_generated_slot_ids or set()
+    stale_prior_slot_rows = [row for row in slot_rows if row.id in prior_generated_slot_ids]
     wrong_field_rows = []
     if wave_ids:
         wrong_field_rows = db.query(GameSlot.id, GameSlot.turf_wave_id, FieldInstance.hosting_availability_id).join(
@@ -2578,9 +2605,15 @@ def _validate_turf_wave_regeneration(db: Session, availability_id: uuid.UUID) ->
         'chronological_sequence_numbers': chronological_sequence_numbers == expected_sequence_numbers,
         'contiguous_sequence_numbers': sorted(sequence_numbers) == expected_sequence_numbers,
         'generated_slots_reference_current_waves': not stale_slot_rows,
-        'generated_slots_reference_correct_field_instances': not wrong_field_rows,
+        'generated_slots_reference_correct_field_instances': not wrong_field_rows and not invalid_field_slot_rows,
+        'stale_generated_slots_removed': not stale_prior_slot_rows,
+        'field_name_uniqueness_validation_passed': not duplicate_field_names,
+        'duplicate_field_names': duplicate_field_names,
         'stale_generated_slot_ids': [_serialize_diagnostic_id(row.id) for row in stale_slot_rows],
-        'wrong_field_instance_slot_ids': [_serialize_diagnostic_id(row.id) for row in wrong_field_rows],
+        'prior_generated_slot_ids_still_present': [_serialize_diagnostic_id(row.id) for row in stale_prior_slot_rows],
+        'wrong_field_instance_slot_ids': [_serialize_diagnostic_id(row.id) for row in wrong_field_rows] + [_serialize_diagnostic_id(row.id) for row in invalid_field_slot_rows],
+        'generated_slot_count': len(slot_rows),
+        'field_instance_count': len(field_name_rows),
     }
     validation_passed = (
         not duplicate_sequence_numbers
@@ -2588,6 +2621,8 @@ def _validate_turf_wave_regeneration(db: Session, availability_id: uuid.UUID) ->
         and validation['contiguous_sequence_numbers']
         and validation['generated_slots_reference_current_waves']
         and validation['generated_slots_reference_correct_field_instances']
+        and validation['stale_generated_slots_removed']
+        and validation['field_name_uniqueness_validation_passed']
     )
     return validation_passed, validation
 
@@ -2698,20 +2733,13 @@ def _regenerate_generated_slots(
     existing_slots = db.query(GameSlot).join(GameSlot.field_instance).filter(
         FieldInstance.hosting_availability_id == availability.id,
     ).all()
-    stale_same_key_slots = []
-    if availability.season_id and availability.week_id and availability.host_location_id and slot_date:
-        stale_same_key_slots = db.query(GameSlot).filter(
-            GameSlot.host_location_id == host_location_id,
-            GameSlot.season_id == availability.season_id,
-            GameSlot.week_id == availability.week_id,
-            GameSlot.assigned_game_id.is_(None),
-            ~GameSlot.field_instance_id.in_(
-                db.query(FieldInstance.id).filter(FieldInstance.hosting_availability_id == availability.id)
-            ),
-        ).all()
-        existing_slots.extend(stale_same_key_slots)
+    prior_generated_slot_ids = {slot.id for slot in existing_slots}
+    locked_slots: list[GameSlot] = []
+    removed_slots = 0
+    if prior_generated_slot_ids:
+        removed_slots = db.query(GameSlot).filter(GameSlot.id.in_(prior_generated_slot_ids)).delete(synchronize_session=False)
+    diagnostics['generated_slots_deleted'] = int(removed_slots or 0)
 
-    assigned_slot_field_instance_ids = {slot.field_instance_id for slot in existing_slots if slot.assigned_game_id is not None and slot.field_instance_id}
     game_referenced_field_instance_ids = {
         field_instance_id
         for (field_instance_id,) in db.query(Game.field_instance_id).filter(
@@ -2719,103 +2747,92 @@ def _regenerate_generated_slots(
         ).all()
         if field_instance_id
     } if before_instances else set()
-    referenced_field_instance_ids = assigned_slot_field_instance_ids | game_referenced_field_instance_ids
-    locked_slots = [slot for slot in existing_slots if slot.assigned_game_id is not None]
-    unlocked_slots = [slot for slot in existing_slots if slot.assigned_game_id is None]
-    unlocked_field_instance_ids = {slot.field_instance_id for slot in unlocked_slots if slot.field_instance_id}
-
-    preserved_instances = [instance for instance in before_instances if instance.id in referenced_field_instance_ids]
-    diagnostics['preserved_referenced_field_instances'] = [_field_instance_diag(instance) for instance in preserved_instances]
-
-    removed_slots = 0
-    deleted_unreferenced_instance_ids = [
-        instance.id for instance in before_instances
-        if instance.id in unlocked_field_instance_ids and instance.id not in referenced_field_instance_ids
-    ]
-    if unlocked_field_instance_ids:
-        removed_slots = db.query(GameSlot).filter(GameSlot.field_instance_id.in_(unlocked_field_instance_ids)).delete(synchronize_session=False)
-    if deleted_unreferenced_instance_ids:
+    deletable_instance_ids = [instance.id for instance in before_instances if instance.id not in game_referenced_field_instance_ids]
+    retired_instances = [instance for instance in before_instances if instance.id in game_referenced_field_instance_ids]
+    if deletable_instance_ids:
         diagnostics['deleted_unreferenced_field_instances'] = [
-            _field_instance_diag(instance) for instance in before_instances if instance.id in set(deleted_unreferenced_instance_ids)
+            _field_instance_diag(instance) for instance in before_instances if instance.id in set(deletable_instance_ids)
         ]
-        db.query(FieldInstance).filter(FieldInstance.id.in_(deleted_unreferenced_instance_ids)).delete(synchronize_session=False)
-    stale_slot_ids = [slot.id for slot in stale_same_key_slots if slot.field_instance_id not in unlocked_field_instance_ids]
-    if stale_slot_ids:
-        removed_slots += db.query(GameSlot).filter(GameSlot.id.in_(stale_slot_ids)).delete(synchronize_session=False)
+        diagnostics['field_instances_deleted'] = db.query(FieldInstance).filter(FieldInstance.id.in_(deletable_instance_ids)).delete(synchronize_session=False)
+    for instance in retired_instances:
+        old_name = instance.field_name
+        retired_name = f'__retired_generated__{str(instance.id)[:8]}__{old_name}'[:120]
+        instance.field_name = retired_name
+        instance.is_active = False
+        diagnostics.setdefault('retired_referenced_field_instances', []).append({
+            **_field_instance_diag(instance),
+            'previous_field_name': old_name,
+            'reason': 'Preserved because a scheduled game still references this generated field instance.',
+        })
+    diagnostics['field_instances_retired'] = len(retired_instances)
+    diagnostics['field_instances_deleted_or_retired'] = int(diagnostics.get('field_instances_deleted') or 0) + len(retired_instances)
 
     stale_wave_ids = [wave_id for (wave_id,) in db.query(TurfWave.id).filter(TurfWave.hosting_availability_id == availability.id).all()]
     if stale_wave_ids:
-        referenced_wave_ids = {wave_id for (wave_id,) in db.query(GameSlot.turf_wave_id).filter(GameSlot.turf_wave_id.in_(stale_wave_ids)).distinct().all() if wave_id}
-        removable_wave_ids = [wave_id for wave_id in stale_wave_ids if wave_id not in referenced_wave_ids]
-        if removable_wave_ids:
-            db.query(TurfWave).filter(TurfWave.id.in_(removable_wave_ids)).delete(synchronize_session=False)
-
-    if stale_wave_ids:
-        remaining_wave_ids = [wave_id for (wave_id,) in db.query(TurfWave.id).filter(TurfWave.hosting_availability_id == availability.id).all()]
-        if not remaining_wave_ids:
-            turf_wave_regeneration_diagnostics['resequence_strategy_used'] = 'delete_recreate'
-            diagnostics['warnings'].append(TURF_WAVE_REGENERATION_WARNINGS['delete_recreate'])
-            logger.warning(
-                '%s hosting_availability_id=%s host_location_id=%s host_date=%s deleted_wave_count=%s',
-                TURF_WAVE_REGENERATION_WARNINGS['delete_recreate'],
-                availability.id,
-                host_location_id,
-                slot_date,
-                len(stale_wave_ids),
-            )
-        else:
-            offset = max([number for (number,) in db.query(TurfWave.sequence_number).filter(TurfWave.hosting_availability_id == availability.id).all()] or [0]) + 1000
-            db.query(TurfWave).filter(TurfWave.hosting_availability_id == availability.id).update(
-                {TurfWave.sequence_number: TurfWave.sequence_number + offset},
-                synchronize_session=False,
-            )
-            db.flush()
-            turf_wave_regeneration_diagnostics['resequence_strategy_used'] = 'temporary_offset'
-            diagnostics['warnings'].append(TURF_WAVE_REGENERATION_WARNINGS['temporary_offset'])
-            logger.warning(
-                '%s hosting_availability_id=%s host_location_id=%s host_date=%s offset=%s remaining_wave_count=%s',
-                TURF_WAVE_REGENERATION_WARNINGS['temporary_offset'],
-                availability.id,
-                host_location_id,
-                slot_date,
-                offset,
-                len(remaining_wave_ids),
-            )
+        diagnostics['turf_waves_deleted'] = db.query(TurfWave).filter(TurfWave.id.in_(stale_wave_ids)).delete(synchronize_session=False)
+        turf_wave_regeneration_diagnostics['resequence_strategy_used'] = 'delete_and_recreate'
+        diagnostics['warnings'].append(TURF_WAVE_REGENERATION_WARNINGS['delete_recreate'])
+    else:
+        turf_wave_regeneration_diagnostics['resequence_strategy_used'] = 'delete_and_recreate'
+    turf_wave_regeneration_diagnostics['generated_slots_deleted'] = int(removed_slots or 0)
+    turf_wave_regeneration_diagnostics['field_instances_deleted_or_retired'] = diagnostics['field_instances_deleted_or_retired']
+    turf_wave_regeneration_diagnostics['turf_waves_deleted'] = int(diagnostics.get('turf_waves_deleted') or 0)
+    try:
         db.flush()
+    except IntegrityError:
+        db.rollback()
+        diagnostics['warnings'].append(TURF_WAVE_REGENERATION_WARNINGS['rollback_after_integrity_error'])
+        logger.exception(
+            '%s hosting_availability_id=%s host_location_id=%s host_date=%s regeneration_strategy=delete_and_recreate',
+            TURF_WAVE_REGENERATION_WARNINGS['rollback_after_integrity_error'],
+            availability.id,
+            host_location_id,
+            slot_date,
+        )
+        raise
 
     def _metrics(new_slots: int = 0) -> dict[str, object]:
         diagnostics['generated_field_instances_after'] = db.query(FieldInstance).filter(FieldInstance.hosting_availability_id == availability.id).count()
-        if _is_turf_stadium_host(host):
-            final_waves = db.query(TurfWave).filter(TurfWave.hosting_availability_id == availability.id).order_by(TurfWave.start_time.asc(), TurfWave.id.asc()).all()
-            turf_wave_regeneration_diagnostics['final_sequence_numbers_by_start_time'] = _turf_wave_sequence_map(final_waves)
-            turf_wave_regeneration_diagnostics['generated_slot_count_after'] = db.query(GameSlot.id).join(GameSlot.field_instance).filter(
-                FieldInstance.hosting_availability_id == availability.id,
-            ).count()
-            validation_passed, validation = _validate_turf_wave_regeneration(db, availability.id)
-            turf_wave_regeneration_diagnostics['validation_passed'] = validation_passed
-            turf_wave_regeneration_diagnostics['validation'] = validation
-            if not validation_passed:
-                diagnostics['warnings'].append(TURF_WAVE_REGENERATION_WARNINGS['validation_failed'])
-                logger.warning(
-                    '%s hosting_availability_id=%s host_location_id=%s host_date=%s validation=%s',
-                    TURF_WAVE_REGENERATION_WARNINGS['validation_failed'],
-                    availability.id,
-                    host_location_id,
-                    slot_date,
-                    validation,
-                )
-            logger.info(
-                'turf_wave_regeneration hosting_availability_id=%s host_location_id=%s host_date=%s prior_sequence_numbers_by_start_time=%s final_sequence_numbers_by_start_time=%s resequence_strategy_used=%s generated_slot_count_before=%s generated_slot_count_after=%s validation_passed=%s',
+        diagnostics['generated_slots_created'] = int(new_slots or 0)
+        diagnostics['field_instances_created'] = len(diagnostics.get('created_field_instances') or [])
+        diagnostics['turf_waves_created'] = db.query(TurfWave).filter(TurfWave.hosting_availability_id == availability.id).count()
+        final_waves = db.query(TurfWave).filter(TurfWave.hosting_availability_id == availability.id).order_by(TurfWave.start_time.asc(), TurfWave.id.asc()).all()
+        turf_wave_regeneration_diagnostics['final_sequence_numbers_by_start_time'] = _turf_wave_sequence_map(final_waves)
+        turf_wave_regeneration_diagnostics['generated_slot_count_after'] = db.query(GameSlot.id).join(GameSlot.field_instance).filter(
+            FieldInstance.hosting_availability_id == availability.id,
+        ).count()
+        validation_passed, validation = _validate_turf_wave_regeneration(db, availability.id, prior_generated_slot_ids)
+        turf_wave_regeneration_diagnostics['validation_passed'] = validation_passed
+        turf_wave_regeneration_diagnostics['validation'] = validation
+        diagnostics['wave_sequence_validation_passed'] = bool(
+            validation.get('chronological_sequence_numbers') and validation.get('contiguous_sequence_numbers') and not validation.get('duplicate_sequence_numbers')
+        )
+        diagnostics['field_name_uniqueness_validation_passed'] = bool(validation.get('field_name_uniqueness_validation_passed'))
+        if not validation_passed:
+            diagnostics['warnings'].append(TURF_WAVE_REGENERATION_WARNINGS['regeneration_validation_failed'])
+            logger.warning(
+                '%s hosting_availability_id=%s host_location_id=%s host_date=%s validation=%s',
+                TURF_WAVE_REGENERATION_WARNINGS['regeneration_validation_failed'],
                 availability.id,
                 host_location_id,
                 slot_date,
-                turf_wave_regeneration_diagnostics['prior_sequence_numbers_by_start_time'],
-                turf_wave_regeneration_diagnostics['final_sequence_numbers_by_start_time'],
-                turf_wave_regeneration_diagnostics['resequence_strategy_used'],
-                turf_wave_regeneration_diagnostics['generated_slot_count_before'],
-                turf_wave_regeneration_diagnostics['generated_slot_count_after'],
-                turf_wave_regeneration_diagnostics['validation_passed'],
+                validation,
             )
+        logger.info(
+            'generated_slot_regeneration hosting_availability_id=%s host_location_id=%s host_date=%s generated_slots_deleted=%s field_instances_deleted_or_retired=%s turf_waves_deleted=%s turf_waves_created=%s field_instances_created=%s generated_slots_created=%s wave_sequence_validation_passed=%s field_name_uniqueness_validation_passed=%s regeneration_strategy=delete_and_recreate diagnostics=%s',
+            availability.id,
+            host_location_id,
+            slot_date,
+            diagnostics['generated_slots_deleted'],
+            diagnostics['field_instances_deleted_or_retired'],
+            diagnostics['turf_waves_deleted'],
+            diagnostics['turf_waves_created'],
+            diagnostics['field_instances_created'],
+            diagnostics['generated_slots_created'],
+            diagnostics['wave_sequence_validation_passed'],
+            diagnostics['field_name_uniqueness_validation_passed'],
+            diagnostics,
+        )
         return {
             'total_slots_evaluated': len(existing_slots),
             'slots_regenerated': removed_slots,
@@ -2963,12 +2980,12 @@ def _regenerate_generated_slots(
                 size = _normalize_field_size(field_type)
                 component_counts[size] = int(component_counts.get(size, 0) or 0) + 1
                 component_index = component_counts[size]
-                base_name = f'Wave {wave_number} {normalized_layout} {size.title()} Field {component_index}'
+                base_name = f'Wave {wave_number} {normalized_layout} {block_start_dt.time().strftime("%H%M")} {size.title()} Field {component_index}'
                 field_name, renamed = _generated_field_name(base_name, existing_names, proposed_names, block_start_dt.time())
                 if renamed:
-                    diagnostics['warnings'].append(GENERATED_SLOT_REGENERATION_BUG_WARNINGS['rename_collision'])
+                    diagnostics['warnings'].append(TURF_WAVE_REGENERATION_WARNINGS['field_name_collision_prevented'])
                     diagnostics['renamed_field_instances'].append({'from_field_name': base_name, 'to_field_name': field_name, 'reason': 'Avoided collision with an existing or proposed field_instance field_name before flush.'})
-                    logger.warning('%s availability_id=%s host_location_id=%s field_name=%s', GENERATED_SLOT_REGENERATION_BUG_WARNINGS['rename_collision'], availability.id, host_location_id, base_name)
+                    logger.warning('%s availability_id=%s host_location_id=%s field_name=%s', TURF_WAVE_REGENERATION_WARNINGS['field_name_collision_prevented'], availability.id, host_location_id, base_name)
                 identity = _component_identity_key(availability.id, host_location_id, slot_date, block_start_dt.time(), wave_number, normalized_layout, size, component_index)
                 label_key = (availability.id, host_location_id, slot_date, wave_number, normalized_layout, size, component_index)
                 detail = {
@@ -3022,9 +3039,9 @@ def _regenerate_generated_slots(
         for field_name, field_type in templates:
             final_name, renamed = _generated_field_name(field_name, existing_names, proposed_names, availability.start_time)
             if renamed:
-                diagnostics['warnings'].append(GENERATED_SLOT_REGENERATION_BUG_WARNINGS['rename_collision'])
+                diagnostics['warnings'].append(TURF_WAVE_REGENERATION_WARNINGS['field_name_collision_prevented'])
                 diagnostics['renamed_field_instances'].append({'from_field_name': field_name, 'to_field_name': final_name, 'reason': 'Avoided collision with an existing or proposed field_instance field_name before flush.'})
-                logger.warning('%s availability_id=%s host_location_id=%s field_name=%s', GENERATED_SLOT_REGENERATION_BUG_WARNINGS['rename_collision'], availability.id, host_location_id, field_name)
+                logger.warning('%s availability_id=%s host_location_id=%s field_name=%s', TURF_WAVE_REGENERATION_WARNINGS['field_name_collision_prevented'], availability.id, host_location_id, field_name)
             if final_name in existing_names or final_name in proposed_names:
                 duplicate_field_details.append({
                     'duplicate_field_name': final_name,
@@ -3066,8 +3083,38 @@ def _regenerate_generated_slots(
     if duplicate_field_details or duplicate_component_details or duplicate_label_details:
         _abort_generated_slot_regeneration(diagnostics, 'Generated slot regeneration preflight duplicate detection failed before database flush.')
 
-    if surface_type == 'TURF_STADIUM':
-        _renumber_turf_waves_for_host_date(db, host_location_id, slot_date)
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        db.rollback()
+        message = str(getattr(exc, 'orig', exc))
+        if 'uq_turf_wave_availability_sequence' in message or 'turf_waves' in message:
+            diagnostics['warnings'].append(TURF_WAVE_REGENERATION_WARNINGS['wave_unique_prevented'])
+            logger.exception(
+                '%s hosting_availability_id=%s host_location_id=%s host_date=%s regeneration_strategy=delete_and_recreate',
+                TURF_WAVE_REGENERATION_WARNINGS['wave_unique_prevented'],
+                availability.id,
+                host_location_id,
+                slot_date,
+            )
+        if 'uq_field_instance_availability_name' in message or 'field_instances' in message:
+            diagnostics['warnings'].append(TURF_WAVE_REGENERATION_WARNINGS['field_name_collision_prevented'])
+            logger.exception(
+                '%s hosting_availability_id=%s host_location_id=%s host_date=%s regeneration_strategy=delete_and_recreate',
+                TURF_WAVE_REGENERATION_WARNINGS['field_name_collision_prevented'],
+                availability.id,
+                host_location_id,
+                slot_date,
+            )
+        diagnostics['warnings'].append(TURF_WAVE_REGENERATION_WARNINGS['rollback_after_integrity_error'])
+        logger.exception(
+            '%s hosting_availability_id=%s host_location_id=%s host_date=%s regeneration_strategy=delete_and_recreate',
+            TURF_WAVE_REGENERATION_WARNINGS['rollback_after_integrity_error'],
+            availability.id,
+            host_location_id,
+            slot_date,
+        )
+        raise
     diagnostics['generated_field_instances_after'] = db.query(FieldInstance).filter(FieldInstance.hosting_availability_id == availability.id).count()
     logger.info('Generated %s field instances for availability_id=%s host_location_id=%s diagnostics=%s', len(instances), availability.id, host_location_id, diagnostics)
     logger.info('Generated %s game slots for availability_id=%s host_location_id=%s', created_slots, availability.id, host_location_id)
@@ -3097,7 +3144,6 @@ def _regenerate_hosting_day(
         host_id = host.id
         host_name = host.name
         availability_id = availability.id
-        availability_game_date = availability.primary_game_date or availability.available_date
         try:
             if not availability.host_location_id and not availability.physical_field_area and not availability.field_id:
                 msg = 'Hosting setup missing for this location.'
@@ -3118,7 +3164,6 @@ def _regenerate_hosting_day(
             result.new_slots_created += int(slot_metrics['new_slots_created'])
             result.obsolete_unused_slots_removed += int(slot_metrics['obsolete_unused_slots_removed'])
             result.diagnostics = slot_metrics.get('diagnostics')
-            _renumber_turf_waves_for_host_date(db, host_id, availability_game_date)
             logger.info('Host %s (%s): availability %s regenerated, field_instances=%s slots=%s diagnostics=%s', host_name, host_id, availability_id, after_instances, after_slots, slot_metrics.get('diagnostics'))
         except HTTPException as exc:
             detail = str(exc.detail)
@@ -3128,11 +3173,11 @@ def _regenerate_hosting_day(
             logger.error('Host %s (%s): availability %s failed: %s', host_name, host_id, availability_id, detail)
         except IntegrityError as exc:
             db.rollback()
-            detail = 'Generated slot regeneration failed database integrity validation; changes were rolled back.'
+            detail = 'Generated slot regeneration failed database integrity validation; changes were rolled back immediately.'
             if detail not in result.errors:
                 result.errors.append(detail)
             result.hard_failures += 1
-            logger.exception('%s Host %s (%s): availability %s failed with IntegrityError after rollback: %s', GENERATED_SLOT_REGENERATION_BUG_WARNINGS['pending_rollback_guard'], host_name, host_id, availability_id, exc)
+            logger.exception('%s Host %s (%s): availability %s failed with IntegrityError after rollback: %s', TURF_WAVE_REGENERATION_WARNINGS['rollback_after_integrity_error'], host_name, host_id, availability_id, exc)
         except Exception as exc:
             detail = str(exc)
             if detail not in result.errors:
@@ -5214,12 +5259,12 @@ def _renumber_turf_waves_for_host_date(db: Session, host_location_id: uuid.UUID 
                 if size not in component_counts:
                     continue
                 component_counts[size] += 1
-                desired_name = f'Wave {wave_index} {layout} {size.title()} Field {component_counts[size]}'
+                desired_name = f'Wave {wave_index} {layout} {wave.start_time.strftime("%H%M")} {size.title()} Field {component_counts[size]}'
                 owner_id = names_by_availability.get(desired_name)
                 if owner_id and owner_id != instance.id:
                     logger.warning(
                         '%s availability_id=%s host_location_id=%s existing_field_instance_id=%s proposed_field_instance_id=%s field_name=%s',
-                        GENERATED_SLOT_REGENERATION_BUG_WARNINGS['rename_collision'],
+                        TURF_WAVE_REGENERATION_WARNINGS['field_name_collision_prevented'],
                         wave.hosting_availability_id,
                         host_location_id,
                         owner_id,
@@ -7867,7 +7912,7 @@ def regenerate_generated_game_slots(payload: dict | None = None, current_user: U
             preflight = _regenerate_and_validate_slots_for_weeks(db, regular_weeks, division_order)
         except IntegrityError as exc:
             db.rollback()
-            logger.exception('%s regenerate_generated_game_slots preflight failed after rollback: %s', GENERATED_SLOT_REGENERATION_BUG_WARNINGS['pending_rollback_guard'], exc)
+            logger.exception('%s regenerate_generated_game_slots preflight failed after rollback: %s', TURF_WAVE_REGENERATION_WARNINGS['rollback_after_integrity_error'], exc)
             raise HTTPException(status_code=409, detail='Generated slot regeneration failed database integrity validation; changes were rolled back.') from exc
         generation_results = list(preflight.get('generation_results') or [])
         results: list[HostingGenerationLocationResult] = []
@@ -7901,7 +7946,7 @@ def regenerate_generated_game_slots(payload: dict | None = None, current_user: U
             db.commit()
         except IntegrityError as exc:
             db.rollback()
-            logger.exception('%s regenerate_generated_game_slots commit failed after rollback: %s', GENERATED_SLOT_REGENERATION_BUG_WARNINGS['pending_rollback_guard'], exc)
+            logger.exception('%s regenerate_generated_game_slots commit failed after rollback: %s', TURF_WAVE_REGENERATION_WARNINGS['rollback_after_integrity_error'], exc)
             raise HTTPException(status_code=409, detail='Generated slot regeneration failed database integrity validation; changes were rolled back.') from exc
         return HostingGenerationRunResult(
             message='League-wide slots regenerated from active host plan selections.' if processed > 0 else 'No selected host plan availability records found.',
@@ -7969,7 +8014,7 @@ def regenerate_generated_game_slots(payload: dict | None = None, current_user: U
         db.commit()
     except IntegrityError as exc:
         db.rollback()
-        logger.exception('%s regenerate_generated_game_slots commit failed after rollback: %s', GENERATED_SLOT_REGENERATION_BUG_WARNINGS['pending_rollback_guard'], exc)
+        logger.exception('%s regenerate_generated_game_slots commit failed after rollback: %s', TURF_WAVE_REGENERATION_WARNINGS['rollback_after_integrity_error'], exc)
         raise HTTPException(status_code=409, detail='Generated slot regeneration failed database integrity validation; changes were rolled back.') from exc
     return HostingGenerationRunResult(
         message='Slots generated successfully' if processed > 0 else 'No hosting availability records found.',

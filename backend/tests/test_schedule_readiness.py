@@ -460,6 +460,63 @@ class TurfMixedLayoutPlanningTest(unittest.TestCase):
         self.assertEqual([wave.preferred_layout_code for wave in turf_site.turf_wave_plan[:3]], ['TWO_SMALL_ONE_MEDIUM', 'TWO_SMALL_ONE_MEDIUM', 'ONE_SMALL_ONE_LARGE'])
         self.assertEqual(turf_site.turf_wave_plan[0].slot_level_configurations[0].slot_level_configuration, 'TWO_SMALL_ONE_MEDIUM')
 
+    def test_turf_regeneration_delete_recreate_is_idempotent_and_scoped(self):
+        from app.models import FieldInstance, GameSlot, HostingAvailability
+        from app.routes.api import _regenerate_generated_slots
+
+        host_date = date(2026, 9, 12)
+        other_date = date(2026, 9, 13)
+        small_division, small_teams = self._division('Scoped Small', 'THIRTY_YARD_WIDTH', 8)
+        medium_division, medium_teams = self._division('Scoped Medium', 'MEDIUM', 8)
+        self._add_games(small_division, small_teams, host_date, 4)
+        self._add_games(medium_division, medium_teams, host_date, 2)
+        host, availability = self._add_turf_host_with_availability(host_date)
+        other_availability = HostingAvailability(
+            id=uuid.uuid4(),
+            organization_id=self.org.id,
+            host_location_id=host.id,
+            available_date=other_date,
+            start_time=time(9, 0),
+            end_time=time(10, 0),
+            is_available=True,
+        )
+        self.db.add(other_availability)
+        self.db.commit()
+
+        first_metrics = _regenerate_generated_slots(self.db, availability, host.id)
+        self.db.commit()
+        first_slot_ids = {slot_id for (slot_id,) in self.db.query(GameSlot.id).join(GameSlot.field_instance).filter(FieldInstance.hosting_availability_id == availability.id).all()}
+        other_wave = TurfWave(
+            id=uuid.uuid4(),
+            host_location_id=host.id,
+            hosting_availability_id=other_availability.id,
+            host_date=other_date,
+            sequence_number=1,
+            wave_intent='SMALL_MEDIUM',
+            preferred_layout_code='THREE_SMALL',
+            start_time=time(9, 0),
+            end_time=time(10, 0),
+        )
+        self.db.add(other_wave)
+        self.db.commit()
+
+        second_metrics = _regenerate_generated_slots(self.db, availability, host.id)
+        self.db.commit()
+
+        second_slots = self.db.query(GameSlot).join(GameSlot.field_instance).filter(FieldInstance.hosting_availability_id == availability.id).all()
+        second_slot_ids = {slot.id for slot in second_slots}
+        waves = self.db.query(TurfWave).filter(TurfWave.hosting_availability_id == availability.id).order_by(TurfWave.start_time, TurfWave.sequence_number).all()
+        field_names = [name for (name,) in self.db.query(FieldInstance.field_name).filter(FieldInstance.hosting_availability_id == availability.id).all()]
+
+        self.assertGreater(first_metrics['new_slots_created'], 0)
+        self.assertEqual(second_metrics['diagnostics']['regeneration_strategy'], 'delete_and_recreate')
+        self.assertTrue(first_slot_ids.isdisjoint(second_slot_ids))
+        self.assertEqual([wave.sequence_number for wave in waves], list(range(1, len(waves) + 1)))
+        self.assertEqual([wave.sequence_number for wave in sorted(waves, key=lambda wave: wave.start_time)], list(range(1, len(waves) + 1)))
+        self.assertEqual(len(field_names), len(set(field_names)))
+        self.assertTrue(all(slot.field_instance_id for slot in second_slots))
+        self.assertIsNotNone(self.db.query(TurfWave).filter(TurfWave.id == other_wave.id).first())
+
     def test_locked_turf_layout_does_not_create_mixed_dynamic_blocks(self):
         from app.models import GameSlot
         from app.routes.api import _regenerate_generated_slots
