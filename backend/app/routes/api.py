@@ -79,6 +79,268 @@ def _format_diagnostic_time(value: time | None) -> str | None:
     return value.isoformat() if value else None
 
 
+DOUBLEHEADER_FINAL_FAILURE_CODES = {
+    'DOUBLEHEADER_NOT_BACK_TO_BACK',
+    'DOUBLEHEADER_SPLIT_LOCATION',
+    'DOUBLEHEADER_FIELD_TYPE_MISMATCH',
+    'DOUBLEHEADER_PAIR_VALIDATION_FAILED',
+    'DOUBLEHEADER_TOO_MANY_GAMES_FOR_TEAM_DIVISION_DATE',
+}
+
+
+def _stable_doubleheader_pair_id(team_id: uuid.UUID, division_id: uuid.UUID | None, game_date: date, game_ids: list[uuid.UUID]) -> str:
+    seed = ':'.join([
+        str(team_id),
+        str(division_id) if division_id else '',
+        game_date.isoformat(),
+        *[str(game_id) for game_id in sorted(game_ids, key=str)],
+    ])
+    return f'dh-{uuid.uuid5(uuid.NAMESPACE_URL, seed)}'
+
+
+def _build_global_doubleheader_validation(db: Session, season_id: uuid.UUID | str | None) -> dict[str, object]:
+    """Validate every team/division/date with exactly two scheduled games as a doubleheader.
+
+    This is intentionally data-driven and season-wide.  It does not assume odd-team
+    divisions or any concrete grade, community, field size, surface, host, or date.
+    """
+    home_alias = aliased(Team)
+    away_alias = aliased(Team)
+    query = db.query(Game, GameSlot, FieldInstance, HostLocation, home_alias, away_alias, Division, Organization, GameStatus).join(
+        Game.status
+    ).join(
+        home_alias, Game.home_team_id == home_alias.id
+    ).join(
+        away_alias, Game.away_team_id == away_alias.id
+    ).join(
+        Division, home_alias.division_id == Division.id
+    ).join(
+        Organization, home_alias.organization_id == Organization.id
+    ).outerjoin(
+        GameSlot, GameSlot.assigned_game_id == Game.id
+    ).outerjoin(
+        FieldInstance, FieldInstance.id == GameSlot.field_instance_id
+    ).outerjoin(
+        HostLocation, HostLocation.id == GameSlot.host_location_id
+    ).filter(func.lower(GameStatus.code) != 'unscheduled')
+    if season_id:
+        query = query.filter(Game.season_id == season_id)
+    rows = query.order_by(Game.game_date, Game.kickoff_time).all()
+    game_rows_by_id: dict[uuid.UUID, tuple[Game, GameSlot | None, FieldInstance | None, HostLocation | None, Team, Team, Division, object, object]] = {}
+    games_by_team_division_date: dict[tuple[uuid.UUID, uuid.UUID | None, date], list[Game]] = {}
+    all_start_times_by_date_host: dict[tuple[date, uuid.UUID | None], set[time]] = {}
+    team_time_seen: dict[tuple[uuid.UUID, date, time], uuid.UUID] = {}
+    team_conflict_game_ids: set[uuid.UUID] = set()
+    field_time_seen: dict[tuple[uuid.UUID | None, uuid.UUID | None, date, time], uuid.UUID] = {}
+    field_conflict_game_ids: set[uuid.UUID] = set()
+
+    for row in rows:
+        game, slot, fi, host, home, away, div, _org, _status = row
+        game_rows_by_id[game.id] = row
+        if game.game_date and game.kickoff_time:
+            all_start_times_by_date_host.setdefault((game.game_date, getattr(slot, 'host_location_id', None) or getattr(host, 'id', None) or game.host_location_id), set()).add(game.kickoff_time)
+        for team in (home, away):
+            division_id = getattr(team, 'division_id', None) or getattr(div, 'id', None)
+            games_by_team_division_date.setdefault((team.id, division_id, game.game_date), []).append(game)
+            t_key = (team.id, game.game_date, game.kickoff_time)
+            if t_key in team_time_seen:
+                team_conflict_game_ids.update({team_time_seen[t_key], game.id})
+            else:
+                team_time_seen[t_key] = game.id
+        f_key = (getattr(slot, 'host_location_id', None) or getattr(host, 'id', None) or game.host_location_id, getattr(slot, 'field_instance_id', None) or getattr(fi, 'id', None) or game.field_instance_id, game.game_date, game.kickoff_time)
+        if f_key in field_time_seen:
+            field_conflict_game_ids.update({field_time_seen[f_key], game.id})
+        else:
+            field_time_seen[f_key] = game.id
+
+    pair_rows: list[dict[str, object]] = []
+    failures: list[dict[str, object]] = []
+    counts = {
+        'doubleheader_not_back_to_back_count': 0,
+        'doubleheader_split_location_count': 0,
+        'doubleheader_field_type_mismatch_count': 0,
+        'doubleheader_pair_validation_failure_count': 0,
+        'doubleheader_too_many_games_count': 0,
+    }
+
+    for (team_id, division_id, game_date), games in sorted(games_by_team_division_date.items(), key=lambda item: (item[0][2] or date.min, str(item[0][1]), str(item[0][0]))):
+        if len(games) <= 1:
+            continue
+        ordered_games = sorted(games, key=lambda game: (game.kickoff_time or time.min, str(game.id)))
+        if len(ordered_games) > 2:
+            counts['doubleheader_too_many_games_count'] += 1
+            failure = {
+                'code': 'DOUBLEHEADER_TOO_MANY_GAMES_FOR_TEAM_DIVISION_DATE',
+                'team_id': str(team_id),
+                'division_id': str(division_id) if division_id else None,
+                'game_date': game_date.isoformat() if game_date else None,
+                'game_ids': [str(game.id) for game in ordered_games],
+                'scheduled_games_count': len(ordered_games),
+            }
+            failures.append(failure)
+            continue
+
+        game_1, game_2 = ordered_games
+        row_1 = game_rows_by_id.get(game_1.id)
+        row_2 = game_rows_by_id.get(game_2.id)
+        if not row_1 or not row_2:
+            continue
+        _g1, slot_1, fi_1, host_1, home_1, away_1, div_1, _org_1, _status_1 = row_1
+        _g2, slot_2, fi_2, host_2, home_2, away_2, div_2, _org_2, _status_2 = row_2
+        team = home_1 if home_1.id == team_id else away_1 if away_1.id == team_id else db.get(Team, team_id)
+        required_size = _required_field_type_for_division(div_1)
+        field_type_1 = _normalize_field_size(slot_1.field_type if slot_1 else (fi_1.field_type if fi_1 else None))
+        field_type_2 = _normalize_field_size(slot_2.field_type if slot_2 else (fi_2.field_type if fi_2 else None))
+        host_id_1 = getattr(slot_1, 'host_location_id', None) or getattr(host_1, 'id', None) or game_1.host_location_id
+        host_id_2 = getattr(slot_2, 'host_location_id', None) or getattr(host_2, 'id', None) or game_2.host_location_id
+        if not host_1 and host_id_1:
+            host_1 = db.get(HostLocation, host_id_1)
+        if not host_2 and host_id_2:
+            host_2 = db.get(HostLocation, host_id_2)
+        same_location = bool(host_id_1 and host_id_1 == host_id_2)
+        start_1 = game_1.kickoff_time
+        start_2 = game_2.kickoff_time
+        start_delta = None
+        if start_1 and start_2:
+            start_delta = abs((_minutes_from_time(start_2) or 0) - (_minutes_from_time(start_1) or 0))
+        scheduled_blocks = sorted(all_start_times_by_date_host.get((game_date, host_id_1), set()))
+        consecutive_blocks = False
+        if start_1 in scheduled_blocks and start_2 in scheduled_blocks:
+            i1 = scheduled_blocks.index(start_1)
+            i2 = scheduled_blocks.index(start_2)
+            consecutive_blocks = abs(i2 - i1) == 1
+        back_to_back = bool(start_delta == GAME_DURATION_MINUTES and consecutive_blocks)
+        compatible_field_type = bool(field_type_1 == required_size and field_type_2 == required_size)
+        allowed_hosts_1 = _host_plan_allowed_host_ids_for_week(db, season_id, game_1.week_id, game_date)
+        allowed_hosts_2 = _host_plan_allowed_host_ids_for_week(db, season_id, game_2.week_id, game_date)
+        selected_host_compliant = (allowed_hosts_1 is None or host_id_1 in allowed_hosts_1) and (allowed_hosts_2 is None or host_id_2 in allowed_hosts_2)
+
+        def _true_home_ok(game: Game, host: HostLocation | None, home: Team | None, away: Team | None) -> bool:
+            host_owner_id = _host_owner_community_id(host)
+            if not host_owner_id:
+                return True
+            home_org_id = _team_community_id(home)
+            away_org_id = _team_community_id(away)
+            if host_owner_id in {home_org_id, away_org_id}:
+                return host_owner_id == home_org_id
+            return True
+
+        true_home_host_compliant = _true_home_ok(game_1, host_1, home_1, away_1) and _true_home_ok(game_2, host_2, home_2, away_2)
+        team_conflict = game_1.id in team_conflict_game_ids or game_2.id in team_conflict_game_ids
+        field_conflict = game_1.id in field_conflict_game_ids or game_2.id in field_conflict_game_ids
+        host_owner_as_away = not true_home_host_compliant
+        same_division = getattr(div_1, 'id', None) == getattr(div_2, 'id', None) == division_id
+        pair_valid = all([
+            same_division,
+            same_location,
+            back_to_back,
+            compatible_field_type,
+            selected_host_compliant,
+            true_home_host_compliant,
+            not team_conflict,
+            not field_conflict,
+            not host_owner_as_away,
+        ])
+        failure_reasons: list[str] = []
+        if not same_location:
+            failure_reasons.append('DOUBLEHEADER_SPLIT_LOCATION')
+            counts['doubleheader_split_location_count'] += 1
+        if not back_to_back:
+            failure_reasons.append('DOUBLEHEADER_NOT_BACK_TO_BACK')
+            counts['doubleheader_not_back_to_back_count'] += 1
+        if not compatible_field_type:
+            failure_reasons.append('DOUBLEHEADER_FIELD_TYPE_MISMATCH')
+            counts['doubleheader_field_type_mismatch_count'] += 1
+        if not selected_host_compliant:
+            failure_reasons.append('DOUBLEHEADER_PAIR_SELECTED_HOST_VIOLATION')
+        if not true_home_host_compliant:
+            failure_reasons.append('DOUBLEHEADER_PAIR_TRUE_HOME_HOST_VIOLATION')
+        if team_conflict:
+            failure_reasons.append('DOUBLEHEADER_PAIR_TEAM_CONFLICT')
+        if field_conflict:
+            failure_reasons.append('DOUBLEHEADER_PAIR_FIELD_CONFLICT')
+        if host_owner_as_away:
+            failure_reasons.append('DOUBLEHEADER_PAIR_HOST_OWNER_AS_AWAY')
+        if not same_division:
+            failure_reasons.append('DOUBLEHEADER_PAIR_VALIDATION_FAILED')
+        if not pair_valid:
+            counts['doubleheader_pair_validation_failure_count'] += 1
+
+        pair_id = _stable_doubleheader_pair_id(team_id, division_id, game_date, [game_1.id, game_2.id])
+        pair_detail = {
+            'doubleheader_pair_id': pair_id,
+            'inferred_pair': True,
+            'team_id': str(team_id),
+            'team_name': team.name if team else None,
+            'division_id': str(division_id) if division_id else None,
+            'division_name': div_1.name if div_1 else None,
+            'division_group': div_1.division_group if div_1 else None,
+            'game_date': game_date.isoformat() if game_date else None,
+            'game_1_id': str(game_1.id),
+            'game_1_start_time': _format_diagnostic_time(game_1.kickoff_time),
+            'game_1_host_location_id': str(host_id_1) if host_id_1 else None,
+            'game_1_host_location_name': host_1.name if host_1 else None,
+            'game_1_field_type': field_type_1,
+            'game_2_id': str(game_2.id),
+            'game_2_start_time': _format_diagnostic_time(game_2.kickoff_time),
+            'game_2_host_location_id': str(host_id_2) if host_id_2 else None,
+            'game_2_host_location_name': host_2.name if host_2 else None,
+            'game_2_field_type': field_type_2,
+            'same_location': same_location,
+            'back_to_back': back_to_back,
+            'compatible_field_type': compatible_field_type,
+            'selected_host_compliant': selected_host_compliant,
+            'true_home_host_compliant': true_home_host_compliant,
+            'team_conflicts': int(team_conflict),
+            'field_conflicts': int(field_conflict),
+            'host_owner_as_away': int(host_owner_as_away),
+            'pair_valid': pair_valid,
+            'validation_failure_reason': failure_reasons[0] if failure_reasons else None,
+            'validation_failure_reasons': failure_reasons,
+        }
+        pair_rows.append(pair_detail)
+        for reason in failure_reasons:
+            failures.append({'code': reason, **pair_detail})
+
+    return {
+        **counts,
+        'doubleheader_pairs': pair_rows,
+        'failures': failures,
+        'failure_count': len(failures),
+        'pair_count': len(pair_rows),
+    }
+
+
+def _game_doubleheader_pair_context(db: Session, game: Game | None) -> dict[str, object] | None:
+    if not game or not game.season_id or not game.game_date:
+        return None
+    validation = _build_global_doubleheader_validation(db, game.season_id)
+    game_id = str(game.id)
+    for pair in validation.get('doubleheader_pairs') or []:
+        if game_id in {str(pair.get('game_1_id')), str(pair.get('game_2_id'))}:
+            return pair
+    for failure in validation.get('failures') or []:
+        if game_id in {str(failure.get('game_1_id')), str(failure.get('game_2_id'))} or game_id in {str(value) for value in (failure.get('game_ids') or [])}:
+            return failure
+    return None
+
+
+def _raise_if_single_doubleheader_manual_move(db: Session, game: Game | None, *, action_source: str) -> None:
+    pair = _game_doubleheader_pair_context(db, game)
+    if not pair:
+        return
+    raise HTTPException(status_code=400, detail={
+        'error': 'DOUBLEHEADER_PAIR_SPLIT_MOVE_REJECTED',
+        'message': 'This game is part of a doubleheader. Move both doubleheader games together in consecutive same-location slots or choose a non-doubleheader game.',
+        'action_source': action_source,
+        'attempted_single_game_move': True,
+        'attempted_pair_move': False,
+        'accepted': False,
+        'rejection_reason': 'DOUBLEHEADER_PAIR_SPLIT_MOVE_REJECTED',
+        'doubleheader_pair': pair,
+    })
+
+
 def _build_host_location_vs_home_team_verification(db: Session, season_id: uuid.UUID | str | None = None, *, require_host_owner_as_home_team: bool = False) -> dict[str, object]:
     """Build verification-only diagnostics for scheduled games.
 
@@ -295,17 +557,17 @@ def _build_revised_scheduling_hierarchy_diagnostics(db: Session, season_id: uuid
                     reasons = hd['reason_scheduled_elsewhere']
                     reasons['HOST_OWNER_WAS_AWAY_TEAM'] = int(reasons.get('HOST_OWNER_WAS_AWAY_TEAM') or 0) + 1
 
-    doubleheader_failures: list[dict[str, object]] = []
+    global_doubleheader_validation = _build_global_doubleheader_validation(db, season_id)
+    doubleheader_failures = list(global_doubleheader_validation.get('failures') or [])
     team_date_times: dict[tuple[uuid.UUID, date], list[time]] = {}
-    for g, _slot, _fi, _host, home, away, _div, _org, _status in rows:
-        for team in (home, away):
-            team_date_times.setdefault((team.id, g.game_date), []).append(g.kickoff_time)
-    for (team_id, game_date), times in team_date_times.items():
-        if len(times) > 1:
-            sorted_times = sorted(times)
-            adjacent = any((_minutes_from_time(b) or 0) - (_minutes_from_time(a) or 0) == GAME_DURATION_MINUTES for a, b in zip(sorted_times, sorted_times[1:]))
-            if not adjacent:
-                doubleheader_failures.append({'team_id': str(team_id), 'game_date': game_date.isoformat(), 'start_times': [t.isoformat() for t in sorted_times]})
+    for pair in global_doubleheader_validation.get('doubleheader_pairs') or []:
+        try:
+            team_date_times[(uuid.UUID(str(pair.get('team_id'))), date.fromisoformat(str(pair.get('game_date'))))] = [
+                datetime.strptime(str(pair.get('game_1_start_time')), '%H:%M:%S').time(),
+                datetime.strptime(str(pair.get('game_2_start_time')), '%H:%M:%S').time(),
+            ]
+        except (TypeError, ValueError):
+            continue
 
     schedule_health_summary = {
         'games_required': games_required,
@@ -317,7 +579,12 @@ def _build_revised_scheduling_hierarchy_diagnostics(db: Session, season_id: uuid
         'validation_failures': len(team_time_conflicts) + len(field_time_conflicts) + len(doubleheader_failures) + len(host_owner_as_away_games) + len(invalid_field_size_assignments) + len(invalid_wave_configuration_games) + len(invalid_field_component_games),
         'team_time_conflicts': len(team_time_conflicts),
         'field_time_conflicts': len(field_time_conflicts),
-        'doubleheader_back_to_back_failures': len(doubleheader_failures),
+        'doubleheader_back_to_back_failures': int(global_doubleheader_validation.get('doubleheader_not_back_to_back_count') or 0),
+        'doubleheader_not_back_to_back_count': int(global_doubleheader_validation.get('doubleheader_not_back_to_back_count') or 0),
+        'doubleheader_split_location_count': int(global_doubleheader_validation.get('doubleheader_split_location_count') or 0),
+        'doubleheader_field_type_mismatch_count': int(global_doubleheader_validation.get('doubleheader_field_type_mismatch_count') or 0),
+        'doubleheader_pair_validation_failure_count': int(global_doubleheader_validation.get('doubleheader_pair_validation_failure_count') or 0),
+        'doubleheader_too_many_games_count': int(global_doubleheader_validation.get('doubleheader_too_many_games_count') or 0),
         'host_owner_as_away_games': len(host_owner_as_away_games),
         'invalid_field_size_assignments': len(invalid_field_size_assignments),
         'invalid_wave_configuration_games': len(invalid_wave_configuration_games),
@@ -1108,7 +1375,13 @@ def _build_revised_scheduling_hierarchy_diagnostics(db: Session, season_id: uuid
         'doubleheader_teams_by_date': {f'{team_id}:{game_date.isoformat()}': [t.isoformat() for t in sorted(times)] for (team_id, game_date), times in team_date_times.items() if len(times) > 1},
         'doubleheader_games_by_team': {str(team_id): [t.isoformat() for t in sorted(times)] for (team_id, _game_date), times in team_date_times.items() if len(times) > 1},
         'doubleheader_back_to_back_success_count': sum(1 for (_team_id, _date), times in team_date_times.items() if len(times) > 1 and any((_minutes_from_time(b) or 0) - (_minutes_from_time(a) or 0) == GAME_DURATION_MINUTES for a, b in zip(sorted(times), sorted(times)[1:]))),
-        'doubleheader_back_to_back_failure_count': len(doubleheader_failures),
+        'doubleheader_back_to_back_failure_count': int(global_doubleheader_validation.get('doubleheader_not_back_to_back_count') or 0),
+        'doubleheader_not_back_to_back_count': int(global_doubleheader_validation.get('doubleheader_not_back_to_back_count') or 0),
+        'doubleheader_split_location_count': int(global_doubleheader_validation.get('doubleheader_split_location_count') or 0),
+        'doubleheader_field_type_mismatch_count': int(global_doubleheader_validation.get('doubleheader_field_type_mismatch_count') or 0),
+        'doubleheader_pair_validation_failure_count': int(global_doubleheader_validation.get('doubleheader_pair_validation_failure_count') or 0),
+        'doubleheader_too_many_games_count': int(global_doubleheader_validation.get('doubleheader_too_many_games_count') or 0),
+        'doubleheader_pairs': list(global_doubleheader_validation.get('doubleheader_pairs') or []),
         'doubleheader_moves_considered': int((compaction_diagnostics or {}).get('doubleheader_moves_considered') or (compaction_diagnostics or {}).get('attempted_doubleheader_pair_moves') or 0),
         'attempted_doubleheader_pair_moves': int((compaction_diagnostics or {}).get('attempted_doubleheader_pair_moves') or 0),
         'doubleheader_moves_accepted': int((compaction_diagnostics or {}).get('doubleheader_moves_accepted') or (compaction_diagnostics or {}).get('accepted_doubleheader_pair_moves') or 0),
@@ -7857,6 +8130,13 @@ def build_schedule_quality_report(db: Session, season_id: uuid.UUID) -> dict[str
         low = min(double_header_counts_by_team.values())
         uneven_double_header_distribution = high - low
 
+    global_doubleheader_validation = _build_global_doubleheader_validation(db, season_id)
+    non_back_to_back_double_headers = int(global_doubleheader_validation.get('doubleheader_not_back_to_back_count') or 0)
+    split_location_double_headers = int(global_doubleheader_validation.get('doubleheader_split_location_count') or 0)
+    field_type_mismatch_double_headers = int(global_doubleheader_validation.get('doubleheader_field_type_mismatch_count') or 0)
+    doubleheader_pair_validation_failures = int(global_doubleheader_validation.get('doubleheader_pair_validation_failure_count') or 0)
+    doubleheader_too_many_games = int(global_doubleheader_validation.get('doubleheader_too_many_games_count') or 0)
+
     repeat_matchups = 0
     for (team_a, _team_b), count in matchup_counts.items():
         division_id = team_division_map.get(team_a)
@@ -7874,6 +8154,8 @@ def build_schedule_quality_report(db: Session, season_id: uuid.UUID) -> dict[str
 
     if non_back_to_back_double_headers > 0:
         warnings.append({'code': 'non_back_to_back_double_headers', 'count': non_back_to_back_double_headers, 'message': 'non-back-to-back double headers detected'})
+    if split_location_double_headers > 0:
+        warnings.append({'code': 'split_location_double_headers', 'count': split_location_double_headers, 'message': 'split-location double headers detected'})
 
     missing_required_games = 1 if not rows else 0
     metrics = {
@@ -7884,6 +8166,11 @@ def build_schedule_quality_report(db: Session, season_id: uuid.UUID) -> dict[str
         'missing_required_games': missing_required_games,
         'uneven_game_counts': uneven_game_counts,
         'non_back_to_back_double_headers': non_back_to_back_double_headers,
+        'doubleheader_not_back_to_back_count': non_back_to_back_double_headers,
+        'doubleheader_split_location_count': split_location_double_headers,
+        'doubleheader_field_type_mismatch_count': field_type_mismatch_double_headers,
+        'doubleheader_pair_validation_failure_count': doubleheader_pair_validation_failures,
+        'doubleheader_too_many_games_count': doubleheader_too_many_games,
         'odd_team_divisions': len(odd_team_divisions),
         'uneven_double_header_distribution': uneven_double_header_distribution,
     }
@@ -7893,7 +8180,10 @@ def build_schedule_quality_report(db: Session, season_id: uuid.UUID) -> dict[str
         + ([{'code': 'teams_with_zero_games', 'count': teams_with_zero_games}] if teams_with_zero_games > 0 else [])
         + ([{'code': 'missing_required_games', 'count': missing_required_games}] if missing_required_games > 0 else [])
         + [{'code': 'invalid_field_type', 'issues': required_field_errors}]
-        + ([{'code': 'non_back_to_back_double_headers', 'count': non_back_to_back_double_headers}] if non_back_to_back_double_headers > 0 else [])
+        + ([{'code': 'non_back_to_back_double_headers', 'count': non_back_to_back_double_headers, 'issues': global_doubleheader_validation.get('failures') or []}] if non_back_to_back_double_headers > 0 else [])
+        + ([{'code': 'split_location_double_headers', 'count': split_location_double_headers, 'issues': global_doubleheader_validation.get('failures') or []}] if split_location_double_headers > 0 else [])
+        + ([{'code': 'doubleheader_field_type_mismatch', 'count': field_type_mismatch_double_headers, 'issues': global_doubleheader_validation.get('failures') or []}] if field_type_mismatch_double_headers > 0 else [])
+        + ([{'code': 'doubleheader_too_many_games', 'count': doubleheader_too_many_games, 'issues': global_doubleheader_validation.get('failures') or []}] if doubleheader_too_many_games > 0 else [])
     )
     hard_errors = [e for e in hard_errors if not (isinstance(e, dict) and 'issues' in e and not e['issues'])]
     if hard_errors:
@@ -8489,22 +8779,25 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         return False
 
     def _breaks_doubleheader(game: Game, target: GameSlot) -> bool:
+        # Optimizer candidates in this pass are single-game moves.  Any game that
+        # is already part of a data-inferred team/division/date doubleheader must
+        # be protected from single-game movement; pair movement requires a separate
+        # atomic validator that can move both games together.
+        division_id = game.home_team.division_id if game.home_team else None
         for team_id in (game.home_team_id, game.away_team_id):
-            games = db.query(Game).join(Game.status).filter(
+            team = db.get(Team, team_id)
+            team_division_id = getattr(team, 'division_id', None) or division_id
+            games = db.query(Game).join(Game.status).join(
+                Team, Game.home_team_id == Team.id
+            ).filter(
                 Game.season_id == season_id,
                 GameStatus.code != 'UNSCHEDULED',
                 Game.game_date == game.game_date,
+                Team.division_id == team_division_id,
                 or_(Game.home_team_id == team_id, Game.away_team_id == team_id),
             ).all()
-            if len(games) <= 1:
-                continue
-            starts = sorted(target.start_time if row.id == game.id else row.kickoff_time for row in games)
-            if any(starts[i] == starts[i - 1] for i in range(1, len(starts))):
+            if len(games) >= 2:
                 return True
-            if len(starts) == 2:
-                delta = abs((datetime.combine(date.today(), starts[1]) - datetime.combine(date.today(), starts[0])).total_seconds())
-                if delta > 7200:
-                    return True
         return False
 
     def _record_rejection_reason(reason: str) -> None:
@@ -8568,7 +8861,7 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         allowed_reasons = {
             'TEAM_TIME_CONFLICT', 'FIELD_TIME_CONFLICT', 'WOULD_VIOLATE_TRUE_HOME_HOST_PRIORITY',
             'SELECTED_HOST_VIOLATION', 'INVALID_FIELD_SIZE', 'INVALID_TURF_COMPONENT',
-            'DOUBLEHEADER_BACK_TO_BACK_VIOLATION', 'HOST_OWNER_AS_AWAY_VIOLATION',
+            'DOUBLEHEADER_BACK_TO_BACK_VIOLATION', 'DOUBLEHEADER_PAIR_SPLIT_MOVE_REJECTED', 'HOST_OWNER_AS_AWAY_VIOLATION',
             'DOES_NOT_IMPROVE_SCHEDULE', 'TARGET_SLOT_NOT_OPEN', 'CACHED_REJECTION',
             'DUPLICATE_MOVE_SKIPPED', 'OPTIMIZATION_LIMIT_REACHED', 'UNKNOWN_HOST_OWNERSHIP',
             'VIOLATES_HOST_COMMUNITY_HARD_RULE', 'VIOLATES_HOME_SITE_REQUIREMENT', 'SOURCE_GAME_LOCKED',
@@ -8915,7 +9208,7 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
                     'target_slot_id': str(target.id) if target else None,
                     'reason': 'DOUBLEHEADER_PAIR_SPLIT_MOVE_REJECTED',
                 })
-            return reject_move('BREAKS_DOUBLEHEADER_BACK_TO_BACK', detail=_doubleheader_detail(game, source, target))
+            return reject_move('DOUBLEHEADER_PAIR_SPLIT_MOVE_REJECTED', detail=_doubleheader_detail(game, source, target))
         host_balance_would_break = bool(host_balance_row.get('host_balance_applied')) and _breaks_host_balance(game, source, target, home_away_plan)
         if host_balance_would_break:
             diagnostics['host_balance_rejected_true_home_game_count'] = int(diagnostics.get('host_balance_rejected_true_home_game_count') or 0) + 1
@@ -9596,7 +9889,7 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         if priority_violation:
             return priority_violation
         if _breaks_doubleheader(game, target):
-            return 'DOUBLEHEADER_BACK_TO_BACK_VIOLATION'
+            return 'DOUBLEHEADER_PAIR_SPLIT_MOVE_REJECTED'
         return None
 
     def _global_turf_wave_utilization_diagnostics(phase: str) -> list[dict[str, object]]:
@@ -17793,6 +18086,18 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
                 warnings.append(f'BUG: auto-schedule returned turf wave hard validation failure {code}.')
         if host_owner_as_away_violation_total == 0 and true_home_violation_total > 0:
             warnings.append('BUG: host-owner-as-away validation passed but true home-host validation failed.')
+        final_doubleheader_diag = revised_hierarchy_diagnostics.get('doubleheader_diagnostics') or {}
+        for code, counter_key in (
+            ('DOUBLEHEADER_NOT_BACK_TO_BACK', 'doubleheader_not_back_to_back_count'),
+            ('DOUBLEHEADER_SPLIT_LOCATION', 'doubleheader_split_location_count'),
+            ('DOUBLEHEADER_FIELD_TYPE_MISMATCH', 'doubleheader_field_type_mismatch_count'),
+            ('DOUBLEHEADER_PAIR_VALIDATION_FAILED', 'doubleheader_pair_validation_failure_count'),
+            ('DOUBLEHEADER_TOO_MANY_GAMES_FOR_TEAM_DIVISION_DATE', 'doubleheader_too_many_games_count'),
+        ):
+            count = int(final_doubleheader_diag.get(counter_key) or 0)
+            if count > 0:
+                validation_errors.append(f'{code}: {count} global doubleheader validation failure(s).')
+                warnings.append(f'BUG: auto-schedule returned doubleheader hard validation failure {code}.')
         for diagnostic_warning in revised_hierarchy_diagnostics.get('diagnostics_warnings') or []:
             warnings.append(str(diagnostic_warning))
     except Exception as exc:
@@ -17840,6 +18145,14 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
     failed_validation_total = int(auto_schedule_diagnostics.get('failed_validation_count') or 0)
     failed_validation_total += int(((auto_schedule_diagnostics.get('True Home-Host Diagnostics') or {}).get('total_home_host_violations') or 0))
     failed_validation_total += sum(int((auto_schedule_diagnostics.get('Turf Wave Diagnostics') or auto_schedule_diagnostics.get('turf_wave_diagnostics') or {}).get(code) or 0) for code in ('NON_CONTIGUOUS_TURF_WAVE_USAGE', 'EARLIER_COMPATIBLE_WAVE_UNUSED', 'SELECTED_CONFIGURATION_DID_NOT_MAXIMIZE_HOUR'))
+    final_doubleheader_diag = auto_schedule_diagnostics.get('Doubleheader Diagnostics') or auto_schedule_diagnostics.get('doubleheader_diagnostics') or {}
+    failed_validation_total += sum(int(final_doubleheader_diag.get(counter_key) or 0) for counter_key in (
+        'doubleheader_not_back_to_back_count',
+        'doubleheader_split_location_count',
+        'doubleheader_field_type_mismatch_count',
+        'doubleheader_pair_validation_failure_count',
+        'doubleheader_too_many_games_count',
+    ))
     required_missing_total = sum(int(row.get('missing_games') or 0) for row in required_games_missing)
     missing_games_by_week_and_division = [
         row for row in (auto_schedule_diagnostics.get('generated_game_groups_by_division_week') or [])
@@ -18179,6 +18492,11 @@ def list_public_schedule_filters(season_id: uuid.UUID | None = None, db: Session
 def _required_field_type_for_division(division: Division | None) -> str:
     if not division:
         return FIELD_SIZE_SMALL
+    layout_type = (getattr(division, 'required_field_layout_type', None) or '').strip().upper()
+    normalized_size = _normalize_field_size(layout_type)
+    if normalized_size:
+        return normalized_size
+    # Legacy fallback for older seeded data that predates required_field_layout_type.
     division_label = normalized_division_key(getattr(division, 'division_group', None), getattr(division, 'name', None))
     small_divisions = {'coed_k_1st', 'girls_k_1st', 'coed_k1st', 'girls_k1st', 'coed_k_1', 'girls_k_2', 'coed_2nd_3rd', 'girls_2nd_3rd', 'coed_2_3'}
     medium_divisions = {'coed_4th_5th', 'girls_4th_5th', 'coed_4_5', 'girls_3_5'}
@@ -18189,9 +18507,7 @@ def _required_field_type_for_division(division: Division | None) -> str:
         return FIELD_SIZE_MEDIUM
     if division_label in large_divisions:
         return FIELD_SIZE_LARGE
-    layout_type = (getattr(division, 'required_field_layout_type', None) or '').strip().upper()
-    normalized_size = _normalize_field_size(layout_type)
-    return normalized_size or FIELD_SIZE_SMALL
+    return FIELD_SIZE_SMALL
 
 
 LEAGUE_DEMAND_DIVISION_KEYS_BY_SIZE = {
@@ -20164,6 +20480,7 @@ def schedule_management_conflicts(db: Session = Depends(get_db)):
 def move_game_schedule(game_id: uuid.UUID, payload: dict, db: Session = Depends(get_db)):
     game = db.query(Game).filter(Game.id == game_id).first()
     if not game: raise HTTPException(404, 'Game not found')
+    _raise_if_single_doubleheader_manual_move(db, game, action_source='schedule-management-move')
     new_slot = db.query(GameSlot).join(GameSlot.field_instance).filter(GameSlot.id == payload.get('generated_slot_id')).first()
     if not new_slot or new_slot.status != 'OPEN': raise HTTPException(400, 'Selected slot must be OPEN')
     division = db.query(Division).join(Team, Team.division_id == Division.id).filter(Team.id == game.home_team_id).first()
@@ -20183,13 +20500,19 @@ def move_game_schedule(game_id: uuid.UUID, payload: dict, db: Session = Depends(
     game.host_location_id = new_slot.host_location_id
     game.field_instance_id = new_slot.field_instance_id
     game.game_date = new_slot.slot_date; game.kickoff_time = new_slot.start_time
+    db.flush()
+    final_doubleheader = _build_global_doubleheader_validation(db, game.season_id)
+    if any(str(game.id) in {str(row.get('game_1_id')), str(row.get('game_2_id'))} for row in final_doubleheader.get('failures') or []):
+        db.rollback()
+        raise HTTPException(status_code=400, detail={'error': 'DOUBLEHEADER_PAIR_VALIDATION_FAILED', 'doubleheader_validation': final_doubleheader})
     db.commit()
-    return {'ok': True}
+    return {'ok': True, 'doubleheader_validation': final_doubleheader}
 
 @router.patch('/schedule-management/games/{game_id}/unschedule', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def unschedule_game(game_id: uuid.UUID, db: Session = Depends(get_db)):
     game = db.query(Game).filter(Game.id == game_id).first()
     if not game: raise HTTPException(404, 'Game not found')
+    _raise_if_single_doubleheader_manual_move(db, game, action_source='schedule-management-unschedule')
     division_id = db.query(Team.division_id).filter(Team.id == game.home_team_id).scalar()
     week_id = game.week_id
     slot = db.query(GameSlot).filter(GameSlot.assigned_game_id == game.id).first()
@@ -20346,17 +20669,28 @@ def create_game(payload:GameCreate, db:Session=Depends(get_db)):
     validation=validate_game(db,payload); status=db.query(GameStatus).filter(GameStatus.id==payload.game_status_id).first()
     if not status: raise HTTPException(400,'Invalid game status')
     if status.code=='published' and validation.hard_conflicts: raise HTTPException(status_code=400, detail={'error':'hard_conflicts','validation':validation.model_dump()})
-    obj=Game(**payload.model_dump(exclude={'division_id'})); db.add(obj); db.commit(); db.refresh(obj)
+    obj=Game(**payload.model_dump(exclude={'division_id'})); db.add(obj); db.flush()
+    final_doubleheader = _build_global_doubleheader_validation(db, obj.season_id)
+    if any(str(obj.id) in {str(row.get('game_1_id')), str(row.get('game_2_id'))} or str(obj.id) in {str(value) for value in (row.get('game_ids') or [])} for row in final_doubleheader.get('failures') or []):
+        db.rollback()
+        raise HTTPException(status_code=400, detail={'error': 'DOUBLEHEADER_PAIR_VALIDATION_FAILED', 'doubleheader_validation': final_doubleheader})
+    db.commit(); db.refresh(obj)
     return GameSaveResponse(game=_to_game_read(obj), validation=validation)
 
 @router.put('/games/{game_id}', response_model=GameSaveResponse, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def update_game(game_id:uuid.UUID,payload:GameCreate, db:Session=Depends(get_db)):
     obj=db.query(Game).filter(Game.id==game_id).first()
     if not obj: raise HTTPException(404,'Game not found')
+    _raise_if_single_doubleheader_manual_move(db, obj, action_source='admin-game-update')
     validation=validate_game(db,payload,game_id=game_id); status=db.query(GameStatus).filter(GameStatus.id==payload.game_status_id).first()
     if not status: raise HTTPException(400,'Invalid game status')
     if status.code=='published' and validation.hard_conflicts: raise HTTPException(status_code=400, detail={'error':'hard_conflicts','validation':validation.model_dump()})
     for k,v in payload.model_dump(exclude={'division_id'}).items(): setattr(obj,k,v)
+    db.flush()
+    final_doubleheader = _build_global_doubleheader_validation(db, obj.season_id)
+    if any(str(obj.id) in {str(row.get('game_1_id')), str(row.get('game_2_id'))} or str(obj.id) in {str(value) for value in (row.get('game_ids') or [])} for row in final_doubleheader.get('failures') or []):
+        db.rollback()
+        raise HTTPException(status_code=400, detail={'error': 'DOUBLEHEADER_PAIR_VALIDATION_FAILED', 'doubleheader_validation': final_doubleheader})
     db.commit(); db.refresh(obj)
     return GameSaveResponse(game=_to_game_read(obj), validation=validation)
 
@@ -20371,6 +20705,7 @@ def delete_game(game_id: uuid.UUID, db: Session = Depends(get_db)):
     obj = db.query(Game).filter(Game.id == game_id).first()
     if not obj:
         raise HTTPException(404, 'Game not found')
+    _raise_if_single_doubleheader_manual_move(db, obj, action_source='admin-game-delete')
     slot = db.query(GameSlot).filter(GameSlot.assigned_game_id == game_id).first()
     if slot:
         slot.status = 'OPEN'
