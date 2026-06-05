@@ -12,7 +12,7 @@ down_revision = '20260531_0026'
 branch_labels = None
 depends_on = None
 
-APPROVED_CODES = ('THREE_SMALL', 'TWO_SMALL_ONE_MEDIUM', 'TWO_MEDIUM', 'ONE_SMALL_ONE_LARGE')
+APPROVED_CODES = ('THREE_SMALL', 'TWO_SMALL_ONE_MEDIUM', 'TWO_MEDIUM', 'ONE_SMALL_ONE_LARGE', 'TWO_LARGE', 'ONE_LARGE_ONE_MEDIUM', 'ONE_MEDIUM_TWO_SMALL')
 
 
 def _table_names(bind) -> set[str]:
@@ -34,7 +34,7 @@ def upgrade() -> None:
                 sa.text(
                     "UPDATE host_location_configurations "
                     "SET is_active = FALSE "
-                    "WHERE UPPER(REPLACE(REPLACE(configuration_name, '-', '_'), ' ', '_')) NOT IN ('THREE_SMALL', 'TWO_SMALL_ONE_MEDIUM', 'TWO_MEDIUM', 'ONE_SMALL_ONE_LARGE')"
+                    "WHERE UPPER(REPLACE(REPLACE(configuration_name, '-', '_'), ' ', '_')) NOT IN ('THREE_SMALL', 'TWO_SMALL_ONE_MEDIUM', 'TWO_MEDIUM', 'ONE_SMALL_ONE_LARGE', 'TWO_LARGE', 'ONE_LARGE_ONE_MEDIUM', 'ONE_MEDIUM_TWO_SMALL')"
                 )
             )
 
@@ -47,7 +47,7 @@ def upgrade() -> None:
                     "SET selected_configuration_id = NULL, auto_select_turf_layout = TRUE, lock_selected_layout = FALSE "
                     "WHERE selected_configuration_id IN ("
                     "SELECT id FROM host_location_configurations "
-                    "WHERE UPPER(REPLACE(REPLACE(configuration_name, '-', '_'), ' ', '_')) NOT IN ('THREE_SMALL', 'TWO_SMALL_ONE_MEDIUM', 'TWO_MEDIUM', 'ONE_SMALL_ONE_LARGE'))"
+                    "WHERE UPPER(REPLACE(REPLACE(configuration_name, '-', '_'), ' ', '_')) NOT IN ('THREE_SMALL', 'TWO_SMALL_ONE_MEDIUM', 'TWO_MEDIUM', 'ONE_SMALL_ONE_LARGE', 'TWO_LARGE', 'ONE_LARGE_ONE_MEDIUM', 'ONE_MEDIUM_TWO_SMALL'))"
                 )
             )
 
@@ -58,7 +58,7 @@ def upgrade() -> None:
                 sa.text(
                     "UPDATE turf_waves "
                     "SET preferred_layout_code = 'INVALID_REQUIRES_REGENERATION' "
-                    "WHERE UPPER(REPLACE(REPLACE(preferred_layout_code, '-', '_'), ' ', '_')) NOT IN ('THREE_SMALL', 'TWO_SMALL_ONE_MEDIUM', 'TWO_MEDIUM', 'ONE_SMALL_ONE_LARGE')"
+                    "WHERE UPPER(REPLACE(REPLACE(preferred_layout_code, '-', '_'), ' ', '_')) NOT IN ('THREE_SMALL', 'TWO_SMALL_ONE_MEDIUM', 'TWO_MEDIUM', 'ONE_SMALL_ONE_LARGE', 'TWO_LARGE', 'ONE_LARGE_ONE_MEDIUM', 'ONE_MEDIUM_TWO_SMALL')"
                 )
             )
 
@@ -70,7 +70,7 @@ def upgrade() -> None:
                     "UPDATE field_configuration_options "
                     "SET is_active = FALSE "
                     "WHERE surface_type = 'TURF_STADIUM' "
-                    "AND UPPER(REPLACE(REPLACE(configuration_name, '-', '_'), ' ', '_')) NOT IN ('THREE_SMALL', 'TWO_SMALL_ONE_MEDIUM', 'TWO_MEDIUM', 'ONE_SMALL_ONE_LARGE')"
+                    "AND UPPER(REPLACE(REPLACE(configuration_name, '-', '_'), ' ', '_')) NOT IN ('THREE_SMALL', 'TWO_SMALL_ONE_MEDIUM', 'TWO_MEDIUM', 'ONE_SMALL_ONE_LARGE', 'TWO_LARGE', 'ONE_LARGE_ONE_MEDIUM', 'ONE_MEDIUM_TWO_SMALL')"
                 )
             )
 

@@ -8,7 +8,7 @@ FIELD_SIZE_ORDER = (FIELD_SIZE_SMALL, FIELD_SIZE_MEDIUM, FIELD_SIZE_LARGE)
 
 INVALID_TURF_CONFIGURATION_MESSAGE = (
     'Invalid turf configuration. Turf stadium locations may only use '
-    'THREE_SMALL, TWO_SMALL_ONE_MEDIUM, TWO_MEDIUM, or ONE_SMALL_ONE_LARGE.'
+    'THREE_SMALL, TWO_SMALL_ONE_MEDIUM, TWO_MEDIUM, ONE_SMALL_ONE_LARGE, TWO_LARGE, ONE_LARGE_ONE_MEDIUM, or ONE_MEDIUM_TWO_SMALL.'
 )
 
 APPROVED_TURF_CONFIGURATIONS: tuple[dict[str, object], ...] = (
@@ -55,6 +55,40 @@ APPROVED_TURF_CONFIGURATIONS: tuple[dict[str, object], ...] = (
         'schedulingNote': 'Supports one small-field game and one large-field game in the same wave; medium games require a different approved configuration.',
         'spaceUsedYards': 90,
         'remainingYards': 30,
+    },
+
+    {
+        'code': 'TWO_LARGE',
+        'displayName': 'Two Large Fields',
+        'availableFields': (FIELD_SIZE_LARGE, FIELD_SIZE_LARGE),
+        'supportedFieldSizes': (FIELD_SIZE_LARGE,),
+        'supportedDivisions': ('Coed 6-7', 'Coed 8', 'Girls 6-8'),
+        'maxFieldsPerWave': 2,
+        'schedulingNote': 'Supports two large-field games in the same wave; small and medium games require a different approved configuration.',
+        'spaceUsedYards': 120,
+        'remainingYards': 0,
+    },
+    {
+        'code': 'ONE_LARGE_ONE_MEDIUM',
+        'displayName': 'One Large Field + One Medium Field',
+        'availableFields': (FIELD_SIZE_LARGE, FIELD_SIZE_MEDIUM),
+        'supportedFieldSizes': (FIELD_SIZE_LARGE, FIELD_SIZE_MEDIUM),
+        'supportedDivisions': ('Coed 4-5', 'Girls 3-5', 'Coed 6-7', 'Coed 8', 'Girls 6-8'),
+        'maxFieldsPerWave': 2,
+        'schedulingNote': 'Supports one large-field game and one medium-field game in the same wave.',
+        'spaceUsedYards': 120,
+        'remainingYards': 0,
+    },
+    {
+        'code': 'ONE_MEDIUM_TWO_SMALL',
+        'displayName': 'One Medium Field + Two Small Fields',
+        'availableFields': (FIELD_SIZE_MEDIUM, FIELD_SIZE_SMALL, FIELD_SIZE_SMALL),
+        'supportedFieldSizes': (FIELD_SIZE_MEDIUM, FIELD_SIZE_SMALL),
+        'supportedDivisions': ('Coed K-1', 'Coed 2-3', 'Girls K-2', 'Coed 4-5', 'Girls 3-5'),
+        'maxFieldsPerWave': 3,
+        'schedulingNote': 'Supports one medium-field game and two small-field games in the same wave.',
+        'spaceUsedYards': 120,
+        'remainingYards': 0,
     },
 )
 

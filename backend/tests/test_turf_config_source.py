@@ -38,9 +38,10 @@ def test_turf_stadium_configurations_are_limited_to_approved_wave_codes():
         'TWO_SMALL_ONE_MEDIUM',
         'TWO_MEDIUM',
         'ONE_SMALL_ONE_LARGE',
+        'TWO_LARGE',
+        'ONE_LARGE_ONE_MEDIUM',
+        'ONE_MEDIUM_TWO_SMALL',
     }
-    assert 'TWO_LARGE' not in codes
-    assert 'ONE_LARGE_ONE_MEDIUM' not in codes
     assert 'ONE_MEDIUM_ONE_SMALL' not in codes
 
 
@@ -56,5 +57,7 @@ def test_manual_turf_validation_slot_counts_match_approved_wave_codes_only():
         'TWO_SMALL_ONE_MEDIUM',
         'TWO_MEDIUM',
         'ONE_SMALL_ONE_LARGE',
+        'TWO_LARGE',
+        'ONE_LARGE_ONE_MEDIUM',
     }
-    assert count_keys == {(3, 0, 0), (2, 1, 0), (0, 2, 0), (1, 0, 1)}
+    assert count_keys == {(3, 0, 0), (2, 1, 0), (0, 2, 0), (1, 0, 1), (0, 0, 2), (0, 1, 1)}
