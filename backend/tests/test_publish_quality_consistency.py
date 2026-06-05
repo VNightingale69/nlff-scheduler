@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import Base
 from app.models import Division, FieldInstance, Game, GameSlot, GameStatus, HostLocation, Organization, Season, Team, Week
-from app.routes.api import _build_global_doubleheader_validation, _raise_if_single_doubleheader_manual_move, _run_global_doubleheader_repair, build_schedule_quality_report, publish_schedule
+from app.routes.api import _build_final_schedule_validation_result, _build_global_doubleheader_validation, _raise_if_single_doubleheader_manual_move, _run_generated_slot_integrity_validation_and_repair, _run_global_doubleheader_repair, build_schedule_quality_report, publish_schedule
 
 
 class PublishQualityConsistencyTest(unittest.TestCase):
@@ -100,6 +100,62 @@ class PublishQualityConsistencyTest(unittest.TestCase):
         )
         self.db.add_all([field_instance, slot])
         return slot
+
+
+    def test_generated_slot_integrity_repairs_orphaned_scheduled_game_to_open_slot(self):
+        self.db.query(Game).delete()
+        host = HostLocation(id=uuid.uuid4(), organization_id=self.org.id, name='Playable Host', is_active=True)
+        self.db.add(host)
+        orphan = Game(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week.id,
+            home_team_id=self.team_a.id,
+            away_team_id=self.team_b.id,
+            game_status_id=self.status.id,
+            game_date=self.week.start_date,
+            kickoff_time=time(10, 0),
+        )
+        self.db.add(orphan)
+        self._add_open_slot(time(10, 0), host, field_type='SMALL')
+        self.db.commit()
+
+        diagnostics = _run_generated_slot_integrity_validation_and_repair(self.db, self.season.id)
+        self.db.refresh(orphan)
+
+        self.assertEqual(diagnostics['invalid_scheduled_game_count'], 1)
+        self.assertEqual(diagnostics['repaired_scheduled_game_count'], 1)
+        self.assertEqual(diagnostics['generated_slot_integrity_failure_count'], 0)
+        self.assertEqual(orphan.host_location_id, host.id)
+        self.assertIsNotNone(orphan.field_instance_id)
+
+    def test_generated_slot_integrity_unschedules_orphan_when_no_repair_exists(self):
+        self.db.query(GameSlot).delete()
+        self.db.query(FieldInstance).delete()
+        self.db.query(Game).delete()
+        unscheduled = GameStatus(id=uuid.uuid4(), code='UNSCHEDULED', label='Unscheduled', is_active=True)
+        self.db.add(unscheduled)
+        orphan = Game(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week.id,
+            home_team_id=self.team_a.id,
+            away_team_id=self.team_b.id,
+            game_status_id=self.status.id,
+            game_date=self.week.start_date,
+            kickoff_time=time(10, 0),
+        )
+        self.db.add(orphan)
+        self.db.commit()
+
+        diagnostics = _run_generated_slot_integrity_validation_and_repair(self.db, self.season.id)
+        self.db.refresh(orphan)
+        validation = _build_final_schedule_validation_result(self.db, self.season.id)
+
+        self.assertEqual(diagnostics['unscheduled_orphan_game_count'], 1)
+        self.assertEqual(orphan.game_status_id, unscheduled.id)
+        self.assertEqual(validation['generated_slot_integrity_failure_count'], 0)
+        self.assertGreater(validation['required_games_missing_count'], 0)
 
     def test_global_doubleheader_repair_moves_split_pair_to_same_location_adjacent_open_slot(self):
         self.db.query(Game).delete()
