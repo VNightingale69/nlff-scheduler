@@ -74,6 +74,15 @@ function booleanLabel(value: unknown): string {
   return String(value);
 }
 
+function trueHomeHostRuleLabel(value: unknown): string {
+  if (value === true) return 'Yes';
+  if (value === false) return 'No';
+  if (value === 'not_applicable') return 'Not applicable';
+  if (value === 'not_run') return 'Not run';
+  if (value === null || value === undefined || value === '') return 'Not run';
+  return String(value);
+}
+
 function toStringArray(value: unknown, fallback: string[] = []): string[] {
   if (Array.isArray(value)) return value.map((item) => String(item));
   if (typeof value === 'string' && value) return [value];
@@ -128,7 +137,7 @@ function summarizeAutoScheduleDiagnostics(value: any): AutoScheduleDiagnosticsSu
     fieldTimeConflicts: itemCount(value?.field_time_conflicts ?? diagnostics?.field_time_conflicts),
     doubleheaderBackToBackFailures: itemCount(value?.doubleheader_back_to_back_failures ?? diagnostics?.doubleheader_back_to_back_failures),
     hostOwnerAsAwayGames: itemCount(hostOwnerAwayGames),
-    trueHomeHostHardRulePassed: booleanLabel(value?.true_home_host_hard_rule_passed ?? diagnostics?.true_home_host_hard_rule_passed ?? trueHomeHost?.hard_rule_passed ?? trueHomeHost?.true_home_host_hard_rule_passed),
+    trueHomeHostHardRulePassed: trueHomeHostRuleLabel(value?.true_home_host_rule_passed ?? diagnostics?.true_home_host_rule_passed ?? trueHomeHost?.true_home_host_rule_passed ?? value?.true_home_host_hard_rule_passed ?? diagnostics?.true_home_host_hard_rule_passed ?? trueHomeHost?.hard_rule_passed ?? trueHomeHost?.true_home_host_hard_rule_passed),
     totalHomeHostViolations: toNumber(value?.total_home_host_violations ?? diagnostics?.total_home_host_violations ?? trueHomeHost?.total_home_host_violations ?? trueHomeHost?.host_owner_is_away_team),
     totalHomeHostExceptions: toNumber(value?.total_home_host_exceptions ?? diagnostics?.total_home_host_exceptions ?? trueHomeHost?.total_home_host_exceptions),
     overflowLocationsUsed: itemCount(value?.overflow_locations_used ?? diagnostics?.overflow_locations_used),
@@ -140,10 +149,10 @@ function summarizeAutoScheduleDiagnostics(value: any): AutoScheduleDiagnosticsSu
     skippedAttemptsByReason,
     failedValidationReasons,
     trueHomeHost: {
-      total_games_checked: trueHomeHost?.total_games_checked ?? 0,
-      violations: itemCount(trueHomeHost?.violations ?? trueHomeHost?.host_owner_is_away_games),
-      exceptions: itemCount(trueHomeHost?.exceptions),
-      hard_rule_passed: booleanLabel(trueHomeHost?.hard_rule_passed ?? trueHomeHost?.true_home_host_hard_rule_passed),
+      true_home_host_checked_count: trueHomeHost?.true_home_host_checked_count ?? trueHomeHost?.total_games_checked ?? 0,
+      true_home_host_violation_count: trueHomeHost?.true_home_host_violation_count ?? trueHomeHost?.total_home_host_violations ?? itemCount(trueHomeHost?.violations ?? trueHomeHost?.host_owner_is_away_games),
+      true_home_host_exception_count: trueHomeHost?.true_home_host_exception_count ?? itemCount(trueHomeHost?.true_home_host_exceptions ?? trueHomeHost?.exceptions),
+      true_home_host_rule_passed: trueHomeHostRuleLabel(trueHomeHost?.true_home_host_rule_passed ?? trueHomeHost?.hard_rule_passed ?? trueHomeHost?.true_home_host_hard_rule_passed),
       host_owner_is_away_team: trueHomeHost?.host_owner_is_away_team ?? itemCount(trueHomeHost?.host_owner_is_away_games),
     },
     turfWave: {
