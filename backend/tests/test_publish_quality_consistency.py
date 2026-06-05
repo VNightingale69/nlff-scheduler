@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import Base
 from app.models import Division, FieldInstance, Game, GameSlot, GameStatus, HostLocation, Organization, Season, Team, Week
-from app.routes.api import _build_global_doubleheader_validation, _raise_if_single_doubleheader_manual_move, build_schedule_quality_report, publish_schedule
+from app.routes.api import _build_global_doubleheader_validation, _raise_if_single_doubleheader_manual_move, _run_global_doubleheader_repair, build_schedule_quality_report, publish_schedule
 
 
 class PublishQualityConsistencyTest(unittest.TestCase):
@@ -73,6 +73,80 @@ class PublishQualityConsistencyTest(unittest.TestCase):
         )
         self.db.add_all([field_instance, game, slot])
         return game
+
+
+    def _add_open_slot(self, kickoff, host, field_type='SMALL'):
+        field_instance = FieldInstance(
+            id=uuid.uuid4(),
+            host_location_id=host.id,
+            hosting_availability_id=uuid.uuid4(),
+            instance_date=self.week.start_date,
+            field_name=f'Open Field {kickoff.hour}',
+            field_type=field_type,
+            is_active=True,
+        )
+        slot = GameSlot(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week.id,
+            field_instance_id=field_instance.id,
+            host_location_id=host.id,
+            slot_date=self.week.start_date,
+            start_time=kickoff,
+            end_time=time(kickoff.hour + 1, kickoff.minute),
+            field_type=field_type,
+            status='OPEN',
+            assigned_game_id=None,
+        )
+        self.db.add_all([field_instance, slot])
+        return slot
+
+    def test_global_doubleheader_repair_moves_split_pair_to_same_location_adjacent_open_slot(self):
+        self.db.query(Game).delete()
+        host_a = HostLocation(id=uuid.uuid4(), organization_id=self.org.id, name='Host A', is_active=True)
+        host_b = HostLocation(id=uuid.uuid4(), organization_id=self.org.id, name='Host B', is_active=True)
+        team_c = Team(id=uuid.uuid4(), organization_id=self.org.id, division_id=self.division.id, name='C', is_active=True)
+        self.db.add_all([host_a, host_b, team_c])
+        first = self._add_scheduled_game_with_slot(self.team_a, self.team_b, time(9, 0), host_a)
+        second = self._add_scheduled_game_with_slot(self.team_a, team_c, time(11, 0), host_b)
+        self._add_open_slot(time(10, 0), host_a)
+        self.db.commit()
+
+        diagnostics = _run_global_doubleheader_repair(self.db, self.season.id)
+        self.db.commit()
+        validation = _build_global_doubleheader_validation(self.db, self.season.id)
+        self.db.refresh(second)
+
+        self.assertTrue(diagnostics['doubleheader_repair_ran'])
+        self.assertEqual(diagnostics['doubleheader_repair_status'], 'SUCCEEDED')
+        self.assertEqual(diagnostics['invalid_doubleheaders_detected_count'], 1)
+        self.assertEqual(diagnostics['doubleheader_repair_success_count'], 1)
+        self.assertEqual(validation['doubleheader_not_back_to_back_count'], 0)
+        self.assertEqual(validation['doubleheader_split_location_count'], 0)
+        self.assertEqual(second.host_location_id, host_a.id)
+        self.assertEqual(second.kickoff_time, time(10, 0))
+        pair = validation['doubleheader_pairs'][0]
+        self.assertTrue(pair['same_location'])
+        self.assertTrue(pair['back_to_back'])
+        self.assertTrue(pair['pair_valid'])
+
+    def test_global_doubleheader_repair_reports_too_many_games_as_unresolvable(self):
+        self.db.query(Game).delete()
+        host = HostLocation(id=uuid.uuid4(), organization_id=self.org.id, name='Host A', is_active=True)
+        team_c = Team(id=uuid.uuid4(), organization_id=self.org.id, division_id=self.division.id, name='C', is_active=True)
+        team_d = Team(id=uuid.uuid4(), organization_id=self.org.id, division_id=self.division.id, name='D', is_active=True)
+        self.db.add_all([host, team_c, team_d])
+        self._add_scheduled_game_with_slot(self.team_a, self.team_b, time(9, 0), host)
+        self._add_scheduled_game_with_slot(self.team_a, team_c, time(10, 0), host)
+        self._add_scheduled_game_with_slot(self.team_a, team_d, time(11, 0), host)
+        self.db.commit()
+
+        diagnostics = _run_global_doubleheader_repair(self.db, self.season.id)
+
+        self.assertEqual(diagnostics['doubleheader_repair_status'], 'FAILED_UNREPAIRABLE')
+        self.assertEqual(diagnostics['invalid_doubleheaders_detected_count'], 1)
+        self.assertGreaterEqual(diagnostics['doubleheader_repair_failure_count'], 1)
+        self.assertTrue(any(row.get('code') == 'DOUBLEHEADER_TOO_MANY_GAMES_FOR_TEAM_DIVISION_DATE' for row in diagnostics['doubleheader_repair_failures']))
 
     def test_quality_report_uses_global_doubleheader_validation_counts(self):
         self.db.query(Game).delete()
