@@ -617,7 +617,22 @@ def _build_revised_scheduling_hierarchy_diagnostics(db: Session, season_id: uuid
         if slot.slot_date and slot.host_location_id:
             slots_by_date_host.setdefault((slot.slot_date, slot.host_location_id), []).append(slot)
     hosts_by_id = {host.id: host for host in db.query(HostLocation).filter(HostLocation.is_active.is_(True)).all()}
+    scheduled_games_by_team_date: dict[tuple[uuid.UUID, date], list[tuple[Game, GameSlot | None, HostLocation | None, Division]]] = {}
+    scheduled_slot_keys_by_game: dict[uuid.UUID, tuple[uuid.UUID | None, uuid.UUID | None, date | None, time | None]] = {}
+    for scheduled_game, scheduled_slot, scheduled_field, scheduled_host, scheduled_home, scheduled_away, scheduled_division, _scheduled_org, _scheduled_status in rows:
+        scheduled_slot_keys_by_game[scheduled_game.id] = (
+            getattr(scheduled_host, 'id', None),
+            getattr(scheduled_field, 'id', None),
+            scheduled_game.game_date,
+            scheduled_game.kickoff_time,
+        )
+        if scheduled_game.game_date:
+            for scheduled_team in (scheduled_home, scheduled_away):
+                scheduled_games_by_team_date.setdefault((scheduled_team.id, scheduled_game.game_date), []).append((scheduled_game, scheduled_slot, scheduled_host, scheduled_division))
+    true_home_host_checked_count = 0
     true_home_host_violation_count = 0
+    true_home_host_exception_count = 0
+    true_home_host_exceptions: list[dict[str, object]] = []
     host_owner_as_away_violation_count = len(host_owner_as_away_games)
     host_activation_summary_by_date: list[dict[str, object]] = []
     true_home_host_enforcement_by_date: list[dict[str, object]] = []
@@ -626,6 +641,91 @@ def _build_revised_scheduling_hierarchy_diagnostics(db: Session, season_id: uuid
     neutral_games_by_host: dict[str, int] = {}
     primary_host_counts: dict[str, int] = {}
     bug_warnings = []
+
+    def _true_home_exception_payload(
+        *,
+        game: Game,
+        game_date_value: date,
+        division: Division,
+        home_team: Team,
+        away_team: Team,
+        hosting_team: Team,
+        expected_host_ids: set[uuid.UUID],
+        actual_host: HostLocation | None,
+        opponent_hosting_status: str,
+        compatible_slot_count: int,
+        exception_reason: str,
+    ) -> dict[str, object]:
+        expected_ids = [str(host_id) for host_id in sorted(expected_host_ids, key=str)]
+        return {
+            'game_id': str(game.id),
+            'game_date': game_date_value.isoformat(),
+            'division_id': str(division.id) if getattr(division, 'id', None) else None,
+            'home_team_id': str(home_team.id),
+            'away_team_id': str(away_team.id),
+            'hosting_team_id': str(hosting_team.id),
+            'hosting_team_community_id': str(hosting_team.organization_id) if getattr(hosting_team, 'organization_id', None) else None,
+            'actual_host_location_id': str(actual_host.id) if actual_host else None,
+            'expected_host_location_id': expected_ids[0] if len(expected_ids) == 1 else None,
+            'expected_host_location_ids': expected_ids,
+            'opponent_hosting_status': opponent_hosting_status,
+            'compatible_home_host_slots_available': compatible_slot_count,
+            'exception_reason': exception_reason,
+        }
+
+    def _candidate_true_home_slot_reason(
+        candidate_slot: GameSlot,
+        *,
+        game: Game,
+        home_team: Team,
+        away_team: Team,
+        division: Division,
+        selected_host_ids_for_date: set[uuid.UUID],
+    ) -> str | None:
+        if candidate_slot.host_location_id not in selected_host_ids_for_date:
+            return 'TRUE_HOME_HOST_SELECTED_HOST_CONFLICT'
+        required_size = _normalize_field_size(_required_field_type_for_division(division))
+        if _normalize_field_size(candidate_slot.field_type) != required_size:
+            return 'TRUE_HOME_HOST_FIELD_SIZE_CONFLICT'
+        if candidate_slot.assigned_game_id and candidate_slot.assigned_game_id != game.id:
+            return 'TRUE_HOME_HOST_FIELD_CONFLICT'
+        field_key = (candidate_slot.host_location_id, candidate_slot.field_instance_id, candidate_slot.slot_date, candidate_slot.start_time)
+        for other_game_id, other_key in scheduled_slot_keys_by_game.items():
+            if other_game_id != game.id and other_key == field_key:
+                return 'TRUE_HOME_HOST_FIELD_CONFLICT'
+        for team in (home_team, away_team):
+            other_games = [item for item in scheduled_games_by_team_date.get((team.id, candidate_slot.slot_date), []) if item[0].id != game.id]
+            if any(other_game.kickoff_time == candidate_slot.start_time for other_game, _other_slot, _other_host, _other_division in other_games):
+                return 'TRUE_HOME_HOST_TEAM_CONFLICT'
+            if len(other_games) > 1:
+                return 'TRUE_HOME_HOST_DOUBLEHEADER_CONFLICT'
+            if len(other_games) == 1:
+                other_game, _other_slot, other_host, other_division = other_games[0]
+                candidate_minutes = _minutes_from_time(candidate_slot.start_time)
+                other_minutes = _minutes_from_time(other_game.kickoff_time)
+                if candidate_minutes is None or other_minutes is None or abs(candidate_minutes - other_minutes) != GAME_DURATION_MINUTES:
+                    return 'TRUE_HOME_HOST_DOUBLEHEADER_CONFLICT'
+                if other_host and candidate_slot.host_location_id != other_host.id:
+                    return 'TRUE_HOME_HOST_DOUBLEHEADER_CONFLICT'
+                if _normalize_field_size(_required_field_type_for_division(other_division)) != required_size:
+                    return 'TRUE_HOME_HOST_DOUBLEHEADER_CONFLICT'
+        return None
+
+    def _true_home_exception_reason_from_candidates(reasons: list[str], compatible_slot_count: int) -> str:
+        if compatible_slot_count == 0:
+            return 'TRUE_HOME_HOST_FIELD_SIZE_CONFLICT'
+        priority = [
+            'TRUE_HOME_HOST_SELECTED_HOST_CONFLICT',
+            'TRUE_HOME_HOST_FIELD_SIZE_CONFLICT',
+            'TRUE_HOME_HOST_TEAM_CONFLICT',
+            'TRUE_HOME_HOST_FIELD_CONFLICT',
+            'TRUE_HOME_HOST_DOUBLEHEADER_CONFLICT',
+        ]
+        for reason in priority:
+            if reason in reasons:
+                return reason
+        return 'TRUE_HOME_HOST_UNRESOLVABLE_WITH_CURRENT_CONSTRAINTS'
+
     for game_date in sorted(set([*games_by_date.keys(), *[key[0] for key in slots_by_date_host.keys()]])):
         selected_ids_for_date = selected_hosts_by_date.get(game_date)
         date_host_ids = set(selected_ids_for_date or {host_id for d, host_id in slots_by_date_host if d == game_date})
@@ -809,6 +909,10 @@ def _build_revised_scheduling_hierarchy_diagnostics(db: Session, season_id: uuid
                 scheduled_at_neutral_host = bool(actual_host_id and actual_host_owner_id not in active_hosting_community_ids)
                 team_is_home = bool(getattr(home, 'id', None) == getattr(team, 'id', None))
                 same_hosting_community = bool(getattr(home, 'organization_id', None) == getattr(away, 'organization_id', None) == hosting_org_id)
+                opponent = away if team_is_home else home
+                opponent_org_id = getattr(opponent, 'organization_id', None)
+                opponent_is_hosting = bool(opponent_org_id in active_hosting_community_ids)
+                opponent_hosting_status = 'hosting_community' if opponent_is_hosting else 'non_hosting_community'
                 required_size = _required_field_type_for_division(div)
                 compatible_owned_slots = [
                     owned_slot
@@ -887,6 +991,64 @@ def _build_revised_scheduling_hierarchy_diagnostics(db: Session, season_id: uuid
                         exception_reason = 'no compatible field size at owned active host'
                         rejection_reasons['no compatible field size at owned active host'] = 1
                 exception_used = bool(((not scheduled_at_owned) or scheduled_at_lower_priority_owned) and exception_reason)
+                true_home_host_violation_recorded_for_game = False
+                if opponent_is_hosting and not same_hosting_community:
+                    both_hosting_payload = _true_home_exception_payload(
+                        game=g,
+                        game_date_value=game_date,
+                        division=div,
+                        home_team=home,
+                        away_team=away,
+                        hosting_team=team,
+                        expected_host_ids=expected_host_ids,
+                        actual_host=actual_host,
+                        opponent_hosting_status=opponent_hosting_status,
+                        compatible_slot_count=len(compatible_owned_slots),
+                        exception_reason='TRUE_HOME_HOST_BOTH_TEAMS_ARE_HOSTING_COMMUNITIES',
+                    )
+                    true_home_host_exception_count += 1
+                    true_home_host_exceptions.append(both_hosting_payload)
+                elif not opponent_is_hosting and not same_hosting_community:
+                    true_home_host_checked_count += 1
+                    selected_candidate_host_ids = set(selected_ids_for_date or date_host_ids)
+                    candidate_rejection_codes = [
+                        _candidate_true_home_slot_reason(
+                            owned_slot,
+                            game=g,
+                            home_team=home,
+                            away_team=away,
+                            division=div,
+                            selected_host_ids_for_date=selected_candidate_host_ids,
+                        )
+                        for owned_slot in compatible_owned_slots
+                    ]
+                    valid_true_home_slot_exists = any(reason is None for reason in candidate_rejection_codes)
+                    explicit_reason = _true_home_exception_reason_from_candidates(
+                        [reason for reason in candidate_rejection_codes if reason],
+                        len(compatible_owned_slots),
+                    )
+                    if not scheduled_at_owned or not team_is_home:
+                        payload = _true_home_exception_payload(
+                            game=g,
+                            game_date_value=game_date,
+                            division=div,
+                            home_team=home,
+                            away_team=away,
+                            hosting_team=team,
+                            expected_host_ids=expected_host_ids,
+                            actual_host=actual_host,
+                            opponent_hosting_status=opponent_hosting_status,
+                            compatible_slot_count=len(compatible_owned_slots),
+                            exception_reason='TRUE_HOME_HOST_UNRESOLVABLE_WITH_CURRENT_CONSTRAINTS' if valid_true_home_slot_exists else explicit_reason,
+                        )
+                        if valid_true_home_slot_exists or not exception_reason:
+                            true_home_host_violation_count += 1
+                            date_home_host_violations += 1
+                            true_home_host_violation_recorded_for_game = True
+                            bug_warnings.append('TRUE_HOME_HOST_VIOLATION: hosting-community team was not placed at its selected owned host against a non-hosting opponent.')
+                        else:
+                            true_home_host_exception_count += 1
+                        true_home_host_exceptions.append(payload)
                 if scheduled_at_owned:
                     scheduled_at_owned_total += 1
                     if community_row is not None:
@@ -946,13 +1108,13 @@ def _build_revised_scheduling_hierarchy_diagnostics(db: Session, season_id: uuid
                     })
                     if not rejection_reasons:
                         bug_warnings.append('BUG: hosting-community game assigned to grass/overflow without TURF_STADIUM rejection reason.')
-                if (not scheduled_at_owned) and valid_owned_slot_rows:
+                if (not scheduled_at_owned) and valid_owned_slot_rows and not true_home_host_violation_recorded_for_game:
                     date_home_host_violations += 1
                     bug_warnings.append('TRUE_HOME_HOST_VIOLATION: hosting-community team scheduled away from selected owned host while valid owned-host slot existed.')
-                elif scheduled_at_other_active_host and not exception_used:
+                elif scheduled_at_other_active_host and not exception_used and not true_home_host_violation_recorded_for_game:
                     date_home_host_violations += 1
                     bug_warnings.append('TRUE_HOME_HOST_VIOLATION: hosting-community team scheduled at another selected host without a hard owned-host exception.')
-                if scheduled_at_owned and not team_is_home and not same_hosting_community:
+                if scheduled_at_owned and not team_is_home and not same_hosting_community and not true_home_host_violation_recorded_for_game:
                     date_home_host_violations += 1
                     bug_warnings.append('BUG: hosting-community team was not home at its selected owned host.')
                 if not scheduled_at_owned and compatible_owned_slots and not candidate_rejections:
@@ -1403,6 +1565,10 @@ def _build_revised_scheduling_hierarchy_diagnostics(db: Session, season_id: uuid
         'failures': doubleheader_failures,
     }
     grass_field_usage_diagnostics = _build_grass_field_usage_diagnostics(db, season_id)
+    if true_home_host_checked_count == 0 and true_home_host_exception_count == 0:
+        true_home_host_rule_passed: bool | str = 'not_applicable'
+    else:
+        true_home_host_rule_passed = (true_home_host_violation_count == 0)
 
     return {
         'diagnostics_status': 'SUCCEEDED',
@@ -1439,6 +1605,16 @@ def _build_revised_scheduling_hierarchy_diagnostics(db: Session, season_id: uuid
             'same_community_games': same_community_games,
             'neutral_site_games': neutral_site_games,
             'hosts': sorted(host_diag_by_id.values(), key=lambda row: str(row.get('host_location_name') or '')),
+            'true_home_host_checked_count': true_home_host_checked_count,
+            'true_home_host_violation_count': true_home_host_violation_count,
+            'true_home_host_exception_count': true_home_host_exception_count,
+            'total_home_host_exceptions': true_home_host_exception_count,
+            'true_home_host_rule_passed': true_home_host_rule_passed,
+            'hard_rule_passed': true_home_host_rule_passed,
+            'true_home_host_hard_rule_passed': true_home_host_rule_passed,
+            'true_home_host_exceptions': true_home_host_exceptions,
+            'exceptions': true_home_host_exceptions,
+            'violations': [row for row in true_home_host_exceptions if row.get('exception_reason') == 'TRUE_HOME_HOST_UNRESOLVABLE_WITH_CURRENT_CONSTRAINTS'],
             'total_home_host_violations': true_home_host_violation_count,
             'TRUE_HOME_HOST_VIOLATION': true_home_host_violation_count,
             'HOST_OWNER_AS_AWAY_VIOLATION': host_owner_as_away_violation_count,
@@ -18293,6 +18469,7 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         auto_schedule_diagnostics['Turf Stadium Schedule Summary'] = revised_hierarchy_diagnostics.get('turf_stadium_schedule_summary')
         auto_schedule_diagnostics['Host Activation Summary by Date'] = revised_hierarchy_diagnostics.get('host_activation_summary_by_date')
         auto_schedule_diagnostics['True Home-Host Diagnostics'] = revised_hierarchy_diagnostics.get('true_home_host_diagnostics')
+        auto_schedule_diagnostics['true_home_host_diagnostics'] = revised_hierarchy_diagnostics.get('true_home_host_diagnostics')
         auto_schedule_diagnostics['Owned Host Priority Diagnostics'] = revised_hierarchy_diagnostics.get('Owned Host Priority Diagnostics')
         auto_schedule_diagnostics['Neutral Game Balance Diagnostics'] = revised_hierarchy_diagnostics.get('neutral_game_balance_diagnostics')
         auto_schedule_diagnostics['Game-Day Compaction Diagnostics'] = revised_hierarchy_diagnostics.get('game_day_compaction_diagnostics')
@@ -18305,6 +18482,20 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         auto_schedule_diagnostics['Overflow/Grass Location Diagnostics'] = revised_hierarchy_diagnostics.get('overflow_grass_location_diagnostics')
         auto_schedule_diagnostics['Pull-Forward Optimization Diagnostics'] = revised_hierarchy_diagnostics.get('pull_forward_optimization_diagnostics')
         true_home_diag = revised_hierarchy_diagnostics.get('true_home_host_diagnostics') or {}
+        true_home_rule_status = true_home_diag.get('true_home_host_rule_passed', 'not_run')
+        auto_schedule_diagnostics['true_home_host_rule_passed'] = true_home_rule_status
+        auto_schedule_diagnostics['true_home_host_checked_count'] = int(true_home_diag.get('true_home_host_checked_count') or 0)
+        auto_schedule_diagnostics['true_home_host_violation_count'] = int(true_home_diag.get('true_home_host_violation_count') or true_home_diag.get('total_home_host_violations') or 0)
+        auto_schedule_diagnostics['true_home_host_exception_count'] = int(true_home_diag.get('true_home_host_exception_count') or 0)
+        auto_schedule_diagnostics['total_home_host_violations'] = auto_schedule_diagnostics['true_home_host_violation_count']
+        auto_schedule_diagnostics['total_home_host_exceptions'] = auto_schedule_diagnostics['true_home_host_exception_count']
+        auto_schedule_diagnostics['true_home_host_exceptions'] = list(true_home_diag.get('true_home_host_exceptions') or [])
+        if true_home_rule_status == 'not_run' or 'true_home_host_rule_passed' not in true_home_diag:
+            validation_errors.append('TRUE_HOME_HOST_VALIDATION_NOT_RUN: mandatory true home-host validation did not run.')
+            warnings.append('BUG: true home-host validation did not run.')
+        elif true_home_rule_status is False:
+            validation_errors.append('TRUE_HOME_HOST_VIOLATION: unresolved true home-host violations exist.')
+            warnings.append('BUG: unresolved true home-host violations exist.')
         true_home_violation_total = int(true_home_diag.get('total_home_host_violations') or true_home_diag.get('TRUE_HOME_HOST_VIOLATION') or 0)
         host_owner_as_away_violation_total = int(true_home_diag.get('HOST_OWNER_AS_AWAY_VIOLATION') or true_home_diag.get('host_owner_as_away_count') or 0)
         if true_home_violation_total > 0:
@@ -18342,11 +18533,23 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
             'diagnostics_status': 'FAILED',
             'diagnostics_error': diagnostics_error,
             'diagnostics_warnings': [f'Diagnostics warning: revised scheduling hierarchy diagnostics unavailable ({diagnostics_error}).'],
+            'true_home_host_diagnostics': {
+                'true_home_host_checked_count': 0,
+                'true_home_host_violation_count': 0,
+                'true_home_host_exception_count': 0,
+                'true_home_host_rule_passed': 'not_run',
+                'diagnostics_error': diagnostics_error,
+                'true_home_host_exceptions': [],
+            },
         }
         warning = f'Diagnostics warning: revised scheduling hierarchy diagnostics unavailable ({diagnostics_error}).'
         warnings.append(warning)
         validation_errors.append(f'REVISED_HIERARCHY_DIAGNOSTICS_FAILED: mandatory hierarchy validation unavailable ({diagnostics_error}).')
         auto_schedule_diagnostics['revised_scheduling_hierarchy_diagnostics'] = revised_hierarchy_diagnostics
+        auto_schedule_diagnostics['True Home-Host Diagnostics'] = revised_hierarchy_diagnostics.get('true_home_host_diagnostics')
+        auto_schedule_diagnostics['true_home_host_diagnostics'] = revised_hierarchy_diagnostics.get('true_home_host_diagnostics')
+        auto_schedule_diagnostics['true_home_host_rule_passed'] = 'not_run'
+        auto_schedule_diagnostics['diagnostics_error'] = diagnostics_error
         auto_schedule_diagnostics['revised_scheduling_hierarchy_diagnostics_status'] = 'FAILED'
         auto_schedule_diagnostics['revised_scheduling_hierarchy_diagnostics_error'] = diagnostics_error
         auto_schedule_diagnostics.setdefault('diagnostics_warnings', []).append(warning)
