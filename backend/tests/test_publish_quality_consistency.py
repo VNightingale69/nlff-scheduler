@@ -6,7 +6,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import Base
-from app.models import Division, FieldInstance, Game, GameSlot, GameStatus, HostLocation, Organization, Season, Team, Week
+from app.models import Division, FieldInstance, Game, GameSlot, GameStatus, HostLocation, HostingAvailability, Organization, Season, Team, TurfWave, Week
 from app.routes.api import build_schedule_quality_report, publish_schedule
 
 
@@ -91,6 +91,63 @@ class PublishQualityConsistencyTest(unittest.TestCase):
         self.assertEqual(report['metrics']['doubleheader_split_location_count'], 1)
         self.assertTrue(any(error['code'] == 'non_back_to_back_double_headers' for error in report['hard_errors']))
         self.assertTrue(any(error['code'] == 'split_location_double_headers' for error in report['hard_errors']))
+
+
+    def test_quality_report_blocks_non_chronological_turf_wave_sequences(self):
+        host = HostLocation(
+            id=uuid.uuid4(),
+            organization_id=self.org.id,
+            name='Turf Host',
+            surface_type='TURF_STADIUM',
+            is_active=True,
+        )
+        availability = HostingAvailability(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week.id,
+            organization_id=self.org.id,
+            host_location_id=host.id,
+            available_date=self.week.start_date,
+            primary_game_date=self.week.start_date,
+            start_time=time(9, 0),
+            end_time=time(11, 0),
+            is_available=True,
+        )
+        early_wave = TurfWave(
+            id=uuid.uuid4(),
+            host_location_id=host.id,
+            hosting_availability_id=availability.id,
+            week_id=self.week.id,
+            host_date=self.week.start_date,
+            sequence_number=2,
+            wave_intent='SMALL_MEDIUM',
+            preferred_layout_code='TWO_SMALL_ONE_MEDIUM',
+            start_time=time(9, 0),
+            end_time=time(10, 0),
+        )
+        second_wave = TurfWave(
+            id=uuid.uuid4(),
+            host_location_id=host.id,
+            hosting_availability_id=availability.id,
+            week_id=self.week.id,
+            host_date=self.week.start_date,
+            sequence_number=4,
+            wave_intent='MIXED',
+            preferred_layout_code='ONE_SMALL_ONE_LARGE',
+            start_time=time(10, 0),
+            end_time=time(11, 0),
+        )
+        self.db.add_all([host, availability, early_wave, second_wave])
+        self.db.commit()
+
+        report = build_schedule_quality_report(self.db, self.season.id)
+
+        self.assertEqual(report['metrics']['turf_wave_sequence_validation_failure_count'], 1)
+        self.assertTrue(any(error['code'] == 'TURF_WAVE_SEQUENCE_GAP' for error in report['hard_errors']))
+        diagnostic = report['turf_wave_sequence_diagnostics'][0]
+        self.assertEqual(diagnostic['wave_sequence_numbers'], [2, 4])
+        self.assertFalse(diagnostic['sequence_contiguous'])
+        self.assertFalse(diagnostic['sequence_chronological'])
 
     def test_publish_uses_same_quality_report_source(self):
         report = build_schedule_quality_report(self.db, self.season.id)

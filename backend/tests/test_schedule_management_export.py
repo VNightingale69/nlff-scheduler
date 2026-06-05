@@ -17,11 +17,25 @@ class ScheduleManagementExportTest(unittest.TestCase):
         self.assertEqual(_format_schedule_export_time(time(13, 5)), '13:05')
         self.assertEqual(_format_schedule_export_status('scheduled'), 'SCHEDULED')
 
-    def test_export_row_uses_compact_schedule_shape(self):
+    def test_export_row_uses_authoritative_turf_wave_metadata_for_field_label(self):
+        field = SimpleNamespace(id='field-1', field_name='Wave 4 ONE_SMALL_ONE_LARGE Small Field 2', field_type='small')
+        wave = SimpleNamespace(sequence_number=2, preferred_layout_code='TWO_SMALL_ONE_MEDIUM', slots=[])
+        slot = SimpleNamespace(
+            id='slot-1',
+            field_type='small',
+            field_instance=field,
+            field_instance_id=field.id,
+            turf_wave_id='wave-1',
+            turf_wave=wave,
+            start_time=time(10, 0),
+            end_time=time(11, 0),
+        )
+        wave.slots = [slot]
+
         values = _schedule_export_row_values(
-            SimpleNamespace(game_date=date(2026, 8, 9), kickoff_time=time(9, 0)),
-            SimpleNamespace(field_type='small'),
-            SimpleNamespace(field_name='Wave 1 TWO_SMALL_ONE_MEDIUM Small Field 2'),
+            SimpleNamespace(game_date=date(2026, 8, 9), kickoff_time=time(10, 0)),
+            slot,
+            field,
             SimpleNamespace(name='Westosha Stadium'),
             SimpleNamespace(name='Westosha Coed 2-3 Maroon'),
             SimpleNamespace(name='LCS Coed 2-3 Red'),
@@ -33,12 +47,12 @@ class ScheduleManagementExportTest(unittest.TestCase):
             values,
             [
                 '8/9/2026',
-                '9:00',
+                '10:00',
                 'coed_2_3',
                 'Westosha Coed 2-3 Maroon',
                 'LCS Coed 2-3 Red',
                 'Westosha Stadium',
-                'Wave 1 TWO_SMALL_ONE_MEDIUM Small Field 2',
+                'Wave 2 TWO_SMALL_ONE_MEDIUM Small Field 1',
                 'SMALL',
                 'SCHEDULED',
             ],

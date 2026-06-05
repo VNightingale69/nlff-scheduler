@@ -293,6 +293,7 @@ class TurfWave(Base, TimestampMixin):
     host_location = relationship('HostLocation')
     hosting_availability = relationship('HostingAvailability')
     week = relationship('Week')
+    slots = relationship('GameSlot', back_populates='turf_wave')
     __table_args__ = (
         UniqueConstraint('hosting_availability_id', 'sequence_number', name='uq_turf_wave_availability_sequence'),
         Index('ix_turf_waves_host_date', 'host_location_id', 'host_date'),
@@ -332,7 +333,7 @@ class GameSlot(Base, TimestampMixin):
     season = relationship('Season')
     week = relationship('Week')
     assigned_game = relationship('Game')
-    turf_wave = relationship('TurfWave')
+    turf_wave = relationship('TurfWave', back_populates='slots')
     __table_args__ = (UniqueConstraint('field_instance_id', 'start_time', 'end_time', name='uq_game_slot_instance_time'),)
 
 class GameStatus(Base, TimestampMixin):
