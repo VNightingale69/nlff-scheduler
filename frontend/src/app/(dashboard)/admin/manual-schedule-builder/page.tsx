@@ -15,7 +15,12 @@ type AutoScheduleDiagnosticsSummary = {
   gamesCommitted: number;
   previewGames: number;
   requiredGamesMissing: number;
+  finalValidationStatus: string;
+  scheduleQualityStatus: string;
+  diagnosticsStatus: string;
+  diagnosticsError: string;
   validationFailures: number;
+  finalValidationFailures: unknown[];
   teamTimeConflicts: number;
   fieldTimeConflicts: number;
   doubleheaderBackToBackFailures: number;
@@ -92,6 +97,7 @@ function createDiagnosticsDownload(value: unknown): string | null {
 
 function summarizeAutoScheduleDiagnostics(value: any): AutoScheduleDiagnosticsSummary {
   const diagnostics = value?.auto_schedule_diagnostics || {};
+  const finalValidation = value?.final_validation || diagnostics?.final_validation || {};
   const hostVerification = value?.host_location_vs_home_team_verification || diagnostics?.host_location_vs_home_team_verification || {};
   const trueHomeHost = value?.true_home_host_diagnostics || diagnostics?.true_home_host_diagnostics || hostVerification;
   const turfWave = value?.turf_wave_compaction || diagnostics?.turf_wave_compaction || {};
@@ -100,12 +106,16 @@ function summarizeAutoScheduleDiagnostics(value: any): AutoScheduleDiagnosticsSu
   const failedValidationReasons = compactRecord(value?.failed_validation_reasons || diagnostics?.failed_validation_reasons || {});
   const rejectionReasons = compactRecord(value?.rejection_diagnostics?.by_reason || diagnostics?.rejection_diagnostics?.by_reason || value?.rejections_by_reason || diagnostics?.rejections_by_reason || skippedAttemptsByReason);
   const requiredGamesMissing = itemCount(value?.required_games_still_missing ?? value?.required_games_missing ?? diagnostics?.required_games_still_missing ?? diagnostics?.required_games_missing);
-  const validationFailures = itemCount(value?.validation_failures ?? value?.validation_errors ?? diagnostics?.validation_failures) + toNumber(value?.failed_validation_count ?? diagnostics?.failed_validation_count);
+  const validationFailures = toNumber(finalValidation?.final_validation_failure_count ?? value?.final_validation_failure_count ?? diagnostics?.final_validation_failure_count) || (itemCount(value?.validation_failures ?? value?.validation_errors ?? diagnostics?.validation_failures) + toNumber(value?.failed_validation_count ?? diagnostics?.failed_validation_count));
   const hostOwnerAwayGames = hostVerification?.host_owner_is_away_games ?? value?.host_owner_as_away_games ?? diagnostics?.host_owner_as_away_games;
   const filename = `auto-schedule-diagnostics-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
 
   return {
-    status: value?.status || 'unknown',
+    status: value?.status || finalValidation?.final_validation_status || 'unknown',
+    finalValidationStatus: String(finalValidation?.final_validation_status ?? value?.final_validation_status ?? diagnostics?.final_validation_status ?? 'unknown'),
+    scheduleQualityStatus: String(finalValidation?.schedule_quality_status ?? value?.schedule_quality_status ?? diagnostics?.schedule_quality_status ?? 'unknown'),
+    diagnosticsStatus: String(finalValidation?.diagnostics_status ?? value?.diagnostics_status ?? diagnostics?.diagnostics_status ?? 'unknown'),
+    diagnosticsError: String(finalValidation?.diagnostics_error ?? value?.diagnostics_error ?? diagnostics?.diagnostics_error ?? ''),
     message: value?.message || 'No message returned.',
     rootCauses: toStringArray(value?.root_cause_categories || diagnostics?.root_cause_categories, ['unknown']),
     dryRun: Boolean(value?.dry_run),
@@ -113,6 +123,7 @@ function summarizeAutoScheduleDiagnostics(value: any): AutoScheduleDiagnosticsSu
     previewGames: toNumber(value?.preview_games_count ?? diagnostics?.preview_games_count),
     requiredGamesMissing,
     validationFailures,
+    finalValidationFailures: toStringArray(finalValidation?.final_validation_failures ?? value?.final_validation_failures ?? diagnostics?.final_validation_failures, []),
     teamTimeConflicts: itemCount(value?.team_time_conflicts ?? diagnostics?.team_time_conflicts),
     fieldTimeConflicts: itemCount(value?.field_time_conflicts ?? diagnostics?.field_time_conflicts),
     doubleheaderBackToBackFailures: itemCount(value?.doubleheader_back_to_back_failures ?? diagnostics?.doubleheader_back_to_back_failures),
@@ -155,6 +166,7 @@ function summarizeAutoScheduleDiagnostics(value: any): AutoScheduleDiagnosticsSu
       root_cause_categories: value?.root_cause_categories || diagnostics?.root_cause_categories,
       skipped_attempts_by_reason: skippedAttemptsByReason,
       failed_validation_reasons: failedValidationReasons,
+      final_validation: finalValidation,
     }),
     downloadUrl: createDiagnosticsDownload(value),
     downloadFilename: filename,
@@ -230,6 +242,25 @@ export default function ManualScheduleBuilderPage() {
     return e instanceof Error ? e.message : 'Request failed.';
   };
 
+  const loadFinalScheduleValidation = async () => {
+    if (!seasonId) return null;
+    const quality: any = await apiFetch(`/schedule-management/quality-report?season_id=${seasonId}`, {}, token);
+    return quality?.final_validation || null;
+  };
+
+  const setManualScheduleBannerFromValidation = (action: string, finalValidation: any) => {
+    const status = String(finalValidation?.final_validation_status || '').toUpperCase();
+    const qualityStatus = String(finalValidation?.schedule_quality_status || '').toUpperCase();
+    const failureCount = Number(finalValidation?.final_validation_failure_count || 0);
+    const missingCount = Number(finalValidation?.required_games_missing_count || 0);
+    if (status === 'COMPLETE' && qualityStatus === 'COMPLETE') {
+      setSuccess(`${action} Final validation COMPLETE.`);
+      return;
+    }
+    setError(`${action} Schedule is ${status || qualityStatus || 'not complete'}: ${failureCount} hard-rule failures, ${missingCount} required games missing. Review Schedule Quality Report.`);
+  };
+
+
   const load = async () => {
     const opts: any = await apiFetch('/manual-schedule-builder/options', {}, token);
     const statuses: any = await apiFetch('/game-statuses?page_size=200', {}, token);
@@ -271,8 +302,8 @@ export default function ManualScheduleBuilderPage() {
         <button className='rounded bg-blue-600 px-3 py-2 text-white disabled:cursor-not-allowed disabled:bg-slate-300' disabled={!canSave} onClick={async () => {
           setError(''); setSuccess('');
           try {
-            await apiFetch('/manual-schedule-builder/assign', { method: 'POST', body: JSON.stringify({ season_id: seasonId, week_id: weekId, division_id: divisionId, home_team_id: homeTeamId, away_team_id: awayTeamId, generated_slot_id: slotId }) }, token);
-            await load(); await loadRecommendations(); setSlotId(''); setSuccess('Game successfully scheduled.');
+            const res: any = await apiFetch('/manual-schedule-builder/assign', { method: 'POST', body: JSON.stringify({ season_id: seasonId, week_id: weekId, division_id: divisionId, home_team_id: homeTeamId, away_team_id: awayTeamId, generated_slot_id: slotId }) }, token);
+            await load(); await loadRecommendations(); setSlotId(''); setManualScheduleBannerFromValidation('Game scheduled.', res.final_validation);
           } catch (e: unknown) { setError(extractError(e)); }
         }}>Save Game Assignment</button>
       </div>
@@ -334,7 +365,8 @@ export default function ManualScheduleBuilderPage() {
                 const applied: any = await apiFetch('/manual-schedule-builder/auto-fill-apply', { method: 'POST', body: JSON.stringify({ season_id: seasonId, week_id: weekId, division_id: divisionId, proposals: autoFillPreview }) }, token);
                 const maxGames = Number(applied.max_games ?? autoFillPreview.length ?? 0);
                 const createdCount = Number(applied.created_count ?? applied.created_games ?? 0);
-                setSuccess(`Applied auto-fill. Created ${createdCount} of ${maxGames} possible games.`);
+                const finalValidation = applied.final_validation || await loadFinalScheduleValidation();
+                setManualScheduleBannerFromValidation(`Applied auto-fill. Created ${createdCount} of ${maxGames} possible games.`, finalValidation);
                 setAutoFillSkipped((applied.skipped || []).map((s: any) => ({ reason: s.reason || String(s) })));
                 setSchedulerDiagnostics(applied.diagnostics || schedulerDiagnostics);
                 setAutoFillPreview([]);
@@ -494,7 +526,7 @@ export default function ManualScheduleBuilderPage() {
                     await apiFetch(`/schedule-management/games/${g.id}/unschedule`, { method: 'PATCH' }, token);
                     await load();
                     await loadRecommendations();
-                    setSuccess('Game unscheduled.');
+                    setManualScheduleBannerFromValidation('Game unscheduled.', await loadFinalScheduleValidation());
                   }
                   catch (e: unknown) {
                     await load();
@@ -527,7 +559,7 @@ export default function ManualScheduleBuilderPage() {
             if (dup && !window.confirm('Duplicate matchup warning: proceed?')) return;
             try {
               await apiFetch(`/games/${editGame.id}`, { method: 'PATCH', body: JSON.stringify({ season_id: editGame.season_id, week_id: editGame.week_id, division_id: editGame.division_id, home_team_id: editGame.home_team_id, away_team_id: editGame.away_team_id, field_id: editGame.field_id, game_status_id: editGame.game_status_id, game_date: editGame.game_date, kickoff_time: editGame.kickoff_time }) }, token);
-              setEditGame(null); await load(); await loadRecommendations(); setSuccess('Game updated.');
+              setEditGame(null); await load(); await loadRecommendations(); setManualScheduleBannerFromValidation('Game updated.', await loadFinalScheduleValidation());
             } catch (e: unknown) { setError(extractError(e)); }
           }}>Save Edit</button>
           <button className='rounded border px-3 py-2' onClick={() => setEditGame(null)}>Cancel</button>
@@ -543,7 +575,7 @@ export default function ManualScheduleBuilderPage() {
           <button className='rounded bg-blue-600 px-3 py-2 text-white' onClick={async () => {
             if (!slotId) return;
             setError('');
-            try { await apiFetch(`/schedule-management/games/${moveGame.id}/move`, { method: 'PATCH', body: JSON.stringify({ generated_slot_id: slotId }) }, token); setMoveGame(null); setSlotId(''); await load(); await loadRecommendations(); setSuccess('Game moved.'); }
+            try { await apiFetch(`/schedule-management/games/${moveGame.id}/move`, { method: 'PATCH', body: JSON.stringify({ generated_slot_id: slotId }) }, token); setMoveGame(null); setSlotId(''); await load(); await loadRecommendations(); setManualScheduleBannerFromValidation('Game moved.', await loadFinalScheduleValidation()); }
             catch (e: unknown) { setError(extractError(e)); }
           }}>Save Move</button>
           <button className='rounded border px-3 py-2' onClick={() => { setMoveGame(null); setSlotId(''); }}>Cancel</button>
@@ -633,16 +665,18 @@ export default function ManualScheduleBuilderPage() {
                   await load();
                   await loadRecommendations();
                   setAutoScheduleDiagnostics(summarizeAutoScheduleDiagnostics(res));
-                  const missing = (res.required_games_still_missing || []).length;
-                  const warningCount = (res.warnings || []).length + (res.validation_errors || []).length;
+                  const finalValidation = res.final_validation || res.auto_schedule_diagnostics?.final_validation || {};
+                  const finalStatus = String(finalValidation.final_validation_status || res.final_validation_status || res.status || '').toUpperCase();
                   const rootCauses = (res.root_cause_categories || res.auto_schedule_diagnostics?.root_cause_categories || []).join(', ');
                   const baseMessage = res.message || 'Auto-schedule completed.';
-                  if (res.dry_run) {
+                  if (res.dry_run && finalStatus === 'COMPLETE') {
                     setSuccess(res.message || `Dry run completed: ${Number(res.preview_games_count || 0)} games would be scheduled. No games were saved.`);
-                  } else if (res.status === 'warning' || Number(res.committed_games_count ?? res.total_games_created ?? 0) === 0) {
-                    setError(`${baseMessage}${rootCauses ? ` Root causes: ${rootCauses}.` : ''}`);
+                  } else if (finalStatus === 'COMPLETE') {
+                    setSuccess(`${baseMessage} ${Number(res.committed_games_count ?? res.total_games_created ?? 0)} games scheduled. Final validation COMPLETE.`);
                   } else {
-                    setSuccess(`${baseMessage} ${Number(res.committed_games_count ?? res.total_games_created ?? 0)} games scheduled, ${Number(res.games_skipped || 0)} placement attempts skipped, ${missing} required game groups still missing, ${warningCount} warnings/errors.`);
+                    const failureCount = Number(finalValidation.final_validation_failure_count || res.final_validation_failure_count || 0);
+                    const missing = Number(finalValidation.required_games_missing_count || 0);
+                    setError(`${baseMessage} Final status ${finalStatus || 'UNKNOWN'}; ${failureCount} hard-rule failures, ${missing} required games missing.${rootCauses ? ` Root causes: ${rootCauses}.` : ''}`);
                   }
                 } catch (e: unknown) {
                   setError(`Auto-schedule failed: ${extractError(e)}`);
@@ -663,6 +697,9 @@ export default function ManualScheduleBuilderPage() {
             <div className='flex flex-wrap items-start justify-between gap-3'>
               <div>
                 <div><span className='font-semibold'>Status:</span> {autoScheduleDiagnostics.status} — {autoScheduleDiagnostics.message}</div>
+                <div><span className='font-semibold'>Final validation status:</span> {autoScheduleDiagnostics.finalValidationStatus}</div>
+                <div><span className='font-semibold'>Schedule quality status:</span> {autoScheduleDiagnostics.scheduleQualityStatus}</div>
+                <div><span className='font-semibold'>Diagnostics status:</span> {autoScheduleDiagnostics.diagnosticsStatus}{autoScheduleDiagnostics.diagnosticsError ? ` — ${autoScheduleDiagnostics.diagnosticsError}` : ''}</div>
                 <div><span className='font-semibold'>Root causes:</span> {autoScheduleDiagnostics.rootCauses.join(', ')}</div>
                 <div><span className='font-semibold'>Dry run:</span> {autoScheduleDiagnostics.dryRun ? 'Yes' : 'No'}</div>
               </div>
@@ -672,7 +709,7 @@ export default function ManualScheduleBuilderPage() {
               <div>Games committed: <span className='font-semibold'>{autoScheduleDiagnostics.gamesCommitted}</span></div>
               <div>Preview games: <span className='font-semibold'>{autoScheduleDiagnostics.previewGames}</span></div>
               <div>Required games missing: <span className='font-semibold'>{autoScheduleDiagnostics.requiredGamesMissing}</span></div>
-              <div>Validation failures: <span className='font-semibold'>{autoScheduleDiagnostics.validationFailures}</span></div>
+              <div>Final validation failures: <span className='font-semibold'>{autoScheduleDiagnostics.validationFailures}</span></div>
               <div>Team time conflicts: <span className='font-semibold'>{autoScheduleDiagnostics.teamTimeConflicts}</span></div>
               <div>Field time conflicts: <span className='font-semibold'>{autoScheduleDiagnostics.fieldTimeConflicts}</span></div>
               <div>Back-to-back doubleheader failures: <span className='font-semibold'>{autoScheduleDiagnostics.doubleheaderBackToBackFailures}</span></div>
