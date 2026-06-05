@@ -117,6 +117,7 @@ FINAL_VALIDATION_COUNTER_KEYS = (
     'turf_wave_non_contiguous_used_time_count',
     'turf_wave_used_later_with_empty_earlier_wave_count',
     'turf_wave_pull_forward_required_count',
+    'turf_wave_pull_forward_unresolved_count',
     'turf_wave_canonical_mapping_missing_count',
     'turf_wave_label_repair_failed_count',
     'generated_slot_integrity_failure_count',
@@ -728,6 +729,8 @@ def _build_final_schedule_validation_result(
     optional_optimization_skip_reason: str | None = None,
     revised_hierarchy_diagnostics: dict[str, object] | None = None,
     extra_failures: list[object] | None = None,
+    turf_pull_forward_repair_diagnostics: dict[str, object] | None = None,
+    run_turf_pull_forward_repair: bool = True,
 ) -> dict[str, object]:
     """Single source of truth for final schedule status and hard-rule counters.
 
@@ -738,6 +741,32 @@ def _build_final_schedule_validation_result(
     counters = {key: 0 for key in FINAL_VALIDATION_COUNTER_KEYS}
     failures: list[dict[str, object]] = []
     generated_slot_integrity = _run_generated_slot_integrity_validation_and_repair(db, season_id, repair=True)
+    turf_pull_forward_repair = turf_pull_forward_repair_diagnostics or _default_turf_pull_forward_repair_diagnostics(
+        ran=False,
+        status='SKIPPED_NO_SEASON' if not season_id else 'NOT_RUN',
+        reason='season_id was not provided to final validation' if not season_id else None,
+    )
+    if season_id and run_turf_pull_forward_repair and turf_pull_forward_repair_diagnostics is None:
+        try:
+            turf_pull_forward_repair = _run_turf_pull_forward_repair(db, season_id)
+            db.flush()
+        except Exception as exc:
+            logger.exception('turf_pull_forward_repair_failed season_id=%s', season_id)
+            diagnostics_error = diagnostics_error or f'turf pull-forward repair unavailable ({exc})'
+            turf_pull_forward_repair = _default_turf_pull_forward_repair_diagnostics(
+                ran=False,
+                status='FAILED',
+                reason='TURF_PULL_FORWARD_REPAIR_FAILED',
+                error=str(exc),
+            )
+            extra_failures = list(extra_failures or []) + [
+                _final_validation_failure(
+                    'TURF_PULL_FORWARD_REPAIR_FAILED',
+                    1,
+                    'Mandatory turf pull-forward repair did not run successfully.',
+                    str(exc),
+                )
+            ]
     turf_wave_source_of_truth_repair = _default_turf_wave_source_of_truth_repair(
         reason='season_id was not provided to final validation' if not season_id else None,
     )
@@ -922,6 +951,7 @@ def _build_final_schedule_validation_result(
     counters['turf_wave_non_contiguous_used_time_count'] = _safe_int(turf.get('turf_wave_non_contiguous_used_time_count'))
     counters['turf_wave_used_later_with_empty_earlier_wave_count'] = _safe_int(turf.get('turf_wave_used_later_with_empty_earlier_wave_count'))
     counters['turf_wave_pull_forward_required_count'] = _safe_int(turf.get('turf_wave_pull_forward_required_count'))
+    counters['turf_wave_pull_forward_unresolved_count'] = _safe_int(turf_pull_forward_repair.get('unresolved_turf_gaps_count') or turf.get('turf_wave_pull_forward_unresolved_count'))
     counters['turf_wave_canonical_mapping_missing_count'] = _safe_int(turf_wave_source_of_truth_repair.get('canonical_mapping_missing_count'))
     counters['turf_wave_label_repair_failed_count'] = _safe_int(turf_wave_source_of_truth_repair.get('label_repair_failed_count'))
     turf_sequence_details = turf.get('chronological_sequence_validation') or turf.get('host_date_sequence_validation')
@@ -946,6 +976,11 @@ def _build_final_schedule_validation_result(
         failures.append(_final_validation_failure('TURF_WAVE_USED_LATER_WITH_EMPTY_EARLIER_WAVE', counters['turf_wave_used_later_with_empty_earlier_wave_count'], 'A later turf wave is used while an earlier compatible wave is empty.', contiguous_details))
     if counters.get('turf_wave_pull_forward_required_count'):
         failures.append(_final_validation_failure('TURF_WAVE_PULL_FORWARD_REQUIRED', counters['turf_wave_pull_forward_required_count'], 'A mandatory turf pull-forward repair is required or remains blocked by hard constraints.', contiguous_details))
+    if counters.get('turf_wave_pull_forward_unresolved_count'):
+        failures.append(_final_validation_failure('TURF_WAVE_PULL_FORWARD_UNRESOLVED', counters['turf_wave_pull_forward_unresolved_count'], 'Mandatory turf pull-forward repair ran but unresolved turf gaps remain.', turf_pull_forward_repair))
+    if season_id and run_turf_pull_forward_repair and not bool(turf_pull_forward_repair.get('turf_pull_forward_repair_ran')):
+        counters['turf_wave_pull_forward_unresolved_count'] = max(1, _safe_int(counters.get('turf_wave_pull_forward_unresolved_count')))
+        failures.append(_final_validation_failure('TURF_PULL_FORWARD_REPAIR_NOT_RUN', 1, 'Mandatory turf pull-forward repair did not run before final validation.', turf_pull_forward_repair))
     if counters.get('turf_wave_canonical_mapping_missing_count'):
         failures.append(_final_validation_failure('TURF_WAVE_CANONICAL_MAPPING_MISSING', counters['turf_wave_canonical_mapping_missing_count'], 'Scheduled turf games could not be mapped to canonical host/date/start wave metadata.', turf_wave_source_of_truth_repair.get('repaired_turf_labels') or []))
     repair_failures = [detail for detail in (turf_wave_source_of_truth_repair.get('repaired_turf_labels') or []) if not detail.get('repair_success')]
@@ -996,6 +1031,10 @@ def _build_final_schedule_validation_result(
         'generated_slot_integrity_diagnostics': generated_slot_integrity,
         'Turf Wave Source-of-Truth Diagnostics': turf_wave_source_of_truth_repair,
         'turf_wave_source_of_truth_diagnostics': turf_wave_source_of_truth_repair,
+        'Turf Pull-Forward Repair Diagnostics': turf_pull_forward_repair,
+        'turf_pull_forward_repair_diagnostics': turf_pull_forward_repair,
+        'turf_pull_forward_repair_ran': turf_pull_forward_repair.get('turf_pull_forward_repair_ran'),
+        'turf_pull_forward_repair_status': turf_pull_forward_repair.get('turf_pull_forward_repair_status'),
         'generated_slot_integrity_check_ran': generated_slot_integrity.get('generated_slot_integrity_check_ran'),
         'generated_slot_integrity_status': generated_slot_integrity.get('generated_slot_integrity_status'),
         'invalid_scheduled_game_count': generated_slot_integrity.get('invalid_scheduled_game_count'),
@@ -1323,7 +1362,7 @@ def _run_global_doubleheader_repair(db: Session, season_id: uuid.UUID | str | No
         diagnostics['protected_doubleheader_pairs'] = baseline_validation.get('doubleheader_pairs') or []
         return diagnostics
 
-    baseline_final = _build_final_schedule_validation_result(db, season_id)
+    baseline_final = _build_final_schedule_validation_result(db, season_id, run_turf_pull_forward_repair=False)
     protected_valid_pair_ids = {
         str(row.get('doubleheader_pair_id'))
         for row in (baseline_validation.get('doubleheader_pairs') or [])
@@ -1434,7 +1473,7 @@ def _run_global_doubleheader_repair(db: Session, season_id: uuid.UUID | str | No
 
     def _candidate_accepts(pair_id: str) -> tuple[bool, str | None, dict[str, object]]:
         db.flush()
-        final_validation = _build_final_schedule_validation_result(db, season_id)
+        final_validation = _build_final_schedule_validation_result(db, season_id, run_turf_pull_forward_repair=False)
         final_dh = _build_global_doubleheader_validation(db, season_id)
         for key in (
             'team_time_conflict_count',
@@ -4509,6 +4548,427 @@ def _build_turf_wave_contiguous_time_diagnostics(db: Session, season_id: uuid.UU
         'TURF_WAVE_USED_LATER_WITH_EMPTY_EARLIER_WAVE': skipped_count,
         'TURF_WAVE_PULL_FORWARD_REQUIRED': skipped_count,
     }
+
+
+TURF_PULL_FORWARD_FAILURE_REASONS = {
+    'TURF_PULL_FORWARD_NO_COMPATIBLE_FIELD_COMPONENT',
+    'TURF_PULL_FORWARD_TEAM_CONFLICT',
+    'TURF_PULL_FORWARD_FIELD_CONFLICT',
+    'TURF_PULL_FORWARD_SELECTED_HOST_VIOLATION',
+    'TURF_PULL_FORWARD_TRUE_HOME_HOST_VIOLATION',
+    'TURF_PULL_FORWARD_GENERATED_SLOT_INTEGRITY_FAILURE',
+    'TURF_PULL_FORWARD_DOUBLEHEADER_PAIR_CONFLICT',
+    'TURF_PULL_FORWARD_WOULD_SPLIT_DOUBLEHEADER',
+    'TURF_PULL_FORWARD_WOULD_BREAK_BACK_TO_BACK_DOUBLEHEADER',
+    'TURF_PULL_FORWARD_NO_ADJACENT_PAIR_AVAILABLE',
+    'TURF_PULL_FORWARD_NO_LATER_COMPATIBLE_GAME',
+}
+
+
+def _default_turf_pull_forward_repair_diagnostics(*, ran: bool = False, status: str = 'NOT_RUN', reason: str | None = None, error: str | None = None) -> dict[str, object]:
+    diagnostics: dict[str, object] = {
+        'diagnostic_label': 'Turf Pull-Forward Repair Diagnostics',
+        'turf_pull_forward_repair_ran': bool(ran),
+        'turf_pull_forward_repair_status': status,
+        'affected_turf_host_dates_count': 0,
+        'skipped_earlier_wave_count': 0,
+        'pull_forward_candidates_considered': 0,
+        'pull_forward_moves_accepted': 0,
+        'pull_forward_moves_rejected': 0,
+        'unresolved_turf_gaps_count': 0,
+        'labels_repaired_count': 0,
+        'host_date_diagnostics': [],
+        'unresolved_skipped_waves': [],
+        'later_games_considered': [],
+        'move_attempts': [],
+    }
+    if reason:
+        diagnostics['repair_failure_reason'] = reason
+    if error:
+        diagnostics['diagnostics_error'] = error
+    return diagnostics
+
+
+def _scheduled_turf_rows_for_host_date(db: Session, season_id: uuid.UUID | str | None, host_id: uuid.UUID, game_date_value: date) -> list[tuple[Game, GameSlot, FieldInstance, HostLocation, Team | None, Team | None, Division | None]]:
+    home = aliased(Team)
+    away = aliased(Team)
+    query = db.query(Game, GameSlot, FieldInstance, HostLocation, home, away, Division).join(
+        GameSlot, GameSlot.assigned_game_id == Game.id
+    ).join(
+        FieldInstance, FieldInstance.id == GameSlot.field_instance_id
+    ).join(
+        HostLocation, HostLocation.id == GameSlot.host_location_id
+    ).outerjoin(home, Game.home_team_id == home.id).outerjoin(away, Game.away_team_id == away.id).outerjoin(Division, home.division_id == Division.id).join(
+        GameStatus, GameStatus.id == Game.game_status_id
+    ).filter(
+        func.lower(GameStatus.code) != 'unscheduled',
+        GameSlot.host_location_id == host_id,
+        GameSlot.slot_date == game_date_value,
+    )
+    if season_id:
+        query = query.filter(Game.season_id == season_id)
+    return query.order_by(GameSlot.start_time.asc(), Game.id.asc()).all()
+
+
+def _turf_pull_forward_game_context(row: tuple[Game, GameSlot, FieldInstance, HostLocation, Team | None, Team | None, Division | None]) -> dict[str, object]:
+    game, slot, instance, _host, _home, _away, division = row
+    return {
+        'game_id': str(game.id),
+        'division_id': str(getattr(division, 'id', None)) if division else None,
+        'required_field_layout_type': _required_field_type_for_division(division),
+        'current_start_time': _format_diagnostic_time(slot.start_time or game.kickoff_time),
+        'current_field_type': _normalize_field_size(slot.field_type or instance.field_type),
+        'current_slot_id': str(slot.id),
+        'current_field_component_id': str(slot.field_instance_id),
+    }
+
+
+def _turf_pull_forward_pair_map(db: Session, season_id: uuid.UUID | str | None) -> dict[str, dict[str, object]]:
+    pair_map: dict[str, dict[str, object]] = {}
+    if not season_id:
+        return pair_map
+    validation = _build_global_doubleheader_validation(db, season_id)
+    for pair in validation.get('doubleheader_pairs') or []:
+        game_ids = {str(pair.get('game_1_id')), str(pair.get('game_2_id'))}
+        if len([gid for gid in game_ids if gid and gid != 'None']) != 2:
+            continue
+        for gid in game_ids:
+            if gid and gid != 'None':
+                pair_map[gid] = pair
+    return pair_map
+
+
+def _turf_pull_forward_true_home_ok(game: Game, host: HostLocation | None) -> bool:
+    host_owner_id = _host_owner_community_id(host)
+    if not host_owner_id:
+        return True
+    home_org_id = _team_community_id(getattr(game, 'home_team', None))
+    away_org_id = _team_community_id(getattr(game, 'away_team', None))
+    if host_owner_id in {home_org_id, away_org_id}:
+        return host_owner_id == home_org_id
+    return True
+
+
+def _turf_pull_forward_slot_rejection(db: Session, game: Game, target_slot: GameSlot, moving_game_ids: set[uuid.UUID]) -> str | None:
+    target_host = target_slot.host_location
+    target_field_type = _normalize_field_size(target_slot.field_type)
+    required = _normalize_field_size(_game_required_field_type(game))
+    if required and target_field_type != required:
+        return 'TURF_PULL_FORWARD_NO_COMPATIBLE_FIELD_COMPONENT'
+    allowed_hosts = _host_plan_allowed_host_ids_for_week(db, game.season_id, game.week_id, target_slot.slot_date)
+    if allowed_hosts is not None and target_slot.host_location_id not in allowed_hosts:
+        return 'TURF_PULL_FORWARD_SELECTED_HOST_VIOLATION'
+    if not _turf_pull_forward_true_home_ok(game, target_host):
+        return 'TURF_PULL_FORWARD_TRUE_HOME_HOST_VIOLATION'
+    team_ids = {getattr(game, 'home_team_id', None), getattr(game, 'away_team_id', None)}
+    team_conflict = db.query(Game.id).join(Game.status).filter(
+        Game.id.notin_(moving_game_ids),
+        Game.season_id == game.season_id,
+        Game.game_date == target_slot.slot_date,
+        Game.kickoff_time == target_slot.start_time,
+        func.lower(GameStatus.code) != 'unscheduled',
+        or_(Game.home_team_id.in_(team_ids), Game.away_team_id.in_(team_ids)),
+    ).first()
+    if team_conflict:
+        return 'TURF_PULL_FORWARD_TEAM_CONFLICT'
+    field_conflict = db.query(GameSlot.id).join(Game, GameSlot.assigned_game_id == Game.id).join(Game.status).filter(
+        GameSlot.id != target_slot.id,
+        GameSlot.assigned_game_id.isnot(None),
+        ~GameSlot.assigned_game_id.in_(moving_game_ids),
+        GameSlot.host_location_id == target_slot.host_location_id,
+        GameSlot.field_instance_id == target_slot.field_instance_id,
+        GameSlot.slot_date == target_slot.slot_date,
+        GameSlot.start_time == target_slot.start_time,
+        func.lower(GameStatus.code) != 'unscheduled',
+    ).first()
+    if field_conflict:
+        return 'TURF_PULL_FORWARD_FIELD_CONFLICT'
+    if target_slot.assigned_game_id and target_slot.assigned_game_id not in moving_game_ids:
+        return 'TURF_PULL_FORWARD_FIELD_CONFLICT'
+    return None
+
+
+def _apply_turf_pull_forward_assignment(game: Game, source_slot: GameSlot, target_slot: GameSlot) -> None:
+    if source_slot.id != target_slot.id:
+        source_slot.assigned_game_id = None
+        source_slot.status = 'OPEN'
+    target_slot.assigned_game_id = game.id
+    target_slot.status = 'ASSIGNED'
+    game.host_location_id = target_slot.host_location_id
+    game.field_instance_id = target_slot.field_instance_id
+    game.game_date = target_slot.slot_date
+    game.kickoff_time = target_slot.start_time
+
+
+def _run_turf_pull_forward_repair(db: Session, season_id: uuid.UUID | str | None) -> dict[str, object]:
+    """Mandatory global turf host/date compaction pass.
+
+    The pass only moves games within the same turf host/date and only into already
+    generated turf slots/components.  It is intentionally conservative: every
+    accepted move is checked against team, field, selected-host, true-home-host,
+    generated-slot-integrity, and doubleheader constraints before it is kept.
+    """
+    diagnostics = _default_turf_pull_forward_repair_diagnostics(ran=True, status='NOT_NEEDED')
+    if not season_id:
+        diagnostics['turf_pull_forward_repair_status'] = 'SKIPPED_NO_SEASON'
+        return diagnostics
+
+    pair_map = _turf_pull_forward_pair_map(db, season_id)
+
+    def _record_attempt(move_type: str, source_games: list[Game], source_slots: list[GameSlot], target_slots: list[GameSlot], accepted: bool, rejection_reason: str | None = None) -> None:
+        row = {
+            'move_type': move_type,
+            'source_game_ids': [str(game.id) for game in source_games],
+            'source_start_times': [_format_diagnostic_time(slot.start_time) for slot in source_slots],
+            'target_start_times': [_format_diagnostic_time(slot.start_time) for slot in target_slots],
+            'target_host_location_id': str(target_slots[0].host_location_id) if target_slots else None,
+            'target_field_component_ids': [str(slot.field_instance_id) for slot in target_slots],
+            'accepted': bool(accepted),
+            'rejection_reason': rejection_reason,
+        }
+        diagnostics['move_attempts'].append(row)
+        if accepted:
+            diagnostics['pull_forward_moves_accepted'] = int(diagnostics['pull_forward_moves_accepted']) + 1
+        else:
+            diagnostics['pull_forward_moves_rejected'] = int(diagnostics['pull_forward_moves_rejected']) + 1
+
+    def _snapshot(games: list[Game], slots: list[GameSlot]) -> dict[str, object]:
+        return {
+            'games': {game.id: (game.game_date, game.kickoff_time, game.host_location_id, game.field_instance_id) for game in games},
+            'slots': {slot.id: (slot.assigned_game_id, slot.status) for slot in slots},
+        }
+
+    def _restore(snapshot: dict[str, object]) -> None:
+        for gid, values in (snapshot.get('games') or {}).items():
+            game = db.get(Game, gid)
+            if game:
+                game.game_date, game.kickoff_time, game.host_location_id, game.field_instance_id = values
+        for sid, values in (snapshot.get('slots') or {}).items():
+            slot = db.get(GameSlot, sid)
+            if slot:
+                slot.assigned_game_id, slot.status = values
+        db.flush()
+
+    def _post_move_valid(moved_game_ids: set[uuid.UUID]) -> str | None:
+        db.flush()
+        integrity = _run_generated_slot_integrity_validation_and_repair(db, season_id, repair=False)
+        if int(integrity.get('generated_slot_integrity_failure_count') or 0) > 0:
+            invalid_ids = {str(row.get('game_id')) for row in (integrity.get('remaining_invalid_scheduled_games') or [])}
+            if invalid_ids.intersection({str(gid) for gid in moved_game_ids}):
+                return 'TURF_PULL_FORWARD_GENERATED_SLOT_INTEGRITY_FAILURE'
+        doubleheader = _build_global_doubleheader_validation(db, season_id)
+        moved_strings = {str(gid) for gid in moved_game_ids}
+        for failure in doubleheader.get('failures') or []:
+            failure_ids = {str(failure.get('game_1_id')), str(failure.get('game_2_id'))} | {str(value) for value in (failure.get('game_ids') or [])}
+            if moved_strings.intersection(failure_ids):
+                code = str(failure.get('code') or '')
+                if code == 'DOUBLEHEADER_NOT_BACK_TO_BACK':
+                    return 'TURF_PULL_FORWARD_WOULD_BREAK_BACK_TO_BACK_DOUBLEHEADER'
+                return 'TURF_PULL_FORWARD_DOUBLEHEADER_PAIR_CONFLICT'
+        host_check = _build_host_location_vs_home_team_verification(db, season_id)
+        if int(host_check.get('host_owner_is_away_team') or 0) > 0:
+            moved_host_away = [row for row in (host_check.get('host_owner_is_away_games') or []) if str(row.get('game_id')) in moved_strings]
+            if moved_host_away:
+                return 'TURF_PULL_FORWARD_TRUE_HOME_HOST_VIOLATION'
+        return None
+
+    def _open_slot_for_game(host_id: uuid.UUID, game_date_value: date, start_value: time, game: Game, moving_game_ids: set[uuid.UUID]) -> tuple[GameSlot | None, str | None]:
+        required = _normalize_field_size(_game_required_field_type(game))
+        slots = db.query(GameSlot).filter(
+            GameSlot.host_location_id == host_id,
+            GameSlot.slot_date == game_date_value,
+            GameSlot.start_time == start_value,
+            GameSlot.turf_wave_id.isnot(None),
+        ).order_by(GameSlot.field_type.asc(), GameSlot.id.asc()).all()
+        compatible_slots = [slot for slot in slots if _normalize_field_size(slot.field_type) == required]
+        if not compatible_slots:
+            return None, 'TURF_PULL_FORWARD_NO_COMPATIBLE_FIELD_COMPONENT'
+        blocked_reason = 'TURF_PULL_FORWARD_FIELD_CONFLICT'
+        for slot in compatible_slots:
+            if slot.assigned_game_id and slot.assigned_game_id not in moving_game_ids:
+                blocked_reason = 'TURF_PULL_FORWARD_FIELD_CONFLICT'
+                continue
+            if str(slot.status or '').upper() not in {'OPEN', 'ASSIGNED'}:
+                blocked_reason = 'TURF_PULL_FORWARD_FIELD_CONFLICT'
+                continue
+            rejection = _turf_pull_forward_slot_rejection(db, game, slot, moving_game_ids)
+            if rejection:
+                blocked_reason = rejection
+                continue
+            return slot, None
+        return None, blocked_reason
+
+    def _try_single_move(row: tuple[Game, GameSlot, FieldInstance, HostLocation, Team | None, Team | None, Division | None], target_start: time, host_id: uuid.UUID, game_date_value: date) -> tuple[bool, str | None]:
+        game, source_slot, _instance, _host, _home, _away, _division = row
+        if str(game.id) in pair_map:
+            return False, 'TURF_PULL_FORWARD_WOULD_SPLIT_DOUBLEHEADER'
+        moving_ids = {game.id}
+        target_slot, rejection = _open_slot_for_game(host_id, game_date_value, target_start, game, moving_ids)
+        diagnostics['pull_forward_candidates_considered'] = int(diagnostics['pull_forward_candidates_considered']) + 1
+        considered = {**_turf_pull_forward_game_context(row), 'candidate_target_start_time': _format_diagnostic_time(target_start), 'candidate_target_field_type': _normalize_field_size(target_slot.field_type) if target_slot else _normalize_field_size(_game_required_field_type(game)), 'accepted': False, 'rejection_reason': rejection}
+        if not target_slot:
+            diagnostics['later_games_considered'].append(considered)
+            _record_attempt('SINGLE_GAME', [game], [source_slot], [], False, rejection)
+            return False, rejection
+        snap = _snapshot([game], [source_slot, target_slot])
+        _apply_turf_pull_forward_assignment(game, source_slot, target_slot)
+        rejection = _post_move_valid(moving_ids)
+        if rejection:
+            _restore(snap)
+            considered['rejection_reason'] = rejection
+            diagnostics['later_games_considered'].append(considered)
+            _record_attempt('SINGLE_GAME', [game], [source_slot], [target_slot], False, rejection)
+            return False, rejection
+        considered['accepted'] = True
+        considered['rejection_reason'] = None
+        diagnostics['later_games_considered'].append(considered)
+        _record_attempt('SINGLE_GAME', [game], [source_slot], [target_slot], True)
+        return True, None
+
+    def _try_pair_move(pair: dict[str, object], target_start: time, host_id: uuid.UUID, game_date_value: date) -> tuple[bool, str | None]:
+        game_ids = [uuid.UUID(str(pair.get('game_1_id'))), uuid.UUID(str(pair.get('game_2_id')))]
+        games = [db.get(Game, gid) for gid in game_ids]
+        if not all(games):
+            return False, 'TURF_PULL_FORWARD_DOUBLEHEADER_PAIR_CONFLICT'
+        source_slots = [db.query(GameSlot).filter(GameSlot.assigned_game_id == game.id).first() for game in games if game]
+        if len(source_slots) != 2 or not all(source_slots):
+            return False, 'TURF_PULL_FORWARD_DOUBLEHEADER_PAIR_CONFLICT'
+        ordered = sorted(zip(games, source_slots), key=lambda item: (item[1].start_time, str(item[0].id)))
+        canonical = _build_canonical_turf_wave_source_of_truth(db, season_id, host_location_id=host_id, host_date=game_date_value)
+        starts = sorted({key[2] for key in (canonical.get('mapping') or {}) if key[0] == host_id and key[1] == game_date_value})
+        try:
+            first_index = starts.index(target_start)
+            second_start = starts[first_index + 1]
+        except (ValueError, IndexError):
+            return False, 'TURF_PULL_FORWARD_NO_ADJACENT_PAIR_AVAILABLE'
+        moving_ids = {game.id for game, _slot in ordered}
+        target_slots: list[GameSlot] = []
+        for game, _source_slot in ordered:
+            start_value = target_start if not target_slots else second_start
+            target_slot, rejection = _open_slot_for_game(host_id, game_date_value, start_value, game, moving_ids)
+            diagnostics['pull_forward_candidates_considered'] = int(diagnostics['pull_forward_candidates_considered']) + 1
+            diagnostics['later_games_considered'].append({
+                'game_id': str(game.id),
+                'division_id': str(getattr(getattr(game.home_team, 'division', None), 'id', None)) if getattr(game, 'home_team', None) else None,
+                'required_field_layout_type': _game_required_field_type(game),
+                'current_start_time': _format_diagnostic_time(_source_slot.start_time),
+                'candidate_target_start_time': _format_diagnostic_time(start_value),
+                'candidate_target_field_type': _normalize_field_size(target_slot.field_type) if target_slot else _normalize_field_size(_game_required_field_type(game)),
+                'accepted': False,
+                'rejection_reason': rejection,
+            })
+            if not target_slot:
+                _record_attempt('DOUBLEHEADER_PAIR', [item[0] for item in ordered], [item[1] for item in ordered], target_slots, False, rejection)
+                return False, rejection
+            target_slots.append(target_slot)
+        snap = _snapshot([item[0] for item in ordered], [item[1] for item in ordered] + target_slots)
+        for (game, source_slot), target_slot in zip(ordered, target_slots):
+            _apply_turf_pull_forward_assignment(game, source_slot, target_slot)
+        rejection = _post_move_valid(moving_ids)
+        if rejection:
+            _restore(snap)
+            _record_attempt('DOUBLEHEADER_PAIR', [item[0] for item in ordered], [item[1] for item in ordered], target_slots, False, rejection)
+            return False, rejection
+        for considered in diagnostics['later_games_considered'][-2:]:
+            considered['accepted'] = True
+            considered['rejection_reason'] = None
+        _record_attempt('DOUBLEHEADER_PAIR', [item[0] for item in ordered], [item[1] for item in ordered], target_slots, True)
+        return True, None
+
+    initial_contiguous = _build_turf_wave_contiguous_time_diagnostics(db, season_id)
+    initial_contiguous_by_key = {
+        (row.get('host_location_id'), row.get('game_date')): row
+        for row in (initial_contiguous.get('turf_wave_contiguous_time_diagnostics') or [])
+        if isinstance(row, dict)
+    }
+    any_change = True
+    while any_change:
+        any_change = False
+        contiguous = _build_turf_wave_contiguous_time_diagnostics(db, season_id)
+        skipped_rows = list(contiguous.get('skipped_earlier_turf_waves') or [])
+        if not skipped_rows:
+            break
+        for skipped in skipped_rows:
+            try:
+                host_id = uuid.UUID(str(skipped.get('host_location_id')))
+                game_date_value = date.fromisoformat(str(skipped.get('game_date')))
+                target_start = time.fromisoformat(str(skipped.get('start_time')))
+            except Exception:
+                continue
+            diagnostics['affected_turf_host_dates_count'] = len({(row.get('host_location_id'), row.get('game_date')) for row in skipped_rows})
+            rows = _scheduled_turf_rows_for_host_date(db, season_id, host_id, game_date_value)
+            later_rows = [row for row in rows if row[1].start_time and row[1].start_time > target_start]
+            last_rejection = 'TURF_PULL_FORWARD_NO_LATER_COMPATIBLE_GAME'
+            moved = False
+            for row in later_rows:
+                if str(row[0].id) in pair_map:
+                    continue
+                moved, rejection = _try_single_move(row, target_start, host_id, game_date_value)
+                if moved:
+                    any_change = True
+                    break
+                last_rejection = rejection or last_rejection
+            if moved:
+                break
+            attempted_pair_ids: set[str] = set()
+            for row in later_rows:
+                pair = pair_map.get(str(row[0].id))
+                pair_id = str(pair.get('doubleheader_pair_id')) if pair else None
+                if not pair or not pair_id or pair_id in attempted_pair_ids:
+                    continue
+                attempted_pair_ids.add(pair_id)
+                moved, rejection = _try_pair_move(pair, target_start, host_id, game_date_value)
+                if moved:
+                    any_change = True
+                    break
+                last_rejection = rejection or last_rejection
+            if moved:
+                break
+            skipped['repair_success'] = False
+            skipped['repair_failure_reason'] = last_rejection
+
+    label_repair = _repair_turf_wave_source_of_truth(db, season_id)
+    diagnostics['labels_repaired_count'] = int(label_repair.get('labels_repaired_count') or 0)
+    final_contiguous = _build_turf_wave_contiguous_time_diagnostics(db, season_id)
+    host_rows = final_contiguous.get('turf_wave_contiguous_time_diagnostics') or []
+    diagnostics['host_date_diagnostics'] = []
+    for row in host_rows:
+        before_row = initial_contiguous_by_key.get((row.get('host_location_id'), row.get('game_date')), row)
+        diagnostics['host_date_diagnostics'].append({
+            'hosting_availability_id': row.get('hosting_availability_id'),
+            'host_location_id': row.get('host_location_id'),
+            'host_location_name': row.get('host_location_name'),
+            'game_date': row.get('game_date'),
+            'available_wave_start_times': row.get('available_wave_start_times') or [],
+            'canonical_wave_numbers': row.get('canonical_wave_numbers') or [],
+            'used_wave_start_times_before_repair': before_row.get('used_wave_start_times') or [],
+            'empty_wave_start_times_before_latest_used_before_repair': before_row.get('empty_wave_start_times_before_latest_used_wave') or [],
+            'used_wave_start_times_after_repair': row.get('used_wave_start_times') or [],
+            'empty_wave_start_times_before_latest_used_after_repair': row.get('empty_wave_start_times_before_latest_used_wave') or [],
+            'final_contiguous_time_validation_passed': bool(row.get('final_contiguous_time_validation_passed')),
+        })
+    diagnostics['skipped_earlier_wave_count'] = int(initial_contiguous.get('turf_wave_earlier_available_hour_skipped_count') or 0)
+    diagnostics['unresolved_turf_gaps_count'] = int(final_contiguous.get('turf_wave_pull_forward_required_count') or 0)
+    unresolved = []
+    for skipped in list(final_contiguous.get('skipped_earlier_turf_waves') or []):
+        target_time = skipped.get('start_time')
+        considered = [row for row in (diagnostics.get('later_games_considered') or []) if row.get('candidate_target_start_time') == target_time]
+        compatible_count = sum(1 for row in considered if not row.get('rejection_reason') or row.get('rejection_reason') != 'TURF_PULL_FORWARD_NO_COMPATIBLE_FIELD_COMPONENT')
+        unresolved.append({
+            **skipped,
+            'later_games_considered_for_pull_forward': considered or skipped.get('later_games_considered_for_pull_forward') or [],
+            'compatible_later_games_count': compatible_count,
+            'repair_success': False,
+            'repair_failure_reason': skipped.get('repair_failure_reason') or (considered[-1].get('rejection_reason') if considered else 'TURF_PULL_FORWARD_NO_LATER_COMPATIBLE_GAME'),
+        })
+    diagnostics['unresolved_skipped_waves'] = unresolved
+    if diagnostics['unresolved_turf_gaps_count']:
+        diagnostics['turf_pull_forward_repair_status'] = 'BLOCKED'
+    elif int(diagnostics['pull_forward_moves_accepted'] or 0) > 0 or int(diagnostics['labels_repaired_count'] or 0) > 0:
+        diagnostics['turf_pull_forward_repair_status'] = 'COMPLETE'
+    else:
+        diagnostics['turf_pull_forward_repair_status'] = 'NOT_NEEDED'
+    return diagnostics
 
 def _build_turf_wave_chronological_validation(db: Session, season_id: uuid.UUID | None = None) -> dict[str, object]:
     """Validate turf wave sequence/labels from canonical host/date/start metadata."""
@@ -18795,6 +19255,10 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         'generated_slot_integrity_diagnostics': generated_slot_integrity,
         'Turf Wave Source-of-Truth Diagnostics': turf_wave_source_of_truth_repair,
         'turf_wave_source_of_truth_diagnostics': turf_wave_source_of_truth_repair,
+        'Turf Pull-Forward Repair Diagnostics': turf_pull_forward_repair,
+        'turf_pull_forward_repair_diagnostics': turf_pull_forward_repair,
+        'turf_pull_forward_repair_ran': turf_pull_forward_repair.get('turf_pull_forward_repair_ran'),
+        'turf_pull_forward_repair_status': turf_pull_forward_repair.get('turf_pull_forward_repair_status'),
         'final_validation': {
             'active_team_count': len(teams),
             'required_game_count': required_games_for_division_week,
@@ -20213,6 +20677,21 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         moves_rejected=int(doubleheader_repair_diagnostics.get('doubleheader_repair_failure_count') or 0),
     )
 
+    generated_slot_integrity_phase = _start_phase('generated slot integrity repair')
+    generated_slot_integrity_diagnostics = _run_generated_slot_integrity_validation_and_repair(db, season_id, repair=not dry_run)
+    if auto_schedule_diagnostics is None:
+        auto_schedule_diagnostics = {}
+    auto_schedule_diagnostics['Generated Slot Integrity Diagnostics'] = generated_slot_integrity_diagnostics
+    auto_schedule_diagnostics['generated_slot_integrity_diagnostics'] = generated_slot_integrity_diagnostics
+    _finish_phase(
+        generated_slot_integrity_phase,
+        records_evaluated=int(generated_slot_integrity_diagnostics.get('invalid_scheduled_game_count') or 0),
+        moves_accepted=int(generated_slot_integrity_diagnostics.get('repaired_scheduled_game_count') or 0),
+        moves_rejected=int(generated_slot_integrity_diagnostics.get('generated_slot_integrity_failure_count') or 0),
+    )
+    if int(generated_slot_integrity_diagnostics.get('generated_slot_integrity_failure_count') or 0) > 0 and not dry_run:
+        validation_errors.append('Generated slot integrity repair left unresolved hard-rule failures.')
+
     hard_validation: list[dict[str, object]] = []
     doubleheader_phase = _start_phase('doubleheader validation')
     final_validation_phase = _start_phase('final validation')
@@ -20441,6 +20920,32 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         moves_rejected=int(turf_wave_compaction.get('rejected_moves_count') or 0),
     )
     auto_schedule_diagnostics['turf_wave_compaction'] = turf_wave_compaction
+    turf_pull_forward_phase = _start_phase('mandatory turf pull-forward repair')
+    try:
+        turf_pull_forward_repair = _run_turf_pull_forward_repair(db, season_id) if not dry_run else _default_turf_pull_forward_repair_diagnostics(ran=False, status='SKIPPED_DRY_RUN', reason='dry_run')
+    except Exception as exc:
+        logger.exception('mandatory_turf_pull_forward_repair_failed season_id=%s', season_id)
+        diagnostics_error = f'turf pull-forward repair unavailable ({exc})'
+        turf_pull_forward_repair = _default_turf_pull_forward_repair_diagnostics(
+            ran=False,
+            status='FAILED',
+            reason='TURF_PULL_FORWARD_REPAIR_FAILED',
+            error=str(exc),
+        )
+        validation_errors.append(f'TURF_PULL_FORWARD_REPAIR_FAILED: mandatory turf pull-forward repair unavailable ({exc}).')
+    _finish_phase(
+        turf_pull_forward_phase,
+        records_evaluated=int(turf_pull_forward_repair.get('pull_forward_candidates_considered') or 0),
+        moves_considered=int(turf_pull_forward_repair.get('pull_forward_candidates_considered') or 0),
+        moves_accepted=int(turf_pull_forward_repair.get('pull_forward_moves_accepted') or 0),
+        moves_rejected=int(turf_pull_forward_repair.get('pull_forward_moves_rejected') or 0),
+    )
+    auto_schedule_diagnostics['Turf Pull-Forward Repair Diagnostics'] = turf_pull_forward_repair
+    auto_schedule_diagnostics['turf_pull_forward_repair_diagnostics'] = turf_pull_forward_repair
+    auto_schedule_diagnostics['turf_pull_forward_repair_ran'] = turf_pull_forward_repair.get('turf_pull_forward_repair_ran')
+    auto_schedule_diagnostics['turf_pull_forward_repair_status'] = turf_pull_forward_repair.get('turf_pull_forward_repair_status')
+    if not bool(turf_pull_forward_repair.get('turf_pull_forward_repair_ran')) and not dry_run:
+        validation_errors.append('TURF_PULL_FORWARD_REPAIR_NOT_RUN: mandatory turf pull-forward repair did not run.')
     revised_hierarchy_diagnostics: dict[str, object] = {}
     true_home_phase = _start_phase('home-host enforcement')
     turf_utilization_phase = _start_phase('turf wave utilization pass')
@@ -20602,6 +21107,8 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
             optional_optimization_skip_reason=auto_schedule_diagnostics.get('optional_optimization_skip_reason'),
             revised_hierarchy_diagnostics=revised_hierarchy_diagnostics,
             extra_failures=list(validation_errors),
+            turf_pull_forward_repair_diagnostics=turf_pull_forward_repair if 'turf_pull_forward_repair' in locals() else None,
+            run_turf_pull_forward_repair=not ('turf_pull_forward_repair' in locals()),
         )
     except Exception as exc:
         logger.exception('final validation diagnostics construction failed season_id=%s', season_id)
@@ -20732,6 +21239,9 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         'doubleheader_repair': auto_schedule_diagnostics.get('doubleheader_repair'),
         'doubleheader_repair_ran': auto_schedule_diagnostics.get('doubleheader_repair_ran'),
         'doubleheader_repair_status': auto_schedule_diagnostics.get('doubleheader_repair_status'),
+        'turf_pull_forward_repair_ran': auto_schedule_diagnostics.get('turf_pull_forward_repair_ran'),
+        'turf_pull_forward_repair_status': auto_schedule_diagnostics.get('turf_pull_forward_repair_status'),
+        'turf_pull_forward_repair_diagnostics': auto_schedule_diagnostics.get('turf_pull_forward_repair_diagnostics'),
         'post_optimization_doubleheader_protection_check': auto_schedule_diagnostics.get('post_optimization_doubleheader_protection_check'),
         'final_validation_ran': auto_schedule_diagnostics.get('final_validation_ran'),
         'final_validation_status': auto_schedule_diagnostics.get('final_validation_status'),
@@ -20778,6 +21288,9 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         'doubleheader_repair': auto_schedule_diagnostics.get('doubleheader_repair'),
         'doubleheader_repair_ran': auto_schedule_diagnostics.get('doubleheader_repair_ran'),
         'doubleheader_repair_status': auto_schedule_diagnostics.get('doubleheader_repair_status'),
+        'turf_pull_forward_repair_ran': auto_schedule_diagnostics.get('turf_pull_forward_repair_ran'),
+        'turf_pull_forward_repair_status': auto_schedule_diagnostics.get('turf_pull_forward_repair_status'),
+        'turf_pull_forward_repair_diagnostics': auto_schedule_diagnostics.get('turf_pull_forward_repair_diagnostics'),
         'post_optimization_doubleheader_protection_check': auto_schedule_diagnostics.get('post_optimization_doubleheader_protection_check'),
         'final_validation_ran': auto_schedule_diagnostics.get('final_validation_ran'),
         'final_validation_status': auto_schedule_diagnostics.get('final_validation_status'),
