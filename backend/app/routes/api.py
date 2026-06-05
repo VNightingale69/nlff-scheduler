@@ -590,6 +590,7 @@ def _build_global_doubleheader_validation(db: Session, season_id: uuid.UUID | st
             'division_id': str(division_id) if division_id else None,
             'division_name': division_context.name if division_context else None,
             'division_group': division_context.division_group if division_context else None,
+            'required_field_layout_type': required_size,
             'game_date': game_date.isoformat() if game_date else None,
             'game_1_id': str(game_1.id),
             'game_1_start_time': _format_diagnostic_time(game_1.kickoff_time),
@@ -625,6 +626,376 @@ def _build_global_doubleheader_validation(db: Session, season_id: uuid.UUID | st
         'pair_count': len(pair_rows),
     }
 
+
+
+
+DOUBLEHEADER_REPAIR_FAILURE_REASONS = {
+    'DOUBLEHEADER_REPAIR_NO_ADJACENT_PAIR_AVAILABLE',
+    'DOUBLEHEADER_REPAIR_NO_SELECTED_HOST_CAPACITY',
+    'DOUBLEHEADER_REPAIR_TEAM_CONFLICT',
+    'DOUBLEHEADER_REPAIR_FIELD_CONFLICT',
+    'DOUBLEHEADER_REPAIR_FIELD_TYPE_CONFLICT',
+    'DOUBLEHEADER_REPAIR_TRUE_HOME_HOST_CONFLICT',
+    'DOUBLEHEADER_REPAIR_SELECTED_HOST_CONFLICT',
+    'DOUBLEHEADER_REPAIR_WOULD_BREAK_OTHER_DOUBLEHEADER',
+    'DOUBLEHEADER_REPAIR_WOULD_CREATE_NEW_HARD_RULE_FAILURE',
+    'DOUBLEHEADER_REPAIR_UNRESOLVABLE_WITH_CURRENT_CONSTRAINTS',
+}
+
+
+def _run_global_doubleheader_repair(db: Session, season_id: uuid.UUID | str | None, *, dry_run: bool = False) -> dict[str, object]:
+    """Mandatory season-wide doubleheader repair pass.
+
+    The pass is intentionally metadata-driven: a doubleheader is inferred from
+    team participation in exactly two scheduled games on the same season/date/
+    division, and repair candidates are drawn only from generated selected slots
+    compatible with the division's required field layout type.
+    """
+    diagnostics: dict[str, object] = {
+        'diagnostic_label': 'Global Doubleheader Repair Diagnostics',
+        'doubleheader_repair_ran': True,
+        'doubleheader_repair_status': 'NOT_NEEDED',
+        'invalid_doubleheaders_detected_count': 0,
+        'doubleheader_repair_attempted_count': 0,
+        'doubleheader_repair_success_count': 0,
+        'doubleheader_repair_failure_count': 0,
+        'doubleheader_repair_failures': [],
+        'invalid_doubleheaders_detected': [],
+        'repair_attempts': [],
+        'successful_repairs': [],
+        'protected_doubleheader_pairs': [],
+        'dry_run': bool(dry_run),
+    }
+    if not season_id:
+        diagnostics['doubleheader_repair_status'] = 'SKIPPED_NO_SEASON'
+        return diagnostics
+
+    baseline_validation = _build_global_doubleheader_validation(db, season_id)
+    invalid_pairs = [
+        row for row in (baseline_validation.get('doubleheader_pairs') or [])
+        if not bool(row.get('pair_valid'))
+    ]
+    too_many_failures = [
+        row for row in (baseline_validation.get('failures') or [])
+        if row.get('code') == 'DOUBLEHEADER_TOO_MANY_GAMES_FOR_TEAM_DIVISION_DATE'
+    ]
+    for row in too_many_failures:
+        diagnostics['doubleheader_repair_failures'].append({
+            **row,
+            'repair_failure_reason': 'DOUBLEHEADER_REPAIR_UNRESOLVABLE_WITH_CURRENT_CONSTRAINTS',
+        })
+    diagnostics['invalid_doubleheaders_detected_count'] = len(invalid_pairs) + len(too_many_failures)
+    diagnostics['invalid_doubleheaders_detected'] = [
+        {
+            **row,
+            'original_same_location': bool(row.get('same_location')),
+            'original_back_to_back': bool(row.get('back_to_back')),
+            'original_failure_reasons': list(row.get('validation_failure_reasons') or []),
+            'required_field_layout_type': row.get('required_field_layout_type') or row.get('game_1_field_type') or row.get('game_2_field_type'),
+        }
+        for row in invalid_pairs
+    ] + too_many_failures
+    if dry_run:
+        diagnostics['doubleheader_repair_status'] = 'DRY_RUN_NOT_MUTATED' if invalid_pairs or too_many_failures else 'NOT_NEEDED'
+        diagnostics['doubleheader_repair_failure_count'] = len(invalid_pairs) + len(too_many_failures)
+        return diagnostics
+    if not invalid_pairs and not too_many_failures:
+        diagnostics['protected_doubleheader_pairs'] = baseline_validation.get('doubleheader_pairs') or []
+        return diagnostics
+
+    baseline_final = _build_final_schedule_validation_result(db, season_id)
+    protected_valid_pair_ids = {
+        str(row.get('doubleheader_pair_id'))
+        for row in (baseline_validation.get('doubleheader_pairs') or [])
+        if row.get('pair_valid')
+    }
+
+    def _host_name(host_id: uuid.UUID | None) -> str | None:
+        host = db.get(HostLocation, host_id) if host_id else None
+        return host.name if host else None
+
+    def _slot_field_type(slot: GameSlot | None) -> str | None:
+        return _normalize_field_size(slot.field_type if slot else None)
+
+    def _game_row(game_id: object) -> tuple[Game | None, GameSlot | None]:
+        gid = uuid.UUID(str(game_id)) if game_id else None
+        if not gid:
+            return None, None
+        game = db.get(Game, gid)
+        slot = db.query(GameSlot).filter(GameSlot.assigned_game_id == gid).first() if game else None
+        return game, slot
+
+    def _slots_are_consecutive_blocks(slot_a: GameSlot, slot_b: GameSlot) -> bool:
+        if not slot_a or not slot_b or slot_a.slot_date != slot_b.slot_date or slot_a.host_location_id != slot_b.host_location_id:
+            return False
+        if slot_a.start_time is None or slot_b.start_time is None:
+            return False
+        if abs((_minutes_from_time(slot_a.start_time) or 0) - (_minutes_from_time(slot_b.start_time) or 0)) != GAME_DURATION_MINUTES:
+            return False
+        blocks = sorted({
+            row.start_time for row in db.query(GameSlot.start_time).filter(
+                GameSlot.season_id == season_id,
+                GameSlot.slot_date == slot_a.slot_date,
+                GameSlot.host_location_id == slot_a.host_location_id,
+            ).all() if row.start_time
+        })
+        if slot_a.start_time not in blocks or slot_b.start_time not in blocks:
+            return False
+        return abs(blocks.index(slot_a.start_time) - blocks.index(slot_b.start_time)) == 1
+
+    def _true_home_ok_for_slot(game: Game, slot: GameSlot) -> bool:
+        host = slot.host_location or db.get(HostLocation, slot.host_location_id)
+        host_owner_id = _host_owner_community_id(host)
+        if not host_owner_id:
+            return True
+        home_org_id = _team_community_id(game.home_team)
+        away_org_id = _team_community_id(game.away_team)
+        if host_owner_id in {home_org_id, away_org_id}:
+            return host_owner_id == home_org_id
+        return True
+
+    def _slot_selected(slot: GameSlot, game: Game) -> bool:
+        allowed = _host_plan_allowed_host_ids_for_week(db, season_id, game.week_id, slot.slot_date)
+        return allowed is None or slot.host_location_id in allowed
+
+    def _compatible_slot(slot: GameSlot, required_size: str, game: Game) -> tuple[bool, str | None]:
+        if str(slot.status or '').upper() not in {'OPEN', 'ASSIGNED', 'BOOKED'}:
+            return False, 'DOUBLEHEADER_REPAIR_NO_SELECTED_HOST_CAPACITY'
+        if _slot_field_type(slot) != required_size:
+            return False, 'DOUBLEHEADER_REPAIR_FIELD_TYPE_CONFLICT'
+        if not _slot_selected(slot, game):
+            return False, 'DOUBLEHEADER_REPAIR_SELECTED_HOST_CONFLICT'
+        if not _true_home_ok_for_slot(game, slot):
+            return False, 'DOUBLEHEADER_REPAIR_TRUE_HOME_HOST_CONFLICT'
+        return True, None
+
+    def _record_attempt(strategy: str, slots: list[GameSlot], *, accepted: bool, rejection_reason: str | None = None) -> dict[str, object]:
+        host_id = slots[0].host_location_id if slots else None
+        row = {
+            'repair_strategy_attempted': strategy,
+            'candidate_host_location_id': str(host_id) if host_id else None,
+            'candidate_host_location_name': _host_name(host_id),
+            'candidate_slot_ids': [str(slot.id) for slot in slots],
+            'candidate_start_times': [_format_diagnostic_time(slot.start_time) for slot in slots],
+            'candidate_field_types': [_slot_field_type(slot) for slot in slots],
+            'accepted': bool(accepted),
+            'rejection_reason': rejection_reason,
+        }
+        diagnostics['repair_attempts'].append(row)
+        return row
+
+    def _snapshot(games: list[Game], slots: list[GameSlot]) -> dict[str, object]:
+        return {
+            'games': {g.id: (g.game_date, g.kickoff_time, g.host_location_id, g.field_instance_id) for g in games},
+            'slots': {s.id: (s.assigned_game_id, s.status) for s in slots},
+        }
+
+    def _restore(snapshot: dict[str, object]) -> None:
+        for gid, values in snapshot.get('games', {}).items():
+            game = db.get(Game, gid)
+            if game:
+                game.game_date, game.kickoff_time, game.host_location_id, game.field_instance_id = values
+        for sid, values in snapshot.get('slots', {}).items():
+            slot = db.get(GameSlot, sid)
+            if slot:
+                slot.assigned_game_id, slot.status = values
+        db.flush()
+
+    def _assign(game: Game, source: GameSlot | None, target: GameSlot) -> None:
+        if source and source.id != target.id:
+            source.assigned_game_id = None
+            source.status = 'OPEN'
+        target.assigned_game_id = game.id
+        target.status = 'ASSIGNED'
+        game.game_date = target.slot_date
+        game.kickoff_time = target.start_time
+        game.host_location_id = target.host_location_id
+        game.field_instance_id = target.field_instance_id
+
+    def _candidate_accepts(pair_id: str) -> tuple[bool, str | None, dict[str, object]]:
+        db.flush()
+        final_validation = _build_final_schedule_validation_result(db, season_id)
+        final_dh = _build_global_doubleheader_validation(db, season_id)
+        for key in (
+            'team_time_conflict_count',
+            'field_time_conflict_count',
+            'field_type_mismatch_count',
+            'selected_host_violation_count',
+            'overflow_location_used_count',
+            'host_owner_as_away_count',
+            'true_home_host_violation_count',
+        ):
+            if int(final_validation.get(key) or 0) > int(baseline_final.get(key) or 0):
+                reason = {
+                    'team_time_conflict_count': 'DOUBLEHEADER_REPAIR_TEAM_CONFLICT',
+                    'field_time_conflict_count': 'DOUBLEHEADER_REPAIR_FIELD_CONFLICT',
+                    'field_type_mismatch_count': 'DOUBLEHEADER_REPAIR_FIELD_TYPE_CONFLICT',
+                    'selected_host_violation_count': 'DOUBLEHEADER_REPAIR_SELECTED_HOST_CONFLICT',
+                    'true_home_host_violation_count': 'DOUBLEHEADER_REPAIR_TRUE_HOME_HOST_CONFLICT',
+                    'host_owner_as_away_count': 'DOUBLEHEADER_REPAIR_TRUE_HOME_HOST_CONFLICT',
+                }.get(key, 'DOUBLEHEADER_REPAIR_WOULD_CREATE_NEW_HARD_RULE_FAILURE')
+                return False, reason, final_dh
+        for row in final_dh.get('doubleheader_pairs') or []:
+            row_pair_id = str(row.get('doubleheader_pair_id'))
+            if row_pair_id == pair_id:
+                if not row.get('pair_valid'):
+                    return False, 'DOUBLEHEADER_REPAIR_WOULD_CREATE_NEW_HARD_RULE_FAILURE', final_dh
+            elif row_pair_id in protected_valid_pair_ids and not row.get('pair_valid'):
+                return False, 'DOUBLEHEADER_REPAIR_WOULD_BREAK_OTHER_DOUBLEHEADER', final_dh
+        return True, None, final_dh
+
+    def _open_slots_for(game: Game, required_size: str, *, host_id: uuid.UUID | None = None) -> list[GameSlot]:
+        query = db.query(GameSlot).filter(
+            GameSlot.season_id == season_id,
+            GameSlot.week_id == game.week_id,
+            GameSlot.slot_date == game.game_date,
+            GameSlot.assigned_game_id.is_(None),
+            GameSlot.status == 'OPEN',
+        )
+        if host_id:
+            query = query.filter(GameSlot.host_location_id == host_id)
+        rows = query.order_by(GameSlot.host_location_id.asc(), GameSlot.start_time.asc(), GameSlot.field_instance_id.asc()).all()
+        compatible = []
+        for slot in rows:
+            ok, _reason = _compatible_slot(slot, required_size, game)
+            if ok:
+                compatible.append(slot)
+        return compatible
+
+    for pair in invalid_pairs:
+        diagnostics['doubleheader_repair_attempted_count'] += 1
+        pair_id = str(pair.get('doubleheader_pair_id') or '')
+        g1, s1 = _game_row(pair.get('game_1_id'))
+        g2, s2 = _game_row(pair.get('game_2_id'))
+        if not g1 or not g2 or not s1 or not s2:
+            reason = 'DOUBLEHEADER_REPAIR_UNRESOLVABLE_WITH_CURRENT_CONSTRAINTS'
+            diagnostics['doubleheader_repair_failures'].append({**pair, 'repair_failure_reason': reason})
+            continue
+        division = g1.home_team.division if g1.home_team else db.get(Division, uuid.UUID(str(pair.get('division_id')))) if pair.get('division_id') else None
+        required_size = _required_field_type_for_division(division)
+        accepted = False
+        last_rejection = 'DOUBLEHEADER_REPAIR_NO_ADJACENT_PAIR_AVAILABLE'
+
+        # A. Single-game move next to the other game, preferring existing pair hosts.
+        for moving_game, moving_slot, fixed_game, fixed_slot in ((g1, s1, g2, s2), (g2, s2, g1, s1)):
+            if accepted:
+                break
+            if not fixed_slot.host_location_id:
+                continue
+            ok, reason = _compatible_slot(fixed_slot, required_size, fixed_game)
+            if not ok:
+                last_rejection = reason or last_rejection
+                _record_attempt('SINGLE_GAME_MOVE_TO_EXISTING_PAIR_HOST', [fixed_slot], accepted=False, rejection_reason=last_rejection)
+                continue
+            for target in _open_slots_for(moving_game, required_size, host_id=fixed_slot.host_location_id):
+                if not _slots_are_consecutive_blocks(target, fixed_slot):
+                    continue
+                snap = _snapshot([moving_game], [moving_slot, target])
+                _assign(moving_game, moving_slot, target)
+                ok, reason, _final_dh = _candidate_accepts(pair_id)
+                if ok:
+                    _record_attempt('SINGLE_GAME_MOVE_TO_EXISTING_PAIR_HOST', [target, fixed_slot], accepted=True)
+                    accepted = True
+                    break
+                _restore(snap)
+                last_rejection = reason or last_rejection
+                _record_attempt('SINGLE_GAME_MOVE_TO_EXISTING_PAIR_HOST', [target, fixed_slot], accepted=False, rejection_reason=last_rejection)
+
+        # B. Paired relocation to two open adjacent selected slots.
+        if not accepted:
+            open_slots = _open_slots_for(g1, required_size)
+            for idx, first in enumerate(open_slots):
+                if accepted:
+                    break
+                for second in open_slots[idx + 1:]:
+                    if first.host_location_id != second.host_location_id or not _slots_are_consecutive_blocks(first, second):
+                        continue
+                    if not _slot_selected(second, g2) or not _true_home_ok_for_slot(g2, second):
+                        continue
+                    ordered_targets = sorted([first, second], key=lambda slot: (slot.start_time or time.min, str(slot.id)))
+                    snap = _snapshot([g1, g2], [s1, s2, *ordered_targets])
+                    _assign(g1, s1, ordered_targets[0])
+                    _assign(g2, s2, ordered_targets[1])
+                    ok, reason, _final_dh = _candidate_accepts(pair_id)
+                    if ok:
+                        _record_attempt('PAIRED_RELOCATION_TO_OPEN_ADJACENT_SLOTS', ordered_targets, accepted=True)
+                        accepted = True
+                        break
+                    _restore(snap)
+                    last_rejection = reason or 'DOUBLEHEADER_REPAIR_NO_SELECTED_HOST_CAPACITY'
+                    _record_attempt('PAIRED_RELOCATION_TO_OPEN_ADJACENT_SLOTS', ordered_targets, accepted=False, rejection_reason=last_rejection)
+
+        # C. Conservative safe swap: swap one pair member into an occupied adjacent slot and put the displaced game into the vacated compatible slot.
+        if not accepted:
+            for moving_game, moving_slot, fixed_game, fixed_slot in ((g1, s1, g2, s2), (g2, s2, g1, s1)):
+                if accepted or not fixed_slot.host_location_id:
+                    break
+                occupied_targets = db.query(GameSlot).filter(
+                    GameSlot.season_id == season_id,
+                    GameSlot.week_id == moving_game.week_id,
+                    GameSlot.slot_date == moving_game.game_date,
+                    GameSlot.host_location_id == fixed_slot.host_location_id,
+                    GameSlot.assigned_game_id.isnot(None),
+                    GameSlot.assigned_game_id != moving_game.id,
+                ).order_by(GameSlot.start_time.asc()).all()
+                for target in occupied_targets:
+                    if target.assigned_game_id == fixed_game.id or not _slots_are_consecutive_blocks(target, fixed_slot):
+                        continue
+                    displaced = db.get(Game, target.assigned_game_id)
+                    if not displaced:
+                        continue
+                    if _slot_field_type(target) != required_size or _slot_field_type(moving_slot) != _required_field_type_for_division(displaced.home_team.division if displaced.home_team else None):
+                        last_rejection = 'DOUBLEHEADER_REPAIR_FIELD_TYPE_CONFLICT'
+                        continue
+                    if not _slot_selected(target, moving_game) or not _slot_selected(moving_slot, displaced):
+                        last_rejection = 'DOUBLEHEADER_REPAIR_SELECTED_HOST_CONFLICT'
+                        continue
+                    if not _true_home_ok_for_slot(moving_game, target) or not _true_home_ok_for_slot(displaced, moving_slot):
+                        last_rejection = 'DOUBLEHEADER_REPAIR_TRUE_HOME_HOST_CONFLICT'
+                        continue
+                    snap = _snapshot([moving_game, displaced], [moving_slot, target])
+                    _assign(displaced, target, moving_slot)
+                    _assign(moving_game, moving_slot, target)
+                    ok, reason, _final_dh = _candidate_accepts(pair_id)
+                    if ok:
+                        _record_attempt('SAFE_SWAP_REPAIR', [target, moving_slot], accepted=True)
+                        accepted = True
+                        break
+                    _restore(snap)
+                    last_rejection = reason or last_rejection
+                    _record_attempt('SAFE_SWAP_REPAIR', [target, moving_slot], accepted=False, rejection_reason=last_rejection)
+
+        post_pair_validation = _build_global_doubleheader_validation(db, season_id)
+        repaired_pair = next((row for row in post_pair_validation.get('doubleheader_pairs') or [] if str(row.get('doubleheader_pair_id')) == pair_id), None)
+        if accepted and repaired_pair and repaired_pair.get('pair_valid'):
+            diagnostics['doubleheader_repair_success_count'] += 1
+            diagnostics['successful_repairs'].append({
+                **pair,
+                'repaired_same_location': bool(repaired_pair.get('same_location')),
+                'repaired_back_to_back': bool(repaired_pair.get('back_to_back')),
+                'repaired_game_1_start_time': repaired_pair.get('game_1_start_time'),
+                'repaired_game_1_host_location_id': repaired_pair.get('game_1_host_location_id'),
+                'repaired_game_2_start_time': repaired_pair.get('game_2_start_time'),
+                'repaired_game_2_host_location_id': repaired_pair.get('game_2_host_location_id'),
+                'hard_rule_validation_after_repair_passed': True,
+            })
+            protected_valid_pair_ids.add(pair_id)
+        else:
+            reason = last_rejection if last_rejection in DOUBLEHEADER_REPAIR_FAILURE_REASONS else 'DOUBLEHEADER_REPAIR_UNRESOLVABLE_WITH_CURRENT_CONSTRAINTS'
+            diagnostics['doubleheader_repair_failures'].append({**pair, 'repair_failure_reason': reason})
+
+    final_validation = _build_global_doubleheader_validation(db, season_id)
+    unresolved = list(final_validation.get('failures') or [])
+    diagnostics['protected_doubleheader_pairs'] = [row for row in (final_validation.get('doubleheader_pairs') or []) if row.get('pair_valid')]
+    diagnostics['doubleheader_repair_failure_count'] = len(diagnostics['doubleheader_repair_failures']) + len([row for row in unresolved if row.get('code') in DOUBLEHEADER_FINAL_FAILURE_CODES])
+    if unresolved:
+        existing_keys = {str(row) for row in diagnostics['doubleheader_repair_failures']}
+        for row in unresolved:
+            enriched = {**row, 'repair_failure_reason': row.get('repair_failure_reason') or 'DOUBLEHEADER_REPAIR_UNRESOLVABLE_WITH_CURRENT_CONSTRAINTS'}
+            if str(enriched) not in existing_keys:
+                diagnostics['doubleheader_repair_failures'].append(enriched)
+    diagnostics['doubleheader_repair_status'] = 'SUCCEEDED' if not unresolved else ('FAILED' if diagnostics['doubleheader_repair_attempted_count'] else 'FAILED_UNREPAIRABLE')
+    return diagnostics
 
 def _game_doubleheader_pair_context(db: Session, game: Game | None) -> dict[str, object] | None:
     if not game or not game.season_id or not game.game_date:
@@ -18878,6 +19249,31 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         moves_rejected=sum(skipped_attempts_by_reason.values()) + failed_validation_count,
     )
 
+    doubleheader_repair_phase = _start_phase('mandatory doubleheader repair')
+    doubleheader_repair_diagnostics = _run_global_doubleheader_repair(db, season_id, dry_run=dry_run)
+    auto_schedule_diagnostics['doubleheader_repair'] = doubleheader_repair_diagnostics
+    auto_schedule_diagnostics['Doubleheader Repair Diagnostics'] = doubleheader_repair_diagnostics
+    for key in (
+        'doubleheader_repair_ran',
+        'doubleheader_repair_status',
+        'invalid_doubleheaders_detected_count',
+        'doubleheader_repair_attempted_count',
+        'doubleheader_repair_success_count',
+        'doubleheader_repair_failure_count',
+        'doubleheader_repair_failures',
+    ):
+        auto_schedule_diagnostics[key] = doubleheader_repair_diagnostics.get(key)
+    doubleheader_repair_failure_count = int(doubleheader_repair_diagnostics.get('doubleheader_repair_failure_count') or 0)
+    if doubleheader_repair_failure_count > 0 and not dry_run:
+        validation_errors.append('Global doubleheader repair left unresolved hard-rule doubleheader failures.')
+    _finish_phase(
+        doubleheader_repair_phase,
+        records_evaluated=int(doubleheader_repair_diagnostics.get('invalid_doubleheaders_detected_count') or 0),
+        moves_considered=int(doubleheader_repair_diagnostics.get('doubleheader_repair_attempted_count') or 0),
+        moves_accepted=int(doubleheader_repair_diagnostics.get('doubleheader_repair_success_count') or 0),
+        moves_rejected=int(doubleheader_repair_diagnostics.get('doubleheader_repair_failure_count') or 0),
+    )
+
     hard_validation: list[dict[str, object]] = []
     doubleheader_phase = _start_phase('doubleheader validation')
     final_validation_phase = _start_phase('final validation')
@@ -19245,6 +19641,18 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
 
     auto_schedule_diagnostics['revised_scheduling_hierarchy_diagnostics_status'] = revised_hierarchy_diagnostics.get('diagnostics_status') or ('SUCCEEDED' if revised_hierarchy_diagnostics else 'FAILED')
     auto_schedule_diagnostics['revised_scheduling_hierarchy_diagnostics_error'] = revised_hierarchy_diagnostics.get('diagnostics_error')
+
+    post_optimization_doubleheader_protection = _build_global_doubleheader_validation(db, season_id)
+    auto_schedule_diagnostics['post_optimization_doubleheader_protection_check'] = {
+        'ran': True,
+        'status': 'PASSED' if int(post_optimization_doubleheader_protection.get('failure_count') or 0) == 0 else 'FAILED',
+        'doubleheader_not_back_to_back_count': post_optimization_doubleheader_protection.get('doubleheader_not_back_to_back_count'),
+        'doubleheader_split_location_count': post_optimization_doubleheader_protection.get('doubleheader_split_location_count'),
+        'doubleheader_pair_validation_failure_count': post_optimization_doubleheader_protection.get('doubleheader_pair_validation_failure_count'),
+        'failures': post_optimization_doubleheader_protection.get('failures') or [],
+    }
+    if int(post_optimization_doubleheader_protection.get('failure_count') or 0) > 0:
+        validation_errors.append('Post-optimization doubleheader protection check found unresolved doubleheader failures.')
     try:
         final_validation_result = _build_final_schedule_validation_result(
             db,
@@ -19375,6 +19783,10 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         'timeout_triggered': timeout_triggered,
         'optional_optimization_skipped': auto_schedule_diagnostics.get('optional_optimization_skipped'),
         'optional_optimization_skip_reason': auto_schedule_diagnostics.get('optional_optimization_skip_reason'),
+        'doubleheader_repair': auto_schedule_diagnostics.get('doubleheader_repair'),
+        'doubleheader_repair_ran': auto_schedule_diagnostics.get('doubleheader_repair_ran'),
+        'doubleheader_repair_status': auto_schedule_diagnostics.get('doubleheader_repair_status'),
+        'post_optimization_doubleheader_protection_check': auto_schedule_diagnostics.get('post_optimization_doubleheader_protection_check'),
         'final_validation_ran': auto_schedule_diagnostics.get('final_validation_ran'),
         'final_validation_status': auto_schedule_diagnostics.get('final_validation_status'),
         'final_validation_failures': auto_schedule_diagnostics.get('final_validation_failures') or [],
@@ -19417,6 +19829,10 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         'revised_scheduling_hierarchy_diagnostics': auto_schedule_diagnostics.get('revised_scheduling_hierarchy_diagnostics') or {},
         'optional_optimization_skipped': auto_schedule_diagnostics.get('optional_optimization_skipped'),
         'optional_optimization_skip_reason': auto_schedule_diagnostics.get('optional_optimization_skip_reason'),
+        'doubleheader_repair': auto_schedule_diagnostics.get('doubleheader_repair'),
+        'doubleheader_repair_ran': auto_schedule_diagnostics.get('doubleheader_repair_ran'),
+        'doubleheader_repair_status': auto_schedule_diagnostics.get('doubleheader_repair_status'),
+        'post_optimization_doubleheader_protection_check': auto_schedule_diagnostics.get('post_optimization_doubleheader_protection_check'),
         'final_validation_ran': auto_schedule_diagnostics.get('final_validation_ran'),
         'final_validation_status': auto_schedule_diagnostics.get('final_validation_status'),
         'final_validation_failure_count': auto_schedule_diagnostics.get('final_validation_failure_count'),
