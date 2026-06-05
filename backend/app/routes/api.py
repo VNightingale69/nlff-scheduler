@@ -17956,6 +17956,19 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
     auto_schedule_started_perf = perf_counter()
     auto_schedule_started_at = datetime.utcnow()
     phase_metrics: list[dict[str, object]] = []
+    auto_schedule_diagnostics: dict[str, object] | None = {}
+
+    def _ensure_auto_schedule_diagnostics() -> dict[str, object]:
+        nonlocal auto_schedule_diagnostics
+        if auto_schedule_diagnostics is None:
+            auto_schedule_diagnostics = {}
+        return auto_schedule_diagnostics
+
+    def _mark_diagnostics_attachment_failure(exc: Exception, section: str) -> None:
+        diagnostics = _ensure_auto_schedule_diagnostics()
+        diagnostics['diagnostics_status'] = 'FAILED'
+        diagnostics['diagnostics_error'] = f'{section}: {exc}'
+        logger.exception('Auto-schedule diagnostics attachment failed for section=%s', section)
 
     def _iso_ts(value: datetime) -> str:
         return value.isoformat(timespec='milliseconds') + 'Z'
@@ -18747,7 +18760,8 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
             diagnostics.get('missing_division_week_generation'),
         )
 
-    preplacement_diagnostics = _build_auto_schedule_diagnostics()
+    preplacement_diagnostics = _ensure_auto_schedule_diagnostics()
+    preplacement_diagnostics.update(_build_auto_schedule_diagnostics())
     preplacement_root_causes = list(preplacement_diagnostics.get('root_cause_categories') or [])
     preplacement_generated_groups = int(preplacement_diagnostics.get('generated_game_groups_total') or 0)
     preplacement_expected_games = int(preplacement_diagnostics.get('expected_games_total') or 0)
@@ -18813,6 +18827,15 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         warnings.append(
             'Generated field-size capacity is insufficient for at least one regular-season date; auto-schedule placement was not started.'
         )
+        slot_capacity_diagnostics = _ensure_auto_schedule_diagnostics()
+        slot_capacity_diagnostics.update({
+            'slot_capacity_validation': slot_preflight,
+            'Required Field-Size Demand vs Generated Capacity Diagnostics': [
+                row.get('Required Field-Size Demand vs Generated Capacity Diagnostics')
+                for row in (slot_preflight.get('validation_rows') or [])
+            ],
+            'phase_metrics': phase_metrics,
+        })
         return {
             'status': 'VALIDATION_FAILED',
             'message': 'Generated slot capacity is insufficient for required field-size demand before placement.',
@@ -18826,14 +18849,7 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
                 'GENERATED_SLOT_COVERAGE_INSUFFICIENT',
                 'TURF_CONFIGURATION_DID_NOT_GENERATE_REQUIRED_FIELD_SIZE',
             ],
-            'auto_schedule_diagnostics': {
-                'slot_capacity_validation': slot_preflight,
-                'Required Field-Size Demand vs Generated Capacity Diagnostics': [
-                    row.get('Required Field-Size Demand vs Generated Capacity Diagnostics')
-                    for row in (slot_preflight.get('validation_rows') or [])
-                ],
-                'phase_metrics': phase_metrics,
-            },
+            'auto_schedule_diagnostics': slot_capacity_diagnostics,
             'slot_capacity_validation': slot_preflight,
             'games_skipped': 0,
             'skipped_attempts_message': '0 placement attempts skipped; placement was not started because generated field-size capacity was insufficient.',
@@ -19251,18 +19267,30 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
 
     doubleheader_repair_phase = _start_phase('mandatory doubleheader repair')
     doubleheader_repair_diagnostics = _run_global_doubleheader_repair(db, season_id, dry_run=dry_run)
-    auto_schedule_diagnostics['doubleheader_repair'] = doubleheader_repair_diagnostics
-    auto_schedule_diagnostics['Doubleheader Repair Diagnostics'] = doubleheader_repair_diagnostics
-    for key in (
-        'doubleheader_repair_ran',
-        'doubleheader_repair_status',
-        'invalid_doubleheaders_detected_count',
-        'doubleheader_repair_attempted_count',
-        'doubleheader_repair_success_count',
-        'doubleheader_repair_failure_count',
-        'doubleheader_repair_failures',
-    ):
-        auto_schedule_diagnostics[key] = doubleheader_repair_diagnostics.get(key)
+    if auto_schedule_diagnostics is None:
+        auto_schedule_diagnostics = {}
+    doubleheader_repair_diagnostics = doubleheader_repair_diagnostics or {
+        'doubleheader_repair_ran': False,
+        'doubleheader_repair_status': 'NOT_RUN',
+        'doubleheader_repair_failure_count': 0,
+    }
+    try:
+        diagnostics = _ensure_auto_schedule_diagnostics()
+        diagnostics['doubleheader_repair'] = doubleheader_repair_diagnostics
+        diagnostics['Doubleheader Repair Diagnostics'] = doubleheader_repair_diagnostics
+        for key in (
+            'doubleheader_repair_ran',
+            'doubleheader_repair_status',
+            'invalid_doubleheaders_detected_count',
+            'doubleheader_repair_attempted_count',
+            'doubleheader_repair_success_count',
+            'doubleheader_repair_failure_count',
+            'doubleheader_repair_failures',
+        ):
+            diagnostics[key] = doubleheader_repair_diagnostics.get(key)
+        diagnostics.setdefault('diagnostics_status', 'OK')
+    except Exception as exc:
+        _mark_diagnostics_attachment_failure(exc, 'doubleheader_repair')
     doubleheader_repair_failure_count = int(doubleheader_repair_diagnostics.get('doubleheader_repair_failure_count') or 0)
     if doubleheader_repair_failure_count > 0 and not dry_run:
         validation_errors.append('Global doubleheader repair left unresolved hard-rule doubleheader failures.')
@@ -19421,7 +19449,8 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
     )
 
     diagnostics_phase = _start_phase('diagnostics build')
-    auto_schedule_diagnostics = _build_auto_schedule_diagnostics()
+    auto_schedule_diagnostics = _ensure_auto_schedule_diagnostics()
+    auto_schedule_diagnostics.update(_build_auto_schedule_diagnostics())
     auto_schedule_diagnostics['phase_metrics'] = phase_metrics
     auto_schedule_diagnostics['search_limits'] = dict(runtime_limits)
     auto_schedule_diagnostics['search_limits']['candidate_move_evaluations_per_date'] = AUTO_SCHEDULE_CANDIDATE_EVALUATION_LIMIT_PER_DATE
