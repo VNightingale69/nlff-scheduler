@@ -113,6 +113,10 @@ FINAL_VALIDATION_COUNTER_KEYS = (
     'turf_wave_duplicate_sequence_count',
     'turf_wave_sequence_out_of_order_count',
     'turf_wave_chronological_validation_failed_count',
+    'turf_wave_earlier_available_hour_skipped_count',
+    'turf_wave_non_contiguous_used_time_count',
+    'turf_wave_used_later_with_empty_earlier_wave_count',
+    'turf_wave_pull_forward_required_count',
     'turf_wave_canonical_mapping_missing_count',
     'turf_wave_label_repair_failed_count',
     'generated_slot_integrity_failure_count',
@@ -914,6 +918,10 @@ def _build_final_schedule_validation_result(
     counters['turf_wave_duplicate_sequence_count'] = _safe_int(turf.get('turf_wave_duplicate_sequence_count'))
     counters['turf_wave_sequence_out_of_order_count'] = _safe_int(turf.get('turf_wave_sequence_out_of_order_count'))
     counters['turf_wave_chronological_validation_failed_count'] = _safe_int(turf.get('turf_wave_chronological_validation_failed_count'))
+    counters['turf_wave_earlier_available_hour_skipped_count'] = _safe_int(turf.get('turf_wave_earlier_available_hour_skipped_count'))
+    counters['turf_wave_non_contiguous_used_time_count'] = _safe_int(turf.get('turf_wave_non_contiguous_used_time_count'))
+    counters['turf_wave_used_later_with_empty_earlier_wave_count'] = _safe_int(turf.get('turf_wave_used_later_with_empty_earlier_wave_count'))
+    counters['turf_wave_pull_forward_required_count'] = _safe_int(turf.get('turf_wave_pull_forward_required_count'))
     counters['turf_wave_canonical_mapping_missing_count'] = _safe_int(turf_wave_source_of_truth_repair.get('canonical_mapping_missing_count'))
     counters['turf_wave_label_repair_failed_count'] = _safe_int(turf_wave_source_of_truth_repair.get('label_repair_failed_count'))
     turf_sequence_details = turf.get('chronological_sequence_validation') or turf.get('host_date_sequence_validation')
@@ -929,6 +937,15 @@ def _build_final_schedule_validation_result(
         failures.append(_final_validation_failure('TURF_WAVE_SEQUENCE_OUT_OF_ORDER', counters['turf_wave_sequence_out_of_order_count'], 'Turf wave sequence numbers do not match chronological start time order.', turf_sequence_details))
     if counters['turf_wave_chronological_validation_failed_count']:
         failures.append(_final_validation_failure('TURF_WAVE_CHRONOLOGICAL_VALIDATION_FAILED', counters['turf_wave_chronological_validation_failed_count'], 'Turf wave chronological validation failed.', turf_sequence_details))
+    contiguous_details = turf.get('turf_wave_contiguous_time_diagnostics') or turf_sequence_details
+    if counters.get('turf_wave_earlier_available_hour_skipped_count'):
+        failures.append(_final_validation_failure('TURF_WAVE_EARLIER_AVAILABLE_HOUR_SKIPPED', counters['turf_wave_earlier_available_hour_skipped_count'], 'A turf host/date uses a later wave while an earlier available compatible hour is empty.', contiguous_details))
+    if counters.get('turf_wave_non_contiguous_used_time_count'):
+        failures.append(_final_validation_failure('TURF_WAVE_NON_CONTIGUOUS_USED_TIME', counters['turf_wave_non_contiguous_used_time_count'], 'Turf host/date usage is not compacted contiguously from the earliest available hosting hour.', contiguous_details))
+    if counters.get('turf_wave_used_later_with_empty_earlier_wave_count'):
+        failures.append(_final_validation_failure('TURF_WAVE_USED_LATER_WITH_EMPTY_EARLIER_WAVE', counters['turf_wave_used_later_with_empty_earlier_wave_count'], 'A later turf wave is used while an earlier compatible wave is empty.', contiguous_details))
+    if counters.get('turf_wave_pull_forward_required_count'):
+        failures.append(_final_validation_failure('TURF_WAVE_PULL_FORWARD_REQUIRED', counters['turf_wave_pull_forward_required_count'], 'A mandatory turf pull-forward repair is required or remains blocked by hard constraints.', contiguous_details))
     if counters.get('turf_wave_canonical_mapping_missing_count'):
         failures.append(_final_validation_failure('TURF_WAVE_CANONICAL_MAPPING_MISSING', counters['turf_wave_canonical_mapping_missing_count'], 'Scheduled turf games could not be mapped to canonical host/date/start wave metadata.', turf_wave_source_of_truth_repair.get('repaired_turf_labels') or []))
     repair_failures = [detail for detail in (turf_wave_source_of_truth_repair.get('repaired_turf_labels') or []) if not detail.get('repair_success')]
@@ -4340,10 +4357,177 @@ def _canonical_turf_field_export_label(db: Session, slot: GameSlot | None, field
         return _turf_field_export_label(slot, field_instance)
     return f"Wave {int(value.get('wave_number') or 0)} {layout} {component_label}"
 
+
+def _build_turf_wave_contiguous_time_diagnostics(db: Session, season_id: uuid.UUID | None = None) -> dict[str, object]:
+    """Detect turf host/date schedules that use later waves while earlier compatible time is empty."""
+    source = _build_canonical_turf_wave_source_of_truth(db, season_id)
+    mapping: dict[tuple[uuid.UUID, date, time], dict[str, object]] = source.get('mapping') or {}
+    groups: dict[tuple[uuid.UUID, date], dict[str, object]] = {}
+    for (host_id, game_date, start_time_value), canonical in mapping.items():
+        group = groups.setdefault((host_id, game_date), {'canonical': [], 'starts': {}})
+        group['canonical'].append(canonical)
+        group['starts'][start_time_value] = canonical
+
+    scheduled_query = db.query(Game, GameSlot, FieldInstance, HostLocation).join(
+        GameSlot, GameSlot.assigned_game_id == Game.id
+    ).join(
+        FieldInstance, FieldInstance.id == GameSlot.field_instance_id
+    ).join(
+        HostLocation, HostLocation.id == GameSlot.host_location_id
+    ).join(
+        GameStatus, GameStatus.id == Game.game_status_id
+    ).filter(func.lower(GameStatus.code) != 'unscheduled')
+    if season_id:
+        scheduled_query = scheduled_query.filter(Game.season_id == season_id)
+
+    used_by_group_start: dict[tuple[uuid.UUID, date], dict[time, list[dict[str, object]]]] = {}
+    for game, slot, instance, host in scheduled_query.order_by(Game.game_date, Game.kickoff_time, Game.id).all():
+        if not _is_turf_stadium_host(host) or not slot.host_location_id or not slot.slot_date or not slot.start_time:
+            continue
+        group_key = (slot.host_location_id, slot.slot_date)
+        field_size = _normalize_field_size(slot.field_type or instance.field_type or _game_required_field_type(game))
+        row = {
+            'game_id': str(game.id),
+            'start_time': slot.start_time.isoformat(),
+            'field_type': field_size,
+            'division_required_field_layout_type': field_size,
+            'slot_id': str(slot.id),
+            'field_instance_id': str(slot.field_instance_id),
+        }
+        used_by_group_start.setdefault(group_key, {}).setdefault(slot.start_time, []).append(row)
+
+    slot_query = db.query(GameSlot, FieldInstance, HostLocation).join(
+        FieldInstance, FieldInstance.id == GameSlot.field_instance_id
+    ).join(HostLocation, HostLocation.id == GameSlot.host_location_id)
+    if season_id:
+        slot_query = slot_query.filter(or_(GameSlot.season_id == season_id, GameSlot.week_id.in_(db.query(Week.id).filter(Week.season_id == season_id))))
+    slots_by_group_start: dict[tuple[uuid.UUID, date], dict[time, list[GameSlot]]] = {}
+    for slot, _instance, host in slot_query.all():
+        if not _is_turf_stadium_host(host) or not slot.host_location_id or not slot.slot_date or not slot.start_time:
+            continue
+        slots_by_group_start.setdefault((slot.host_location_id, slot.slot_date), {}).setdefault(slot.start_time, []).append(slot)
+
+    diagnostics_by_key = {(row.get('host_location_id'), row.get('game_date')): row for row in (source.get('diagnostics') or []) if isinstance(row, dict)}
+    host_date_rows: list[dict[str, object]] = []
+    skipped_wave_rows: list[dict[str, object]] = []
+    skipped_count = 0
+
+    for group_key, data in sorted(groups.items(), key=lambda item: (item[0][1], str(item[0][0]))):
+        host_id, game_date_value = group_key
+        base_row = diagnostics_by_key.get((str(host_id), game_date_value.isoformat())) or {}
+        host = db.get(HostLocation, host_id)
+        canonical_rows = sorted(data.get('canonical') or [], key=lambda row: row.get('start_time') or time.min)
+        start_times = [row.get('start_time') for row in canonical_rows if row.get('start_time')]
+        canonical_by_start = {row.get('start_time'): row for row in canonical_rows}
+        used_starts = sorted((used_by_group_start.get(group_key) or {}).keys())
+        latest_used_start = max(used_starts) if used_starts else None
+        latest_used_wave_number = int((canonical_by_start.get(latest_used_start) or {}).get('wave_number') or 0) if latest_used_start else None
+        empty_before_latest: list[str] = []
+        skipped_details: list[dict[str, object]] = []
+        pull_forward_candidates = 0
+        rejection_reasons: dict[str, int] = {}
+
+        for start_value in start_times:
+            if not latest_used_start or start_value >= latest_used_start:
+                continue
+            if (used_by_group_start.get(group_key) or {}).get(start_value):
+                continue
+            slots = (slots_by_group_start.get(group_key) or {}).get(start_value, [])
+            open_slots = [slot for slot in slots if not slot.assigned_game_id and str(slot.status or '').upper() == 'OPEN']
+            available_components = []
+            later_games_considered = []
+            compatible_later_count = 0
+            for slot in open_slots:
+                size = _normalize_field_size(slot.field_type)
+                if size:
+                    available_components.append({'slot_id': str(slot.id), 'field_instance_id': str(slot.field_instance_id), 'field_type': size})
+            for later_start in used_starts:
+                if later_start <= start_value:
+                    continue
+                for game_row in (used_by_group_start.get(group_key) or {}).get(later_start, []):
+                    pull_forward_candidates += 1
+                    compatible = any(component.get('field_type') == game_row.get('field_type') for component in available_components)
+                    if compatible:
+                        compatible_later_count += 1
+                    later_games_considered.append({**game_row, 'compatible_with_empty_wave': compatible})
+            if available_components and compatible_later_count > 0:
+                empty_before_latest.append(start_value.isoformat())
+                wave_number = int((canonical_by_start.get(start_value) or {}).get('wave_number') or 0)
+                detail = {
+                    'wave_number': wave_number,
+                    'start_time': start_value.isoformat(),
+                    'available_field_components': available_components,
+                    'later_games_considered_for_pull_forward': later_games_considered,
+                    'repair_success': False,
+                    'repair_failure_reason': 'TURF_WAVE_PULL_FORWARD_REQUIRED',
+                }
+                skipped_details.append(detail)
+                skipped_wave_rows.append({
+                    'hosting_availability_id': str((canonical_by_start.get(start_value) or {}).get('hosting_availability_id')) if (canonical_by_start.get(start_value) or {}).get('hosting_availability_id') else None,
+                    'host_location_id': str(host_id),
+                    'host_location_name': getattr(host, 'name', None),
+                    'game_date': game_date_value.isoformat(),
+                    **detail,
+                })
+                skipped_count += 1
+                rejection_reasons['TURF_WAVE_PULL_FORWARD_REQUIRED'] = int(rejection_reasons.get('TURF_WAVE_PULL_FORWARD_REQUIRED') or 0) + 1
+
+        row = {
+            'hosting_availability_id': base_row.get('hosting_availability_id'),
+            'host_location_id': str(host_id),
+            'host_location_name': getattr(host, 'name', None),
+            'game_date': game_date_value.isoformat(),
+            'available_wave_start_times': [value.isoformat() for value in start_times],
+            'canonical_wave_numbers': [int(row.get('wave_number') or 0) for row in canonical_rows],
+            'used_wave_start_times': [value.isoformat() for value in used_starts],
+            'empty_wave_start_times_before_latest_used_wave': empty_before_latest,
+            'latest_used_wave_number': latest_used_wave_number,
+            'skipped_earlier_wave_count': len(skipped_details),
+            'pull_forward_repair_ran': False,
+            'pull_forward_candidates_considered': pull_forward_candidates,
+            'pull_forward_moves_accepted': 0,
+            'pull_forward_moves_rejected': pull_forward_candidates if skipped_details else 0,
+            'rejection_reasons': rejection_reasons,
+            'labels_repaired_count': int(base_row.get('labels_repaired_count') or 0),
+            'final_contiguous_time_validation_passed': len(skipped_details) == 0,
+            'skipped_waves': skipped_details,
+        }
+        if skipped_details:
+            row['validation_failure_reason'] = 'TURF_WAVE_EARLIER_AVAILABLE_HOUR_SKIPPED'
+        host_date_rows.append(row)
+
+    return {
+        'turf_wave_contiguous_time_diagnostics': host_date_rows,
+        'Turf Wave Contiguous Time Diagnostics': host_date_rows,
+        'skipped_earlier_turf_waves': skipped_wave_rows,
+        'turf_wave_earlier_available_hour_skipped_count': skipped_count,
+        'turf_wave_non_contiguous_used_time_count': skipped_count,
+        'turf_wave_used_later_with_empty_earlier_wave_count': skipped_count,
+        'turf_wave_pull_forward_required_count': skipped_count,
+        'TURF_WAVE_EARLIER_AVAILABLE_HOUR_SKIPPED': skipped_count,
+        'TURF_WAVE_NON_CONTIGUOUS_USED_TIME': skipped_count,
+        'TURF_WAVE_USED_LATER_WITH_EMPTY_EARLIER_WAVE': skipped_count,
+        'TURF_WAVE_PULL_FORWARD_REQUIRED': skipped_count,
+    }
+
 def _build_turf_wave_chronological_validation(db: Session, season_id: uuid.UUID | None = None) -> dict[str, object]:
     """Validate turf wave sequence/labels from canonical host/date/start metadata."""
     source = _build_canonical_turf_wave_source_of_truth(db, season_id)
     diagnostics = source.get('diagnostics') or []
+    contiguous = _build_turf_wave_contiguous_time_diagnostics(db, season_id)
+    contiguous_by_key = {
+        (row.get('host_location_id'), row.get('game_date')): row
+        for row in (contiguous.get('turf_wave_contiguous_time_diagnostics') or [])
+        if isinstance(row, dict)
+    }
+    for row in diagnostics:
+        if not isinstance(row, dict):
+            continue
+        contiguous_row = contiguous_by_key.get((row.get('host_location_id'), row.get('game_date')))
+        if contiguous_row:
+            row.update({key: value for key, value in contiguous_row.items() if key not in {'host_location_id', 'host_location_name', 'game_date'}})
+            if int(contiguous_row.get('skipped_earlier_wave_count') or 0) > 0:
+                row['validation_failure_reason'] = 'TURF_WAVE_EARLIER_AVAILABLE_HOUR_SKIPPED'
 
     label_mismatch_count = 0
     mixed_label_count = 0
@@ -4427,6 +4611,7 @@ def _build_turf_wave_chronological_validation(db: Session, season_id: uuid.UUID 
         'turf_wave_mixed_labels_for_same_time_count': mixed_label_count,
         'turf_wave_canonical_mapping_missing_count': canonical_missing_count,
         'turf_wave_chronological_validation_failed_count': failed_count,
+        **contiguous,
     }
 
 def _validate_turf_wave_regeneration(
@@ -11354,8 +11539,8 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         target_after_assigned = sum(1 for slot in target_slots if slot.assigned_game_id) + 1
         target_capacity = len(target_slots) or sum(_layout_counts(target_wave, target_slots).values())
         source_after_assigned = max(0, sum(1 for slot in source_slots if slot.assigned_game_id) - 1) if source.turf_wave_id != target_wave.id else sum(1 for slot in source_slots if slot.assigned_game_id)
-        if target.start_time > source.start_time and source_after_assigned > 0:
-            return reject_move('NO_NET_WAVE_IMPROVEMENT', detail='Target wave improves, but moving to a later wave would leave the source wave partially used.', hard_constraint_failure=False, score_before=0, score_after=0)
+        if target.start_time > source.start_time:
+            return reject_move('NO_NET_WAVE_IMPROVEMENT', detail='Pull-forward compaction cannot move a game to a later turf wave.', hard_constraint_failure=False, score_before=0, score_after=0)
         score = 0
         reasons: list[str] = []
         layout = _normalize_configuration_name(target_wave.preferred_layout_code)
@@ -11592,57 +11777,37 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         return row
 
     def _initialize_partial_wave_details(*, phase: str = 'before', update_current_collections: bool = True) -> None:
-        assigned_slots = db.query(GameSlot).join(GameSlot.field_instance).filter(
-            GameSlot.season_id == season_id,
-            GameSlot.turf_wave_id.is_not(None),
-        ).all()
+        # Build the optimization target set from generated TurfWave/GameSlot metadata,
+        # not from assigned games or stale field labels. This makes entirely empty
+        # earlier waves visible to the mandatory pull-forward pass.
+        waves_by_id, slots_by_wave = _wave_rows()
         detected_groups_by_key: dict[tuple[date | None, uuid.UUID | None, time | None, int | None, str], dict[str, object]] = {}
-        parse_failure_labels: set[str] = set()
-
-        for slot in assigned_slots:
-            label = slot.field_instance.field_name if slot.field_instance else None
-            parsed = _parse_detected_turf_wave_metadata(label)
-            if parsed is None:
-                parsed = _fallback_turf_wave_metadata(slot)
-                if parsed is None:
-                    if label and 'wave' in str(label).lower():
-                        parse_failure_labels.add(str(label))
-                    continue
-            wave_layout = str(parsed['wave_layout'])
-            expected = _turf_wave_layout_counts(wave_layout)
-            component_size = _field_size_label(parsed.get('component_size'))
-            if component_size is None:
-                parse_failure_labels.add(str(label or slot.id))
-                continue
-            group_key = (
-                slot.slot_date,
-                slot.host_location_id,
-                slot.start_time,
-                int(parsed['wave_number']) if parsed.get('wave_number') is not None else None,
-                wave_layout,
-            )
+        for wave in waves_by_id.values():
+            wave_slots = slots_by_wave.get(wave.id, [])
+            layout = _normalize_configuration_name(wave.preferred_layout_code)
+            expected = _wave_capacity_counts(wave, wave_slots)
+            group_key = _logical_wave_group_key(wave)
             group = detected_groups_by_key.setdefault(group_key, {
-                'date': slot.slot_date,
-                'host_location_id': slot.host_location_id,
-                'host_location_name': slot.host_location.name if slot.host_location else None,
-                'start_time': slot.start_time,
-                'wave_number': int(parsed['wave_number']) if parsed.get('wave_number') is not None else None,
-                'wave_layout': wave_layout,
-                'expected_components_by_size': expected,
+                'date': wave.host_date,
+                'host_location_id': wave.host_location_id,
+                'host_location_name': wave.host_location.name if wave.host_location else None,
+                'start_time': wave.start_time,
+                'wave_number': int(wave.sequence_number or 0),
+                'wave_layout': layout,
+                'expected_components_by_size': {size: int(expected.get(size) or 0) for size in FIELD_SIZE_ORDER},
                 'assigned_components_by_size': {size: 0 for size in FIELD_SIZE_ORDER},
                 'assigned_slots': [],
                 'group_waves': [],
             })
+            if isinstance(group.get('group_waves'), list) and all(existing.id != wave.id for existing in group['group_waves']):
+                group['group_waves'].append(wave)
             assigned = group['assigned_components_by_size']
-            if slot.assigned_game_id and isinstance(assigned, dict):
-                assigned[component_size] = int(assigned.get(component_size) or 0) + 1
-            if slot.assigned_game_id and isinstance(group.get('assigned_slots'), list):
-                group['assigned_slots'].append(slot)
-            if slot.turf_wave and isinstance(group.get('group_waves'), list) and all(existing.id != slot.turf_wave.id for existing in group['group_waves']):
-                group['group_waves'].append(slot.turf_wave)
-
-        for label in sorted(parse_failure_labels):
-            _add_diagnostics_warning(f'Unable to parse turf wave metadata from assigned field label: {label}')
+            for slot in wave_slots:
+                size = _field_size_label(slot.field_type)
+                if slot.assigned_game_id and size and isinstance(assigned, dict):
+                    assigned[size] = int(assigned.get(size) or 0) + 1
+                if slot.assigned_game_id and isinstance(group.get('assigned_slots'), list):
+                    group['assigned_slots'].append(slot)
 
         detected_turf_wave_groups = [
             _detected_wave_detail_row(group)
@@ -11655,7 +11820,7 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
 
         if update_current_collections:
             partial_wave_detail_by_id.clear()
-            for row in partial_waves:
+            for row in detected_turf_wave_groups:
                 for wave_id in row.get('wave_ids') or []:
                     partial_wave_detail_by_id[str(wave_id)] = row
 
@@ -11684,6 +11849,8 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
             _add_diagnostics_warning('BUG: total_partial_waves_found does not match partial_waves length.', error=True)
         if len(diagnostics.get('partial_wave_details') or []) != len(partial_waves):
             _add_diagnostics_warning('BUG: partial_wave_details length does not match partial_waves length.', error=True)
+        return
+
 
     _initialize_partial_wave_details(phase='before')
     _warn_if_counted_partial_waves_missing_from_collection(phase='before')
@@ -11787,7 +11954,7 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         needed_sizes = [size for size in (target_detail.get('needed_field_sizes') or []) if _field_size_label(size)]
 
         if unused_total > 0 and needed_sizes:
-            return True, 'HAS_UNUSED_COMPONENTS_AND_NEEDED_FIELD_SIZE'
+            return True, 'EMPTY_WAVE_HAS_USABLE_COMPONENTS' if status == 'EMPTY' else 'HAS_UNUSED_COMPONENTS_AND_NEEDED_FIELD_SIZE'
         if expected_total > 0 and assigned_total > 0 and assigned_total < expected_total:
             return True, 'ASSIGNED_COMPONENTS_BETWEEN_ZERO_AND_EXPECTED'
         if status == 'PARTIAL':
@@ -12004,6 +12171,8 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
         allowed_target_hosts = _host_plan_allowed_host_ids_for_week(db, season_id, target.week_id, target.slot_date)
         if allowed_target_hosts is not None and target.host_location_id not in allowed_target_hosts:
             return 'SELECTED_HOST_VIOLATION'
+        if source.start_time and target.start_time and target.start_time > source.start_time:
+            return 'DOES_NOT_IMPROVE_SCHEDULE'
         if optimization_phase == 'pull-forward' and source.start_time and target.start_time and target.start_time >= source.start_time:
             return 'DOES_NOT_IMPROVE_SCHEDULE'
         if _field_has_time_conflict(game, target):
@@ -12552,6 +12721,15 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
             accepted_key_rows.append(_candidate_move_key_dict(accepted_candidate_key))
         schedule_state_version += 1
         db.flush()
+        _initialize_partial_wave_details(phase='during')
+        refreshed_targets = diagnostics.get('detected_turf_wave_groups')
+        refreshed_targets = refreshed_targets if isinstance(refreshed_targets, list) else []
+        target_partial_waves = [
+            row for row in refreshed_targets
+            if isinstance(row, dict) and str(row.get('status') or '').upper() in {'PARTIAL', 'EMPTY'}
+        ]
+        diagnostics['optimization_target_wave_details'] = target_partial_waves
+        diagnostics['empty_turf_waves_considered_for_pull_forward'] = sum(1 for row in target_partial_waves if isinstance(row, dict) and str(row.get('status') or '').upper() == 'EMPTY')
 
     for row in partial_wave_detail_by_id.values():
         if int(row.get('same_date_matching_field_size_games_found') or row.get('same_date_needed_field_size_games_found_count') or 0) == 0:
