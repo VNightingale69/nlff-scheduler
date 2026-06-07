@@ -328,7 +328,6 @@ export default function ManualScheduleBuilderPage() {
     const selectedHostId = String(editGame?.host_location_id || '');
     const selectedDate = String(editGame?.game_date || '');
     const preferredDate = (slot: any) => String(slot.game_date || slot.available_date || '');
-    const hostHasSlotsForSelectedDate = Boolean(selectedHostId && selectedDate && generatedSlots.some((candidate: any) => String(candidate.host_location_id || '') === selectedHostId && preferredDate(candidate) === selectedDate));
     const isExplicitManualField = (slot: any) => {
       const label = explicitFieldSlotLabel(slot);
       return Boolean(label) &&
@@ -348,8 +347,7 @@ export default function ManualScheduleBuilderPage() {
     generatedSlots
       .filter((slot: any) => (
         (!editGame?.season_id || slot.season_id === editGame.season_id) &&
-        (!selectedHostId || String(slot.host_location_id || '') === selectedHostId) &&
-        (!hostHasSlotsForSelectedDate || preferredDate(slot) === selectedDate)
+        (!selectedHostId || String(slot.host_location_id || '') === selectedHostId)
       ))
       .forEach(addSlot);
     const currentFieldInstanceId = String(editGame?.field_instance_id || '');

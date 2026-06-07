@@ -148,6 +148,25 @@ class ManualScheduleEditPermissionsTest(unittest.TestCase):
         self.assertEqual(game.internal_admin_notes, 'Scheduler override')
 
 
+    def test_manual_edit_preserves_existing_score_records(self):
+        score_id = uuid.uuid4()
+        self.db.add(GameScore(id=score_id, game_id=self.game.id, home_score=12, away_score=6, score_status='APPROVED'))
+        self.db.commit()
+
+        response = self.client.patch(
+            f'/api/schedule-management/games/{self.game.id}/manual-edit',
+            headers=self._token(self.scheduling_user.id),
+            json=self._payload(away_team_id=str(self.other_team.id), score_change_confirmed=True, override_warnings=True),
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.db.expire_all()
+        game = self.db.get(Game, self.game.id)
+        score = self.db.get(GameScore, score_id)
+        self.assertIsNotNone(score)
+        self.assertEqual(score.game_id, game.id)
+        self.assertEqual(game.away_team_id, self.other_team.id)
+
+
     def test_field_size_mismatch_is_warning_override_not_hard_block(self):
         large_field = FieldInstance(id=uuid.uuid4(), host_location_id=self.host.id, hosting_availability_id=uuid.uuid4(), instance_date=date(2026, 8, 9), field_name='Large Field 1', field_type='LARGE', is_active=True)
         self.db.add(large_field)
@@ -223,7 +242,7 @@ class ManualScheduleEditPermissionsTest(unittest.TestCase):
         self.assertEqual(response.json()['detail']['error'], 'INVALID_TURF_FIELD_SLOT_COMBINATION')
         self.assertIn('TWO_LARGE_FIELDS_NOT_ALLOWED_ON_ONE_TURF_SURFACE', response.json()['detail']['failure_reasons'])
 
-    def test_turf_manual_edit_blocks_small_field_1_with_unsupported_medium_field_2_same_time(self):
+    def test_turf_manual_edit_warns_for_unoptimized_but_physically_possible_layout(self):
         self.host.surface_type = 'TURF_STADIUM'
         medium_field_2 = FieldInstance(id=uuid.uuid4(), host_location_id=self.host.id, hosting_availability_id=uuid.uuid4(), instance_date=date(2026, 8, 9), field_name='Medium Field 2', field_type='MEDIUM', is_active=True)
         conflict_home = Team(id=uuid.uuid4(), organization_id=self.home_org.id, division_id=self.division.id, name='Home 2', is_active=True)
@@ -259,12 +278,19 @@ class ManualScheduleEditPermissionsTest(unittest.TestCase):
         response = self.client.patch(
             f'/api/schedule-management/games/{self.game.id}/manual-edit',
             headers=self._token(self.league_user.id),
+            json=self._payload(field_instance_id=str(self.field.id), override_warnings=False),
+        )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()['detail']['error'], 'SCHEDULE_WARNINGS_REQUIRE_OVERRIDE')
+        self.assertIn('TURF_LAYOUT_MANUAL_REBALANCE', {warning['code'] for warning in response.json()['detail']['warnings']})
+
+        response = self.client.patch(
+            f'/api/schedule-management/games/{self.game.id}/manual-edit',
+            headers=self._token(self.league_user.id),
             json=self._payload(field_instance_id=str(self.field.id), override_warnings=True),
         )
-
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(response.json()['detail']['error'], 'INVALID_TURF_FIELD_SLOT_COMBINATION')
-        self.assertIn('TURF_FIELD_SLOT_COMBINATION_NOT_APPROVED', response.json()['detail']['failure_reasons'])
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn('TURF_LAYOUT_MANUAL_REBALANCE', {warning['code'] for warning in response.json()['warnings']})
 
     def test_same_explicit_field_slot_is_hard_blocked(self):
         conflict_home = Team(id=uuid.uuid4(), organization_id=self.home_org.id, division_id=self.division.id, name='Home 2', is_active=True)
