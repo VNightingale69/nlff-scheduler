@@ -7,6 +7,54 @@ import { getAuthUser, getToken } from '@/lib/auth';
 import { getDivisionLabel } from '@/lib/divisionLabel';
 import { formatDisplayDate, formatDisplayDateTime, formatDisplayTime } from '@/lib/displayFormat';
 
+
+type ScheduledGamesFilters = {
+  date: string;
+  time: string;
+  division: string;
+  hostLocation: string;
+  field: string;
+};
+
+const emptyScheduledGamesFilters: ScheduledGamesFilters = {
+  date: '',
+  time: '',
+  division: '',
+  hostLocation: '',
+  field: '',
+};
+
+const naturalCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+
+function uniqueByValue<T extends { value: string }>(items: T[]): T[] {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    if (!item.value || seen.has(item.value)) return false;
+    seen.add(item.value);
+    return true;
+  });
+}
+
+function gameDateValue(game: any): string {
+  return String(game?.game_date || '');
+}
+
+function gameTimeValue(game: any): string {
+  return String(game?.kickoff_time || '');
+}
+
+function gameDivisionValue(game: any): string {
+  return String(game?.division_id || game?.division_name || '');
+}
+
+function gameHostLocationValue(game: any): string {
+  return String(game?.host_location_id || game?.host_location_name || '');
+}
+
+function gameFieldValue(game: any): string {
+  return String(game?.field_instance_id || game?.field_id || game?.field_instance_name || '');
+}
+
 type AutoScheduleDiagnosticsSummary = {
   status: string;
   message: string;
@@ -225,6 +273,7 @@ export default function ManualScheduleBuilderPage() {
   const [optimizerDryRun, setOptimizerDryRun] = useState(true);
   const [optimizerLoading, setOptimizerLoading] = useState(false);
   const [optimizerDiagnostics, setOptimizerDiagnostics] = useState<any | null>(null);
+  const [scheduledGamesFilters, setScheduledGamesFilters] = useState<ScheduledGamesFilters>(emptyScheduledGamesFilters);
 
   useEffect(() => () => {
     if (autoScheduleDiagnostics?.downloadUrl) URL.revokeObjectURL(autoScheduleDiagnostics.downloadUrl);
@@ -238,6 +287,51 @@ export default function ManualScheduleBuilderPage() {
   const seasonDateOptions = useMemo(() => Array.from(new Set(options.weeks.filter((w: any) => !seasonId || w.season_id === seasonId).map((w: any) => w.primary_game_date || w.start_date).filter(Boolean))).sort(), [options.weeks, seasonId]);
   const timeOptions = useMemo(() => Array.from(new Set(slots.map((s: any) => s.start_time).filter(Boolean))).sort(), [slots]);
   const editFieldOptions = useMemo(() => slots.filter((s: any) => !editGame?.host_location_id || s.host_location_id === editGame.host_location_id), [slots, editGame?.host_location_id]);
+  const scheduledGamesFilterOptions = useMemo(() => {
+    const divisionOrder = new Map<string, number>((options.divisions || []).map((division: any, index: number) => [String(division.id), index]));
+    const dates = uniqueByValue(games.map((game: any) => ({ value: gameDateValue(game), label: formatDisplayDate(game.game_date) })))
+      .sort((a, b) => a.value.localeCompare(b.value));
+    const times = uniqueByValue(games.map((game: any) => ({ value: gameTimeValue(game), label: formatDisplayTime(game.kickoff_time) })))
+      .sort((a, b) => a.value.localeCompare(b.value));
+    const divisions = uniqueByValue(games.map((game: any) => ({ value: gameDivisionValue(game), label: game.division_name || 'Unknown Division' })))
+      .sort((a, b) => {
+        const aOrder = divisionOrder.get(a.value);
+        const bOrder = divisionOrder.get(b.value);
+        if (aOrder !== undefined && bOrder !== undefined) return aOrder - bOrder;
+        if (aOrder !== undefined) return -1;
+        if (bOrder !== undefined) return 1;
+        return naturalCollator.compare(a.label, b.label);
+      });
+    const hostLocations = uniqueByValue(games.map((game: any) => ({ value: gameHostLocationValue(game), label: game.host_location_name || '-' })))
+      .sort((a, b) => naturalCollator.compare(a.label, b.label));
+    const fieldSourceGames = scheduledGamesFilters.hostLocation
+      ? games.filter((game: any) => gameHostLocationValue(game) === scheduledGamesFilters.hostLocation)
+      : games;
+    const fields = uniqueByValue(fieldSourceGames.map((game: any) => ({ value: gameFieldValue(game), label: game.field_instance_name || '-' })))
+      .sort((a, b) => naturalCollator.compare(a.label, b.label));
+    return { dates, times, divisions, hostLocations, fields };
+  }, [games, options.divisions, scheduledGamesFilters.hostLocation]);
+  const filteredGames = useMemo(() => games.filter((game: any) => (
+    (!scheduledGamesFilters.date || gameDateValue(game) === scheduledGamesFilters.date) &&
+    (!scheduledGamesFilters.time || gameTimeValue(game) === scheduledGamesFilters.time) &&
+    (!scheduledGamesFilters.division || gameDivisionValue(game) === scheduledGamesFilters.division) &&
+    (!scheduledGamesFilters.hostLocation || gameHostLocationValue(game) === scheduledGamesFilters.hostLocation) &&
+    (!scheduledGamesFilters.field || gameFieldValue(game) === scheduledGamesFilters.field)
+  )), [games, scheduledGamesFilters]);
+  const hasScheduledGamesFilters = Object.values(scheduledGamesFilters).some(Boolean);
+
+  useEffect(() => {
+    setScheduledGamesFilters((current) => {
+      const next = { ...current };
+      if (next.date && !scheduledGamesFilterOptions.dates.some((option) => option.value === next.date)) next.date = '';
+      if (next.time && !scheduledGamesFilterOptions.times.some((option) => option.value === next.time)) next.time = '';
+      if (next.division && !scheduledGamesFilterOptions.divisions.some((option) => option.value === next.division)) next.division = '';
+      if (next.hostLocation && !scheduledGamesFilterOptions.hostLocations.some((option) => option.value === next.hostLocation)) next.hostLocation = '';
+      if (next.field && !scheduledGamesFilterOptions.fields.some((option) => option.value === next.field)) next.field = '';
+      if (Object.entries(next).every(([key, value]) => value === current[key as keyof ScheduledGamesFilters])) return current;
+      return next;
+    });
+  }, [scheduledGamesFilterOptions]);
 
   const getWeekOptionLabel = (week: any) => {
     const baseLabel = week.label || `Week ${week.week_number}`;
@@ -522,41 +616,82 @@ export default function ManualScheduleBuilderPage() {
       </div>
       <div className='rounded border p-3'>
         <h2 className='mb-2 text-lg font-semibold'>Scheduled Games</h2>
-        <table className='min-w-full text-sm'>
-          <thead><tr>{['Date', 'Time', 'Division', 'Matchup', 'Host Location', 'Field', ...(canManageGeneratedGames ? ['Actions'] : [])].map((h) => <th key={h} className='px-2 py-2 text-left'>{h}</th>)}</tr></thead>
-          <tbody>
-            {games.map((g: any) => <tr key={g.id} className='border-t'>
-              <td className='p-2'>{formatDisplayDate(g.game_date)}</td>
-              <td className='p-2'>{formatDisplayTime(g.kickoff_time)}</td>
-              <td className='p-2'>{g.division_name || 'Unknown Division'}</td>
-              <td className='p-2'>{g.home_team_name || 'Unknown Team'} vs {g.away_team_name || 'Unknown Team'}</td>
-              <td className='p-2'>{g.host_location_name || '-'}</td>
-              <td className='p-2'>{g.field_instance_name || '-'}</td>
-              {canManageGeneratedGames ? <td className='p-2 space-x-2'>
-                <button className='rounded border px-2 py-1 text-xs' onClick={() => setEditGame({ ...g, division_id: g.division_id })}>Edit</button>
-                <button className='rounded border px-2 py-1 text-xs' onClick={() => setMoveGame(g)}>Move</button>
-                <button className='rounded border border-red-300 px-2 py-1 text-xs text-red-700' onClick={async () => {
-                  if (!window.confirm('Remove this scheduled game?')) return;
-                  setError('');
-                  setAutoFillSkipped([]);
-                  setAutoFillPreview([]);
-                  try {
-                    setGames((prev) => prev.filter((game: any) => game.id !== g.id));
-                    await apiFetch(`/schedule-management/games/${g.id}/unschedule`, { method: 'PATCH' }, token);
-                    await load();
-                    await loadRecommendations();
-                    setManualScheduleBannerFromValidation('Game unscheduled.', await loadFinalScheduleValidation());
-                  }
-                  catch (e: unknown) {
-                    await load();
-                    await loadRecommendations();
-                    setError(extractError(e));
-                  }
-                }}>Delete / Unschedule</button>
-              </td> : null}
-            </tr>)}
-          </tbody>
-        </table>
+        <div className='mb-3 rounded border bg-slate-50 p-3'>
+          <div className='grid gap-2 sm:grid-cols-2 lg:grid-cols-6'>
+            <label className='flex flex-col gap-1 text-xs font-semibold text-slate-700'>Date
+              <select className='rounded border bg-white p-2 text-sm font-normal text-slate-900' value={scheduledGamesFilters.date} onChange={(e) => setScheduledGamesFilters((current) => ({ ...current, date: e.target.value }))}>
+                <option value=''>All</option>
+                {scheduledGamesFilterOptions.dates.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+              </select>
+            </label>
+            <label className='flex flex-col gap-1 text-xs font-semibold text-slate-700'>Time
+              <select className='rounded border bg-white p-2 text-sm font-normal text-slate-900' value={scheduledGamesFilters.time} onChange={(e) => setScheduledGamesFilters((current) => ({ ...current, time: e.target.value }))}>
+                <option value=''>All</option>
+                {scheduledGamesFilterOptions.times.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+              </select>
+            </label>
+            <label className='flex flex-col gap-1 text-xs font-semibold text-slate-700'>Division
+              <select className='rounded border bg-white p-2 text-sm font-normal text-slate-900' value={scheduledGamesFilters.division} onChange={(e) => setScheduledGamesFilters((current) => ({ ...current, division: e.target.value }))}>
+                <option value=''>All</option>
+                {scheduledGamesFilterOptions.divisions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+              </select>
+            </label>
+            <label className='flex flex-col gap-1 text-xs font-semibold text-slate-700'>Host Location
+              <select className='rounded border bg-white p-2 text-sm font-normal text-slate-900' value={scheduledGamesFilters.hostLocation} onChange={(e) => setScheduledGamesFilters((current) => ({ ...current, hostLocation: e.target.value, field: '' }))}>
+                <option value=''>All</option>
+                {scheduledGamesFilterOptions.hostLocations.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+              </select>
+            </label>
+            <label className='flex flex-col gap-1 text-xs font-semibold text-slate-700'>Field
+              <select className='rounded border bg-white p-2 text-sm font-normal text-slate-900' value={scheduledGamesFilters.field} onChange={(e) => setScheduledGamesFilters((current) => ({ ...current, field: e.target.value }))}>
+                <option value=''>All</option>
+                {scheduledGamesFilterOptions.fields.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+              </select>
+            </label>
+            <div className='flex flex-col justify-end gap-1'>
+              <button className='rounded border bg-white px-3 py-2 text-sm disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400' disabled={!hasScheduledGamesFilters} onClick={() => setScheduledGamesFilters(emptyScheduledGamesFilters)}>Clear Filters</button>
+            </div>
+          </div>
+          <div className='mt-2 text-sm text-slate-600'>Showing {filteredGames.length} of {games.length} scheduled games</div>
+        </div>
+        {games.length > 0 && filteredGames.length === 0 ? <div className='rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800'>No scheduled games match the selected filters.</div> : null}
+        <div className='overflow-auto'>
+          <table className='min-w-full text-sm'>
+            <thead><tr>{['Date', 'Time', 'Division', 'Matchup', 'Host Location', 'Field', ...(canManageGeneratedGames ? ['Actions'] : [])].map((h) => <th key={h} className='px-2 py-2 text-left'>{h}</th>)}</tr></thead>
+            <tbody>
+              {filteredGames.map((g: any) => <tr key={g.id} className='border-t'>
+                <td className='p-2'>{formatDisplayDate(g.game_date)}</td>
+                <td className='p-2'>{formatDisplayTime(g.kickoff_time)}</td>
+                <td className='p-2'>{g.division_name || 'Unknown Division'}</td>
+                <td className='p-2'>{g.home_team_name || 'Unknown Team'} vs {g.away_team_name || 'Unknown Team'}</td>
+                <td className='p-2'>{g.host_location_name || '-'}</td>
+                <td className='p-2'>{g.field_instance_name || '-'}</td>
+                {canManageGeneratedGames ? <td className='p-2 space-x-2'>
+                  <button className='rounded border px-2 py-1 text-xs' onClick={() => setEditGame({ ...g, division_id: g.division_id })}>Edit</button>
+                  <button className='rounded border px-2 py-1 text-xs' onClick={() => setMoveGame(g)}>Move</button>
+                  <button className='rounded border border-red-300 px-2 py-1 text-xs text-red-700' onClick={async () => {
+                    if (!window.confirm('Remove this scheduled game?')) return;
+                    setError('');
+                    setAutoFillSkipped([]);
+                    setAutoFillPreview([]);
+                    try {
+                      setGames((prev) => prev.filter((game: any) => game.id !== g.id));
+                      await apiFetch(`/schedule-management/games/${g.id}/unschedule`, { method: 'PATCH' }, token);
+                      await load();
+                      await loadRecommendations();
+                      setManualScheduleBannerFromValidation('Game unscheduled.', await loadFinalScheduleValidation());
+                    }
+                    catch (e: unknown) {
+                      await load();
+                      await loadRecommendations();
+                      setError(extractError(e));
+                    }
+                  }}>Delete / Unschedule</button>
+                </td> : null}
+              </tr>)}
+            </tbody>
+          </table>
+        </div>
       </div>
       {canManageGeneratedGames && editGame ? <div className='fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4'>
         <div className='w-full max-w-4xl rounded-lg bg-white p-4 shadow-xl'>
