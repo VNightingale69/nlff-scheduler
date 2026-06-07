@@ -1255,6 +1255,23 @@ def _build_final_schedule_validation_result(
         'label_source_used': None,
         'affected_host_dates': [],
     }
+    export_display_issues = []
+    for g, slot, fi, host, _home, _away, _div, _org, _status in rows:
+        display_label = _field_export_display_label(slot, fi, db)
+        issue = _field_export_display_issue(display_label)
+        if issue:
+            export_display_issues.append({
+                'message': issue,
+                'game_id': str(getattr(g, 'id', '')),
+                'host_location_id': str(getattr(host, 'id', '')) if host else None,
+                'field': display_label,
+            })
+    export_display_diagnostics = {
+        'export_display_validation_ran': bool(season_id),
+        'export_display_issue_count': len(export_display_issues),
+        'export_display_issues': export_display_issues,
+        'public_schedule_display_message': 'Public schedule display issue: Wave terminology should not be visible.' if export_display_issues else None,
+    }
     validation_scope, season_phase = _infer_validation_scope(db, season_id)
     final_validation_run_id = str(run_id or uuid.uuid4())
     final_validation_timestamp = datetime.utcnow().isoformat()
@@ -1683,6 +1700,10 @@ def _build_final_schedule_validation_result(
         'turf_wave_source_of_truth_diagnostics': turf_wave_source_of_truth_repair,
         'Turf Component Label Diagnostics': turf_component_label_validation,
         'turf_component_label_diagnostics': turf_component_label_validation,
+        'Export Display Diagnostics': export_display_diagnostics,
+        'export_display_diagnostics': export_display_diagnostics,
+        'export_display_issue_count': export_display_diagnostics.get('export_display_issue_count'),
+        'export_display_issues': export_display_diagnostics.get('export_display_issues'),
         'turf_component_label_validation_ran': turf_component_label_validation.get('turf_component_label_validation_ran'),
         'turf_component_label_collisions_count': turf_component_label_validation.get('turf_component_label_collisions_count'),
         'turf_component_label_collisions': turf_component_label_validation.get('turf_component_label_collisions'),
@@ -5104,8 +5125,12 @@ def _canonical_turf_field_export_label(db: Session, slot: GameSlot | None, field
     # Normal schedule surfaces must show the explicit field slot only.  Turf
     # layout/wave metadata remains available separately for diagnostics and
     # validation, but it is no longer the primary game assignment label.
+    raw_label = getattr(field_instance or getattr(slot, 'field_instance', None), 'field_name', None)
+    explicit_label = _extract_explicit_field_slot_label(raw_label, getattr(slot, 'field_type', None) or getattr(field_instance, 'field_type', None))
+    if explicit_label:
+        return explicit_label
     component_label = _canonical_turf_field_component_label(db, slot, field_instance)
-    return component_label or _turf_field_export_label(slot, field_instance)
+    return _clean_explicit_field_slot_label(component_label or _turf_field_export_label(slot, field_instance), getattr(slot, 'field_type', None) or getattr(field_instance, 'field_type', None))
 
 
 def _build_turf_wave_contiguous_time_diagnostics(db: Session, season_id: uuid.UUID | None = None) -> dict[str, object]:
@@ -11010,7 +11035,7 @@ def list_generated_slots(host_location_id: uuid.UUID, available_date: str | None
         'host_location_name': row.host_location_name,
         'field_instance_id': row.GameSlot.field_instance_id,
         'field_id': getattr(row.GameSlot.field_instance, 'field_id', None),
-        'field_instance_name': (_canonical_turf_field_export_label(db, row.GameSlot, row.GameSlot.field_instance) if getattr(row.GameSlot, 'turf_wave_id', None) else row.field_name),
+        'field_instance_name': _field_export_display_label(row.GameSlot, row.GameSlot.field_instance, db),
         'field_size': _normalize_field_size(row.GameSlot.field_type) or row.GameSlot.field_type,
         'field_type': row.GameSlot.field_type,
         'start_time': row.GameSlot.start_time,
@@ -11073,7 +11098,7 @@ def list_generated_game_slots(host_location_id: uuid.UUID | None = None, availab
         'host_location_name': row.host_location_name,
         'field_instance_id': row.GameSlot.field_instance_id,
         'field_id': getattr(row.GameSlot.field_instance, 'field_id', None),
-        'field_instance_name': (_canonical_turf_field_export_label(db, row.GameSlot, row.GameSlot.field_instance) if getattr(row.GameSlot, 'turf_wave_id', None) else row.field_name),
+        'field_instance_name': _field_export_display_label(row.GameSlot, row.GameSlot.field_instance, db),
         'field_size': _normalize_field_size(row.GameSlot.field_type) or row.GameSlot.field_type,
         'field_type': row.GameSlot.field_type,
         'start_time': row.GameSlot.start_time,
@@ -14225,9 +14250,7 @@ def _to_game_read(
         slot_field_instance = getattr(generated_slot, 'field_instance', None)
         try:
             resolved_field_instance_name = (
-                _canonical_turf_field_export_label(db, generated_slot, slot_field_instance)
-                if db is not None
-                else _turf_field_export_label(generated_slot, slot_field_instance)
+                _field_export_display_label(generated_slot, slot_field_instance, db)
             )
             if resolved_field_instance_name:
                 field_instance_name = resolved_field_instance_name
@@ -14239,12 +14262,12 @@ def _to_game_read(
                 getattr(generated_slot, 'turf_wave_id', None),
             )
             field_instance_name = (
-                _turf_field_export_label(generated_slot, slot_field_instance)
+                _field_export_display_label(generated_slot, slot_field_instance, db)
                 or field_instance_name
                 or getattr(slot_field_instance, 'field_name', None)
             )
     if field_instance_name is None and getattr(g, 'field_instance', None):
-        field_instance_name = g.field_instance.field_name
+        field_instance_name = _clean_explicit_field_slot_label(g.field_instance.field_name, getattr(g.field_instance, 'field_type', None))
     if host_location_name is None and getattr(g, 'host_location', None):
         host_location_name = g.host_location.name
     return GameRead(
@@ -14480,7 +14503,7 @@ def manual_schedule_builder_recommendations(payload: dict, db: Session = Depends
             'start_time': slot.start_time,
             'end_time': slot.end_time,
             'host_location_name': slot.host_location.name,
-            'field_instance_name': _canonical_turf_field_export_label(db, slot, slot.field_instance) if getattr(slot, 'turf_wave_id', None) else slot.field_instance.field_name,
+            'field_instance_name': _field_export_display_label(slot, slot.field_instance, db),
             'field_type': slot.field_type,
             'score': max(0, min(100, score)),
             'reason': ', '.join(reasons + conflicts) if (reasons or conflicts) else 'open slot',
@@ -16346,7 +16369,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'proposed_start_time': str(slot.start_time),
             'host_location': slot.host_location.name if slot.host_location else '',
             'host_location_id': str(slot.host_location_id) if slot.host_location_id else None,
-            'field': slot.field_instance.field_name if slot.field_instance else '',
+            'field': _field_export_display_label(slot, slot.field_instance, db),
             'field_instance_id': str(slot.field_instance_id) if slot.field_instance_id else None,
             'field_type': slot.field_type,
             'turf_wave_id': str(slot.turf_wave_id) if slot.turf_wave_id else None,
@@ -17747,7 +17770,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'proposed_start_time': str(selected_field_slot.start_time),
             'host_location': selected_field_slot.host_location.name if selected_field_slot.host_location else '',
             'host_location_id': str(selected_field_slot.host_location_id) if selected_field_slot.host_location_id else None,
-            'field': selected_field_slot.field_instance.field_name if selected_field_slot.field_instance else '',
+            'field': _field_export_display_label(selected_field_slot, selected_field_slot.field_instance, db),
             'field_instance_id': str(selected_field_slot.field_instance_id) if selected_field_slot.field_instance_id else None,
             'field_type': selected_field_slot.field_type,
             'turf_wave_id': str(selected_field_slot.turf_wave_id) if selected_field_slot.turf_wave_id else None,
@@ -23662,7 +23685,7 @@ def _score_game_dict(row, include_history: bool = False, db: Session | None = No
         'host_location_id': str(host.id) if host else None,
         'host_location_name': host.name if host else '',
         'field_id': str(fi.id) if fi else None,
-        'field_name': (_canonical_turf_field_export_label(db, slot, fi) if db is not None else _turf_field_export_label(slot, fi)) if slot and slot.turf_wave_id else (fi.field_name if fi else ''),
+        'field_name': _field_export_display_label(slot, fi, db),
         'field_type': slot.field_type if slot else None,
         'turf_wave_id': str(slot.turf_wave_id) if slot and slot.turf_wave_id else None,
         'turf_wave_start_time': wave.start_time.isoformat() if wave else None,
@@ -23824,6 +23847,49 @@ def admin_score_history(game_id: uuid.UUID, db: Session = Depends(get_db)):
 
 
 
+def _extract_explicit_field_slot_label(value: object | None, field_type: str | None = None) -> str:
+    raw = str(value or '').strip()
+    size = _normalize_field_size(field_type)
+    if size:
+        match = re.search(rf'\b{re.escape(size.title())}\s+Field\s+(\d+)\b', raw, flags=re.IGNORECASE)
+        if match:
+            return f'{size.title()} Field {match.group(1)}'
+    match = re.search(r'\b(Small|Medium|Large)\s+Field\s+(\d+)\b', raw, flags=re.IGNORECASE)
+    if match:
+        return f'{match.group(1).title()} Field {match.group(2)}'
+    return ''
+
+
+def _clean_explicit_field_slot_label(value: object | None, field_type: str | None = None) -> str:
+    """Return the public/export field-slot label without turf wave/layout terms."""
+    raw = str(value or '').strip()
+    explicit = _extract_explicit_field_slot_label(raw, field_type)
+    if explicit:
+        return explicit
+    cleaned = re.sub(r'^\s*Wave\s+\d+\s+', '', raw, flags=re.IGNORECASE)
+    cleaned = re.sub(r'\b(?:THREE_SMALL|TWO_MEDIUM|TWO_SMALL_ONE_MEDIUM|ONE_MEDIUM_TWO_SMALL|ONE_SMALL_ONE_LARGE)\b\s*', '', cleaned, flags=re.IGNORECASE)
+    return ' '.join(cleaned.split())
+
+
+def _field_export_display_label(slot: GameSlot | None, field_instance: FieldInstance | None = None, db: Session | None = None) -> str:
+    field_type = getattr(slot, 'field_type', None) or getattr(field_instance, 'field_type', None)
+    raw = None
+    if slot and getattr(slot, 'turf_wave_id', None):
+        raw = (_canonical_turf_field_export_label(db, slot, field_instance) if db is not None else _turf_field_export_label(slot, field_instance))
+    if not raw:
+        raw = getattr(field_instance, 'field_name', None)
+    return _clean_explicit_field_slot_label(raw, field_type)
+
+
+def _field_export_display_issue(label: object | None) -> str | None:
+    text = str(label or '')
+    if re.search(r'\bWave\s+\d+\b', text, flags=re.IGNORECASE):
+        return 'Export display issue: Field column contains Wave terminology.'
+    if re.search(r'\b(?:THREE_SMALL|TWO_MEDIUM|TWO_SMALL_ONE_MEDIUM|ONE_MEDIUM_TWO_SMALL|ONE_SMALL_ONE_LARGE)\b', text, flags=re.IGNORECASE):
+        return 'Export display issue: Field column should show explicit field slot only.'
+    return None
+
+
 def _turf_field_component_label(slot: GameSlot | None, field_instance: FieldInstance | None = None) -> str | None:
     """Return the component label used inside a validated turf wave field label."""
     if not slot or not slot.turf_wave_id:
@@ -23860,7 +23926,7 @@ def _turf_field_export_label(slot: GameSlot | None, field_instance: FieldInstanc
     """Return the explicit turf field slot label for normal schedule display."""
     if not slot or not slot.turf_wave_id:
         return getattr(field_instance, 'field_name', None)
-    return _turf_field_component_label(slot, field_instance) or getattr(field_instance or getattr(slot, 'field_instance', None), 'field_name', None)
+    return _clean_explicit_field_slot_label(_turf_field_component_label(slot, field_instance) or getattr(field_instance or getattr(slot, 'field_instance', None), 'field_name', None), getattr(slot, 'field_type', None) or getattr(field_instance, 'field_type', None))
 
 def _public_game_read_from_schedule_row(row, db: Session | None = None) -> PublicGameRead:
     g, slot, fi, host, home, away, div, org, status = row
@@ -23873,7 +23939,7 @@ def _public_game_read_from_schedule_row(row, db: Session | None = None) -> Publi
         host_location_id=host.id if host else None,
         host_location_name=host.name if host else '',
         field_id=fi.id if fi else None,
-        field_name=(_canonical_turf_field_export_label(db, slot, fi) if db is not None else _turf_field_export_label(slot, fi)) if slot and slot.turf_wave_id else (fi.field_name if fi else ''),
+        field_name=_field_export_display_label(slot, fi, db),
         field_type=slot.field_type if slot else None,
         turf_wave_id=slot.turf_wave_id if slot else None,
         turf_wave_start_time=wave.start_time if wave else None,
@@ -24331,7 +24397,7 @@ def schedule_management_games(season_id: uuid.UUID | None = None, date: date | N
             'id': str(g.id), 'date': g.game_date.isoformat(), 'time': g.kickoff_time.strftime('%H:%M:%S'), 'division_id': str(div.id), 'division_name': div.name,
             'home_team_id': str(home.id), 'home_team_name': home.name, 'away_team_id': str(away.id), 'away_team_name': away.name,
             'organization_id': str(org.id), 'organization_name': org.name, 'host_location_id': (str(host.id) if host else None), 'host_location_name': (host.name if host else None),
-            'field_id': (str(fi.id) if fi else None), 'field': (_canonical_turf_field_export_label(db, slot, fi) if slot and slot.turf_wave_id else (fi.field_name if fi else None)), 'field_type': ((slot.field_type if slot else None) or (fi.field_type if fi else None)), 'status': status.code, 'slot_id': (str(slot.id) if slot else None), 'is_slot_active': (fi.is_active if fi else False),
+            'field_id': (str(fi.id) if fi else None), 'field': _field_export_display_label(slot, fi, db), 'field_type': ((slot.field_type if slot else None) or (fi.field_type if fi else None)), 'status': status.code, 'slot_id': (str(slot.id) if slot else None), 'is_slot_active': (fi.is_active if fi else False),
             'turf_wave_id': str(slot.turf_wave_id) if slot and slot.turf_wave_id else None,
             'turf_wave_start_time': wave.start_time.isoformat() if wave else None,
             'turf_configuration_code': turf_configuration_code if turf_configuration_code in TURF_APPROVED_LAYOUT_CODES else None,
@@ -24361,10 +24427,10 @@ def schedule_management_conflicts(db: Session = Depends(get_db)):
             team_time[tk]=g.id
         if slot:
             fk=(slot.field_instance_id,key)
-            if fk in field_time: conflicts.append({'type':'FIELD_DOUBLE_BOOKED','message':f"{(_canonical_turf_field_export_label(db, slot, fi) if slot and slot.turf_wave_id else fi.field_name)} double-booked at same date/time"})
+            if fk in field_time: conflicts.append({'type':'FIELD_DOUBLE_BOOKED','message':f"{_field_export_display_label(slot, fi, db)} double-booked at same date/time"})
             field_time[fk]=g.id
             if slot.field_type != _required_field_type_for_division(div): conflicts.append({'type':'WRONG_FIELD_TYPE','message':f'{div.name} assigned wrong field type'})
-            if not fi.is_active: conflicts.append({'type':'INACTIVE_SLOT','message':f"Game on inactive slot {(_canonical_turf_field_export_label(db, slot, fi) if slot and slot.turf_wave_id else fi.field_name)}"})
+            if not fi.is_active: conflicts.append({'type':'INACTIVE_SLOT','message':f"Game on inactive slot {_field_export_display_label(slot, fi, db)}"})
         mk=(home.id,away.id,g.game_date)
         if mk in matchup: conflicts.append({'type':'DUPLICATE_MATCHUP','message':f'Duplicate matchup {home.name} vs {away.name}'})
         matchup.add(mk)
@@ -24555,6 +24621,7 @@ def _validate_turf_explicit_field_slot_combination(
         func.lower(GameStatus.code).in_(['scheduled', 'published', 'score_pending', 'submitted', 'flagged', 'approved']),
     ).all()
     field_instances.extend(fi for _game, fi in rows if fi)
+    game_row_ids = {game.id for game, _fi in rows if getattr(game, 'id', None)}
     slot_rows = db.query(GameSlot, FieldInstance).join(GameSlot.field_instance).filter(
         GameSlot.host_location_id == host_location_id,
         GameSlot.slot_date == game_date_value,
@@ -24563,6 +24630,8 @@ def _validate_turf_explicit_field_slot_combination(
     ).all()
     for slot, fi in slot_rows:
         if exclude_game_id and slot.assigned_game_id == exclude_game_id:
+            continue
+        if slot.assigned_game_id in game_row_ids:
             continue
         field_instances.append(fi)
 
@@ -24575,12 +24644,16 @@ def _validate_turf_explicit_field_slot_combination(
             raise HTTPException(status_code=400, detail={'error': 'INVALID_TURF_FIELD_SLOT', 'field': getattr(fi, 'field_name', None)})
         if re.search(r'\bLarge\s+Field\s+2\b', label, flags=re.IGNORECASE):
             raise HTTPException(status_code=400, detail={'error': 'INVALID_TURF_FIELD_SLOT', 'failure_reasons': ['LARGE_FIELD_2_NOT_ALLOWED_ON_ONE_TURF_SURFACE']})
-        if label in by_label and by_label[label].id != fi.id:
+        if label in by_label:
             raise HTTPException(status_code=400, detail={'error': 'INVALID_TURF_FIELD_SLOT_COMBINATION', 'failure_reasons': ['DUPLICATE_EXPLICIT_FIELD_SLOT']})
         by_label[label] = fi
         counts[size] += 1
     if counts[FIELD_SIZE_LARGE] > 1:
         raise HTTPException(status_code=400, detail={'error': 'INVALID_TURF_FIELD_SLOT_COMBINATION', 'failure_reasons': ['TWO_LARGE_FIELDS_NOT_ALLOWED_ON_ONE_TURF_SURFACE']})
+    if counts[FIELD_SIZE_LARGE] == 1 and re.search(r'\bLarge\s+Field\s+2\b', ' '.join(by_label.keys()), flags=re.IGNORECASE):
+        raise HTTPException(status_code=400, detail={'error': 'INVALID_TURF_FIELD_SLOT', 'failure_reasons': ['LARGE_FIELD_2_NOT_ALLOWED_ON_ONE_TURF_SURFACE']})
+    if not _is_approved_turf_slot_counts(counts):
+        raise HTTPException(status_code=400, detail={'error': 'INVALID_TURF_FIELD_SLOT_COMBINATION', 'failure_reasons': ['TURF_FIELD_CAPACITY_EXCEEDED']})
 
 
 def _raise_if_invalid_manual_game_edit(db: Session, game: Game, payload: ManualGameEditRequest) -> None:
@@ -24846,7 +24919,7 @@ def _schedule_export_row_values(g, slot, fi, host, home, away, div, status, db: 
         home.name,
         away.name,
         host.name if host else '',
-        (_canonical_turf_field_export_label(db, slot, fi) if db is not None else _turf_field_export_label(slot, fi)) if slot and getattr(slot, 'turf_wave_id', None) else (fi.field_name if fi else ''),
+        _field_export_display_label(slot, fi, db),
         _format_schedule_export_status(field_type),
         _format_schedule_export_status(row_status),
     ]
