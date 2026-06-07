@@ -14368,10 +14368,15 @@ def manual_schedule_builder_options(db: Session = Depends(get_db)):
     seasons = db.query(Season).filter(Season.is_active.is_(True)).order_by(Season.start_date.desc()).all()
     weeks = db.query(Week).order_by(Week.week_number).all()
     organizations = db.query(Organization).filter(Organization.is_active.is_(True)).order_by(Organization.name).all()
+    field_instances = db.query(FieldInstance).filter(
+        FieldInstance.is_active.is_(True),
+        FieldInstance.host_location_id.in_(eligible_host_ids),
+    ).order_by(FieldInstance.host_location_id, FieldInstance.instance_date, FieldInstance.field_type, FieldInstance.field_name).all()
     return {
         'divisions': [{'id': d.id, 'name': d.name, 'division_group': d.division_group, 'sort_order': d.sort_order, 'required_field_layout_type': d.required_field_layout_type, 'required_field_type': 'LARGE' if '53' in (d.required_field_layout_type or '') else 'SMALL'} for d in divisions],
         'teams': [{'id': t.id, 'name': t.name, 'division_id': t.division_id, 'is_active': t.is_active} for t in teams],
         'host_locations': [{'id': h.id, 'name': h.name} for h in host_locations],
+        'field_instances': [{'id': fi.id, 'field_instance_id': fi.id, 'host_location_id': fi.host_location_id, 'field_instance_name': _clean_explicit_field_slot_label(fi.field_name, fi.field_type), 'field_name': _clean_explicit_field_slot_label(fi.field_name, fi.field_type), 'field_type': fi.field_type, 'field_size': fi.field_type, 'instance_date': fi.instance_date, 'game_date': fi.instance_date, 'available_date': fi.instance_date, 'is_active': fi.is_active} for fi in field_instances],
         'seasons': [{'id': s.id, 'name': s.name, 'start_date': s.start_date, 'end_date': s.end_date, 'is_active': s.is_active} for s in seasons],
         'weeks': [{'id': w.id, 'season_id': w.season_id, 'week_number': w.week_number, 'label': w.label or f'Week {w.week_number}', 'start_date': w.start_date, 'end_date': w.end_date, 'primary_game_date': w.primary_game_date or w.start_date, 'status': w.status} for w in weeks],
         'organizations': [{'id': o.id, 'name': o.name} for o in organizations],
@@ -24431,29 +24436,47 @@ def schedule_management_games(season_id: uuid.UUID | None = None, date: date | N
         })
     return {'items': items}
 
-@router.get('/schedule-management/conflicts', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+@router.get('/schedule-management/conflicts', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
 def schedule_management_conflicts(db: Session = Depends(get_db)):
     rows = _schedule_management_rows(db)
     conflicts=[]
     team_time={}
     field_time={}
     matchup=set()
+
+    def add_manual_override_warning(conflict_type: str, message: str, game_id: uuid.UUID | None = None):
+        conflicts.append({
+            'type': conflict_type,
+            'classification': 'Manual Override Warning',
+            'severity': 'Warning',
+            'game_id': str(game_id) if game_id else None,
+            'message': f'Manual Override Warning: {message}',
+        })
+
     for g, slot, fi, host, home, away, div, org, status in rows:
         key=(g.game_date,g.kickoff_time)
+        field_instance_id = getattr(fi, 'id', None) or getattr(g, 'field_instance_id', None) or (slot.field_instance_id if slot else None)
+        field_label = _field_export_display_label(slot, fi, db) if (slot or fi) else 'Selected field'
         for t in [home,away]:
             tk=(t.id,key)
-            if tk in team_time: conflicts.append({'type':'TEAM_OVERLAP','message':f'{t.name} scheduled multiple times at same date/time'})
+            if tk in team_time:
+                add_manual_override_warning('TEAM_OVERLAP', f'{t.name} scheduled multiple times at same date/time', g.id)
             team_time[tk]=g.id
-        if slot:
-            fk=(slot.field_instance_id,key)
-            if fk in field_time: conflicts.append({'type':'FIELD_DOUBLE_BOOKED','message':f"{_field_export_display_label(slot, fi, db)} double-booked at same date/time"})
+        if field_instance_id:
+            fk=(field_instance_id,key)
+            if fk in field_time:
+                add_manual_override_warning('FIELD_DOUBLE_BOOKED', f'{field_label} double-booked at same date/time', g.id)
             field_time[fk]=g.id
-            if slot.field_type != _required_field_type_for_division(div): conflicts.append({'type':'WRONG_FIELD_TYPE','message':f'{div.name} assigned wrong field type'})
-            if not fi.is_active: conflicts.append({'type':'INACTIVE_SLOT','message':f"Game on inactive slot {_field_export_display_label(slot, fi, db)}"})
+            effective_field_type = (slot.field_type if slot else None) or (fi.field_type if fi else None)
+            if effective_field_type != _required_field_type_for_division(div):
+                add_manual_override_warning('WRONG_FIELD_TYPE', f'{div.name} assigned wrong field type', g.id)
+            if fi and not fi.is_active:
+                add_manual_override_warning('INACTIVE_SLOT', f'Game on inactive slot {field_label}', g.id)
         mk=(home.id,away.id,g.game_date)
-        if mk in matchup: conflicts.append({'type':'DUPLICATE_MATCHUP','message':f'Duplicate matchup {home.name} vs {away.name}'})
+        if mk in matchup:
+            add_manual_override_warning('DUPLICATE_MATCHUP', f'Duplicate matchup {home.name} vs {away.name}', g.id)
         matchup.add(mk)
-        if not home.is_active or not away.is_active: conflicts.append({'type':'INACTIVE_TEAM','message':f'Game assigned to inactive team'})
+        if not home.is_active or not away.is_active: conflicts.append({'type':'INACTIVE_TEAM','severity':'Hard Error','message':f'Game assigned to inactive team'})
     return {'conflicts': conflicts}
 
 
@@ -24671,20 +24694,12 @@ def _validate_turf_explicit_field_slot_combination(
             raise HTTPException(status_code=400, detail={'error': 'INVALID_TURF_FIELD_SLOT', 'field': getattr(fi, 'field_name', None)})
         if re.search(r'\bLarge\s+Field\s+2\b', label, flags=re.IGNORECASE):
             raise HTTPException(status_code=400, detail={'error': 'INVALID_TURF_FIELD_SLOT', 'failure_reasons': ['LARGE_FIELD_2_NOT_ALLOWED_ON_ONE_TURF_SURFACE']})
-        if label in by_label:
-            raise HTTPException(status_code=400, detail={'error': 'INVALID_TURF_FIELD_SLOT_COMBINATION', 'failure_reasons': ['DUPLICATE_EXPLICIT_FIELD_SLOT']})
-        by_label[label] = fi
+        by_label.setdefault(label, fi)
         counts[size] += 1
-    if counts[FIELD_SIZE_LARGE] > 1:
-        raise HTTPException(status_code=400, detail={'error': 'INVALID_TURF_FIELD_SLOT_COMBINATION', 'failure_reasons': ['TWO_LARGE_FIELDS_NOT_ALLOWED_ON_ONE_TURF_SURFACE']})
-    if counts[FIELD_SIZE_LARGE] == 1 and re.search(r'\bLarge\s+Field\s+2\b', ' '.join(by_label.keys()), flags=re.IGNORECASE):
-        raise HTTPException(status_code=400, detail={'error': 'INVALID_TURF_FIELD_SLOT', 'failure_reasons': ['LARGE_FIELD_2_NOT_ALLOWED_ON_ONE_TURF_SURFACE']})
-    if not _is_approved_turf_slot_counts(counts):
-        raise HTTPException(status_code=400, detail={
-            'error': 'INVALID_TURF_FIELD_SLOT_COMBINATION',
-            'failure_reasons': ['TURF_FIELD_SLOT_COMBINATION_EXCEEDS_PHYSICAL_CAPACITY'],
-            'selected_field_slots': sorted(by_label.keys()),
-        })
+    # Scheduling Admin / League Admin manual edits are allowed to temporarily
+    # over-schedule or rebalance turf layouts. Keep only physically impossible
+    # explicit turf slots as hard errors here; duplicate labels, two-large-field
+    # combinations, and capacity overruns are returned as overrideable warnings.
 
 
 def _manual_turf_layout_warnings(
@@ -24726,19 +24741,38 @@ def _manual_turf_layout_warnings(
             continue
         field_instances.append(fi)
 
-    labels = {_explicit_turf_field_label_for_instance(fi) for fi in field_instances}
-    labels = {label for label in labels if label}
+    warnings: list[ScheduleEditWarning] = []
+    labels: list[str] = []
     counts = _empty_field_size_counts()
     for fi in field_instances:
+        label = _explicit_turf_field_label_for_instance(fi)
+        if label:
+            labels.append(label)
         size = _normalize_field_size(getattr(fi, 'field_type', None))
         if size in counts:
             counts[size] += 1
-    if labels and _is_approved_turf_slot_counts(counts) and not _approved_turf_configuration_for_explicit_slots(labels):
-        return [ScheduleEditWarning(
+    unique_labels = set(labels)
+    if len(unique_labels) < len(labels):
+        warnings.append(ScheduleEditWarning(
+            code='DUPLICATE_EXPLICIT_FIELD_SLOT',
+            message='Manual Override Warning: the exact same explicit field slot is assigned to more than one game at this host/date/time.',
+        ))
+    if labels and not _is_approved_turf_slot_counts(counts):
+        warnings.append(ScheduleEditWarning(
+            code='TURF_TIME_BLOCK_OVERSCHEDULED',
+            message='Manual Override Warning: this turf time block exceeds the normal approved configuration capacity and may require manual rebalancing.',
+        ))
+    if labels and counts[FIELD_SIZE_LARGE] > 1:
+        warnings.append(ScheduleEditWarning(
+            code='TURF_FIELD_CONFIGURATION_EXCEEDS_NORMAL_CAPACITY',
+            message='Manual Override Warning: this turf field configuration exceeds the normal large-field capacity for one turf surface.',
+        ))
+    if unique_labels and _is_approved_turf_slot_counts(counts) and not _approved_turf_configuration_for_explicit_slots(unique_labels):
+        warnings.append(ScheduleEditWarning(
             code='TURF_LAYOUT_MANUAL_REBALANCE',
-            message='Manual override: selected turf field combination is physically possible but not part of the optimizer’s preferred layout and may require rebalancing.',
-        )]
-    return []
+            message='Manual Override Warning: selected turf field combination is not part of the optimizer’s preferred layout and may require rebalancing.',
+        ))
+    return warnings
 
 
 def _raise_if_invalid_manual_game_edit(db: Session, game: Game, payload: ManualGameEditRequest) -> None:
@@ -24776,28 +24810,6 @@ def _raise_if_invalid_manual_game_edit(db: Session, game: Game, payload: ManualG
         raise HTTPException(status_code=400, detail={'error': 'INVALID_FIELD'})
     if fi and payload.host_location_id and fi.host_location_id != payload.host_location_id:
         raise HTTPException(status_code=400, detail={'error': 'INVALID_FIELD_LOCATION_RELATIONSHIP'})
-    active_statuses = _canonical_active_scheduled_status_codes(db) - {'CANCELLED', 'POSTPONED'}
-    if payload.field_instance_id and payload.game_date and payload.kickoff_time:
-        field_conflict = db.query(Game.id).join(Game.status).filter(
-            Game.id != game.id,
-            Game.season_id == payload.season_id,
-            Game.game_date == payload.game_date,
-            Game.kickoff_time == payload.kickoff_time,
-            Game.host_location_id == payload.host_location_id,
-            Game.field_instance_id == payload.field_instance_id,
-            func.upper(GameStatus.code).in_(active_statuses),
-        ).first()
-        slot_field_conflict = db.query(GameSlot.id).join(Game, GameSlot.assigned_game_id == Game.id).join(Game.status).filter(
-            Game.id != game.id,
-            Game.season_id == payload.season_id,
-            Game.game_date == payload.game_date,
-            Game.kickoff_time == payload.kickoff_time,
-            GameSlot.host_location_id == payload.host_location_id,
-            GameSlot.field_instance_id == payload.field_instance_id,
-            func.upper(GameStatus.code).in_(active_statuses),
-        ).first()
-        if field_conflict or slot_field_conflict:
-            raise HTTPException(status_code=400, detail={'error': 'FIELD_TIME_CONFLICT'})
     _validate_turf_explicit_field_slot_combination(
         db,
         host_location_id=payload.host_location_id,
@@ -24824,7 +24836,8 @@ def manual_edit_generated_game(game_id: uuid.UUID, payload: ManualGameEditReques
         game.original_game_snapshot = json.dumps(_game_snapshot(game), sort_keys=True)
     old_values = _game_snapshot(game)
     old_slot = db.query(GameSlot).filter(GameSlot.assigned_game_id == game.id).first()
-    new_slot = db.query(GameSlot).filter(GameSlot.field_instance_id == payload.field_instance_id, GameSlot.slot_date == payload.game_date, GameSlot.start_time == payload.kickoff_time).first() if payload.field_instance_id else None
+    candidate_slot = db.query(GameSlot).filter(GameSlot.field_instance_id == payload.field_instance_id, GameSlot.slot_date == payload.game_date, GameSlot.start_time == payload.kickoff_time).first() if payload.field_instance_id else None
+    new_slot = candidate_slot if candidate_slot and (not candidate_slot.assigned_game_id or candidate_slot.assigned_game_id == game.id) else None
     if old_slot and (not new_slot or old_slot.id != new_slot.id):
         old_slot.status = 'OPEN'
         old_slot.assigned_game_id = None

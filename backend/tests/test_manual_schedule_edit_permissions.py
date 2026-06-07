@@ -212,7 +212,7 @@ class ManualScheduleEditPermissionsTest(unittest.TestCase):
         game = self.db.get(Game, self.game.id)
         self.assertEqual(game.field_instance_id, large_field.id)
 
-    def test_two_large_fields_on_one_turf_surface_are_hard_blocked(self):
+    def test_two_large_fields_on_one_turf_surface_are_overrideable_warnings(self):
         self.host.surface_type = 'TURF_STADIUM'
         large_field_1 = FieldInstance(id=uuid.uuid4(), host_location_id=self.host.id, hosting_availability_id=uuid.uuid4(), instance_date=date(2026, 8, 9), field_name='Large Field 1', field_type='LARGE', is_active=True)
         large_field_2 = FieldInstance(id=uuid.uuid4(), host_location_id=self.host.id, hosting_availability_id=uuid.uuid4(), instance_date=date(2026, 8, 9), field_name='Large Field 3', field_type='LARGE', is_active=True)
@@ -236,11 +236,35 @@ class ManualScheduleEditPermissionsTest(unittest.TestCase):
         response = self.client.patch(
             f'/api/schedule-management/games/{self.game.id}/manual-edit',
             headers=self._token(self.league_user.id),
+            json=self._payload(field_instance_id=str(large_field_2.id), override_warnings=False),
+        )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()['detail']['error'], 'SCHEDULE_WARNINGS_REQUIRE_OVERRIDE')
+        self.assertIn('TURF_FIELD_CONFIGURATION_EXCEEDS_NORMAL_CAPACITY', {warning['code'] for warning in response.json()['detail']['warnings']})
+
+        response = self.client.patch(
+            f'/api/schedule-management/games/{self.game.id}/manual-edit',
+            headers=self._token(self.league_user.id),
+            json=self._payload(field_instance_id=str(large_field_2.id), override_warnings=True),
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn('TURF_FIELD_CONFIGURATION_EXCEEDS_NORMAL_CAPACITY', {warning['code'] for warning in response.json()['warnings']})
+
+
+    def test_large_field_2_on_single_turf_surface_remains_hard_blocked(self):
+        self.host.surface_type = 'TURF_STADIUM'
+        large_field_2 = FieldInstance(id=uuid.uuid4(), host_location_id=self.host.id, hosting_availability_id=uuid.uuid4(), instance_date=date(2026, 8, 9), field_name='Large Field 2', field_type='LARGE', is_active=True)
+        self.db.add(large_field_2)
+        self.db.commit()
+
+        response = self.client.patch(
+            f'/api/schedule-management/games/{self.game.id}/manual-edit',
+            headers=self._token(self.league_user.id),
             json=self._payload(field_instance_id=str(large_field_2.id), override_warnings=True),
         )
         self.assertEqual(response.status_code, 400)
-        self.assertEqual(response.json()['detail']['error'], 'INVALID_TURF_FIELD_SLOT_COMBINATION')
-        self.assertIn('TWO_LARGE_FIELDS_NOT_ALLOWED_ON_ONE_TURF_SURFACE', response.json()['detail']['failure_reasons'])
+        self.assertEqual(response.json()['detail']['error'], 'INVALID_TURF_FIELD_SLOT')
+        self.assertIn('LARGE_FIELD_2_NOT_ALLOWED_ON_ONE_TURF_SURFACE', response.json()['detail']['failure_reasons'])
 
     def test_turf_manual_edit_warns_for_unoptimized_but_physically_possible_layout(self):
         self.host.surface_type = 'TURF_STADIUM'
@@ -292,7 +316,7 @@ class ManualScheduleEditPermissionsTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertIn('TURF_LAYOUT_MANUAL_REBALANCE', {warning['code'] for warning in response.json()['warnings']})
 
-    def test_same_explicit_field_slot_is_hard_blocked(self):
+    def test_same_explicit_field_slot_is_warning_override_not_hard_block(self):
         conflict_home = Team(id=uuid.uuid4(), organization_id=self.home_org.id, division_id=self.division.id, name='Home 2', is_active=True)
         conflict_away = Team(id=uuid.uuid4(), organization_id=self.away_org.id, division_id=self.division.id, name='Away 3', is_active=True)
         conflict_game = Game(
@@ -313,10 +337,22 @@ class ManualScheduleEditPermissionsTest(unittest.TestCase):
         response = self.client.patch(
             f'/api/schedule-management/games/{self.game.id}/manual-edit',
             headers=self._token(self.league_user.id),
-            json=self._payload(),
+            json=self._payload(override_warnings=False),
         )
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(response.json()['detail']['error'], 'FIELD_TIME_CONFLICT')
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()['detail']['error'], 'SCHEDULE_WARNINGS_REQUIRE_OVERRIDE')
+        self.assertIn('FIELD_TIME_CONFLICT', {warning['code'] for warning in response.json()['detail']['warnings']})
+
+        response = self.client.patch(
+            f'/api/schedule-management/games/{self.game.id}/manual-edit',
+            headers=self._token(self.league_user.id),
+            json=self._payload(override_warnings=True),
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn('FIELD_TIME_CONFLICT', {warning['code'] for warning in response.json()['warnings']})
+        self.db.expire_all()
+        game = self.db.get(Game, self.game.id)
+        self.assertEqual(game.field_instance_id, self.field.id)
 
     def test_same_team_is_hard_blocked_for_league_admin(self):
         response = self.client.patch(
