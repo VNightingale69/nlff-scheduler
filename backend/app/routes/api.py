@@ -17,7 +17,7 @@ from sqlalchemy.exc import IntegrityError, ProgrammingError, SQLAlchemyError
 from sqlalchemy.orm import Session, aliased
 
 from app.config import RULEBOOK_MAX_SIZE_BYTES, RULEBOOK_UPLOAD_DIR
-from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, enforce_organization_scope, get_current_user, is_community_admin, is_league_admin, normalize_role_name, require_roles
+from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN, enforce_organization_scope, get_current_user, is_community_admin, is_league_admin, normalize_role_name, require_roles
 from app.database import get_db
 from app.models import Division, Field, FieldConfigurationOption, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostPlanSelection, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Rulebook, ScheduleChangeLog, ScoreSubmission, Season, Team, TurfWave, User, Week
 from app.schemas import (
@@ -10999,6 +10999,7 @@ def list_generated_slots(host_location_id: uuid.UUID, available_date: str | None
         'host_location_id': row.GameSlot.host_location_id,
         'host_location_name': row.host_location_name,
         'field_instance_id': row.GameSlot.field_instance_id,
+        'field_id': getattr(row.GameSlot.field_instance, 'field_id', None),
         'field_instance_name': (_canonical_turf_field_export_label(db, row.GameSlot, row.GameSlot.field_instance) if getattr(row.GameSlot, 'turf_wave_id', None) else row.field_name),
         'field_size': _normalize_field_size(row.GameSlot.field_type) or row.GameSlot.field_type,
         'field_type': row.GameSlot.field_type,
@@ -11061,6 +11062,7 @@ def list_generated_game_slots(host_location_id: uuid.UUID | None = None, availab
         'host_location_id': row.GameSlot.host_location_id,
         'host_location_name': row.host_location_name,
         'field_instance_id': row.GameSlot.field_instance_id,
+        'field_id': getattr(row.GameSlot.field_instance, 'field_id', None),
         'field_instance_name': (_canonical_turf_field_export_label(db, row.GameSlot, row.GameSlot.field_instance) if getattr(row.GameSlot, 'turf_wave_id', None) else row.field_name),
         'field_size': _normalize_field_size(row.GameSlot.field_type) or row.GameSlot.field_type,
         'field_type': row.GameSlot.field_type,
@@ -14231,6 +14233,10 @@ def _to_game_read(
                 or field_instance_name
                 or getattr(slot_field_instance, 'field_name', None)
             )
+    if field_instance_name is None and getattr(g, 'field_instance', None):
+        field_instance_name = g.field_instance.field_name
+    if host_location_name is None and getattr(g, 'host_location', None):
+        host_location_name = g.host_location.name
     return GameRead(
         id=g.id,
         created_at=g.created_at,
@@ -14301,7 +14307,7 @@ def list_games(division_id:uuid.UUID|None=None, week_id:uuid.UUID|None=None, tea
 
 
 
-@router.get('/manual-schedule-builder/options', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+@router.get('/manual-schedule-builder/options', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
 def manual_schedule_builder_options(db: Session = Depends(get_db)):
     divisions = db.query(Division).filter(Division.is_active.is_(True)).order_by(Division.sort_order, Division.name).all()
     teams = db.query(Team).join(Team.division).filter(Team.is_active.is_(True), Division.is_active.is_(True)).order_by(Team.name).all()
@@ -14323,7 +14329,7 @@ def manual_schedule_builder_options(db: Session = Depends(get_db)):
 
 
 
-@router.post('/manual-schedule-builder/recommendations', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+@router.post('/manual-schedule-builder/recommendations', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
 def manual_schedule_builder_recommendations(payload: dict, db: Session = Depends(get_db)):
     season_id = payload.get('season_id')
     week_id = payload.get('week_id')
@@ -24414,7 +24420,8 @@ def _manual_edit_status_code(db: Session, status_id: uuid.UUID | None) -> str | 
 
 def _manual_game_edit_warnings(db: Session, game: Game, payload: ManualGameEditRequest) -> list[ScheduleEditWarning]:
     warnings: list[ScheduleEditWarning] = []
-    status_code = _manual_edit_status_code(db, payload.game_status_id)
+    effective_status_id = payload.game_status_id or game.game_status_id
+    status_code = _manual_edit_status_code(db, effective_status_id)
     active_statuses = {'SCHEDULED', 'RESCHEDULED'}
     if status_code in active_statuses:
         team_conflict = db.query(Game.id).join(Game.status).filter(
@@ -24450,6 +24457,22 @@ def _manual_game_edit_warnings(db: Session, game: Game, payload: ManualGameEditR
     fi = db.get(FieldInstance, payload.field_instance_id) if payload.field_instance_id else None
     if fi and division and _normalize_field_size(fi.field_type) != _required_field_type_for_division(division):
         warnings.append(ScheduleEditWarning(code='FIELD_SIZE_MISMATCH', message='Selected field size does not match the division expected field size.'))
+    if payload.field_instance_id:
+        matching_slot = db.query(GameSlot.id).filter(
+            GameSlot.field_instance_id == payload.field_instance_id,
+            GameSlot.slot_date == payload.game_date,
+            GameSlot.start_time == payload.kickoff_time,
+        ).first()
+        if not matching_slot:
+            warnings.append(ScheduleEditWarning(code='FIELD_AVAILABILITY_MISMATCH', message='Selected field is not configured as available for the selected date and time.'))
+    if payload.host_location_id:
+        host_slot = db.query(GameSlot.id).filter(
+            GameSlot.host_location_id == payload.host_location_id,
+            GameSlot.slot_date == payload.game_date,
+            GameSlot.start_time == payload.kickoff_time,
+        ).first()
+        if not host_slot:
+            warnings.append(ScheduleEditWarning(code='HOST_TIME_AVAILABILITY_MISMATCH', message='Selected host location is not configured as available for the selected date and time.'))
     if payload.season_id and payload.game_date and payload.host_location_id:
         allowed_hosts = _host_plan_allowed_host_ids_for_week(db, payload.season_id, payload.week_id, payload.game_date)
         if allowed_hosts is not None and payload.host_location_id not in allowed_hosts:
@@ -24481,7 +24504,7 @@ def _manual_game_edit_warnings(db: Session, game: Game, payload: ManualGameEditR
             payload.kickoff_time != game.kickoff_time,
             payload.host_location_id != game.host_location_id,
             payload.field_instance_id != game.field_instance_id,
-            payload.game_status_id != game.game_status_id,
+            (payload.game_status_id or game.game_status_id) != game.game_status_id,
         ])
         if schedule_sensitive_changed:
             warnings.append(ScheduleEditWarning(code='SCORED_GAME_CHANGE', message='This game already has score history; confirm before changing teams, date, status, or location.'))
@@ -24491,8 +24514,10 @@ def _manual_game_edit_warnings(db: Session, game: Game, payload: ManualGameEditR
 
 
 def _raise_if_invalid_manual_game_edit(db: Session, game: Game, payload: ManualGameEditRequest) -> None:
+    if payload.game_status_id is None:
+        payload.game_status_id = game.game_status_id
     missing = []
-    for name in ['division_id', 'home_team_id', 'away_team_id', 'game_status_id', 'game_date', 'kickoff_time']:
+    for name in ['division_id', 'home_team_id', 'away_team_id', 'host_location_id', 'field_instance_id', 'game_date', 'kickoff_time']:
         if getattr(payload, name) in (None, ''):
             missing.append(name)
     if missing:
@@ -24506,6 +24531,18 @@ def _raise_if_invalid_manual_game_edit(db: Session, game: Game, payload: ManualG
     status = db.get(GameStatus, payload.game_status_id)
     if not status or not status.is_active:
         raise HTTPException(status_code=400, detail={'error': 'INVALID_GAME_STATUS'})
+    if payload.season_id:
+        valid_dates = {row[0] for row in db.query(Week.primary_game_date).filter(Week.season_id == payload.season_id, Week.primary_game_date.isnot(None)).all()}
+        if not valid_dates:
+            valid_dates = {row[0] for row in db.query(Week.start_date).filter(Week.season_id == payload.season_id, Week.start_date.isnot(None)).all()}
+        if valid_dates and payload.game_date not in valid_dates:
+            raise HTTPException(status_code=400, detail={'error': 'INVALID_GAME_DATE'})
+        valid_times = {row[0] for row in db.query(GameSlot.start_time).outerjoin(Week, Week.id == GameSlot.week_id).filter(or_(GameSlot.season_id == payload.season_id, Week.season_id == payload.season_id)).distinct().all()}
+        if valid_times and payload.kickoff_time not in valid_times:
+            raise HTTPException(status_code=400, detail={'error': 'INVALID_START_TIME'})
+    host = db.get(HostLocation, payload.host_location_id) if payload.host_location_id else None
+    if not host or not host.is_active:
+        raise HTTPException(status_code=400, detail={'error': 'INVALID_HOST_LOCATION'})
     fi = db.get(FieldInstance, payload.field_instance_id) if payload.field_instance_id else None
     if payload.field_instance_id and not fi:
         raise HTTPException(status_code=400, detail={'error': 'INVALID_FIELD'})
@@ -24513,7 +24550,7 @@ def _raise_if_invalid_manual_game_edit(db: Session, game: Game, payload: ManualG
         raise HTTPException(status_code=400, detail={'error': 'INVALID_FIELD_LOCATION_RELATIONSHIP'})
 
 
-@router.patch('/schedule-management/games/{game_id}/manual-edit', response_model=ManualGameEditResponse, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+@router.patch('/schedule-management/games/{game_id}/manual-edit', response_model=ManualGameEditResponse, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
 def manual_edit_generated_game(game_id: uuid.UUID, payload: ManualGameEditRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     game = db.query(Game).filter(Game.id == game_id).first()
     if not game:
@@ -24537,13 +24574,16 @@ def manual_edit_generated_game(game_id: uuid.UUID, payload: ManualGameEditReques
         new_slot.status = 'ASSIGNED'
         new_slot.assigned_game_id = game.id
         game.field_id = getattr(new_slot.field_instance, 'field_id', None)
+    elif payload.field_instance_id:
+        selected_field_instance = db.get(FieldInstance, payload.field_instance_id)
+        game.field_id = getattr(selected_field_instance, 'field_id', None)
     game.season_id = payload.season_id
     game.week_id = payload.week_id
     game.home_team_id = payload.home_team_id
     game.away_team_id = payload.away_team_id
     game.host_location_id = payload.host_location_id
     game.field_instance_id = payload.field_instance_id
-    game.game_status_id = payload.game_status_id
+    game.game_status_id = payload.game_status_id or game.game_status_id
     game.game_date = payload.game_date
     game.kickoff_time = payload.kickoff_time
     game.public_notes = payload.public_notes
@@ -24579,7 +24619,7 @@ def manual_edit_generated_game(game_id: uuid.UUID, payload: ManualGameEditReques
     return ManualGameEditResponse(game=_to_game_read(game, db=db, generated_slot=slot), warnings=warnings, change_log=[_schedule_change_log_read(row) for row in changed_logs])
 
 
-@router.get('/schedule-management/games/{game_id}/manual-edit-history', response_model=list[ScheduleChangeLogRead], dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+@router.get('/schedule-management/games/{game_id}/manual-edit-history', response_model=list[ScheduleChangeLogRead], dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
 def manual_edit_history(game_id: uuid.UUID, db: Session = Depends(get_db)):
     rows = db.query(ScheduleChangeLog).filter(ScheduleChangeLog.game_id == game_id).order_by(ScheduleChangeLog.changed_at.desc()).all()
     return [_schedule_change_log_read(row) for row in rows]

@@ -386,6 +386,7 @@ class GeneratedSlotRead(BaseModel):
     host_location_id: uuid.UUID | None = None
     host_location_name: str
     field_instance_id: uuid.UUID | None = None
+    field_id: uuid.UUID | None = None
     field_instance_name: str
     field_size: str
     field_type: str
@@ -634,7 +635,7 @@ class GameCreate(BaseModel):
     field_id: uuid.UUID | None
     host_location_id: uuid.UUID | None = None
     field_instance_id: uuid.UUID | None = None
-    game_status_id: uuid.UUID
+    game_status_id: uuid.UUID | None = None
     game_date: date
     kickoff_time: time
     public_notes: str | None = None
@@ -669,7 +670,7 @@ class ManualGameEditRequest(BaseModel):
     away_team_id: uuid.UUID
     host_location_id: uuid.UUID | None = None
     field_instance_id: uuid.UUID | None = None
-    game_status_id: uuid.UUID
+    game_status_id: uuid.UUID | None = None
     game_date: date
     kickoff_time: time
     public_notes: str | None = None
