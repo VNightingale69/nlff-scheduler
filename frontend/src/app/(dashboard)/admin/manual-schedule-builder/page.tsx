@@ -332,7 +332,7 @@ export default function ManualScheduleBuilderPage() {
     const isExplicitManualField = (slot: any) => {
       const label = explicitFieldSlotLabel(slot);
       return Boolean(label) &&
-        !/\bWave\s+\d+\b|THREE_SMALL|TWO_MEDIUM|ONE_SMALL_ONE_LARGE|TWO_SMALL_ONE_MEDIUM|ONE_MEDIUM_TWO_SMALL|ONE_LARGE_ONE_MEDIUM/i.test(label) &&
+        !/\bWave\s+\d+\b|THREE_SMALL|TWO_MEDIUM|ONE_SMALL_ONE_LARGE|TWO_SMALL_ONE_MEDIUM|ONE_LARGE|ONE_MEDIUM_TWO_SMALL|ONE_LARGE_ONE_MEDIUM|TWO_LARGE/i.test(label) &&
         !/^Large Field 2$/i.test(label);
     };
     const addSlot = (slot: any) => {
