@@ -24565,6 +24565,14 @@ def _manual_game_edit_warnings(db: Session, game: Game, payload: ManualGameEditR
         allowed_hosts = _host_plan_allowed_host_ids_for_week(db, payload.season_id, payload.week_id, payload.game_date)
         if allowed_hosts is not None and payload.host_location_id not in allowed_hosts:
             warnings.append(ScheduleEditWarning(code='HOSTING_AVAILABILITY_MISMATCH', message='Manual override: selected date/location is outside configured hosting availability and may require field reconfiguration.'))
+    warnings.extend(_manual_turf_layout_warnings(
+        db,
+        host_location_id=payload.host_location_id,
+        game_date_value=payload.game_date,
+        start_time_value=payload.kickoff_time,
+        field_instance_id=payload.field_instance_id,
+        exclude_game_id=game.id,
+    ))
     home = db.get(Team, payload.home_team_id) if payload.home_team_id else None
     away = db.get(Team, payload.away_team_id) if payload.away_team_id else None
     if home and away and home.organization_id == away.organization_id:
@@ -24671,13 +24679,66 @@ def _validate_turf_explicit_field_slot_combination(
         raise HTTPException(status_code=400, detail={'error': 'INVALID_TURF_FIELD_SLOT_COMBINATION', 'failure_reasons': ['TWO_LARGE_FIELDS_NOT_ALLOWED_ON_ONE_TURF_SURFACE']})
     if counts[FIELD_SIZE_LARGE] == 1 and re.search(r'\bLarge\s+Field\s+2\b', ' '.join(by_label.keys()), flags=re.IGNORECASE):
         raise HTTPException(status_code=400, detail={'error': 'INVALID_TURF_FIELD_SLOT', 'failure_reasons': ['LARGE_FIELD_2_NOT_ALLOWED_ON_ONE_TURF_SURFACE']})
-    selected_configuration = _approved_turf_configuration_for_explicit_slots(set(by_label.keys()))
-    if not selected_configuration or not _is_approved_turf_slot_counts(counts):
+    if not _is_approved_turf_slot_counts(counts):
         raise HTTPException(status_code=400, detail={
             'error': 'INVALID_TURF_FIELD_SLOT_COMBINATION',
-            'failure_reasons': ['TURF_FIELD_SLOT_COMBINATION_NOT_APPROVED'],
+            'failure_reasons': ['TURF_FIELD_SLOT_COMBINATION_EXCEEDS_PHYSICAL_CAPACITY'],
             'selected_field_slots': sorted(by_label.keys()),
         })
+
+
+def _manual_turf_layout_warnings(
+    db: Session,
+    *,
+    host_location_id: uuid.UUID | None,
+    game_date_value: date | None,
+    start_time_value: time | None,
+    field_instance_id: uuid.UUID | None,
+    exclude_game_id: uuid.UUID | None = None,
+) -> list[ScheduleEditWarning]:
+    host = db.get(HostLocation, host_location_id) if host_location_id else None
+    if not _is_turf_stadium_host(host) or not game_date_value or not start_time_value:
+        return []
+    field_instances: list[FieldInstance] = []
+    if field_instance_id:
+        selected = db.get(FieldInstance, field_instance_id)
+        if selected:
+            field_instances.append(selected)
+    rows = db.query(Game, FieldInstance).join(Game.status).join(FieldInstance, FieldInstance.id == Game.field_instance_id).filter(
+        Game.host_location_id == host_location_id,
+        Game.game_date == game_date_value,
+        Game.kickoff_time == start_time_value,
+        Game.id != exclude_game_id if exclude_game_id else True,
+        func.lower(GameStatus.code).in_(['scheduled', 'published', 'score_pending', 'submitted', 'flagged', 'approved']),
+    ).all()
+    field_instances.extend(fi for _game, fi in rows if fi)
+    game_row_ids = {game.id for game, _fi in rows if getattr(game, 'id', None)}
+    slot_rows = db.query(GameSlot, FieldInstance).join(GameSlot.field_instance).filter(
+        GameSlot.host_location_id == host_location_id,
+        GameSlot.slot_date == game_date_value,
+        GameSlot.start_time == start_time_value,
+        GameSlot.assigned_game_id.isnot(None),
+    ).all()
+    for slot, fi in slot_rows:
+        if exclude_game_id and slot.assigned_game_id == exclude_game_id:
+            continue
+        if slot.assigned_game_id in game_row_ids:
+            continue
+        field_instances.append(fi)
+
+    labels = {_explicit_turf_field_label_for_instance(fi) for fi in field_instances}
+    labels = {label for label in labels if label}
+    counts = _empty_field_size_counts()
+    for fi in field_instances:
+        size = _normalize_field_size(getattr(fi, 'field_type', None))
+        if size in counts:
+            counts[size] += 1
+    if labels and _is_approved_turf_slot_counts(counts) and not _approved_turf_configuration_for_explicit_slots(labels):
+        return [ScheduleEditWarning(
+            code='TURF_LAYOUT_MANUAL_REBALANCE',
+            message='Manual override: selected turf field combination is physically possible but not part of the optimizer’s preferred layout and may require rebalancing.',
+        )]
+    return []
 
 
 def _raise_if_invalid_manual_game_edit(db: Session, game: Game, payload: ManualGameEditRequest) -> None:
