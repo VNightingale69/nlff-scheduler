@@ -147,6 +147,82 @@ class ManualScheduleEditPermissionsTest(unittest.TestCase):
         self.assertEqual(game.away_team_id, self.other_team.id)
         self.assertEqual(game.internal_admin_notes, 'Scheduler override')
 
+
+    def test_field_size_mismatch_is_warning_override_not_hard_block(self):
+        large_field = FieldInstance(id=uuid.uuid4(), host_location_id=self.host.id, hosting_availability_id=uuid.uuid4(), instance_date=date(2026, 8, 9), field_name='Large Field 1', field_type='LARGE', is_active=True)
+        self.db.add(large_field)
+        self.db.commit()
+
+        response = self.client.patch(
+            f'/api/schedule-management/games/{self.game.id}/manual-edit',
+            headers=self._token(self.league_user.id),
+            json=self._payload(field_instance_id=str(large_field.id), override_warnings=False),
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()['detail']['error'], 'SCHEDULE_WARNINGS_REQUIRE_OVERRIDE')
+        warning_codes = {warning['code'] for warning in response.json()['detail']['warnings']}
+        self.assertIn('FIELD_SIZE_MISMATCH', warning_codes)
+
+        response = self.client.patch(
+            f'/api/schedule-management/games/{self.game.id}/manual-edit',
+            headers=self._token(self.league_user.id),
+            json=self._payload(field_instance_id=str(large_field.id), override_warnings=True),
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        data = response.json()
+        self.assertEqual(data['game']['id'], str(self.game.id))
+        self.assertEqual(data['game']['field_instance_id'], str(large_field.id))
+        self.assertIn('FIELD_SIZE_MISMATCH', {warning['code'] for warning in data['warnings']})
+        self.db.expire_all()
+        game = self.db.get(Game, self.game.id)
+        self.assertEqual(game.field_instance_id, large_field.id)
+
+    def test_unoptimized_turf_subset_is_warning_not_hard_block(self):
+        self.host.surface_type = 'TURF_STADIUM'
+        large_field = FieldInstance(id=uuid.uuid4(), host_location_id=self.host.id, hosting_availability_id=uuid.uuid4(), instance_date=date(2026, 8, 9), field_name='Large Field 1', field_type='LARGE', is_active=True)
+        self.db.add(large_field)
+        self.db.commit()
+
+        response = self.client.patch(
+            f'/api/schedule-management/games/{self.game.id}/manual-edit',
+            headers=self._token(self.league_user.id),
+            json=self._payload(field_instance_id=str(large_field.id), override_warnings=True),
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.db.expire_all()
+        game = self.db.get(Game, self.game.id)
+        self.assertEqual(game.field_instance_id, large_field.id)
+
+    def test_two_large_fields_on_one_turf_surface_are_hard_blocked(self):
+        self.host.surface_type = 'TURF_STADIUM'
+        large_field_1 = FieldInstance(id=uuid.uuid4(), host_location_id=self.host.id, hosting_availability_id=uuid.uuid4(), instance_date=date(2026, 8, 9), field_name='Large Field 1', field_type='LARGE', is_active=True)
+        large_field_2 = FieldInstance(id=uuid.uuid4(), host_location_id=self.host.id, hosting_availability_id=uuid.uuid4(), instance_date=date(2026, 8, 9), field_name='Large Field 3', field_type='LARGE', is_active=True)
+        conflict_home = Team(id=uuid.uuid4(), organization_id=self.home_org.id, division_id=self.division.id, name='Home 2', is_active=True)
+        conflict_away = Team(id=uuid.uuid4(), organization_id=self.away_org.id, division_id=self.division.id, name='Away 3', is_active=True)
+        conflict_game = Game(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week.id,
+            home_team_id=conflict_home.id,
+            away_team_id=conflict_away.id,
+            host_location_id=self.host.id,
+            field_instance_id=large_field_1.id,
+            game_status_id=self.status.id,
+            game_date=date(2026, 8, 9),
+            kickoff_time=time(9, 0),
+        )
+        self.db.add_all([large_field_1, large_field_2, conflict_home, conflict_away, conflict_game])
+        self.db.commit()
+
+        response = self.client.patch(
+            f'/api/schedule-management/games/{self.game.id}/manual-edit',
+            headers=self._token(self.league_user.id),
+            json=self._payload(field_instance_id=str(large_field_2.id), override_warnings=True),
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()['detail']['error'], 'INVALID_TURF_FIELD_SLOT_COMBINATION')
+        self.assertIn('TWO_LARGE_FIELDS_NOT_ALLOWED_ON_ONE_TURF_SURFACE', response.json()['detail']['failure_reasons'])
+
     def test_same_explicit_field_slot_is_hard_blocked(self):
         conflict_home = Team(id=uuid.uuid4(), organization_id=self.home_org.id, division_id=self.division.id, name='Home 2', is_active=True)
         conflict_away = Team(id=uuid.uuid4(), organization_id=self.away_org.id, division_id=self.division.id, name='Away 3', is_active=True)
