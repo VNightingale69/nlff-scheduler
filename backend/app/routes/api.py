@@ -11034,8 +11034,8 @@ def list_field_instances(host_location_id: uuid.UUID | None = None, available_da
     return [{'id': r.FieldInstance.id, 'date': r.FieldInstance.instance_date, 'host_location_name': r.host_location_name, 'field_instance_name': r.FieldInstance.field_name, 'field_type': r.FieldInstance.field_type, 'hosting_availability_id': r.FieldInstance.hosting_availability_id} for r in rows]
 
 
-@router.get('/generated-game-slots', response_model=list[GeneratedSlotRead], dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_COMMUNITY_ADMIN))])
-def list_generated_game_slots(host_location_id: uuid.UUID | None = None, available_date: str | None = None, status: str | None = None, field_type: str | None = None, season_id: uuid.UUID | None = None, week_id: uuid.UUID | None = None, current_user: User = Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_COMMUNITY_ADMIN)), db: Session = Depends(get_db)):
+@router.get('/generated-game-slots', response_model=list[GeneratedSlotRead], dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_COMMUNITY_ADMIN, ROLE_SCHEDULING_ADMIN))])
+def list_generated_game_slots(host_location_id: uuid.UUID | None = None, available_date: str | None = None, status: str | None = None, field_type: str | None = None, season_id: uuid.UUID | None = None, week_id: uuid.UUID | None = None, current_user: User = Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_COMMUNITY_ADMIN, ROLE_SCHEDULING_ADMIN)), db: Session = Depends(get_db)):
     q = db.query(
         GameSlot,
         FieldInstance.field_name,
@@ -24459,7 +24459,7 @@ def _manual_game_edit_warnings(db: Session, game: Game, payload: ManualGameEditR
     division = db.get(Division, payload.division_id) if payload.division_id else None
     fi = db.get(FieldInstance, payload.field_instance_id) if payload.field_instance_id else None
     if fi and division and _normalize_field_size(fi.field_type) != _required_field_type_for_division(division):
-        warnings.append(ScheduleEditWarning(code='FIELD_SIZE_MISMATCH', message='Selected field size does not match the division expected field size.'))
+        warnings.append(ScheduleEditWarning(code='FIELD_SIZE_MISMATCH', message='Manual override: selected field type does not match division default.'))
     if payload.field_instance_id:
         matching_slot = db.query(GameSlot.id).filter(
             GameSlot.field_instance_id == payload.field_instance_id,
@@ -24467,7 +24467,7 @@ def _manual_game_edit_warnings(db: Session, game: Game, payload: ManualGameEditR
             GameSlot.start_time == payload.kickoff_time,
         ).first()
         if not matching_slot:
-            warnings.append(ScheduleEditWarning(code='FIELD_AVAILABILITY_MISMATCH', message='Selected field is not configured as available for the selected date and time.'))
+            warnings.append(ScheduleEditWarning(code='FIELD_AVAILABILITY_MISMATCH', message='Manual override: selected field is not part of the optimizer’s recommended layout.'))
     if payload.host_location_id:
         host_slot = db.query(GameSlot.id).filter(
             GameSlot.host_location_id == payload.host_location_id,
@@ -24475,11 +24475,11 @@ def _manual_game_edit_warnings(db: Session, game: Game, payload: ManualGameEditR
             GameSlot.start_time == payload.kickoff_time,
         ).first()
         if not host_slot:
-            warnings.append(ScheduleEditWarning(code='HOST_TIME_AVAILABILITY_MISMATCH', message='Selected host location is not configured as available for the selected date and time.'))
+            warnings.append(ScheduleEditWarning(code='HOST_TIME_AVAILABILITY_MISMATCH', message='Manual override: selected host/time is not part of the currently generated optimized layout.'))
     if payload.season_id and payload.game_date and payload.host_location_id:
         allowed_hosts = _host_plan_allowed_host_ids_for_week(db, payload.season_id, payload.week_id, payload.game_date)
         if allowed_hosts is not None and payload.host_location_id not in allowed_hosts:
-            warnings.append(ScheduleEditWarning(code='HOSTING_AVAILABILITY_MISMATCH', message='Selected date/location is outside configured hosting availability.'))
+            warnings.append(ScheduleEditWarning(code='HOSTING_AVAILABILITY_MISMATCH', message='Manual override: selected date/location is outside configured hosting availability and may require field reconfiguration.'))
     home = db.get(Team, payload.home_team_id) if payload.home_team_id else None
     away = db.get(Team, payload.away_team_id) if payload.away_team_id else None
     if home and away and home.organization_id == away.organization_id:
@@ -24581,8 +24581,6 @@ def _validate_turf_explicit_field_slot_combination(
         counts[size] += 1
     if counts[FIELD_SIZE_LARGE] > 1:
         raise HTTPException(status_code=400, detail={'error': 'INVALID_TURF_FIELD_SLOT_COMBINATION', 'failure_reasons': ['TWO_LARGE_FIELDS_NOT_ALLOWED_ON_ONE_TURF_SURFACE']})
-    if any(counts.values()) and not _is_approved_turf_slot_counts(counts):
-        raise HTTPException(status_code=400, detail={'error': 'INVALID_TURF_FIELD_SLOT_COMBINATION', 'failure_reasons': ['FIELD_SLOT_COMBINATION_NOT_APPROVED_TURF_LAYOUT_OR_VALID_SUBSET'], 'field_counts': counts})
 
 
 def _raise_if_invalid_manual_game_edit(db: Session, game: Game, payload: ManualGameEditRequest) -> None:

@@ -324,24 +324,37 @@ export default function ManualScheduleBuilderPage() {
     return Array.from(new Set(configuredTimes)).sort();
   }, [generatedSlots, editGame?.season_id, editGame?.week_id, editGame?.kickoff_time, seasonId]);
   const editFieldOptions = useMemo(() => {
-    const matchingSlots = generatedSlots.filter((s: any) => (
-      (!editGame?.season_id || s.season_id === editGame.season_id) &&
-      (!editGame?.week_id || !s.week_id || s.week_id === editGame.week_id || s.season_week_id === editGame.week_id) &&
-      (!editGame?.game_date || s.game_date === editGame.game_date || s.available_date === editGame.game_date) &&
-      (!editGame?.kickoff_time || s.start_time === editGame.kickoff_time) &&
-      (!editGame?.host_location_id || s.host_location_id === editGame.host_location_id)
-    ));
     const byField = new Map<string, any>();
-    matchingSlots.forEach((slot: any) => {
-      const id = String(slot.field_instance_id || slot.field_id || '');
+    const selectedHostId = String(editGame?.host_location_id || '');
+    const selectedDate = String(editGame?.game_date || '');
+    const preferredDate = (slot: any) => String(slot.game_date || slot.available_date || '');
+    const hostHasSlotsForSelectedDate = Boolean(selectedHostId && selectedDate && generatedSlots.some((candidate: any) => String(candidate.host_location_id || '') === selectedHostId && preferredDate(candidate) === selectedDate));
+    const isExplicitManualField = (slot: any) => {
       const label = explicitFieldSlotLabel(slot);
-      if (!id || /\bWave\s+\d+\b|THREE_SMALL|TWO_MEDIUM|ONE_SMALL_ONE_LARGE|TWO_SMALL_ONE_MEDIUM|ONE_MEDIUM_TWO_SMALL|ONE_LARGE_ONE_MEDIUM/i.test(label)) return;
-      if (/^Large Field 2$/i.test(label)) return;
-      if (!byField.has(id)) byField.set(id, { ...slot, explicit_field_slot_label: label });
-    });
+      return Boolean(label) &&
+        !/\bWave\s+\d+\b|THREE_SMALL|TWO_MEDIUM|ONE_SMALL_ONE_LARGE|TWO_SMALL_ONE_MEDIUM|ONE_MEDIUM_TWO_SMALL|ONE_LARGE_ONE_MEDIUM/i.test(label) &&
+        !/^Large Field 2$/i.test(label);
+    };
+    const addSlot = (slot: any) => {
+      const id = String(slot.field_instance_id || slot.field_id || '');
+      if (!id || !isExplicitManualField(slot)) return;
+      const label = explicitFieldSlotLabel(slot);
+      const current = byField.get(id);
+      const slotDate = preferredDate(slot);
+      if (!current || (selectedDate && slotDate === selectedDate && preferredDate(current) !== selectedDate)) {
+        byField.set(id, { ...slot, explicit_field_slot_label: label });
+      }
+    };
+    generatedSlots
+      .filter((slot: any) => (
+        (!editGame?.season_id || slot.season_id === editGame.season_id) &&
+        (!selectedHostId || String(slot.host_location_id || '') === selectedHostId) &&
+        (!hostHasSlotsForSelectedDate || preferredDate(slot) === selectedDate)
+      ))
+      .forEach(addSlot);
     const currentFieldInstanceId = String(editGame?.field_instance_id || '');
-    if (editGame && currentFieldInstanceId && !byField.has(currentFieldInstanceId)) {
-      byField.set(currentFieldInstanceId, {
+    if (editGame && currentFieldInstanceId && String(editGame.host_location_id || '') === selectedHostId && !byField.has(currentFieldInstanceId)) {
+      addSlot({
         field_instance_id: currentFieldInstanceId,
         field_id: editGame.field_id,
         host_location_id: editGame.host_location_id,
@@ -352,14 +365,18 @@ export default function ManualScheduleBuilderPage() {
         start_time: editGame.kickoff_time,
         game_date: editGame.game_date,
         available_date: editGame.game_date,
-        explicit_field_slot_label: explicitFieldSlotLabel(editGame) || editGame.field_instance_name || 'Current field',
       });
     }
     return Array.from(byField.values()).sort((a: any, b: any) => explicitFieldSlotLabel(a).localeCompare(explicitFieldSlotLabel(b), undefined, { numeric: true }));
-  }, [generatedSlots, editGame?.season_id, editGame?.week_id, editGame?.game_date, editGame?.kickoff_time, editGame?.host_location_id, editGame?.field_instance_id, editGame?.field_id, editGame?.field_instance_name, editGame?.host_location_name, editGame?.field_type, editGame?.field_size]);
+  }, [generatedSlots, editGame?.season_id, editGame?.game_date, editGame?.host_location_id, editGame?.field_instance_id, editGame?.field_id, editGame?.field_instance_name, editGame?.host_location_name, editGame?.field_type, editGame?.field_size, editGame?.kickoff_time]);
   const editSelectedField = useMemo(() => editFieldOptions.find((slot: any) => String(slot.field_instance_id || slot.field_id) === String(editGame?.field_instance_id || editGame?.field_id || '')), [editFieldOptions, editGame?.field_instance_id, editGame?.field_id]);
   const editSelectedDivision = useMemo(() => options.divisions.find((d: any) => d.id === editGame?.division_id), [options.divisions, editGame?.division_id]);
-  const editFieldSizeLabel = editSelectedField?.field_size || editSelectedField?.field_type || (editSelectedDivision?.required_field_type ? `Expected ${editSelectedDivision.required_field_type}` : 'Select a field to view field type');
+  const editSelectedFieldType = String(editSelectedField?.field_size || editSelectedField?.field_type || '').toUpperCase();
+  const editDivisionDefaultFieldType = String(editSelectedDivision?.required_field_type || '').toUpperCase();
+  const editFieldSizeMismatch = Boolean(editSelectedFieldType && editDivisionDefaultFieldType && editSelectedFieldType !== editDivisionDefaultFieldType);
+  const editFieldSizeLabel = editSelectedFieldType
+    ? `Selected field type: ${editSelectedFieldType}${editDivisionDefaultFieldType ? ` • Division default field type: ${editDivisionDefaultFieldType}` : ''}`
+    : (editDivisionDefaultFieldType ? `Division default field type: ${editDivisionDefaultFieldType}` : 'Select a field to view field type');
   const isEditFieldValid = Boolean(editGame?.field_instance_id && editFieldOptions.some((slot: any) => String(slot.field_instance_id || slot.field_id) === String(editGame.field_instance_id)));
   const editSaveDisabled = !canManageGeneratedGames || !editGame || !editGame.game_date || !seasonDateOptions.includes(editGame.game_date) || !editGame.kickoff_time || !validStartTimeOptions.includes(editGame.kickoff_time) || !editGame.division_id || !editGame.home_team_id || !editGame.away_team_id || editGame.home_team_id === editGame.away_team_id || !editGame.host_location_id || !isEditFieldValid || !editDivisionTeams.some((team: any) => team.id === editGame.home_team_id) || !editDivisionTeams.some((team: any) => team.id === editGame.away_team_id);
   const scheduledGamesFilterOptions = useMemo(() => {
@@ -425,9 +442,9 @@ export default function ManualScheduleBuilderPage() {
     INVALID_HOST_LOCATION: 'Unable to save: selected host location is invalid.',
     INVALID_FIELD: 'Unable to save: selected field is invalid.',
     INVALID_FIELD_LOCATION_RELATIONSHIP: 'Unable to save: selected field does not belong to selected host location.',
-    FIELD_TIME_CONFLICT: 'Unable to save: the selected field is already assigned at that host, date, and time.',
+    FIELD_TIME_CONFLICT: 'Unable to save: this exact field slot is already assigned at the selected date/time.',
     INVALID_TURF_FIELD_SLOT: 'Unable to save: selected turf field slot is invalid.',
-    INVALID_TURF_FIELD_SLOT_COMBINATION: 'Unable to save: this turf field combination exceeds physical capacity or is not an approved subset.',
+    INVALID_TURF_FIELD_SLOT_COMBINATION: 'Unable to save: this turf field combination violates a hard physical field limit.',
   };
 
   const extractError = (e: unknown) => {
@@ -440,9 +457,10 @@ export default function ManualScheduleBuilderPage() {
         if (errorCode === 'MISSING_REQUIRED_FIELDS' && Array.isArray(detail.fields)) {
           return `Unable to save: required ${detail.fields.join(', ')} ${detail.fields.length === 1 ? 'is' : 'are'} missing.`;
         }
-        if (errorCode === 'INVALID_TURF_FIELD_SLOT_COMBINATION' && Array.isArray(detail.failure_reasons)) {
-          if (detail.failure_reasons.includes('TWO_LARGE_FIELDS_NOT_ALLOWED_ON_ONE_TURF_SURFACE')) return 'Unable to save: this turf field cannot support two Large games at the same time.';
-          if (detail.failure_reasons.includes('LARGE_FIELD_2_NOT_ALLOWED_ON_ONE_TURF_SURFACE')) return 'Unable to save: Large Field 2 is not available on a single turf surface.';
+        if ((errorCode === 'INVALID_TURF_FIELD_SLOT_COMBINATION' || errorCode === 'INVALID_TURF_FIELD_SLOT') && Array.isArray(detail.failure_reasons)) {
+          if (detail.failure_reasons.includes('TWO_LARGE_FIELDS_NOT_ALLOWED_ON_ONE_TURF_SURFACE')) return 'Unable to save: this turf surface cannot support two Large fields at the same time.';
+          if (detail.failure_reasons.includes('LARGE_FIELD_2_NOT_ALLOWED_ON_ONE_TURF_SURFACE')) return 'Unable to save: Large Field 2 is not valid for a single turf surface.';
+          if (detail.failure_reasons.includes('DUPLICATE_EXPLICIT_FIELD_SLOT')) return 'Unable to save: this exact field slot is already assigned at the selected date/time.';
         }
         if (validationErrorMessages[errorCode]) return validationErrorMessages[errorCode];
         return JSON.stringify(detail);
@@ -814,7 +832,7 @@ export default function ManualScheduleBuilderPage() {
           <select className='rounded border p-2' value={editGame.home_team_id} onChange={(e) => setEditGame({ ...editGame, home_team_id: e.target.value })}><option value=''>Home Team</option>{editDivisionTeams.map((t: any) => <option key={t.id} value={t.id} disabled={t.id === editGame.away_team_id}>{t.name}</option>)}</select>
           <select className='rounded border p-2' value={editGame.away_team_id} onChange={(e) => setEditGame({ ...editGame, away_team_id: e.target.value })}><option value=''>Away Team</option>{editDivisionTeams.map((t: any) => <option key={t.id} value={t.id} disabled={t.id === editGame.home_team_id}>{t.name}</option>)}</select>
         </div>
-        <div className='mt-2 rounded border border-slate-200 bg-slate-50 p-2 text-sm text-slate-700'>Field size / type: <span className='font-semibold'>{editFieldSizeLabel}</span></div>
+        <div className='mt-2 rounded border border-slate-200 bg-slate-50 p-2 text-sm text-slate-700'>Field size / type: <span className='font-semibold'>{editFieldSizeLabel}</span>{editFieldSizeMismatch ? <div className='mt-1 text-amber-700'>Manual override: selected field type does not match division default.</div> : null}</div>
         <div className='mt-2 grid gap-2 md:grid-cols-2'>
           <textarea className='rounded border p-2' value={editGame.public_notes || ''} onChange={(e) => setEditGame({ ...editGame, public_notes: e.target.value })} placeholder='Public notes' />
           <textarea className='rounded border p-2' value={editGame.internal_admin_notes || ''} onChange={(e) => setEditGame({ ...editGame, internal_admin_notes: e.target.value })} placeholder='Internal Admin Notes' />
@@ -840,7 +858,7 @@ export default function ManualScheduleBuilderPage() {
                 const warnings = (e.details as any)?.detail?.warnings || [];
                 const needsScoreConfirm = (e.details as any)?.detail?.error === 'SCORED_GAME_CHANGE_REQUIRES_CONFIRMATION';
                 const message = warnings.map((w: any) => w.message || w.code).join('\n') || 'This change creates one or more schedule warnings.';
-                if (window.confirm(`${message}\n\nThis change creates one or more schedule warnings. Do you want to save anyway?`)) {
+                if (window.confirm(`${message}\n\nThis manual edit does not match one or more scheduler recommendations. As Scheduling Admin / League Admin, you may override and save this change. Continue?`)) {
                   try { const res: any = await save(true, needsScoreConfirm); setEditGame(null); setGames((prev) => prev.map((game: any) => game.id === editGame.id ? { ...game, ...res.game, game_status_code: res.game.status_code } : game)); await load(); await loadRecommendations(); setManualScheduleBannerFromValidation('Game manually edited with warning override.', await loadFinalScheduleValidation()); }
                   catch (inner: unknown) { setError(extractError(inner)); }
                 }
