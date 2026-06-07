@@ -241,7 +241,8 @@ function summarizeAutoScheduleDiagnostics(value: any): AutoScheduleDiagnosticsSu
 export default function ManualScheduleBuilderPage() {
   const token = getToken();
   const authUser = getAuthUser();
-  const canManageGeneratedGames = authUser?.role_name === 'LEAGUE_ADMIN' || authUser?.role_name === 'SCHEDULING_ADMIN';
+  const normalizedRoleName = String(authUser?.role_name || '').toUpperCase();
+  const canManageGeneratedGames = normalizedRoleName === 'LEAGUE_ADMIN' || normalizedRoleName === 'SCHEDULING_ADMIN';
   const searchParams = useSearchParams();
   const [options, setOptions] = useState<any>({ divisions: [], teams: [], host_locations: [], seasons: [], weeks: [], organizations: [], game_statuses: [] });
   const [seasonId, setSeasonId] = useState(searchParams.get('season_id') || '');
@@ -292,6 +293,19 @@ export default function ManualScheduleBuilderPage() {
   const divisionTeams = useMemo(() => options.teams.filter((t: any) => t.division_id === divisionId && t.is_active), [options, divisionId]);
   const seasonWeeks = useMemo(() => options.weeks.filter((w: any) => w.season_id === seasonId), [options, seasonId]);
   const canSave = Boolean(canManageGeneratedGames && seasonId && weekId && divisionId && homeTeamId && awayTeamId && slotId);
+  const scheduledStatusId = useMemo(() => {
+    const statuses = options.game_statuses || [];
+    return statuses.find((status: any) => String(status.code || '').toUpperCase() === 'SCHEDULED')?.id || statuses[0]?.id || null;
+  }, [options.game_statuses]);
+  const buildEditableGame = (game: any) => ({
+    ...game,
+    division_id: game.division_id,
+    field_instance_id: game.field_instance_id || game.generated_field_instance_id || '',
+    host_location_id: game.host_location_id || '',
+    game_status_id: game.game_status_id || scheduledStatusId,
+    public_notes: game.public_notes || '',
+    internal_admin_notes: game.internal_admin_notes || '',
+  });
   const editDivisionTeams = useMemo(() => options.teams.filter((t: any) => t.division_id === editGame?.division_id && t.is_active), [options.teams, editGame?.division_id]);
   const seasonDateOptions = useMemo(() => {
     const editSeasonId = editGame?.season_id || seasonId;
@@ -325,8 +339,24 @@ export default function ManualScheduleBuilderPage() {
       if (/^Large Field 2$/i.test(label)) return;
       if (!byField.has(id)) byField.set(id, { ...slot, explicit_field_slot_label: label });
     });
+    const currentFieldInstanceId = String(editGame?.field_instance_id || '');
+    if (editGame && currentFieldInstanceId && !byField.has(currentFieldInstanceId)) {
+      byField.set(currentFieldInstanceId, {
+        field_instance_id: currentFieldInstanceId,
+        field_id: editGame.field_id,
+        host_location_id: editGame.host_location_id,
+        host_location_name: editGame.host_location_name,
+        field_instance_name: editGame.field_instance_name || 'Current field',
+        field_type: editGame.field_type,
+        field_size: editGame.field_size,
+        start_time: editGame.kickoff_time,
+        game_date: editGame.game_date,
+        available_date: editGame.game_date,
+        explicit_field_slot_label: explicitFieldSlotLabel(editGame) || editGame.field_instance_name || 'Current field',
+      });
+    }
     return Array.from(byField.values()).sort((a: any, b: any) => explicitFieldSlotLabel(a).localeCompare(explicitFieldSlotLabel(b), undefined, { numeric: true }));
-  }, [generatedSlots, editGame?.season_id, editGame?.week_id, editGame?.game_date, editGame?.kickoff_time, editGame?.host_location_id]);
+  }, [generatedSlots, editGame?.season_id, editGame?.week_id, editGame?.game_date, editGame?.kickoff_time, editGame?.host_location_id, editGame?.field_instance_id, editGame?.field_id, editGame?.field_instance_name, editGame?.host_location_name, editGame?.field_type, editGame?.field_size]);
   const editSelectedField = useMemo(() => editFieldOptions.find((slot: any) => String(slot.field_instance_id || slot.field_id) === String(editGame?.field_instance_id || editGame?.field_id || '')), [editFieldOptions, editGame?.field_instance_id, editGame?.field_id]);
   const editSelectedDivision = useMemo(() => options.divisions.find((d: any) => d.id === editGame?.division_id), [options.divisions, editGame?.division_id]);
   const editFieldSizeLabel = editSelectedField?.field_size || editSelectedField?.field_type || (editSelectedDivision?.required_field_type ? `Expected ${editSelectedDivision.required_field_type}` : 'Select a field to view field type');
@@ -385,12 +415,38 @@ export default function ManualScheduleBuilderPage() {
     return `${baseLabel} — ${formattedDate}`;
   };
 
+  const validationErrorMessages: Record<string, string> = {
+    MISSING_REQUIRED_FIELDS: 'Unable to save: required game-day fields are missing.',
+    SAME_TEAM_NOT_ALLOWED: 'Unable to save: home and away teams cannot be the same.',
+    INVALID_TEAM_DIVISION_RELATIONSHIP: 'Unable to save: selected teams must belong to the selected division.',
+    INVALID_GAME_STATUS: 'Unable to save: current game status is invalid.',
+    INVALID_GAME_DATE: 'Unable to save: selected game date is invalid for this season.',
+    INVALID_START_TIME: 'Unable to save: selected start time is invalid.',
+    INVALID_HOST_LOCATION: 'Unable to save: selected host location is invalid.',
+    INVALID_FIELD: 'Unable to save: selected field is invalid.',
+    INVALID_FIELD_LOCATION_RELATIONSHIP: 'Unable to save: selected field does not belong to selected host location.',
+    FIELD_TIME_CONFLICT: 'Unable to save: the selected field is already assigned at that host, date, and time.',
+    INVALID_TURF_FIELD_SLOT: 'Unable to save: selected turf field slot is invalid.',
+    INVALID_TURF_FIELD_SLOT_COMBINATION: 'Unable to save: this turf field combination exceeds physical capacity or is not an approved subset.',
+  };
+
   const extractError = (e: unknown) => {
-    if (e instanceof ApiError && e.details && typeof e.details === 'object') {
-      const detail = (e.details as any).detail;
+    if (e instanceof ApiError) {
+      const detail = (e.details as any)?.detail;
       if (Array.isArray(detail)) return detail.map((x: any) => x?.msg || JSON.stringify(x)).join('; ');
       if (typeof detail === 'string') return detail;
-      if (detail && typeof detail === 'object') return JSON.stringify(detail);
+      if (detail && typeof detail === 'object') {
+        const errorCode = String(detail.error || '');
+        if (errorCode === 'MISSING_REQUIRED_FIELDS' && Array.isArray(detail.fields)) {
+          return `Unable to save: required ${detail.fields.join(', ')} ${detail.fields.length === 1 ? 'is' : 'are'} missing.`;
+        }
+        if (errorCode === 'INVALID_TURF_FIELD_SLOT_COMBINATION' && Array.isArray(detail.failure_reasons)) {
+          if (detail.failure_reasons.includes('TWO_LARGE_FIELDS_NOT_ALLOWED_ON_ONE_TURF_SURFACE')) return 'Unable to save: this turf field cannot support two Large games at the same time.';
+          if (detail.failure_reasons.includes('LARGE_FIELD_2_NOT_ALLOWED_ON_ONE_TURF_SURFACE')) return 'Unable to save: Large Field 2 is not available on a single turf surface.';
+        }
+        if (validationErrorMessages[errorCode]) return validationErrorMessages[errorCode];
+        return JSON.stringify(detail);
+      }
       return e.message;
     }
     return e instanceof Error ? e.message : 'Request failed.';
@@ -720,7 +776,7 @@ export default function ManualScheduleBuilderPage() {
                 <td className='p-2'>{g.host_location_name || '-'}</td>
                 <td className='p-2'>{explicitFieldSlotLabel(g) || '-'}</td>
                 {canManageGeneratedGames ? <td className='p-2 space-x-2'>
-                  <button className='rounded border px-2 py-1 text-xs' onClick={() => setEditGame({ ...g, division_id: g.division_id })}>Edit</button>
+                  <button className='rounded border px-2 py-1 text-xs' onClick={() => setEditGame(buildEditableGame(g))}>Edit</button>
                   <button className='rounded border px-2 py-1 text-xs' onClick={() => setMoveGame(g)}>Move</button>
                   <button className='rounded border border-red-300 px-2 py-1 text-xs text-red-700' onClick={async () => {
                     if (!window.confirm('Remove this scheduled game?')) return;
@@ -773,7 +829,7 @@ export default function ManualScheduleBuilderPage() {
             const home = options.teams.find((t: any) => t.id === editGame.home_team_id);
             const away = options.teams.find((t: any) => t.id === editGame.away_team_id);
             if (!home || !away || home.division_id !== editGame.division_id || away.division_id !== editGame.division_id) { setError('Teams must belong to selected division.'); return; }
-            const save = async (overrideWarnings: boolean, scoreConfirmed: boolean) => apiFetch(`/schedule-management/games/${editGame.id}/manual-edit`, { method: 'PATCH', body: JSON.stringify({ season_id: editGame.season_id, week_id: editGame.week_id, division_id: editGame.division_id, home_team_id: editGame.home_team_id, away_team_id: editGame.away_team_id, host_location_id: editGame.host_location_id, field_instance_id: editGame.field_instance_id, game_status_id: editGame.game_status_id || null, game_date: editGame.game_date, kickoff_time: editGame.kickoff_time, public_notes: editGame.public_notes || null, internal_admin_notes: editGame.internal_admin_notes || null, override_warnings: overrideWarnings, score_change_confirmed: scoreConfirmed, manual_edit_locked: true }) }, token);
+            const save = async (overrideWarnings: boolean, scoreConfirmed: boolean) => apiFetch(`/schedule-management/games/${editGame.id}/manual-edit`, { method: 'PATCH', body: JSON.stringify({ season_id: editGame.season_id, week_id: editGame.week_id, division_id: editGame.division_id, home_team_id: editGame.home_team_id, away_team_id: editGame.away_team_id, host_location_id: editGame.host_location_id, field_instance_id: editGame.field_instance_id, game_status_id: editGame.game_status_id || scheduledStatusId || null, game_date: editGame.game_date, kickoff_time: editGame.kickoff_time, public_notes: editGame.public_notes || null, internal_admin_notes: editGame.internal_admin_notes || null, override_warnings: overrideWarnings, score_change_confirmed: scoreConfirmed, manual_edit_locked: true }) }, token);
             try {
               const res: any = await save(false, false);
               setEditGame(null);

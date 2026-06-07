@@ -7,7 +7,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN
+from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN
 from app.database import Base, get_db
 from app.main import app
 from app.models import Division, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, Organization, Role, ScheduleChangeLog, Season, Team, User, Week
@@ -28,6 +28,7 @@ class ManualScheduleEditPermissionsTest(unittest.TestCase):
 
         self.league_role = Role(id=uuid.uuid4(), name=ROLE_LEAGUE_ADMIN, is_active=True)
         self.community_role = Role(id=uuid.uuid4(), name=ROLE_COMMUNITY_ADMIN, is_active=True)
+        self.scheduling_role = Role(id=uuid.uuid4(), name=ROLE_SCHEDULING_ADMIN, is_active=True)
         self.home_org = Organization(id=uuid.uuid4(), name='Home Community', is_active=True)
         self.away_org = Organization(id=uuid.uuid4(), name='Away Community', is_active=True)
         self.host = HostLocation(id=uuid.uuid4(), organization_id=self.home_org.id, name='Main Park', is_active=True)
@@ -44,11 +45,12 @@ class ManualScheduleEditPermissionsTest(unittest.TestCase):
         self.game = Game(id=uuid.uuid4(), season_id=self.season.id, week_id=self.week.id, home_team_id=self.home_team.id, away_team_id=self.away_team.id, host_location_id=self.host.id, field_instance_id=self.field.id, game_status_id=self.status.id, game_date=date(2026, 8, 9), kickoff_time=time(9, 0))
         self.slot.assigned_game_id = self.game.id
         self.league_user = User(id=uuid.uuid4(), email='league@example.com', full_name='League Admin', password_hash=hash_password('Password123!'), role_id=self.league_role.id, is_active=True)
+        self.scheduling_user = User(id=uuid.uuid4(), email='scheduler@example.com', full_name='Scheduling Admin', password_hash=hash_password('Password123!'), role_id=self.scheduling_role.id, is_active=True)
         self.community_user = User(id=uuid.uuid4(), email='community@example.com', full_name='Community Admin', password_hash=hash_password('Password123!'), role_id=self.community_role.id, organization_id=self.home_org.id, is_active=True)
         self.db.add_all([
-            self.league_role, self.community_role, self.home_org, self.away_org, self.host, self.division,
+            self.league_role, self.community_role, self.scheduling_role, self.home_org, self.away_org, self.host, self.division,
             self.season, self.week, self.status, self.cancelled, self.home_team, self.away_team, self.other_team,
-            self.field, self.game, self.slot, self.league_user, self.community_user,
+            self.field, self.game, self.slot, self.league_user, self.scheduling_user, self.community_user,
         ])
         self.db.commit()
 
@@ -124,6 +126,52 @@ class ManualScheduleEditPermissionsTest(unittest.TestCase):
         self.assertTrue(game.is_manual_edit)
         self.assertEqual(game.internal_admin_notes, 'Internal note')
         self.assertGreaterEqual(self.db.query(ScheduleChangeLog).filter(ScheduleChangeLog.game_id == self.game.id).count(), 1)
+
+
+    def test_scheduling_admin_can_save_generated_game_without_status_payload_and_status_is_preserved(self):
+        response = self.client.patch(
+            f'/api/schedule-management/games/{self.game.id}/manual-edit',
+            headers=self._token(self.scheduling_user.id),
+            json=self._payload(game_status_id=None, away_team_id=str(self.other_team.id), internal_admin_notes='Scheduler override'),
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        data = response.json()
+        self.assertEqual(data['game']['id'], str(self.game.id))
+        self.assertEqual(data['game']['game_status_id'], str(self.status.id))
+        self.assertEqual(data['game']['status_code'], 'SCHEDULED')
+        self.assertEqual(data['game']['away_team_id'], str(self.other_team.id))
+        self.db.expire_all()
+        game = self.db.get(Game, self.game.id)
+        self.assertEqual(game.id, self.game.id)
+        self.assertEqual(game.game_status_id, self.status.id)
+        self.assertEqual(game.away_team_id, self.other_team.id)
+        self.assertEqual(game.internal_admin_notes, 'Scheduler override')
+
+    def test_same_explicit_field_slot_is_hard_blocked(self):
+        conflict_home = Team(id=uuid.uuid4(), organization_id=self.home_org.id, division_id=self.division.id, name='Home 2', is_active=True)
+        conflict_away = Team(id=uuid.uuid4(), organization_id=self.away_org.id, division_id=self.division.id, name='Away 3', is_active=True)
+        conflict_game = Game(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week.id,
+            home_team_id=conflict_home.id,
+            away_team_id=conflict_away.id,
+            host_location_id=self.host.id,
+            field_instance_id=self.field.id,
+            game_status_id=self.status.id,
+            game_date=date(2026, 8, 9),
+            kickoff_time=time(9, 0),
+        )
+        self.db.add_all([conflict_home, conflict_away, conflict_game])
+        self.db.commit()
+
+        response = self.client.patch(
+            f'/api/schedule-management/games/{self.game.id}/manual-edit',
+            headers=self._token(self.league_user.id),
+            json=self._payload(),
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()['detail']['error'], 'FIELD_TIME_CONFLICT')
 
     def test_same_team_is_hard_blocked_for_league_admin(self):
         response = self.client.patch(
