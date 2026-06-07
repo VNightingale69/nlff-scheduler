@@ -39,6 +39,14 @@ function gameDateValue(game: any): string {
   return String(game?.game_date || '');
 }
 
+
+function explicitFieldSlotLabel(value: any): string {
+  const raw = String(value?.field_instance_name || value?.field_name || value?.field || '').trim();
+  const match = raw.match(/\b(Small|Medium|Large)\s+Field\s+(\d+)\b/i);
+  if (match) return `${match[1][0].toUpperCase()}${match[1].slice(1).toLowerCase()} Field ${match[2]}`;
+  return raw || String(value?.field_type ? `${value.field_type} Field` : 'Field');
+}
+
 function gameTimeValue(game: any): string {
   return String(game?.kickoff_time || '');
 }
@@ -301,12 +309,24 @@ export default function ManualScheduleBuilderPage() {
     if (editGame?.kickoff_time) configuredTimes.push(editGame.kickoff_time);
     return Array.from(new Set(configuredTimes)).sort();
   }, [generatedSlots, editGame?.season_id, editGame?.week_id, editGame?.kickoff_time, seasonId]);
-  const editFieldOptions = useMemo(() => generatedSlots.filter((s: any) => (
-    (!editGame?.season_id || s.season_id === editGame.season_id) &&
-    (!editGame?.week_id || !s.week_id || s.week_id === editGame.week_id || s.season_week_id === editGame.week_id) &&
-    (!editGame?.game_date || s.game_date === editGame.game_date || s.available_date === editGame.game_date) &&
-    (!editGame?.host_location_id || s.host_location_id === editGame.host_location_id)
-  )), [generatedSlots, editGame?.season_id, editGame?.week_id, editGame?.game_date, editGame?.host_location_id]);
+  const editFieldOptions = useMemo(() => {
+    const matchingSlots = generatedSlots.filter((s: any) => (
+      (!editGame?.season_id || s.season_id === editGame.season_id) &&
+      (!editGame?.week_id || !s.week_id || s.week_id === editGame.week_id || s.season_week_id === editGame.week_id) &&
+      (!editGame?.game_date || s.game_date === editGame.game_date || s.available_date === editGame.game_date) &&
+      (!editGame?.kickoff_time || s.start_time === editGame.kickoff_time) &&
+      (!editGame?.host_location_id || s.host_location_id === editGame.host_location_id)
+    ));
+    const byField = new Map<string, any>();
+    matchingSlots.forEach((slot: any) => {
+      const id = String(slot.field_instance_id || slot.field_id || '');
+      const label = explicitFieldSlotLabel(slot);
+      if (!id || /\bWave\s+\d+\b|THREE_SMALL|TWO_MEDIUM|ONE_SMALL_ONE_LARGE|TWO_SMALL_ONE_MEDIUM|ONE_MEDIUM_TWO_SMALL|ONE_LARGE_ONE_MEDIUM/i.test(label)) return;
+      if (/^Large Field 2$/i.test(label)) return;
+      if (!byField.has(id)) byField.set(id, { ...slot, explicit_field_slot_label: label });
+    });
+    return Array.from(byField.values()).sort((a: any, b: any) => explicitFieldSlotLabel(a).localeCompare(explicitFieldSlotLabel(b), undefined, { numeric: true }));
+  }, [generatedSlots, editGame?.season_id, editGame?.week_id, editGame?.game_date, editGame?.kickoff_time, editGame?.host_location_id]);
   const editSelectedField = useMemo(() => editFieldOptions.find((slot: any) => String(slot.field_instance_id || slot.field_id) === String(editGame?.field_instance_id || editGame?.field_id || '')), [editFieldOptions, editGame?.field_instance_id, editGame?.field_id]);
   const editSelectedDivision = useMemo(() => options.divisions.find((d: any) => d.id === editGame?.division_id), [options.divisions, editGame?.division_id]);
   const editFieldSizeLabel = editSelectedField?.field_size || editSelectedField?.field_type || (editSelectedDivision?.required_field_type ? `Expected ${editSelectedDivision.required_field_type}` : 'Select a field to view field type');
@@ -698,7 +718,7 @@ export default function ManualScheduleBuilderPage() {
                 <td className='p-2'>{g.division_name || 'Unknown Division'}</td>
                 <td className='p-2'>{g.home_team_name || 'Unknown Team'} vs {g.away_team_name || 'Unknown Team'}</td>
                 <td className='p-2'>{g.host_location_name || '-'}</td>
-                <td className='p-2'>{g.field_instance_name || '-'}</td>
+                <td className='p-2'>{explicitFieldSlotLabel(g) || '-'}</td>
                 {canManageGeneratedGames ? <td className='p-2 space-x-2'>
                   <button className='rounded border px-2 py-1 text-xs' onClick={() => setEditGame({ ...g, division_id: g.division_id })}>Edit</button>
                   <button className='rounded border px-2 py-1 text-xs' onClick={() => setMoveGame(g)}>Move</button>
@@ -731,9 +751,9 @@ export default function ManualScheduleBuilderPage() {
         <h3 className='mb-2 text-lg font-semibold'>Edit Game</h3>
         <div className='grid gap-2 md:grid-cols-4'>
           <select className='rounded border p-2' value={editGame.game_date || ''} onChange={(e) => setEditGame({ ...editGame, game_date: e.target.value, field_instance_id: '' })}><option value=''>Game Date</option>{seasonDateOptions.map((d: any) => <option key={d} value={d}>{formatDisplayDate(d)}</option>)}</select>
-          <select className='rounded border p-2' value={editGame.kickoff_time || ''} onChange={(e) => setEditGame({ ...editGame, kickoff_time: e.target.value })} required><option value=''>Start Time</option>{validStartTimeOptions.map((t: any) => <option key={t} value={t}>{formatDisplayTime(t)}</option>)}</select>
+          <select className='rounded border p-2' value={editGame.kickoff_time || ''} onChange={(e) => setEditGame({ ...editGame, kickoff_time: e.target.value, field_instance_id: '' })} required><option value=''>Start Time</option>{validStartTimeOptions.map((t: any) => <option key={t} value={t}>{formatDisplayTime(t)}</option>)}</select>
           <select className='rounded border p-2' value={editGame.host_location_id || ''} onChange={(e) => setEditGame({ ...editGame, host_location_id: e.target.value, field_instance_id: '' })}><option value=''>Host Location</option>{options.host_locations.map((h: any) => <option key={h.id} value={h.id}>{h.name}</option>)}</select>
-          <select className='rounded border p-2' value={editGame.field_instance_id || ''} onChange={(e) => { const selected = editFieldOptions.find((slot: any) => String(slot.field_instance_id || slot.field_id) === e.target.value); setEditGame({ ...editGame, field_instance_id: e.target.value, field_id: selected?.field_id || editGame.field_id, host_location_id: selected?.host_location_id || editGame.host_location_id }); }}><option value=''>Field</option>{editFieldOptions.map((s: any) => <option key={`${s.field_instance_id || s.field_id}-${s.slot_id || s.id}`} value={s.field_instance_id || s.field_id}>{s.field_instance_name || s.field_name || s.field || `${s.host_location_name} ${s.field_type}`}</option>)}</select>
+          <select className='rounded border p-2' value={editGame.field_instance_id || ''} onChange={(e) => { const selected = editFieldOptions.find((slot: any) => String(slot.field_instance_id || slot.field_id) === e.target.value); setEditGame({ ...editGame, field_instance_id: e.target.value, field_id: selected?.field_id || editGame.field_id, host_location_id: selected?.host_location_id || editGame.host_location_id }); }}><option value=''>Field</option>{editFieldOptions.map((s: any) => <option key={`${s.field_instance_id || s.field_id}-${s.slot_id || s.id}`} value={s.field_instance_id || s.field_id}>{s.explicit_field_slot_label || explicitFieldSlotLabel(s)}</option>)}</select>
           <select className='rounded border p-2' value={editGame.division_id || ''} onChange={(e) => setEditGame({ ...editGame, division_id: e.target.value, home_team_id: '', away_team_id: '' })}><option value=''>Division</option>{options.divisions.map((d: any) => <option key={d.id} value={d.id}>{getDivisionLabel(d)}</option>)}</select>
           <select className='rounded border p-2' value={editGame.home_team_id} onChange={(e) => setEditGame({ ...editGame, home_team_id: e.target.value })}><option value=''>Home Team</option>{editDivisionTeams.map((t: any) => <option key={t.id} value={t.id} disabled={t.id === editGame.away_team_id}>{t.name}</option>)}</select>
           <select className='rounded border p-2' value={editGame.away_team_id} onChange={(e) => setEditGame({ ...editGame, away_team_id: e.target.value })}><option value=''>Away Team</option>{editDivisionTeams.map((t: any) => <option key={t.id} value={t.id} disabled={t.id === editGame.home_team_id}>{t.name}</option>)}</select>

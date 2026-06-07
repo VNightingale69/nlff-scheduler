@@ -4061,11 +4061,24 @@ def _turf_layout_code_for_counts(counts: dict[str, int]) -> str | None:
 
 
 def _is_approved_turf_slot_counts(counts: dict[str, int]) -> bool:
-    code = _turf_layout_code_for_counts(counts)
-    if not code:
+    normalized_counts = {size: max(int(counts.get(size, 0) or 0), 0) for size in FIELD_SIZE_ORDER}
+    if not any(normalized_counts.values()):
         return False
-    metadata = TURF_STADIUM_CONFIGURATIONS[code]
-    return int(metadata.get('space_used_yards') or 0) <= TURF_FOOTPRINT_YARDS
+    # One turf surface cannot fit two large fields, and this league model only
+    # exposes Large Field 1 as an explicit slot.  Treat any second large field
+    # as a hard physical-capacity violation even if legacy data/configuration
+    # names still exist in older databases.
+    if normalized_counts[FIELD_SIZE_LARGE] > 1:
+        return False
+    for metadata in TURF_STADIUM_CONFIGURATIONS.values():
+        layout_counts = metadata.get('counts') or {}
+        if int(metadata.get('space_used_yards') or 0) > TURF_FOOTPRINT_YARDS:
+            continue
+        if int(layout_counts.get(FIELD_SIZE_LARGE, 0) or 0) > 1:
+            continue
+        if all(normalized_counts[size] <= int(layout_counts.get(size, 0) or 0) for size in FIELD_SIZE_ORDER):
+            return True
+    return False
 
 
 def _turf_wave_intent_for_layout(layout_code: str) -> str:
@@ -5088,16 +5101,11 @@ def _canonical_turf_field_slot_label(db: Session, slot: GameSlot | None, field_i
 
 
 def _canonical_turf_field_export_label(db: Session, slot: GameSlot | None, field_instance: FieldInstance | None = None) -> str | None:
-    value = _canonical_turf_wave_value_for_slot(db, slot, field_instance)
-    if not value:
-        return _turf_field_export_label(slot, field_instance)
-    layout = value.get('preferred_layout_code')
-    component_label = (value.get('component_by_slot_id') or {}).get(getattr(slot, 'id', None)) if slot else None
-    if not component_label:
-        component_label = _turf_field_component_label(slot, field_instance)
-    if not layout or not component_label:
-        return _turf_field_export_label(slot, field_instance)
-    return f"Wave {int(value.get('wave_number') or 0)} {layout} {component_label}"
+    # Normal schedule surfaces must show the explicit field slot only.  Turf
+    # layout/wave metadata remains available separately for diagnostics and
+    # validation, but it is no longer the primary game assignment label.
+    component_label = _canonical_turf_field_component_label(db, slot, field_instance)
+    return component_label or _turf_field_export_label(slot, field_instance)
 
 
 def _build_turf_wave_contiguous_time_diagnostics(db: Session, season_id: uuid.UUID | None = None) -> dict[str, object]:
@@ -6164,6 +6172,7 @@ def _regenerate_generated_slots(
     proposed_names: set[str] = set()
     component_seen: dict[tuple[object, ...], dict[str, object]] = {}
     wave_label_seen: dict[tuple[object, ...], dict[str, object]] = {}
+    explicit_turf_instance_by_name: dict[str, FieldInstance] = {}
     duplicate_field_details: list[dict[str, object]] = []
     duplicate_component_details: list[dict[str, object]] = []
     duplicate_label_details: list[dict[str, object]] = []
@@ -6217,12 +6226,10 @@ def _regenerate_generated_slots(
                 size = _normalize_field_size(field_type)
                 component_counts[size] = int(component_counts.get(size, 0) or 0) + 1
                 component_index = component_counts[size]
-                base_name = f'Wave {wave_number} {normalized_layout} {size.title()} Field {component_index}'
-                field_name, renamed = _generated_field_name(base_name, existing_names, proposed_names, block_start_dt.time())
-                if renamed:
-                    diagnostics['warnings'].append(TURF_WAVE_REGENERATION_WARNINGS['field_name_collision_prevented'])
-                    diagnostics['renamed_field_instances'].append({'from_field_name': base_name, 'to_field_name': field_name, 'reason': 'Avoided collision with an existing or proposed field_instance field_name before flush.'})
-                    logger.warning('%s availability_id=%s host_location_id=%s field_name=%s', TURF_WAVE_REGENERATION_WARNINGS['field_name_collision_prevented'], availability.id, host_location_id, base_name)
+                if size == FIELD_SIZE_LARGE and component_index > 1:
+                    logger.warning('Skipping invalid Large Field %s for one turf surface availability_id=%s', component_index, availability.id)
+                    continue
+                field_name = f'{size.title()} Field {component_index}'
                 identity = _component_identity_key(availability.id, host_location_id, slot_date, block_start_dt.time(), wave_number, normalized_layout, size, component_index)
                 label_key = (availability.id, host_location_id, slot_date, wave_number, normalized_layout, size, component_index)
                 detail = {
@@ -6237,30 +6244,33 @@ def _regenerate_generated_slots(
                     'proposed_component_size': size,
                     'proposed_component_index': component_index,
                 }
-                if field_name in existing_names or field_name in proposed_names:
-                    duplicate_field_details.append(detail)
                 if identity in component_seen:
                     duplicate_component_details.append(detail)
                 if label_key in wave_label_seen:
                     duplicate_label_details.append(detail)
                 component_seen[identity] = detail
                 wave_label_seen[label_key] = detail
-                instance = FieldInstance(
-                    id=uuid.uuid4(),
-                    host_location_id=host_location_id,
-                    hosting_availability_id=availability.id,
-                    instance_date=slot_date,
-                    field_name=field_name,
-                    field_type=field_type,
-                    is_active=True,
-                    is_generated=True,
-                )
+                instance = explicit_turf_instance_by_name.get(field_name)
+                if instance is None:
+                    if field_name in existing_names or field_name in proposed_names:
+                        duplicate_field_details.append(detail)
+                    instance = FieldInstance(
+                        id=uuid.uuid4(),
+                        host_location_id=host_location_id,
+                        hosting_availability_id=availability.id,
+                        instance_date=slot_date,
+                        field_name=field_name,
+                        field_type=field_type,
+                        is_active=True,
+                        is_generated=True,
+                    )
+                    explicit_turf_instance_by_name[field_name] = instance
+                    instances.append(instance)
+                    proposed_names.add(field_name)
+                    db.add(instance)
+                    diagnostics['created_field_instances'].append({**_field_instance_diag(instance), 'component_identity': list(map(str, identity))})
                 detail['proposed_field_instance_ids'] = [str(instance.id)]
                 block_instances.append(instance)
-                instances.append(instance)
-                proposed_names.add(field_name)
-                db.add(instance)
-                diagnostics['created_field_instances'].append({**_field_instance_diag(instance), 'component_identity': list(map(str, identity))})
             slot_start_dt = block_start_dt
             while slot_start_dt < block_end_dt:
                 next_dt = min(slot_start_dt + GAME_DURATION, block_end_dt)
@@ -23847,17 +23857,10 @@ def _turf_field_slot_label(slot: GameSlot | None, field_instance: FieldInstance 
 
 
 def _turf_field_export_label(slot: GameSlot | None, field_instance: FieldInstance | None = None) -> str | None:
-    """Return Wave {sequence_number} {preferred_layout_code} {field component label}."""
+    """Return the explicit turf field slot label for normal schedule display."""
     if not slot or not slot.turf_wave_id:
         return getattr(field_instance, 'field_name', None)
-    wave = getattr(slot, 'turf_wave', None)
-    if not wave:
-        return getattr(field_instance or getattr(slot, 'field_instance', None), 'field_name', None)
-    layout = _normalize_configuration_name(wave.preferred_layout_code)
-    component_label = _turf_field_component_label(slot, field_instance)
-    if not layout or not component_label:
-        return getattr(field_instance or getattr(slot, 'field_instance', None), 'field_name', None)
-    return f'Wave {int(wave.sequence_number or 0)} {layout} {component_label}'
+    return _turf_field_component_label(slot, field_instance) or getattr(field_instance or getattr(slot, 'field_instance', None), 'field_name', None)
 
 def _public_game_read_from_schedule_row(row, db: Session | None = None) -> PublicGameRead:
     g, slot, fi, host, home, away, div, org, status = row
@@ -24513,6 +24516,75 @@ def _manual_game_edit_warnings(db: Session, game: Game, payload: ManualGameEditR
     return warnings
 
 
+
+
+def _explicit_turf_field_label_for_instance(field_instance: FieldInstance | None, field_type: str | None = None) -> str | None:
+    if not field_instance:
+        return None
+    size = _normalize_field_size(field_type or getattr(field_instance, 'field_type', None))
+    name = str(getattr(field_instance, 'field_name', '') or '')
+    if size:
+        match = re.search(rf'{re.escape(size.title())}\s+Field\s+(\d+)\b', name)
+        if match:
+            return f'{size.title()} Field {match.group(1)}'
+    return name or None
+
+
+def _validate_turf_explicit_field_slot_combination(
+    db: Session,
+    *,
+    host_location_id: uuid.UUID | None,
+    game_date_value: date | None,
+    start_time_value: time | None,
+    field_instance_id: uuid.UUID | None,
+    exclude_game_id: uuid.UUID | None = None,
+) -> None:
+    host = db.get(HostLocation, host_location_id) if host_location_id else None
+    if not _is_turf_stadium_host(host) or not game_date_value or not start_time_value:
+        return
+    field_instances: list[FieldInstance] = []
+    if field_instance_id:
+        selected = db.get(FieldInstance, field_instance_id)
+        if selected:
+            field_instances.append(selected)
+    rows = db.query(Game, FieldInstance).join(Game.status).join(FieldInstance, FieldInstance.id == Game.field_instance_id).filter(
+        Game.host_location_id == host_location_id,
+        Game.game_date == game_date_value,
+        Game.kickoff_time == start_time_value,
+        Game.id != exclude_game_id if exclude_game_id else True,
+        func.lower(GameStatus.code).in_(['scheduled', 'published', 'score_pending', 'submitted', 'flagged', 'approved']),
+    ).all()
+    field_instances.extend(fi for _game, fi in rows if fi)
+    slot_rows = db.query(GameSlot, FieldInstance).join(GameSlot.field_instance).filter(
+        GameSlot.host_location_id == host_location_id,
+        GameSlot.slot_date == game_date_value,
+        GameSlot.start_time == start_time_value,
+        GameSlot.assigned_game_id.isnot(None),
+    ).all()
+    for slot, fi in slot_rows:
+        if exclude_game_id and slot.assigned_game_id == exclude_game_id:
+            continue
+        field_instances.append(fi)
+
+    by_label: dict[str, FieldInstance] = {}
+    counts = _empty_field_size_counts()
+    for fi in field_instances:
+        label = _explicit_turf_field_label_for_instance(fi)
+        size = _normalize_field_size(getattr(fi, 'field_type', None))
+        if not label or not size:
+            raise HTTPException(status_code=400, detail={'error': 'INVALID_TURF_FIELD_SLOT', 'field': getattr(fi, 'field_name', None)})
+        if re.search(r'\bLarge\s+Field\s+2\b', label, flags=re.IGNORECASE):
+            raise HTTPException(status_code=400, detail={'error': 'INVALID_TURF_FIELD_SLOT', 'failure_reasons': ['LARGE_FIELD_2_NOT_ALLOWED_ON_ONE_TURF_SURFACE']})
+        if label in by_label and by_label[label].id != fi.id:
+            raise HTTPException(status_code=400, detail={'error': 'INVALID_TURF_FIELD_SLOT_COMBINATION', 'failure_reasons': ['DUPLICATE_EXPLICIT_FIELD_SLOT']})
+        by_label[label] = fi
+        counts[size] += 1
+    if counts[FIELD_SIZE_LARGE] > 1:
+        raise HTTPException(status_code=400, detail={'error': 'INVALID_TURF_FIELD_SLOT_COMBINATION', 'failure_reasons': ['TWO_LARGE_FIELDS_NOT_ALLOWED_ON_ONE_TURF_SURFACE']})
+    if any(counts.values()) and not _is_approved_turf_slot_counts(counts):
+        raise HTTPException(status_code=400, detail={'error': 'INVALID_TURF_FIELD_SLOT_COMBINATION', 'failure_reasons': ['FIELD_SLOT_COMBINATION_NOT_APPROVED_TURF_LAYOUT_OR_VALID_SUBSET'], 'field_counts': counts})
+
+
 def _raise_if_invalid_manual_game_edit(db: Session, game: Game, payload: ManualGameEditRequest) -> None:
     if payload.game_status_id is None:
         payload.game_status_id = game.game_status_id
@@ -24548,6 +24620,14 @@ def _raise_if_invalid_manual_game_edit(db: Session, game: Game, payload: ManualG
         raise HTTPException(status_code=400, detail={'error': 'INVALID_FIELD'})
     if fi and payload.host_location_id and fi.host_location_id != payload.host_location_id:
         raise HTTPException(status_code=400, detail={'error': 'INVALID_FIELD_LOCATION_RELATIONSHIP'})
+    _validate_turf_explicit_field_slot_combination(
+        db,
+        host_location_id=payload.host_location_id,
+        game_date_value=payload.game_date,
+        start_time_value=payload.kickoff_time,
+        field_instance_id=payload.field_instance_id,
+        exclude_game_id=game.id,
+    )
 
 
 @router.patch('/schedule-management/games/{game_id}/manual-edit', response_model=ManualGameEditResponse, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
@@ -24859,6 +24939,18 @@ def _raise_if_invalid_scheduled_game_payload(db: Session, payload: GameCreate, *
     division = db.get(Division, payload.division_id) if payload.division_id else None
     if fi and _normalize_field_size(fi.field_type) != _required_field_type_for_division(division):
         failures.append('SCHEDULED_GAME_FIELD_TYPE_MISMATCH')
+    try:
+        _validate_turf_explicit_field_slot_combination(
+            db,
+            host_location_id=payload.host_location_id,
+            game_date_value=payload.game_date,
+            start_time_value=payload.kickoff_time,
+            field_instance_id=payload.field_instance_id,
+            exclude_game_id=game_id,
+        )
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, dict) else {'error': exc.detail}
+        failures.extend(detail.get('failure_reasons') or [detail.get('error') or 'INVALID_TURF_FIELD_SLOT_COMBINATION'])
     if payload.season_id and payload.game_date and payload.host_location_id:
         allowed_hosts = _host_plan_allowed_host_ids_for_week(db, payload.season_id, payload.week_id, payload.game_date)
         if allowed_hosts is not None and payload.host_location_id not in allowed_hosts:
