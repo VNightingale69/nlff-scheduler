@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { ApiError, apiFetch } from '@/lib/api';
-import { getToken } from '@/lib/auth';
+import { getAuthUser, getToken } from '@/lib/auth';
 import { getDivisionLabel } from '@/lib/divisionLabel';
 import { formatDisplayDate, formatDisplayDateTime, formatDisplayTime } from '@/lib/displayFormat';
 
@@ -184,6 +184,8 @@ function summarizeAutoScheduleDiagnostics(value: any): AutoScheduleDiagnosticsSu
 
 export default function ManualScheduleBuilderPage() {
   const token = getToken();
+  const authUser = getAuthUser();
+  const canManageGeneratedGames = authUser?.role_name === 'LEAGUE_ADMIN';
   const searchParams = useSearchParams();
   const [options, setOptions] = useState<any>({ divisions: [], teams: [], host_locations: [], seasons: [], weeks: [], organizations: [], game_statuses: [] });
   const [seasonId, setSeasonId] = useState(searchParams.get('season_id') || '');
@@ -231,7 +233,11 @@ export default function ManualScheduleBuilderPage() {
   const division = useMemo(() => options.divisions.find((d: any) => d.id === divisionId), [options, divisionId]);
   const divisionTeams = useMemo(() => options.teams.filter((t: any) => t.division_id === divisionId && t.is_active), [options, divisionId]);
   const seasonWeeks = useMemo(() => options.weeks.filter((w: any) => w.season_id === seasonId), [options, seasonId]);
-  const canSave = Boolean(seasonId && weekId && divisionId && homeTeamId && awayTeamId && slotId);
+  const canSave = Boolean(canManageGeneratedGames && seasonId && weekId && divisionId && homeTeamId && awayTeamId && slotId);
+  const editDivisionTeams = useMemo(() => options.teams.filter((t: any) => t.division_id === editGame?.division_id && t.is_active), [options.teams, editGame?.division_id]);
+  const seasonDateOptions = useMemo(() => Array.from(new Set(options.weeks.filter((w: any) => !seasonId || w.season_id === seasonId).map((w: any) => w.primary_game_date || w.start_date).filter(Boolean))).sort(), [options.weeks, seasonId]);
+  const timeOptions = useMemo(() => Array.from(new Set(slots.map((s: any) => s.start_time).filter(Boolean))).sort(), [slots]);
+  const editFieldOptions = useMemo(() => slots.filter((s: any) => !editGame?.host_location_id || s.host_location_id === editGame.host_location_id), [slots, editGame?.host_location_id]);
 
   const getWeekOptionLabel = (week: any) => {
     const baseLabel = week.label || `Week ${week.week_number}`;
@@ -517,7 +523,7 @@ export default function ManualScheduleBuilderPage() {
       <div className='rounded border p-3'>
         <h2 className='mb-2 text-lg font-semibold'>Scheduled Games</h2>
         <table className='min-w-full text-sm'>
-          <thead><tr>{['Date', 'Time', 'Division', 'Matchup', 'Host Location', 'Field', 'Status', 'Actions'].map((h) => <th key={h} className='px-2 py-2 text-left'>{h}</th>)}</tr></thead>
+          <thead><tr>{['Date', 'Time', 'Division', 'Matchup', 'Host Location', 'Field', 'Status', ...(canManageGeneratedGames ? ['Edit Metadata', 'Actions'] : [])].map((h) => <th key={h} className='px-2 py-2 text-left'>{h}</th>)}</tr></thead>
           <tbody>
             {games.map((g: any) => <tr key={g.id} className='border-t'>
               <td className='p-2'>{formatDisplayDate(g.game_date)}</td>
@@ -526,8 +532,9 @@ export default function ManualScheduleBuilderPage() {
               <td className='p-2'>{g.home_team_name || 'Unknown Team'} vs {g.away_team_name || 'Unknown Team'}</td>
               <td className='p-2'>{g.host_location_name || '-'}</td>
               <td className='p-2'>{g.field_instance_name || '-'}</td>
-              <td className='p-2'>{g.game_status_code}</td>
-              <td className='p-2 space-x-2'>
+              <td className='p-2'>{g.game_status_code}{g.is_manual_edit ? <span className='ml-2 rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800'>Manual Edit</span> : null}</td>
+              {canManageGeneratedGames ? <td className='p-2 text-xs text-slate-600'>{g.is_manual_edit ? <div>Updated {g.manual_updated_at ? formatDisplayDateTime(g.manual_updated_at.slice(0, 10), g.manual_updated_at.slice(11, 19)) : 'recently'}{g.manual_updated_by_name ? ` by ${g.manual_updated_by_name}` : ''}</div> : '—'}</td> : null}
+              {canManageGeneratedGames ? <td className='p-2 space-x-2'>
                 <button className='rounded border px-2 py-1 text-xs' onClick={() => setEditGame({ ...g, division_id: g.division_id })}>Edit</button>
                 <button className='rounded border px-2 py-1 text-xs' onClick={() => setMoveGame(g)}>Move</button>
                 <button className='rounded border border-red-300 px-2 py-1 text-xs text-red-700' onClick={async () => {
@@ -548,35 +555,58 @@ export default function ManualScheduleBuilderPage() {
                     setError(extractError(e));
                   }
                 }}>Delete / Unschedule</button>
-              </td>
+              </td> : null}
             </tr>)}
           </tbody>
         </table>
       </div>
-      {editGame ? <div className='rounded border bg-slate-50 p-3'>
-        <h3 className='mb-2 font-semibold'>Edit Game</h3>
-        <div className='grid gap-2 md:grid-cols-5'>
+      {canManageGeneratedGames && editGame ? <div className='fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4'>
+        <div className='w-full max-w-4xl rounded-lg bg-white p-4 shadow-xl'>
+        <h3 className='mb-2 text-lg font-semibold'>Edit Game</h3>
+        <div className='grid gap-2 md:grid-cols-4'>
+          <select className='rounded border p-2' value={editGame.game_date || ''} onChange={(e) => setEditGame({ ...editGame, game_date: e.target.value })}><option value=''>Game Date</option>{seasonDateOptions.map((d: any) => <option key={d} value={d}>{formatDisplayDate(d)}</option>)}</select>
+          <select className='rounded border p-2' value={editGame.kickoff_time || ''} onChange={(e) => setEditGame({ ...editGame, kickoff_time: e.target.value })}><option value=''>Start Time</option>{timeOptions.map((t: any) => <option key={t} value={t}>{formatDisplayTime(t)}</option>)}</select>
+          <select className='rounded border p-2' value={editGame.host_location_id || ''} onChange={(e) => setEditGame({ ...editGame, host_location_id: e.target.value, field_instance_id: '' })}><option value=''>Host Location</option>{options.host_locations.map((h: any) => <option key={h.id} value={h.id}>{h.name}</option>)}</select>
+          <select className='rounded border p-2' value={editGame.field_instance_id || ''} onChange={(e) => { const selected = editFieldOptions.find((slot: any) => (slot.field_instance_id || slot.field_id) === e.target.value); setEditGame({ ...editGame, field_instance_id: e.target.value, field_id: selected?.field_id || editGame.field_id, host_location_id: selected?.host_location_id || editGame.host_location_id }); }}><option value=''>Field</option>{editFieldOptions.map((s: any) => <option key={`${s.field_instance_id || s.field_id}-${s.slot_id || s.id}`} value={s.field_instance_id || s.field_id}>{s.field_instance_name || s.field_name || s.field || `${s.host_location_name} ${s.field_type}`}</option>)}</select>
           <select className='rounded border p-2' value={editGame.division_id || ''} onChange={(e) => setEditGame({ ...editGame, division_id: e.target.value, home_team_id: '', away_team_id: '' })}><option value=''>Division</option>{options.divisions.map((d: any) => <option key={d.id} value={d.id}>{getDivisionLabel(d)}</option>)}</select>
-          <select className='rounded border p-2' value={editGame.home_team_id} onChange={(e) => setEditGame({ ...editGame, home_team_id: e.target.value })}><option value=''>Home Team</option>{options.teams.filter((t: any) => t.division_id === editGame.division_id).map((t: any) => <option key={t.id} value={t.id}>{t.name}</option>)}</select>
-          <select className='rounded border p-2' value={editGame.away_team_id} onChange={(e) => setEditGame({ ...editGame, away_team_id: e.target.value })}><option value=''>Away Team</option>{options.teams.filter((t: any) => t.division_id === editGame.division_id).map((t: any) => <option key={t.id} value={t.id}>{t.name}</option>)}</select>
-          <select className='rounded border p-2' value={editGame.game_status_id} onChange={(e) => setEditGame({ ...editGame, game_status_id: e.target.value })}><option value=''>Status</option>{options.game_statuses?.map((s: any) => <option key={s.id} value={s.id}>{s.label}</option>)}</select>
-          <div className='rounded border p-2 text-xs text-slate-500'>Notes editing not available in current game schema.</div>
+          <select className='rounded border p-2' value={editGame.home_team_id} onChange={(e) => setEditGame({ ...editGame, home_team_id: e.target.value })}><option value=''>Home Team</option>{editDivisionTeams.map((t: any) => <option key={t.id} value={t.id} disabled={t.id === editGame.away_team_id}>{t.name}</option>)}</select>
+          <select className='rounded border p-2' value={editGame.away_team_id} onChange={(e) => setEditGame({ ...editGame, away_team_id: e.target.value })}><option value=''>Away Team</option>{editDivisionTeams.map((t: any) => <option key={t.id} value={t.id} disabled={t.id === editGame.home_team_id}>{t.name}</option>)}</select>
+          <select className='rounded border p-2' value={editGame.game_status_id} onChange={(e) => setEditGame({ ...editGame, game_status_id: e.target.value })}><option value=''>Status</option>{options.game_statuses?.filter((s: any) => ['SCHEDULED', 'RESCHEDULED', 'CANCELLED', 'POSTPONED', 'FORFEIT'].includes(String(s.code || '').toUpperCase())).map((s: any) => <option key={s.id} value={s.id}>{s.label}</option>)}</select>
         </div>
-        <div className='mt-2 flex gap-2'>
+        <div className='mt-2 grid gap-2 md:grid-cols-2'>
+          <textarea className='rounded border p-2' value={editGame.public_notes || ''} onChange={(e) => setEditGame({ ...editGame, public_notes: e.target.value })} placeholder='Public notes' />
+          <textarea className='rounded border p-2' value={editGame.internal_admin_notes || ''} onChange={(e) => setEditGame({ ...editGame, internal_admin_notes: e.target.value })} placeholder='Internal Admin Notes' />
+        </div>
+        <div className='mt-2 flex flex-wrap gap-2'>
+          <button className='rounded border px-3 py-2' onClick={() => setEditGame({ ...editGame, home_team_id: editGame.away_team_id, away_team_id: editGame.home_team_id })}>Swap Home/Away</button>
           <button className='rounded bg-blue-600 px-3 py-2 text-white' onClick={async () => {
             setError('');
             if (editGame.home_team_id === editGame.away_team_id) { setError('Home and away cannot be the same.'); return; }
             const home = options.teams.find((t: any) => t.id === editGame.home_team_id);
             const away = options.teams.find((t: any) => t.id === editGame.away_team_id);
             if (!home || !away || home.division_id !== editGame.division_id || away.division_id !== editGame.division_id) { setError('Teams must belong to selected division.'); return; }
-            const dup = games.some((g: any) => g.id !== editGame.id && ((g.home_team_id === editGame.home_team_id && g.away_team_id === editGame.away_team_id) || (g.home_team_id === editGame.away_team_id && g.away_team_id === editGame.home_team_id)));
-            if (dup && !window.confirm('Duplicate matchup warning: proceed?')) return;
+            const save = async (overrideWarnings: boolean, scoreConfirmed: boolean) => apiFetch(`/schedule-management/games/${editGame.id}/manual-edit`, { method: 'PATCH', body: JSON.stringify({ season_id: editGame.season_id, week_id: editGame.week_id, division_id: editGame.division_id, home_team_id: editGame.home_team_id, away_team_id: editGame.away_team_id, host_location_id: editGame.host_location_id, field_instance_id: editGame.field_instance_id, game_status_id: editGame.game_status_id, game_date: editGame.game_date, kickoff_time: editGame.kickoff_time, public_notes: editGame.public_notes || null, internal_admin_notes: editGame.internal_admin_notes || null, override_warnings: overrideWarnings, score_change_confirmed: scoreConfirmed, manual_edit_locked: true }) }, token);
             try {
-              await apiFetch(`/games/${editGame.id}`, { method: 'PATCH', body: JSON.stringify({ season_id: editGame.season_id, week_id: editGame.week_id, division_id: editGame.division_id, home_team_id: editGame.home_team_id, away_team_id: editGame.away_team_id, field_id: editGame.field_id, game_status_id: editGame.game_status_id, game_date: editGame.game_date, kickoff_time: editGame.kickoff_time }) }, token);
-              setEditGame(null); await load(); await loadRecommendations(); setManualScheduleBannerFromValidation('Game updated.', await loadFinalScheduleValidation());
-            } catch (e: unknown) { setError(extractError(e)); }
-          }}>Save Edit</button>
+              const res: any = await save(false, false);
+              setEditGame(null);
+              setGames((prev) => prev.map((game: any) => game.id === editGame.id ? { ...game, ...res.game, game_status_code: res.game.status_code } : game));
+              await load(); await loadRecommendations(); setManualScheduleBannerFromValidation('Game manually edited.', await loadFinalScheduleValidation());
+            } catch (e: unknown) {
+              if (e instanceof ApiError && e.status === 409) {
+                const warnings = (e.details as any)?.detail?.warnings || [];
+                const needsScoreConfirm = (e.details as any)?.detail?.error === 'SCORED_GAME_CHANGE_REQUIRES_CONFIRMATION';
+                const message = warnings.map((w: any) => w.message || w.code).join('\n') || 'This change creates one or more schedule warnings.';
+                if (window.confirm(`${message}\n\nThis change creates one or more schedule warnings. Do you want to save anyway?`)) {
+                  try { const res: any = await save(true, needsScoreConfirm); setEditGame(null); setGames((prev) => prev.map((game: any) => game.id === editGame.id ? { ...game, ...res.game, game_status_code: res.game.status_code } : game)); await load(); await loadRecommendations(); setManualScheduleBannerFromValidation('Game manually edited with warning override.', await loadFinalScheduleValidation()); }
+                  catch (inner: unknown) { setError(extractError(inner)); }
+                }
+                return;
+              }
+              setError(extractError(e));
+            }
+          }}>Save Changes</button>
           <button className='rounded border px-3 py-2' onClick={() => setEditGame(null)}>Cancel</button>
+        </div>
         </div>
       </div> : null}
       {moveGame ? <div className='rounded border bg-slate-50 p-3'>
@@ -672,6 +702,7 @@ export default function ManualScheduleBuilderPage() {
                 setSuccess('');
                 // Keep the previous diagnostics visible while the next run is in progress.
                 // They will be replaced by the HTTP 200 response even when the response status is warning/incomplete.
+                if (!autoScheduleDryRun && games.some((game: any) => game.is_manual_edit) && !window.confirm('Regenerating may overwrite manual schedule edits. Continue?')) return;
                 setAutoScheduleSeasonLoading(true);
                 try {
                   const res: any = await apiFetch('/manual-schedule-builder/auto-schedule-season', { method: 'POST', body: JSON.stringify({ season_id: seasonId, clear_existing: clearExistingBeforeAutoSchedule, dry_run: autoScheduleDryRun }) }, token);

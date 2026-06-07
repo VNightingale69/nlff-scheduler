@@ -356,6 +356,13 @@ class Game(Base, TimestampMixin):
     game_status_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('game_statuses.id'), nullable=False)
     game_date: Mapped[Date] = mapped_column(Date, nullable=False)
     kickoff_time: Mapped[Time] = mapped_column(Time, nullable=False)
+    public_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    internal_admin_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_manual_edit: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    manual_edit_locked: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    manual_updated_by_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('users.id'), nullable=True)
+    manual_updated_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    original_game_snapshot: Mapped[str | None] = mapped_column(Text, nullable=True)
     season = relationship('Season')
     week = relationship('Week')
     field = relationship('Field')
@@ -364,8 +371,32 @@ class Game(Base, TimestampMixin):
     status = relationship('GameStatus')
     home_team = relationship('Team', foreign_keys=[home_team_id])
     away_team = relationship('Team', foreign_keys=[away_team_id])
+    manual_updated_by = relationship('User', foreign_keys=[manual_updated_by_user_id])
     score = relationship('GameScore', back_populates='game', cascade='all, delete-orphan', uselist=False)
     score_submissions = relationship('ScoreSubmission', back_populates='game', cascade='all, delete-orphan')
+    change_logs = relationship('ScheduleChangeLog', back_populates='game', cascade='all, delete-orphan')
+
+
+class ScheduleChangeLog(Base):
+    __tablename__ = 'schedule_change_logs'
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    game_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('games.id', ondelete='CASCADE'), nullable=False)
+    changed_by_user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('users.id'), nullable=False)
+    changed_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    field_changed: Mapped[str] = mapped_column(String(100), nullable=False)
+    old_value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    new_value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    warning_override: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    warnings: Mapped[str | None] = mapped_column(Text, nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    game = relationship('Game', back_populates='change_logs')
+    changed_by = relationship('User')
+
+    __table_args__ = (
+        Index('ix_schedule_change_logs_game_id', 'game_id'),
+        Index('ix_schedule_change_logs_changed_at', 'changed_at'),
+    )
 
 
 class GameScore(Base, TimestampMixin):

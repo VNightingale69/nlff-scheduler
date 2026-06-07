@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 REQUIRED_GAME_STATUSES: tuple[tuple[str, str], ...] = (
     ('SCHEDULED', 'Scheduled'),
     ('COMPLETED', 'Completed'),
+    ('RESCHEDULED', 'Rescheduled'),
     ('CANCELLED', 'Cancelled'),
     ('POSTPONED', 'Postponed'),
     ('FORFEIT', 'Forfeit'),

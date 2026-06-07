@@ -637,12 +637,19 @@ class GameCreate(BaseModel):
     game_status_id: uuid.UUID
     game_date: date
     kickoff_time: time
+    public_notes: str | None = None
+    internal_admin_notes: str | None = None
 
 class GameUpdate(GameCreate):
     pass
 
 class GameRead(BaseSchema, GameCreate):
     status_code: str
+    is_manual_edit: bool = False
+    manual_edit_locked: bool = False
+    manual_updated_by_user_id: uuid.UUID | None = None
+    manual_updated_by_name: str | None = None
+    manual_updated_at: datetime | None = None
     division_name: str | None = None
     division_group: str | None = None
     home_team_name: str | None = None
@@ -652,6 +659,52 @@ class GameRead(BaseSchema, GameCreate):
     host_location_id: uuid.UUID | None = None
     field_instance_name: str | None = None
     host_location_name: str | None = None
+
+
+class ManualGameEditRequest(BaseModel):
+    season_id: uuid.UUID | None = None
+    week_id: uuid.UUID | None = None
+    division_id: uuid.UUID
+    home_team_id: uuid.UUID
+    away_team_id: uuid.UUID
+    host_location_id: uuid.UUID | None = None
+    field_instance_id: uuid.UUID | None = None
+    game_status_id: uuid.UUID
+    game_date: date
+    kickoff_time: time
+    public_notes: str | None = None
+    internal_admin_notes: str | None = None
+    override_warnings: bool = False
+    score_change_confirmed: bool = False
+    manual_edit_locked: bool = True
+
+
+class ScheduleEditWarning(BaseModel):
+    code: str
+    message: str
+
+
+class ScheduleChangeLogRead(BaseModel):
+    id: uuid.UUID
+    game_id: uuid.UUID
+    changed_by_user_id: uuid.UUID
+    changed_by_name: str | None = None
+    changed_at: datetime
+    field_changed: str
+    old_value: str | None = None
+    new_value: str | None = None
+    warning_override: bool = False
+    warnings: str | None = None
+    notes: str | None = None
+
+    class Config:
+        from_attributes = True
+
+
+class ManualGameEditResponse(BaseModel):
+    game: GameRead
+    warnings: list[ScheduleEditWarning] = []
+    change_log: list[ScheduleChangeLogRead] = []
 
 
 class GameSaveResponse(BaseModel):
@@ -711,6 +764,7 @@ class PublicGameRead(BaseModel):
     public_score_status: str | None = None
     home_score: int | None = None
     away_score: int | None = None
+    public_notes: str | None = None
 
 
 from pydantic.generics import GenericModel
