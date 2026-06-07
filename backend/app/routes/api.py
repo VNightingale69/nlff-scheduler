@@ -24620,6 +24620,28 @@ def _raise_if_invalid_manual_game_edit(db: Session, game: Game, payload: ManualG
         raise HTTPException(status_code=400, detail={'error': 'INVALID_FIELD'})
     if fi and payload.host_location_id and fi.host_location_id != payload.host_location_id:
         raise HTTPException(status_code=400, detail={'error': 'INVALID_FIELD_LOCATION_RELATIONSHIP'})
+    active_statuses = _canonical_active_scheduled_status_codes(db) - {'CANCELLED', 'POSTPONED'}
+    if payload.field_instance_id and payload.game_date and payload.kickoff_time:
+        field_conflict = db.query(Game.id).join(Game.status).filter(
+            Game.id != game.id,
+            Game.season_id == payload.season_id,
+            Game.game_date == payload.game_date,
+            Game.kickoff_time == payload.kickoff_time,
+            Game.host_location_id == payload.host_location_id,
+            Game.field_instance_id == payload.field_instance_id,
+            func.upper(GameStatus.code).in_(active_statuses),
+        ).first()
+        slot_field_conflict = db.query(GameSlot.id).join(Game, GameSlot.assigned_game_id == Game.id).join(Game.status).filter(
+            Game.id != game.id,
+            Game.season_id == payload.season_id,
+            Game.game_date == payload.game_date,
+            Game.kickoff_time == payload.kickoff_time,
+            GameSlot.host_location_id == payload.host_location_id,
+            GameSlot.field_instance_id == payload.field_instance_id,
+            func.upper(GameStatus.code).in_(active_statuses),
+        ).first()
+        if field_conflict or slot_field_conflict:
+            raise HTTPException(status_code=400, detail={'error': 'FIELD_TIME_CONFLICT'})
     _validate_turf_explicit_field_slot_combination(
         db,
         host_location_id=payload.host_location_id,
