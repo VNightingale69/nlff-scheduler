@@ -663,6 +663,11 @@ class GameRead(BaseSchema, GameCreate):
 
 
 class ManualGameEditRequest(BaseModel):
+    def __init__(self, **data):
+        if 'overrideWarnings' in data and 'override_warnings' not in data:
+            data['override_warnings'] = data['overrideWarnings']
+        super().__init__(**data)
+
     season_id: uuid.UUID | None = None
     week_id: uuid.UUID | None = None
     division_id: uuid.UUID
