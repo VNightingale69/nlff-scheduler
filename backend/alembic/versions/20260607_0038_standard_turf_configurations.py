@@ -11,6 +11,7 @@ import uuid
 
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
 
 revision = '20260607_0038'
 down_revision = '20260607_0037'
@@ -35,6 +36,15 @@ def _columns(bind, table: str) -> set[str]:
     return {column['name'] for column in sa.inspect(bind).get_columns(table)}
 
 
+def _has_database_uuid_default(bind, table: str, column_name: str) -> bool:
+    for column in sa.inspect(bind).get_columns(table):
+        if column['name'] != column_name:
+            continue
+        default = column.get('default')
+        return default is not None and 'uuid' in str(column['type']).lower()
+    return False
+
+
 def upgrade() -> None:
     bind = op.get_bind()
     tables = _table_names(bind)
@@ -57,14 +67,39 @@ def upgrade() -> None:
                         "SELECT host_location_id, configuration_name FROM host_location_configurations"
                     )).all()
                 }
+                id_has_database_uuid_default = _has_database_uuid_default(bind, 'host_location_configurations', 'id')
                 for name, (used, remaining, large, medium, small) in APPROVED_CONFIGS.items():
                     for host_id in turf_host_ids:
                         if (str(host_id), name) not in existing_pairs:
-                            op.execute(sa.text(
-                                "INSERT INTO host_location_configurations "
-                                "(id, host_location_id, configuration_name, surface_type, space_used_yards, remaining_yards, large_field_count, medium_field_count, small_field_count, is_active) "
-                                "VALUES (:id, :host_id, :name, 'TURF_STADIUM', :used, :remaining, :large, :medium, :small, TRUE)"
-                            ).bindparams(id=str(uuid.uuid4()), host_id=host_id, name=name, used=used, remaining=remaining, large=large, medium=medium, small=small))
+                            if id_has_database_uuid_default:
+                                op.execute(sa.text(
+                                    "INSERT INTO host_location_configurations "
+                                    "(host_location_id, configuration_name, surface_type, space_used_yards, remaining_yards, large_field_count, medium_field_count, small_field_count, is_active) "
+                                    "VALUES (:host_id, :name, 'TURF_STADIUM', :used, :remaining, :large, :medium, :small, TRUE)"
+                                ).bindparams(
+                                    sa.bindparam('host_id', value=host_id, type_=postgresql.UUID(as_uuid=True)),
+                                    name=name,
+                                    used=used,
+                                    remaining=remaining,
+                                    large=large,
+                                    medium=medium,
+                                    small=small,
+                                ))
+                            else:
+                                op.execute(sa.text(
+                                    "INSERT INTO host_location_configurations "
+                                    "(id, host_location_id, configuration_name, surface_type, space_used_yards, remaining_yards, large_field_count, medium_field_count, small_field_count, is_active) "
+                                    "VALUES (CAST(:id AS uuid), :host_id, :name, 'TURF_STADIUM', :used, :remaining, :large, :medium, :small, TRUE)"
+                                ).bindparams(
+                                    sa.bindparam('id', value=uuid.uuid4(), type_=postgresql.UUID(as_uuid=True)),
+                                    sa.bindparam('host_id', value=host_id, type_=postgresql.UUID(as_uuid=True)),
+                                    name=name,
+                                    used=used,
+                                    remaining=remaining,
+                                    large=large,
+                                    medium=medium,
+                                    small=small,
+                                ))
                             existing_pairs.add((str(host_id), name))
                     op.execute(sa.text(
                         "UPDATE host_location_configurations SET surface_type = 'TURF_STADIUM', "
