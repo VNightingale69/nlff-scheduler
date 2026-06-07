@@ -11024,7 +11024,7 @@ def list_field_instances(host_location_id: uuid.UUID | None = None, available_da
 
 
 @router.get('/generated-game-slots', response_model=list[GeneratedSlotRead], dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_COMMUNITY_ADMIN))])
-def list_generated_game_slots(host_location_id: uuid.UUID | None = None, available_date: str | None = None, status: str | None = None, field_type: str | None = None, current_user: User = Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_COMMUNITY_ADMIN)), db: Session = Depends(get_db)):
+def list_generated_game_slots(host_location_id: uuid.UUID | None = None, available_date: str | None = None, status: str | None = None, field_type: str | None = None, season_id: uuid.UUID | None = None, week_id: uuid.UUID | None = None, current_user: User = Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_COMMUNITY_ADMIN)), db: Session = Depends(get_db)):
     q = db.query(
         GameSlot,
         FieldInstance.field_name,
@@ -11035,6 +11035,10 @@ def list_generated_game_slots(host_location_id: uuid.UUID | None = None, availab
         q = q.filter(HostLocation.organization_id == current_user.organization_id)
     if host_location_id:
         q = q.filter(GameSlot.host_location_id == host_location_id)
+    if season_id:
+        q = q.filter(or_(GameSlot.season_id == season_id, Week.season_id == season_id))
+    if week_id:
+        q = q.filter(GameSlot.week_id == week_id)
     if available_date:
         q = q.filter(func.cast(GameSlot.slot_date, str) == available_date)
     if status:
