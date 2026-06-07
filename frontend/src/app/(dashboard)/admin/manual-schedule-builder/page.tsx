@@ -523,7 +523,7 @@ export default function ManualScheduleBuilderPage() {
       <div className='rounded border p-3'>
         <h2 className='mb-2 text-lg font-semibold'>Scheduled Games</h2>
         <table className='min-w-full text-sm'>
-          <thead><tr>{['Date', 'Time', 'Division', 'Matchup', 'Host Location', 'Field', 'Status', ...(canManageGeneratedGames ? ['Edit Metadata', 'Actions'] : [])].map((h) => <th key={h} className='px-2 py-2 text-left'>{h}</th>)}</tr></thead>
+          <thead><tr>{['Date', 'Time', 'Division', 'Matchup', 'Host Location', 'Field', ...(canManageGeneratedGames ? ['Actions'] : [])].map((h) => <th key={h} className='px-2 py-2 text-left'>{h}</th>)}</tr></thead>
           <tbody>
             {games.map((g: any) => <tr key={g.id} className='border-t'>
               <td className='p-2'>{formatDisplayDate(g.game_date)}</td>
@@ -532,8 +532,6 @@ export default function ManualScheduleBuilderPage() {
               <td className='p-2'>{g.home_team_name || 'Unknown Team'} vs {g.away_team_name || 'Unknown Team'}</td>
               <td className='p-2'>{g.host_location_name || '-'}</td>
               <td className='p-2'>{g.field_instance_name || '-'}</td>
-              <td className='p-2'>{g.game_status_code}{g.is_manual_edit ? <span className='ml-2 rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800'>Manual Edit</span> : null}</td>
-              {canManageGeneratedGames ? <td className='p-2 text-xs text-slate-600'>{g.is_manual_edit ? <div>Updated {g.manual_updated_at ? formatDisplayDateTime(g.manual_updated_at.slice(0, 10), g.manual_updated_at.slice(11, 19)) : 'recently'}{g.manual_updated_by_name ? ` by ${g.manual_updated_by_name}` : ''}</div> : '—'}</td> : null}
               {canManageGeneratedGames ? <td className='p-2 space-x-2'>
                 <button className='rounded border px-2 py-1 text-xs' onClick={() => setEditGame({ ...g, division_id: g.division_id })}>Edit</button>
                 <button className='rounded border px-2 py-1 text-xs' onClick={() => setMoveGame(g)}>Move</button>
