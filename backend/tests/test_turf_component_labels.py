@@ -191,7 +191,7 @@ class TurfComponentLabelSourceOfTruthTest(unittest.TestCase):
             division_group=division.division_group,
         )
 
-        self.assertEqual(serialized.field_instance_name, 'Wave 1 TWO_MEDIUM Medium Field 2')
+        self.assertEqual(serialized.field_instance_name, 'Medium Field 2')
 
     def test_game_read_without_db_does_not_crash_for_turf_slot(self):
         game, slot, fi, host, home, away, division, _org, _status = self._build_wave('TWO_MEDIUM')[0]
@@ -207,7 +207,7 @@ class TurfComponentLabelSourceOfTruthTest(unittest.TestCase):
             division_group=division.division_group,
         )
 
-        self.assertTrue(serialized.field_instance_name.startswith('Wave 1 TWO_MEDIUM Medium Field'))
+        self.assertRegex(serialized.field_instance_name, r'^Medium Field [12]$')
 
     def test_list_games_returns_200_and_uses_canonical_turf_component_labels(self):
         self._build_wave('TWO_MEDIUM')
@@ -216,7 +216,7 @@ class TurfComponentLabelSourceOfTruthTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200, response.text)
         labels = sorted(item['field_instance_name'] for item in response.json()['items'])
-        self.assertEqual(labels, ['Wave 1 TWO_MEDIUM Medium Field 1', 'Wave 1 TWO_MEDIUM Medium Field 2'])
+        self.assertEqual(labels, ['Medium Field 1', 'Medium Field 2'])
 
 
 if __name__ == '__main__':

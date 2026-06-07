@@ -223,6 +223,48 @@ class ManualScheduleEditPermissionsTest(unittest.TestCase):
         self.assertEqual(response.json()['detail']['error'], 'INVALID_TURF_FIELD_SLOT_COMBINATION')
         self.assertIn('TWO_LARGE_FIELDS_NOT_ALLOWED_ON_ONE_TURF_SURFACE', response.json()['detail']['failure_reasons'])
 
+    def test_turf_manual_edit_allows_small_field_1_with_medium_field_2_same_time(self):
+        self.host.surface_type = 'TURF_STADIUM'
+        medium_field_2 = FieldInstance(id=uuid.uuid4(), host_location_id=self.host.id, hosting_availability_id=uuid.uuid4(), instance_date=date(2026, 8, 9), field_name='Medium Field 2', field_type='MEDIUM', is_active=True)
+        conflict_home = Team(id=uuid.uuid4(), organization_id=self.home_org.id, division_id=self.division.id, name='Home 2', is_active=True)
+        conflict_away = Team(id=uuid.uuid4(), organization_id=self.away_org.id, division_id=self.division.id, name='Away 3', is_active=True)
+        conflict_game = Game(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week.id,
+            home_team_id=conflict_home.id,
+            away_team_id=conflict_away.id,
+            host_location_id=self.host.id,
+            field_instance_id=medium_field_2.id,
+            game_status_id=self.status.id,
+            game_date=date(2026, 8, 9),
+            kickoff_time=time(9, 0),
+        )
+        conflict_slot = GameSlot(
+            id=uuid.uuid4(),
+            field_instance_id=medium_field_2.id,
+            host_location_id=self.host.id,
+            season_id=self.season.id,
+            week_id=self.week.id,
+            slot_date=date(2026, 8, 9),
+            start_time=time(9, 0),
+            end_time=time(10, 0),
+            field_type='MEDIUM',
+            status='BOOKED',
+            assigned_game_id=conflict_game.id,
+        )
+        self.db.add_all([medium_field_2, conflict_home, conflict_away, conflict_game, conflict_slot])
+        self.db.commit()
+
+        response = self.client.patch(
+            f'/api/schedule-management/games/{self.game.id}/manual-edit',
+            headers=self._token(self.league_user.id),
+            json=self._payload(field_instance_id=str(self.field.id), override_warnings=True),
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()['game']['field_instance_name'], 'Small Field 1')
+
     def test_same_explicit_field_slot_is_hard_blocked(self):
         conflict_home = Team(id=uuid.uuid4(), organization_id=self.home_org.id, division_id=self.division.id, name='Home 2', is_active=True)
         conflict_away = Team(id=uuid.uuid4(), organization_id=self.away_org.id, division_id=self.division.id, name='Away 3', is_active=True)
