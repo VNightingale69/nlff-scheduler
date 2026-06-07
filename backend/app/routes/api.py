@@ -4071,10 +4071,13 @@ TURF_LAYOUT_CODE_BY_COUNTS = {
     tuple(config['counts'][size] for size in FIELD_SIZE_ORDER): code
     for code, config in TURF_STADIUM_CONFIGURATIONS.items()
 }
-# TWO_SMALL_ONE_MEDIUM and ONE_MEDIUM_TWO_SMALL have the same component counts;
-# count-only inference keeps the historical layout while explicit turf_wave
-# preferred_layout_code remains the source of truth when present.
-TURF_LAYOUT_CODE_BY_COUNTS[(2, 1, 0)] = 'TWO_SMALL_ONE_MEDIUM'
+APPROVED_TURF_FIELD_SLOT_SETS = {
+    'THREE_SMALL': frozenset({'Small Field 1', 'Small Field 2', 'Small Field 3'}),
+    'TWO_SMALL_ONE_MEDIUM': frozenset({'Small Field 1', 'Small Field 2', 'Medium Field 1'}),
+    'TWO_MEDIUM': frozenset({'Medium Field 1', 'Medium Field 2'}),
+    'ONE_SMALL_ONE_LARGE': frozenset({'Small Field 1', 'Large Field 1'}),
+    'ONE_LARGE': frozenset({'Large Field 1'}),
+}
 
 
 def _turf_layout_code_for_counts(counts: dict[str, int]) -> str | None:
@@ -4100,6 +4103,21 @@ def _is_approved_turf_slot_counts(counts: dict[str, int]) -> bool:
         if all(normalized_counts[size] <= int(layout_counts.get(size, 0) or 0) for size in FIELD_SIZE_ORDER):
             return True
     return False
+
+
+
+def _approved_turf_configuration_for_explicit_slots(labels: set[str]) -> str | None:
+    if not labels:
+        return None
+    for code, approved_labels in APPROVED_TURF_FIELD_SLOT_SETS.items():
+        if labels == approved_labels:
+            return code
+    subset_matches = [
+        (len(approved_labels), code)
+        for code, approved_labels in APPROVED_TURF_FIELD_SLOT_SETS.items()
+        if labels.issubset(approved_labels)
+    ]
+    return min(subset_matches)[1] if subset_matches else None
 
 
 def _turf_wave_intent_for_layout(layout_code: str) -> str:
@@ -4692,10 +4710,11 @@ def _simulate_turf_layout_sequence(
 
 
 TURF_WAVE_CONFIGURATION_PRIORITY = {
-    'THREE_SMALL': 40,
-    'TWO_SMALL_ONE_MEDIUM': 30,
-    'TWO_MEDIUM': 20,
-    'ONE_SMALL_ONE_LARGE': 10,
+    'THREE_SMALL': 50,
+    'TWO_SMALL_ONE_MEDIUM': 40,
+    'TWO_MEDIUM': 30,
+    'ONE_SMALL_ONE_LARGE': 20,
+    'ONE_LARGE': 10,
 }
 
 
@@ -23867,7 +23886,7 @@ def _clean_explicit_field_slot_label(value: object | None, field_type: str | Non
     if explicit:
         return explicit
     cleaned = re.sub(r'^\s*Wave\s+\d+\s+', '', raw, flags=re.IGNORECASE)
-    cleaned = re.sub(r'\b(?:THREE_SMALL|TWO_MEDIUM|TWO_SMALL_ONE_MEDIUM|ONE_MEDIUM_TWO_SMALL|ONE_SMALL_ONE_LARGE)\b\s*', '', cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r'\b(?:THREE_SMALL|TWO_MEDIUM|TWO_SMALL_ONE_MEDIUM|ONE_SMALL_ONE_LARGE|ONE_LARGE|ONE_MEDIUM_TWO_SMALL|ONE_LARGE_ONE_MEDIUM|TWO_LARGE)\b\s*', '', cleaned, flags=re.IGNORECASE)
     return ' '.join(cleaned.split())
 
 
@@ -23885,7 +23904,7 @@ def _field_export_display_issue(label: object | None) -> str | None:
     text = str(label or '')
     if re.search(r'\bWave\s+\d+\b', text, flags=re.IGNORECASE):
         return 'Export display issue: Field column contains Wave terminology.'
-    if re.search(r'\b(?:THREE_SMALL|TWO_MEDIUM|TWO_SMALL_ONE_MEDIUM|ONE_MEDIUM_TWO_SMALL|ONE_SMALL_ONE_LARGE)\b', text, flags=re.IGNORECASE):
+    if re.search(r'\b(?:THREE_SMALL|TWO_MEDIUM|TWO_SMALL_ONE_MEDIUM|ONE_SMALL_ONE_LARGE|ONE_LARGE|ONE_MEDIUM_TWO_SMALL|ONE_LARGE_ONE_MEDIUM|TWO_LARGE)\b', text, flags=re.IGNORECASE):
         return 'Export display issue: Field column should show explicit field slot only.'
     return None
 
@@ -24652,8 +24671,13 @@ def _validate_turf_explicit_field_slot_combination(
         raise HTTPException(status_code=400, detail={'error': 'INVALID_TURF_FIELD_SLOT_COMBINATION', 'failure_reasons': ['TWO_LARGE_FIELDS_NOT_ALLOWED_ON_ONE_TURF_SURFACE']})
     if counts[FIELD_SIZE_LARGE] == 1 and re.search(r'\bLarge\s+Field\s+2\b', ' '.join(by_label.keys()), flags=re.IGNORECASE):
         raise HTTPException(status_code=400, detail={'error': 'INVALID_TURF_FIELD_SLOT', 'failure_reasons': ['LARGE_FIELD_2_NOT_ALLOWED_ON_ONE_TURF_SURFACE']})
-    if not _is_approved_turf_slot_counts(counts):
-        raise HTTPException(status_code=400, detail={'error': 'INVALID_TURF_FIELD_SLOT_COMBINATION', 'failure_reasons': ['TURF_FIELD_CAPACITY_EXCEEDED']})
+    selected_configuration = _approved_turf_configuration_for_explicit_slots(set(by_label.keys()))
+    if not selected_configuration or not _is_approved_turf_slot_counts(counts):
+        raise HTTPException(status_code=400, detail={
+            'error': 'INVALID_TURF_FIELD_SLOT_COMBINATION',
+            'failure_reasons': ['TURF_FIELD_SLOT_COMBINATION_NOT_APPROVED'],
+            'selected_field_slots': sorted(by_label.keys()),
+        })
 
 
 def _raise_if_invalid_manual_game_edit(db: Session, game: Game, payload: ManualGameEditRequest) -> None:

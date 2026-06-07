@@ -41,6 +41,7 @@ const HOST_CONFIG_OPTIONS = [
   { value: 'TWO_SMALL_ONE_MEDIUM', label: 'Two Small Fields + One Medium Field' },
   { value: 'TWO_MEDIUM', label: 'Two Medium Fields' },
   { value: 'ONE_SMALL_ONE_LARGE', label: 'One Small Field + One Large Field' },
+  { value: 'ONE_LARGE', label: 'One Large Field' },
 ];
 const APPROVED_TURF_LAYOUT_CODES = new Set(HOST_CONFIG_OPTIONS.map((option) => option.value));
 const configLabel = (value: string) => {

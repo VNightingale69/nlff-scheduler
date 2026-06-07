@@ -40,6 +40,15 @@ export const APPROVED_TURF_CONFIGURATIONS: TurfConfiguration[] = [
     maxFieldsPerWave: 2,
     schedulingNote: 'Supports one small-field game and one large-field game in the same wave; medium games require a different approved configuration.',
   },
+
+  {
+    code: 'ONE_LARGE',
+    displayName: 'One Large Field',
+    availableFields: ['LARGE'],
+    supportedDivisions: ['Coed 6-7', 'Coed 8', 'Girls 6-8'],
+    maxFieldsPerWave: 1,
+    schedulingNote: 'Supports one large-field game only; Small Field 1 may be paired with Large Field 1 only under ONE_SMALL_ONE_LARGE.',
+  },
 ];
 
 export const APPROVED_TURF_CONFIGURATION_CODES = APPROVED_TURF_CONFIGURATIONS.map((config) => config.code);

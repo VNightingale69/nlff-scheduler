@@ -20,12 +20,11 @@ def _normalize_turf_configuration_name(value: str | None) -> str | None:
 
 
 TURF_APPROVED_LAYOUTS_BY_SMALL_MEDIUM_LARGE = {
+    (3, 0, 0): 'THREE_SMALL',
     (2, 1, 0): 'TWO_SMALL_ONE_MEDIUM',
     (0, 2, 0): 'TWO_MEDIUM',
-    (3, 0, 0): 'THREE_SMALL',
     (1, 0, 1): 'ONE_SMALL_ONE_LARGE',
-    (0, 0, 2): 'TWO_LARGE',
-    (0, 1, 1): 'ONE_LARGE_ONE_MEDIUM',
+    (0, 0, 1): 'ONE_LARGE',
 }
 
 

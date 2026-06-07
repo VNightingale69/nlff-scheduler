@@ -223,7 +223,7 @@ class ManualScheduleEditPermissionsTest(unittest.TestCase):
         self.assertEqual(response.json()['detail']['error'], 'INVALID_TURF_FIELD_SLOT_COMBINATION')
         self.assertIn('TWO_LARGE_FIELDS_NOT_ALLOWED_ON_ONE_TURF_SURFACE', response.json()['detail']['failure_reasons'])
 
-    def test_turf_manual_edit_allows_small_field_1_with_medium_field_2_same_time(self):
+    def test_turf_manual_edit_blocks_small_field_1_with_unsupported_medium_field_2_same_time(self):
         self.host.surface_type = 'TURF_STADIUM'
         medium_field_2 = FieldInstance(id=uuid.uuid4(), host_location_id=self.host.id, hosting_availability_id=uuid.uuid4(), instance_date=date(2026, 8, 9), field_name='Medium Field 2', field_type='MEDIUM', is_active=True)
         conflict_home = Team(id=uuid.uuid4(), organization_id=self.home_org.id, division_id=self.division.id, name='Home 2', is_active=True)
@@ -262,8 +262,9 @@ class ManualScheduleEditPermissionsTest(unittest.TestCase):
             json=self._payload(field_instance_id=str(self.field.id), override_warnings=True),
         )
 
-        self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(response.json()['game']['field_instance_name'], 'Small Field 1')
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()['detail']['error'], 'INVALID_TURF_FIELD_SLOT_COMBINATION')
+        self.assertIn('TURF_FIELD_SLOT_COMBINATION_NOT_APPROVED', response.json()['detail']['failure_reasons'])
 
     def test_same_explicit_field_slot_is_hard_blocked(self):
         conflict_home = Team(id=uuid.uuid4(), organization_id=self.home_org.id, division_id=self.division.id, name='Home 2', is_active=True)

@@ -24,6 +24,7 @@ const APPROVED_TURF_LAYOUTS = [
   { code: 'TWO_SMALL_ONE_MEDIUM', label: 'Two Small Fields + One Medium Field' },
   { code: 'TWO_MEDIUM', label: 'Two Medium Fields' },
   { code: 'ONE_SMALL_ONE_LARGE', label: 'One Small Field + One Large Field' },
+  { code: 'ONE_LARGE', label: 'One Large Field' },
 ];
 const APPROVED_TURF_LAYOUT_CODES = new Set(APPROVED_TURF_LAYOUTS.map((layout) => layout.code));
 const layoutLabel = (layout: string) => {

@@ -8,7 +8,7 @@ FIELD_SIZE_ORDER = (FIELD_SIZE_SMALL, FIELD_SIZE_MEDIUM, FIELD_SIZE_LARGE)
 
 INVALID_TURF_CONFIGURATION_MESSAGE = (
     'Invalid turf configuration. Turf stadium locations may only use '
-    'THREE_SMALL, TWO_SMALL_ONE_MEDIUM, TWO_MEDIUM, ONE_SMALL_ONE_LARGE, ONE_LARGE_ONE_MEDIUM, or ONE_MEDIUM_TWO_SMALL. TWO_LARGE and Large Field 2 are not valid on one turf surface.'
+    'THREE_SMALL, TWO_SMALL_ONE_MEDIUM, TWO_MEDIUM, ONE_SMALL_ONE_LARGE, or ONE_LARGE. TWO_LARGE, Large Field 2, Medium+Large, and Two Small+Large are not valid on one turf surface.'
 )
 
 APPROVED_TURF_CONFIGURATIONS: tuple[dict[str, object], ...] = (
@@ -58,27 +58,17 @@ APPROVED_TURF_CONFIGURATIONS: tuple[dict[str, object], ...] = (
     },
 
     {
-        'code': 'ONE_LARGE_ONE_MEDIUM',
-        'displayName': 'One Large Field + One Medium Field',
-        'availableFields': (FIELD_SIZE_LARGE, FIELD_SIZE_MEDIUM),
-        'supportedFieldSizes': (FIELD_SIZE_LARGE, FIELD_SIZE_MEDIUM),
-        'supportedDivisions': ('Coed 4-5', 'Girls 3-5', 'Coed 6-7', 'Coed 8', 'Girls 6-8'),
-        'maxFieldsPerWave': 2,
-        'schedulingNote': 'Supports one large-field game and one medium-field game in the same wave.',
-        'spaceUsedYards': 120,
-        'remainingYards': 0,
+        'code': 'ONE_LARGE',
+        'displayName': 'One Large Field',
+        'availableFields': (FIELD_SIZE_LARGE,),
+        'supportedFieldSizes': (FIELD_SIZE_LARGE,),
+        'supportedDivisions': ('Coed 6-7', 'Coed 8', 'Girls 6-8'),
+        'maxFieldsPerWave': 1,
+        'schedulingNote': 'Supports one large-field game only; Small Field 1 may be paired with Large Field 1 only under ONE_SMALL_ONE_LARGE.',
+        'spaceUsedYards': 70,
+        'remainingYards': 50,
     },
-    {
-        'code': 'ONE_MEDIUM_TWO_SMALL',
-        'displayName': 'One Medium Field + Two Small Fields',
-        'availableFields': (FIELD_SIZE_MEDIUM, FIELD_SIZE_SMALL, FIELD_SIZE_SMALL),
-        'supportedFieldSizes': (FIELD_SIZE_MEDIUM, FIELD_SIZE_SMALL),
-        'supportedDivisions': ('Coed K-1', 'Coed 2-3', 'Girls K-2', 'Coed 4-5', 'Girls 3-5'),
-        'maxFieldsPerWave': 3,
-        'schedulingNote': 'Supports one medium-field game and two small-field games in the same wave.',
-        'spaceUsedYards': 120,
-        'remainingYards': 0,
-    },
+
 )
 
 APPROVED_TURF_CONFIGURATIONS_BY_CODE = {str(config['code']): config for config in APPROVED_TURF_CONFIGURATIONS}
