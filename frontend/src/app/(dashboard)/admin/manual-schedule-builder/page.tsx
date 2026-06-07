@@ -244,7 +244,7 @@ export default function ManualScheduleBuilderPage() {
   const normalizedRoleName = String(authUser?.role_name || '').toUpperCase();
   const canManageGeneratedGames = normalizedRoleName === 'LEAGUE_ADMIN' || normalizedRoleName === 'SCHEDULING_ADMIN';
   const searchParams = useSearchParams();
-  const [options, setOptions] = useState<any>({ divisions: [], teams: [], host_locations: [], seasons: [], weeks: [], organizations: [], game_statuses: [] });
+  const [options, setOptions] = useState<any>({ divisions: [], teams: [], host_locations: [], field_instances: [], seasons: [], weeks: [], organizations: [], game_statuses: [] });
   const [seasonId, setSeasonId] = useState(searchParams.get('season_id') || '');
   const [weekId, setWeekId] = useState(searchParams.get('week_id') || '');
   const [divisionId, setDivisionId] = useState('');
@@ -331,8 +331,7 @@ export default function ManualScheduleBuilderPage() {
     const isExplicitManualField = (slot: any) => {
       const label = explicitFieldSlotLabel(slot);
       return Boolean(label) &&
-        !/\bWave\s+\d+\b|THREE_SMALL|TWO_MEDIUM|ONE_SMALL_ONE_LARGE|TWO_SMALL_ONE_MEDIUM|ONE_LARGE|ONE_MEDIUM_TWO_SMALL|ONE_LARGE_ONE_MEDIUM|TWO_LARGE/i.test(label) &&
-        !/^Large Field 2$/i.test(label);
+        !/\bWave\s+\d+\b|THREE_SMALL|TWO_MEDIUM|ONE_SMALL_ONE_LARGE|TWO_SMALL_ONE_MEDIUM|ONE_LARGE|ONE_MEDIUM_TWO_SMALL|ONE_LARGE_ONE_MEDIUM|TWO_LARGE/i.test(label);
     };
     const addSlot = (slot: any) => {
       const id = String(slot.field_instance_id || slot.field_id || '');
@@ -344,6 +343,9 @@ export default function ManualScheduleBuilderPage() {
         byField.set(id, { ...slot, explicit_field_slot_label: label });
       }
     };
+    (options.field_instances || [])
+      .filter((field: any) => (!selectedHostId || String(field.host_location_id || '') === selectedHostId))
+      .forEach(addSlot);
     generatedSlots
       .filter((slot: any) => (
         (!editGame?.season_id || slot.season_id === editGame.season_id) &&
@@ -366,7 +368,7 @@ export default function ManualScheduleBuilderPage() {
       });
     }
     return Array.from(byField.values()).sort((a: any, b: any) => explicitFieldSlotLabel(a).localeCompare(explicitFieldSlotLabel(b), undefined, { numeric: true }));
-  }, [generatedSlots, editGame?.season_id, editGame?.game_date, editGame?.host_location_id, editGame?.field_instance_id, editGame?.field_id, editGame?.field_instance_name, editGame?.host_location_name, editGame?.field_type, editGame?.field_size, editGame?.kickoff_time]);
+  }, [options.field_instances, generatedSlots, editGame?.season_id, editGame?.game_date, editGame?.host_location_id, editGame?.field_instance_id, editGame?.field_id, editGame?.field_instance_name, editGame?.host_location_name, editGame?.field_type, editGame?.field_size, editGame?.kickoff_time]);
   const editSelectedField = useMemo(() => editFieldOptions.find((slot: any) => String(slot.field_instance_id || slot.field_id) === String(editGame?.field_instance_id || editGame?.field_id || '')), [editFieldOptions, editGame?.field_instance_id, editGame?.field_id]);
   const editSelectedDivision = useMemo(() => options.divisions.find((d: any) => d.id === editGame?.division_id), [options.divisions, editGame?.division_id]);
   const editSelectedFieldType = String(editSelectedField?.field_size || editSelectedField?.field_type || '').toUpperCase();
@@ -856,7 +858,7 @@ export default function ManualScheduleBuilderPage() {
                 const warnings = (e.details as any)?.detail?.warnings || [];
                 const needsScoreConfirm = (e.details as any)?.detail?.error === 'SCORED_GAME_CHANGE_REQUIRES_CONFIRMATION';
                 const message = warnings.map((w: any) => w.message || w.code).join('\n') || 'This change creates one or more schedule warnings.';
-                if (window.confirm(`${message}\n\nThis manual edit does not match one or more scheduler recommendations. As Scheduling Admin / League Admin, you may override and save this change. Continue?`)) {
+                if (window.confirm(`${message}\n\nThis manual edit creates schedule warnings and may require manual rebalancing of turf time slots or field configurations. As Scheduling Admin / League Admin, you may override and save this change. Continue?`)) {
                   try { const res: any = await save(true, needsScoreConfirm); setEditGame(null); setGames((prev) => prev.map((game: any) => game.id === editGame.id ? { ...game, ...res.game, game_status_code: res.game.status_code } : game)); await load(); await loadRecommendations(); setManualScheduleBannerFromValidation('Game manually edited with warning override.', await loadFinalScheduleValidation()); }
                   catch (inner: unknown) { setError(extractError(inner)); }
                 }
