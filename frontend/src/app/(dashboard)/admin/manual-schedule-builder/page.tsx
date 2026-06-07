@@ -245,6 +245,7 @@ export default function ManualScheduleBuilderPage() {
   const [organizationId, setOrganizationId] = useState('');
   const [hostLocationId, setHostLocationId] = useState('');
   const [slots, setSlots] = useState<any[]>([]);
+  const [generatedSlots, setGeneratedSlots] = useState<any[]>([]);
   const [games, setGames] = useState<any[]>([]);
   const [suggestedMatchups, setSuggestedMatchups] = useState<any[]>([]);
   const [suggestedSlots, setSuggestedSlots] = useState<any[]>([]);
@@ -285,8 +286,21 @@ export default function ManualScheduleBuilderPage() {
   const canSave = Boolean(canManageGeneratedGames && seasonId && weekId && divisionId && homeTeamId && awayTeamId && slotId);
   const editDivisionTeams = useMemo(() => options.teams.filter((t: any) => t.division_id === editGame?.division_id && t.is_active), [options.teams, editGame?.division_id]);
   const seasonDateOptions = useMemo(() => Array.from(new Set(options.weeks.filter((w: any) => !seasonId || w.season_id === seasonId).map((w: any) => w.primary_game_date || w.start_date).filter(Boolean))).sort(), [options.weeks, seasonId]);
-  const timeOptions = useMemo(() => Array.from(new Set(slots.map((s: any) => s.start_time).filter(Boolean))).sort(), [slots]);
-  const editFieldOptions = useMemo(() => slots.filter((s: any) => !editGame?.host_location_id || s.host_location_id === editGame.host_location_id), [slots, editGame?.host_location_id]);
+  const validStartTimeOptions = useMemo(() => {
+    const editSeasonId = editGame?.season_id || seasonId;
+    const editWeekId = editGame?.week_id;
+    const configuredTimes = generatedSlots
+      .filter((slot: any) => (!editSeasonId || slot.season_id === editSeasonId) && (!editWeekId || !slot.week_id || slot.week_id === editWeekId || slot.season_week_id === editWeekId))
+      .map((slot: any) => slot.start_time)
+      .filter(Boolean);
+    return Array.from(new Set(configuredTimes)).sort();
+  }, [generatedSlots, editGame?.season_id, editGame?.week_id, seasonId]);
+  const editFieldOptions = useMemo(() => generatedSlots.filter((s: any) => (
+    (!editGame?.season_id || s.season_id === editGame.season_id) &&
+    (!editGame?.week_id || !s.week_id || s.week_id === editGame.week_id || s.season_week_id === editGame.week_id) &&
+    (!editGame?.game_date || s.game_date === editGame.game_date || s.available_date === editGame.game_date) &&
+    (!editGame?.host_location_id || s.host_location_id === editGame.host_location_id)
+  )), [generatedSlots, editGame?.season_id, editGame?.week_id, editGame?.game_date, editGame?.host_location_id]);
   const scheduledGamesFilterOptions = useMemo(() => {
     const divisionOrder = new Map<string, number>((options.divisions || []).map((division: any, index: number) => [String(division.id), index]));
     const dates = uniqueByValue(games.map((game: any) => ({ value: gameDateValue(game), label: formatDisplayDate(game.game_date) })))
@@ -386,6 +400,13 @@ export default function ManualScheduleBuilderPage() {
     setGames((scheduled.items || []).filter((game: any) => (game.status_code || game.game_status_code) !== 'UNSCHEDULED'));
   };
 
+  const loadGeneratedSlots = async () => {
+    const params = new URLSearchParams();
+    if (seasonId) params.set('season_id', seasonId);
+    const data: any = await apiFetch(`/generated-game-slots${params.toString() ? `?${params.toString()}` : ''}`, {}, token);
+    setGeneratedSlots(Array.isArray(data) ? data : []);
+  };
+
   const loadRecommendations = async () => {
     if (!divisionId || !weekId) return;
     const r: any = await apiFetch('/manual-schedule-builder/recommendations', { method: 'POST', body: JSON.stringify({ season_id: seasonId, week_id: weekId, division_id: divisionId, organization_id: organizationId || null, host_location_id: hostLocationId || null, home_team_id: homeTeamId || null, away_team_id: awayTeamId || null }) }, token);
@@ -397,6 +418,7 @@ export default function ManualScheduleBuilderPage() {
   };
 
   useEffect(() => { load().catch((e) => setError(extractError(e))); }, []);
+  useEffect(() => { loadGeneratedSlots().catch((e) => setError(extractError(e))); }, [seasonId]);
   useEffect(() => { loadRecommendations().catch((e) => setError(extractError(e))); }, [seasonId, weekId, divisionId, organizationId, hostLocationId, homeTeamId, awayTeamId]);
 
   return (
@@ -698,13 +720,12 @@ export default function ManualScheduleBuilderPage() {
         <h3 className='mb-2 text-lg font-semibold'>Edit Game</h3>
         <div className='grid gap-2 md:grid-cols-4'>
           <select className='rounded border p-2' value={editGame.game_date || ''} onChange={(e) => setEditGame({ ...editGame, game_date: e.target.value })}><option value=''>Game Date</option>{seasonDateOptions.map((d: any) => <option key={d} value={d}>{formatDisplayDate(d)}</option>)}</select>
-          <select className='rounded border p-2' value={editGame.kickoff_time || ''} onChange={(e) => setEditGame({ ...editGame, kickoff_time: e.target.value })}><option value=''>Start Time</option>{timeOptions.map((t: any) => <option key={t} value={t}>{formatDisplayTime(t)}</option>)}</select>
+          <select className='rounded border p-2' value={editGame.kickoff_time || ''} onChange={(e) => setEditGame({ ...editGame, kickoff_time: e.target.value })} required><option value='' disabled>Start Time</option>{validStartTimeOptions.map((t: any) => <option key={t} value={t}>{formatDisplayTime(t)}</option>)}</select>
           <select className='rounded border p-2' value={editGame.host_location_id || ''} onChange={(e) => setEditGame({ ...editGame, host_location_id: e.target.value, field_instance_id: '' })}><option value=''>Host Location</option>{options.host_locations.map((h: any) => <option key={h.id} value={h.id}>{h.name}</option>)}</select>
           <select className='rounded border p-2' value={editGame.field_instance_id || ''} onChange={(e) => { const selected = editFieldOptions.find((slot: any) => (slot.field_instance_id || slot.field_id) === e.target.value); setEditGame({ ...editGame, field_instance_id: e.target.value, field_id: selected?.field_id || editGame.field_id, host_location_id: selected?.host_location_id || editGame.host_location_id }); }}><option value=''>Field</option>{editFieldOptions.map((s: any) => <option key={`${s.field_instance_id || s.field_id}-${s.slot_id || s.id}`} value={s.field_instance_id || s.field_id}>{s.field_instance_name || s.field_name || s.field || `${s.host_location_name} ${s.field_type}`}</option>)}</select>
           <select className='rounded border p-2' value={editGame.division_id || ''} onChange={(e) => setEditGame({ ...editGame, division_id: e.target.value, home_team_id: '', away_team_id: '' })}><option value=''>Division</option>{options.divisions.map((d: any) => <option key={d.id} value={d.id}>{getDivisionLabel(d)}</option>)}</select>
           <select className='rounded border p-2' value={editGame.home_team_id} onChange={(e) => setEditGame({ ...editGame, home_team_id: e.target.value })}><option value=''>Home Team</option>{editDivisionTeams.map((t: any) => <option key={t.id} value={t.id} disabled={t.id === editGame.away_team_id}>{t.name}</option>)}</select>
           <select className='rounded border p-2' value={editGame.away_team_id} onChange={(e) => setEditGame({ ...editGame, away_team_id: e.target.value })}><option value=''>Away Team</option>{editDivisionTeams.map((t: any) => <option key={t.id} value={t.id} disabled={t.id === editGame.home_team_id}>{t.name}</option>)}</select>
-          <select className='rounded border p-2' value={editGame.game_status_id} onChange={(e) => setEditGame({ ...editGame, game_status_id: e.target.value })}><option value=''>Status</option>{options.game_statuses?.filter((s: any) => ['SCHEDULED', 'RESCHEDULED', 'CANCELLED', 'POSTPONED', 'FORFEIT'].includes(String(s.code || '').toUpperCase())).map((s: any) => <option key={s.id} value={s.id}>{s.label}</option>)}</select>
         </div>
         <div className='mt-2 grid gap-2 md:grid-cols-2'>
           <textarea className='rounded border p-2' value={editGame.public_notes || ''} onChange={(e) => setEditGame({ ...editGame, public_notes: e.target.value })} placeholder='Public notes' />
@@ -714,6 +735,8 @@ export default function ManualScheduleBuilderPage() {
           <button className='rounded border px-3 py-2' onClick={() => setEditGame({ ...editGame, home_team_id: editGame.away_team_id, away_team_id: editGame.home_team_id })}>Swap Home/Away</button>
           <button className='rounded bg-blue-600 px-3 py-2 text-white' onClick={async () => {
             setError('');
+            if (!editGame.kickoff_time || !validStartTimeOptions.includes(editGame.kickoff_time)) { setError('Select a valid start time.'); return; }
+            if (!editGame.game_status_id) { setError('This game is missing its saved status. Refresh and try again.'); return; }
             if (editGame.home_team_id === editGame.away_team_id) { setError('Home and away cannot be the same.'); return; }
             const home = options.teams.find((t: any) => t.id === editGame.home_team_id);
             const away = options.teams.find((t: any) => t.id === editGame.away_team_id);
