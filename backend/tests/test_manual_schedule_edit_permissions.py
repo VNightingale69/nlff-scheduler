@@ -436,5 +436,66 @@ class ManualScheduleEditPermissionsTest(unittest.TestCase):
         self.assertEqual(response.json()['detail']['error'], 'SCORED_GAME_CHANGE_REQUIRES_CONFIRMATION')
 
 
+class ManualOptimizationWorkflowPermissionsTest(ManualScheduleEditPermissionsTest):
+    def _optimization_payload(self, **overrides):
+        payload = {
+            'season_id': str(self.season.id),
+            'optimize_same_community_home': True,
+            'repair_double_headers': True,
+            'reduce_repeat_matchups': False,
+            'preserve_two_location_limit': True,
+            'include_manual_edits': False,
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_scheduling_admin_can_run_manual_optimization_preview_with_metrics(self):
+        response = self.client.post(
+            '/api/manual-schedule-builder/optimize-schedule',
+            headers=self._token(self.scheduling_user.id),
+            json=self._optimization_payload(),
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn('before_metrics', data)
+        self.assertIn('after_metrics', data)
+        self.assertIn('metric_comparison', data)
+        self.assertEqual(data['schedule_state'], 'Optimization Preview')
+        self.assertTrue(data['preview'])
+
+    def test_scheduling_admin_can_apply_manual_optimization(self):
+        response = self.client.post(
+            '/api/manual-schedule-builder/optimize-schedule/apply',
+            headers=self._token(self.scheduling_user.id),
+            json=self._optimization_payload(),
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data['schedule_state'], 'Optimized Schedule Applied')
+        self.assertTrue(data['applied'])
+
+    def test_community_admin_cannot_run_manual_optimization_api(self):
+        preview = self.client.post(
+            '/api/manual-schedule-builder/optimize-schedule',
+            headers=self._token(self.community_user.id),
+            json=self._optimization_payload(),
+        )
+        apply = self.client.post(
+            '/api/manual-schedule-builder/optimize-schedule/apply',
+            headers=self._token(self.community_user.id),
+            json=self._optimization_payload(),
+        )
+        self.assertEqual(preview.status_code, 403)
+        self.assertEqual(apply.status_code, 403)
+
+    def test_league_admin_cannot_run_scheduling_admin_only_optimization_api(self):
+        response = self.client.post(
+            '/api/manual-schedule-builder/optimize-schedule',
+            headers=self._token(self.league_user.id),
+            json=self._optimization_payload(),
+        )
+        self.assertEqual(response.status_code, 403)
+
+
 if __name__ == '__main__':
     unittest.main()
