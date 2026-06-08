@@ -42,7 +42,8 @@ export async function apiFetch(path: string, opts: RequestInit = {}, token?: str
         ...(opts.headers || {}),
       },
     });
-  } catch {
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') throw error;
     throw new ApiError('Unable to connect to server.', 0, null);
   }
 

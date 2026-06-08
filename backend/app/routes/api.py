@@ -59,6 +59,15 @@ AUTO_SCHEDULE_REPEATED_MOVE_WARN_THRESHOLD = 3
 
 
 
+def _bounded_int_env(name: str, default: int, minimum: int = 1) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, value)
+
+
+
 HOST_LOCATION_VERIFICATION_CATEGORIES = (
     'SAME_COMMUNITY_GAME',
     'UNKNOWN_LOCATION_OWNER',
@@ -22697,7 +22706,9 @@ def _optimization_preview_game_rows(db: Session, season_id: uuid.UUID | str) -> 
     return preview_rows
 
 
-def _run_manual_optimization_workflow(payload: dict, db: Session, *, apply: bool) -> dict[str, object]:
+def _run_manual_optimization_workflow(payload: dict, db: Session, *, apply: bool, current_user: User | None = None) -> dict[str, object]:
+    workflow_start = perf_counter()
+    endpoint_name = 'manual_schedule_builder.apply_optimized_schedule' if apply else 'manual_schedule_builder.optimize_schedule'
     season_id = payload.get('season_id')
     if not season_id:
         raise HTTPException(400, 'season_id is required')
@@ -22706,6 +22717,21 @@ def _run_manual_optimization_workflow(payload: dict, db: Session, *, apply: bool
         raise HTTPException(404, 'Season not found')
 
     include_manual_edits = bool(payload.get('include_manual_edits', False))
+    scheduled_game_count = db.query(Game.id).join(Game.status).filter(
+        Game.season_id == season_id,
+        func.lower(GameStatus.code) != 'unscheduled',
+    ).count()
+    user_role = normalize_role_name(current_user.role.name) if current_user and current_user.role else None
+    logger.info(
+        'manual_schedule_optimization_start endpoint=%s user_role=%s season_id=%s schedule_id=%s include_manual_edits=%s timestamp=%s scheduled_game_count=%s',
+        endpoint_name,
+        user_role,
+        season_id,
+        payload.get('schedule_id'),
+        include_manual_edits,
+        datetime.utcnow().isoformat(),
+        scheduled_game_count,
+    )
     manual_edit_count = db.query(Game.id).filter(Game.season_id == season_id, Game.is_manual_edit.is_(True)).count()
     locked_manual_snapshots = {} if include_manual_edits else _manual_game_snapshots(db, season_id)
     before_metrics = _build_optimization_workflow_metrics(db, season_id)
@@ -22727,22 +22753,9 @@ def _run_manual_optimization_workflow(payload: dict, db: Session, *, apply: bool
         optimized_preview_games = _optimization_preview_game_rows(db, season_id)
     except Exception as exc:
         db.rollback()
-        logger.exception('Schedule optimization failed for season_id=%s', season_id)
-        return {
-            'ran': False,
-            'preview': not apply,
-            'applied': False,
-            'schedule_state': 'First-Pass Schedule',
-            'summary': {'error': str(exc)},
-            'before_metrics': before_metrics if 'before_metrics' in locals() else {},
-            'after_metrics': before_metrics if 'before_metrics' in locals() else {},
-            'metric_comparison': _optimization_metric_comparison(before_metrics, before_metrics) if 'before_metrics' in locals() else [],
-            'optimized_preview_games': [],
-            'proposed_changes': [],
-            'rejected_changes': [],
-            'remaining_violations': [],
-            'warnings': [f'Optimization failed: {exc}'],
-        }
+        elapsed = perf_counter() - workflow_start
+        logger.exception('manual_schedule_optimization_end status=error endpoint=%s season_id=%s elapsed_seconds=%.3f', endpoint_name, season_id, elapsed)
+        raise HTTPException(status_code=500, detail=f'Optimization failed unexpectedly: {exc}') from exc
 
     proposed_changes = list((diagnostics.get('proposed_changes') or []))
     rejected_changes = list((diagnostics.get('rejected_changes') or []))
@@ -22778,6 +22791,19 @@ def _run_manual_optimization_workflow(payload: dict, db: Session, *, apply: bool
         db.commit()
     else:
         db.rollback()
+    elapsed = perf_counter() - workflow_start
+    logger.info(
+        'manual_schedule_optimization_end status=success endpoint=%s season_id=%s elapsed_seconds=%.3f candidates_generated=%s candidates_evaluated=%s accepted_moves=%s rejected_moves=%s guard_limit_reached=%s preview_returned=%s',
+        endpoint_name,
+        season_id,
+        elapsed,
+        summary.get('optimization_candidates_generated') or summary.get('candidate_count') or 0,
+        summary.get('optimization_candidates_evaluated') or 0,
+        accepted_moves,
+        rejected_moves,
+        bool(summary.get('guard_limit_reached')),
+        bool(not apply and optimized_preview_games),
+    )
     return response
 
 
@@ -22785,14 +22811,14 @@ def _run_manual_optimization_workflow(payload: dict, db: Session, *, apply: bool
 def optimize_schedule(payload: dict, _current_user: User = Depends(require_schedule_optimization_admin), db: Session = Depends(get_db)):
     payload = dict(payload or {})
     payload['dry_run'] = True
-    return _run_manual_optimization_workflow(payload, db, apply=False)
+    return _run_manual_optimization_workflow(payload, db, apply=False, current_user=_current_user)
 
 
 @router.post('/manual-schedule-builder/optimize-schedule/apply')
 def apply_optimized_schedule(payload: dict, _current_user: User = Depends(require_schedule_optimization_admin), db: Session = Depends(get_db)):
     payload = dict(payload or {})
     payload['dry_run'] = False
-    return _run_manual_optimization_workflow(payload, db, apply=True)
+    return _run_manual_optimization_workflow(payload, db, apply=True, current_user=_current_user)
 
 
 @router.post('/manual-schedule-builder/optimize-schedule/keep-first-pass')
@@ -23754,6 +23780,32 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
         or_(GameSlot.season_id == season_id, GameSlot.week_id.in_(db.query(Week.id).filter(Week.season_id == season_id)))
     ).order_by(GameSlot.slot_date, GameSlot.start_time, GameSlot.id).all()
 
+    optimization_started_at = perf_counter()
+    max_runtime_seconds = _bounded_int_env('SCHEDULE_OPTIMIZATION_MAX_RUNTIME_SECONDS', 25)
+    max_candidates_generated = _bounded_int_env('SCHEDULE_OPTIMIZATION_MAX_CANDIDATES_GENERATED', 3000)
+    max_candidates_evaluated = _bounded_int_env('SCHEDULE_OPTIMIZATION_MAX_CANDIDATES_EVALUATED', 750)
+    max_accepted_moves = _bounded_int_env('SCHEDULE_OPTIMIZATION_MAX_ACCEPTED_MOVES', 25)
+    max_passes = _bounded_int_env('SCHEDULE_OPTIMIZATION_MAX_PASSES', 1)
+    stop_reason: str | None = None
+
+    def _elapsed_seconds() -> float:
+        return perf_counter() - optimization_started_at
+
+    def _runtime_exceeded() -> bool:
+        return _elapsed_seconds() >= max_runtime_seconds
+
+    logger.info(
+        'turf_optimizer_start season_id=%s scheduled_game_count=%s slot_count=%s max_runtime_seconds=%s max_candidates_generated=%s max_candidates_evaluated=%s max_accepted_moves=%s max_passes=%s',
+        season_id,
+        len(scheduled_games),
+        len(all_slots),
+        max_runtime_seconds,
+        max_candidates_generated,
+        max_candidates_evaluated,
+        max_accepted_moves,
+        max_passes,
+    )
+
     host_cache: dict[uuid.UUID, HostLocation | None] = {}
     field_cache: dict[uuid.UUID, FieldInstance | None] = {}
 
@@ -24085,73 +24137,157 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
         baseline_opportunities.append('hard validation conflicts detected')
 
     candidates: list[dict[str, object]] = []
+    candidate_keys: set[tuple[object, ...]] = set()
     no_candidate_reasons: set[str] = set()
     turf_games = [g for g in scheduled_games if _game_is_turf(g)]
     turf_slots = [slot for slot in all_slots if _slot_is_turf(slot)]
     occupied_without: dict[uuid.UUID, set[uuid.UUID]] = {}
     blocks = _block_counts()
 
-    for g in turf_games:
-        source = slots_by_game_id.get(g.id)
-        if g.id in locked_game_ids:
-            candidates.append({'type': 'move', 'opportunity': 'manual edit lock', 'game_id': g.id, 'locked': True})
-            continue
-        if not source:
-            no_candidate_reasons.add('Scheduled turf game has no matching turf slot.')
-            continue
-        occupied_without[g.id] = _occupied_slot_ids({g.id})
-        source_count = blocks.get((source.host_location_id, g.game_date, g.kickoff_time), 0) if source.host_location_id and g.game_date and g.kickoff_time else 0
-        open_slots = [slot for slot in turf_slots if slot.id not in occupied_without[g.id] and slot.week_id == g.week_id and _compatible(g, slot)]
-        if not open_slots:
-            no_candidate_reasons.add('No compatible turf slot.')
-        for target in open_slots[:80]:
-            if target.id == source.id:
-                continue
-            target_count = blocks.get((target.host_location_id, target.slot_date, target.start_time), 0) if target.host_location_id and target.slot_date and target.start_time else 0
-            if target_count <= 0 and _minutes(target.start_time) >= _minutes(source.start_time):
-                continue
-            if target.host_location_id != source.host_location_id and target.slot_date != source.slot_date:
-                continue
-            opportunity = 'turf host-time compression'
-            if source_count == 1 and target_count > 0:
-                opportunity = 'move isolated turf game'
-            if target_count == 1:
-                opportunity = 'pair turf games'
-            if _minutes(target.start_time) < _minutes(source.start_time):
-                opportunity = 'move late turf game earlier'
-            candidates.append(_move_action(g, target, opportunity))
+    def _candidate_identity(action: dict[str, object]) -> tuple[object, ...]:
+        return (
+            action.get('type'),
+            str(action.get('game_id') or ''),
+            str(action.get('swap_game_id') or ''),
+            str(action.get('from_slot_id') or ''),
+            str(action.get('to_slot_id') or ''),
+            action.get('old_date'),
+            action.get('old_time'),
+            action.get('old_location'),
+            action.get('old_field'),
+            action.get('new_date'),
+            action.get('new_time'),
+            action.get('new_location'),
+            action.get('new_field'),
+        )
 
-    for idx, a in enumerate(turf_games):
-        if a.id in locked_game_ids:
-            continue
-        sa = slots_by_game_id.get(a.id)
-        if not sa:
-            continue
-        for b in turf_games[idx + 1:idx + 121]:
-            if b.id in locked_game_ids or a.week_id != b.week_id:
+    def _add_candidate(action: dict[str, object]) -> bool:
+        nonlocal stop_reason
+        if len(candidates) >= max_candidates_generated:
+            stop_reason = stop_reason or 'candidate generation limit reached'
+            return False
+        if _runtime_exceeded():
+            stop_reason = stop_reason or 'runtime limit reached during candidate generation'
+            return False
+        identity = _candidate_identity(action)
+        if identity in candidate_keys:
+            return True
+        candidate_keys.add(identity)
+        candidates.append(action)
+        if len(candidates) == 1 or len(candidates) % 100 == 0:
+            logger.info(
+                'turf_optimizer_candidate_generation_progress candidate_type=%s candidates_generated=%s elapsed_seconds=%.3f cap_remaining=%s',
+                action.get('opportunity') or action.get('type'),
+                len(candidates),
+                _elapsed_seconds(),
+                max(0, max_candidates_generated - len(candidates)),
+            )
+        return True
+
+    logger.info('turf_optimizer_candidate_generation_start turf_game_count=%s turf_slot_count=%s', len(turf_games), len(turf_slots))
+    generation_halted = False
+    for generation_pass in range(max_passes):
+        if generation_halted:
+            break
+        for g in turf_games:
+            if generation_halted:
+                break
+            source = slots_by_game_id.get(g.id)
+            if g.id in locked_game_ids:
+                generation_halted = not _add_candidate({'type': 'move', 'opportunity': 'manual edit lock', 'game_id': g.id, 'locked': True})
                 continue
-            sb = slots_by_game_id.get(b.id)
-            if not sb or not _compatible(a, sb) or not _compatible(b, sa):
+            if not source:
+                no_candidate_reasons.add('Scheduled turf game has no matching turf slot.')
                 continue
-            same_date = sa.slot_date == sb.slot_date
-            same_week = a.week_id == b.week_id
-            if not same_date and not same_week:
+            occupied_without[g.id] = _occupied_slot_ids({g.id})
+            source_count = blocks.get((source.host_location_id, g.game_date, g.kickoff_time), 0) if source.host_location_id and g.game_date and g.kickoff_time else 0
+            compatible_slots_seen = 0
+            for target in turf_slots:
+                if len(candidates) >= max_candidates_generated or _runtime_exceeded():
+                    generation_halted = not _add_candidate({'type': 'guard', 'opportunity': 'candidate generation guard'})
+                    if candidates and candidates[-1].get('type') == 'guard':
+                        candidates.pop()
+                    break
+                if target.id == source.id or target.id in occupied_without[g.id] or target.week_id != g.week_id or not _compatible(g, target):
+                    continue
+                compatible_slots_seen += 1
+                if compatible_slots_seen > 80:
+                    break
+                target_count = blocks.get((target.host_location_id, target.slot_date, target.start_time), 0) if target.host_location_id and target.slot_date and target.start_time else 0
+                if target_count <= 0 and _minutes(target.start_time) >= _minutes(source.start_time):
+                    continue
+                if target.host_location_id != source.host_location_id and target.slot_date != source.slot_date:
+                    continue
+                opportunity = 'turf host-time compression'
+                if source_count == 1 and target_count > 0:
+                    opportunity = 'move isolated turf game'
+                if target_count == 1:
+                    opportunity = 'pair turf games'
+                if _minutes(target.start_time) < _minutes(source.start_time):
+                    opportunity = 'move late turf game earlier'
+                generation_halted = not _add_candidate(_move_action(g, target, opportunity))
+                if generation_halted:
+                    break
+            if compatible_slots_seen == 0:
+                no_candidate_reasons.add('No compatible turf slot.')
+
+        for idx, a in enumerate(turf_games):
+            if generation_halted:
+                break
+            if a.id in locked_game_ids:
                 continue
-            if sa.host_location_id != sb.host_location_id and (sa.slot_date != sb.slot_date):
+            sa = slots_by_game_id.get(a.id)
+            if not sa:
                 continue
-            candidates.append(_swap_action(a, b, 'turf utilization swap'))
+            for b in turf_games[idx + 1:idx + 121]:
+                if len(candidates) >= max_candidates_generated or _runtime_exceeded():
+                    stop_reason = stop_reason or ('candidate generation limit reached' if len(candidates) >= max_candidates_generated else 'runtime limit reached during candidate generation')
+                    generation_halted = True
+                    break
+                if b.id in locked_game_ids or a.week_id != b.week_id:
+                    continue
+                sb = slots_by_game_id.get(b.id)
+                if not sb or not _compatible(a, sb) or not _compatible(b, sa):
+                    continue
+                same_date = sa.slot_date == sb.slot_date
+                same_week = a.week_id == b.week_id
+                if not same_date and not same_week:
+                    continue
+                if sa.host_location_id != sb.host_location_id and (sa.slot_date != sb.slot_date):
+                    continue
+                generation_halted = not _add_candidate(_swap_action(a, b, 'same-week turf utilization swap'))
+                if generation_halted:
+                    break
+    logger.info('turf_optimizer_candidate_generation_end candidates_generated=%s deduplicated_candidates=%s elapsed_seconds=%.3f stop_reason=%s', len(candidates), len(candidate_keys), _elapsed_seconds(), stop_reason)
 
     accepted_changes: list[dict[str, object]] = []
     rejected_changes: list[dict[str, object]] = []
     rejected_by_reason: dict[str, int] = {}
-    candidate_limit = 750
+    candidate_limit = min(max_candidates_evaluated, len(candidates))
     current_score = _score()
+    candidates_evaluated = 0
 
     def _reject(action: dict[str, object], reason: str, before_score: int, after_score: int | None = None) -> None:
         rejected_by_reason[reason] = rejected_by_reason.get(reason, 0) + 1
         rejected_changes.append(_candidate_detail(action, reason=reason, before_score=before_score, after_score=current_score if after_score is None else after_score))
 
     for action in candidates[:candidate_limit]:
+        if _runtime_exceeded():
+            stop_reason = stop_reason or 'runtime limit reached during candidate evaluation'
+            break
+        if len(accepted_changes) >= max_accepted_moves:
+            stop_reason = stop_reason or 'accepted move limit reached'
+            break
+        candidates_evaluated += 1
+        if candidates_evaluated == 1 or candidates_evaluated % 100 == 0:
+            logger.info(
+                'turf_optimizer_evaluation_progress evaluated_count=%s accepted_count=%s rejected_count=%s elapsed_seconds=%.3f best_score=%s',
+                candidates_evaluated,
+                len(accepted_changes),
+                len(rejected_changes),
+                _elapsed_seconds(),
+                current_score,
+            )
         if action.get('locked'):
             _reject(action, 'manually edited game is locked', current_score, current_score)
             continue
@@ -24218,9 +24354,24 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
             current_score = after_score
             accepted_changes.append(_candidate_detail(action, accepted=True, before_score=before_score, after_score=after_score, metric_improved=metric_improved))
 
-    if len(candidates) > candidate_limit:
-        reason = f'candidate evaluation limit reached; {len(candidates) - candidate_limit} candidates deferred'
-        rejected_by_reason[reason] = rejected_by_reason.get(reason, 0) + (len(candidates) - candidate_limit)
+    deferred_candidates = max(0, len(candidates) - candidates_evaluated)
+    if deferred_candidates:
+        if not stop_reason:
+            stop_reason = 'candidate evaluation limit reached'
+        reason = f'{stop_reason}; {deferred_candidates} candidates deferred'
+        rejected_by_reason[reason] = rejected_by_reason.get(reason, 0) + deferred_candidates
+
+    guard_limit_reached = bool(stop_reason)
+    if guard_limit_reached:
+        logger.info(
+            'turf_optimizer_guard_exit stop_reason=%s candidates_generated=%s candidates_evaluated=%s accepted_moves=%s rejected_moves=%s elapsed_seconds=%.3f',
+            stop_reason,
+            len(candidates),
+            candidates_evaluated,
+            len(accepted_changes),
+            len(rejected_changes),
+            _elapsed_seconds(),
+        )
 
     if not candidates:
         if not turf_games:
@@ -24266,11 +24417,18 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
         'games_reviewed': len(scheduled_games),
         'optimization_scope': 'GLOBAL_TURF_STADIUM_UTILIZATION_ONLY',
         'optimization_candidates_generated': len(candidates),
+        'optimization_candidates_evaluated': candidates_evaluated,
+        'optimization_candidate_generation_limit': max_candidates_generated,
+        'optimization_candidate_evaluation_limit': max_candidates_evaluated,
+        'optimization_runtime_limit_seconds': max_runtime_seconds,
+        'optimization_accepted_move_limit': max_accepted_moves,
+        'guard_limit_reached': guard_limit_reached,
+        'guard_stop_reason': stop_reason,
         'candidate_count': len(candidates),
         'accepted_optimization_moves': len(accepted_changes),
-        'rejected_optimization_moves': len(rejected_changes) + max(0, len(candidates) - candidate_limit),
+        'rejected_optimization_moves': len(rejected_changes) + deferred_candidates,
         'accepted_turf_optimization_moves': len(accepted_changes),
-        'rejected_turf_optimization_moves': len(rejected_changes) + max(0, len(candidates) - candidate_limit),
+        'rejected_turf_optimization_moves': len(rejected_changes) + deferred_candidates,
         'total_scheduled_games': final_hard['total_scheduled_games'],
         'teams_missing_weekly_games': final_hard['teams_missing_weekly_games'],
         'teams_below_expected_season_game_count': final_hard['teams_below_expected_season_game_count'],
@@ -24298,8 +24456,21 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
         'rejected_moves_by_reason': rejected_by_reason,
         'score_after': current_score,
     }
+    if guard_limit_reached:
+        summary['partial_diagnostics_message'] = f'Optimization stopped after reaching guard limit: {stop_reason}.'
     if candidates and not accepted_changes:
-        summary['no_safe_moves_message'] = f'No safe turf optimization moves were found. {len(candidates)} turf candidates evaluated, 0 accepted, {summary["rejected_optimization_moves"]} rejected.'
+        summary['no_safe_moves_message'] = f'No safe turf optimization moves were found. {candidates_evaluated} turf candidates evaluated, 0 accepted, {summary["rejected_optimization_moves"]} rejected.'
+
+    logger.info(
+        'turf_optimizer_end status=completed stop_reason=%s candidates_generated=%s candidates_evaluated=%s accepted_moves=%s rejected_moves=%s elapsed_seconds=%.3f best_score=%s',
+        stop_reason,
+        len(candidates),
+        candidates_evaluated,
+        len(accepted_changes),
+        summary['rejected_optimization_moves'],
+        _elapsed_seconds(),
+        current_score,
+    )
 
     return {
         'ran': True,
