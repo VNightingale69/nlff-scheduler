@@ -23737,21 +23737,39 @@ def repair_same_community_home_fields(db: Session, season_id: uuid.UUID) -> dict
 
 
 def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize_same_community_home: bool = True, repair_double_headers: bool = True, reduce_repeat_matchups: bool = False, preserve_two_location_limit: bool = True, include_manual_edits: bool = False) -> dict[str, object]:
-    """Evaluate real post-generation optimization move/swap candidates.
+    """Preview/apply a global turf-stadium utilization pass.
 
-    This pass intentionally reads and mutates the saved Game rows that power the
-    Manual Schedule Builder and normal export. Preview callers roll the session
-    back after reading the mutated rows; apply callers commit explicitly.
+    This post-generation optimizer is deliberately turf-only: it considers only
+    scheduled games currently assigned to configured turf stadium hosts and only
+    generated turf slots at configured turf stadium hosts.  It does not perform
+    broad grass/park, matchup-diversity, host-equity, weekly-balance, or season
+    reshuffling repairs; those concerns are treated as hard-rule/quality guards
+    that may reject a turf move, not as optimization goals for this pass.
     """
-    primary_host_by_org = _primary_host_by_org(db)
     scheduled_games = db.query(Game).join(Game.status).filter(
         Game.season_id == season_id,
         func.lower(GameStatus.code) != 'unscheduled',
     ).order_by(Game.game_date, Game.kickoff_time, Game.id).all()
-    scheduled_game_ids = {g.id for g in scheduled_games}
     all_slots = db.query(GameSlot).filter(
         or_(GameSlot.season_id == season_id, GameSlot.week_id.in_(db.query(Week.id).filter(Week.season_id == season_id)))
     ).order_by(GameSlot.slot_date, GameSlot.start_time, GameSlot.id).all()
+
+    host_cache: dict[uuid.UUID, HostLocation | None] = {}
+    field_cache: dict[uuid.UUID, FieldInstance | None] = {}
+
+    def _host_for_slot(slot: GameSlot | None) -> HostLocation | None:
+        if not slot or not slot.host_location_id:
+            return None
+        if slot.host_location_id not in host_cache:
+            host_cache[slot.host_location_id] = slot.host_location or db.get(HostLocation, slot.host_location_id)
+        return host_cache[slot.host_location_id]
+
+    def _field_for_slot(slot: GameSlot | None) -> FieldInstance | None:
+        if not slot or not slot.field_instance_id:
+            return None
+        if slot.field_instance_id not in field_cache:
+            field_cache[slot.field_instance_id] = slot.field_instance or db.get(FieldInstance, slot.field_instance_id)
+        return field_cache[slot.field_instance_id]
 
     def _slot_for(g: Game) -> GameSlot | None:
         return _optimization_exact_slot_for_game(db, g)
@@ -23763,6 +23781,11 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
         parsed = _minutes_from_time(t)
         return parsed if parsed is not None else 24 * 60
 
+    def _time_from_minutes(value: int | None) -> str | None:
+        if value is None or value >= 24 * 60:
+            return None
+        return f'{value // 60:02d}:{value % 60:02d}:00'
+
     def _field_size_for_game(g: Game) -> str | None:
         return _normalize_field_size(_game_required_field_type(g))
 
@@ -23770,17 +23793,28 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
         return _normalize_field_size(_slot_field_type(slot))
 
     def _slot_is_turf(slot: GameSlot | None) -> bool:
+        return bool(slot and _is_turf_stadium_host(_host_for_slot(slot)))
+
+    def _game_is_turf(g: Game) -> bool:
+        return _slot_is_turf(slots_by_game_id.get(g.id))
+
+    def _standard_turf_label_valid(slot: GameSlot | None) -> bool:
         if not slot:
             return False
-        host = slot.host_location or (db.get(HostLocation, slot.host_location_id) if slot.host_location_id else None)
-        return bool(getattr(slot, 'turf_wave_id', None) or (host and _is_turf_stadium_host(host)))
+        if not _slot_is_turf(slot):
+            return True
+        label = _field_export_display_label(slot, _field_for_slot(slot), db)
+        return label in STANDARD_TURF_FIELD_SLOT_SET
 
-    def _compatible(g: Game, slot: GameSlot | None) -> bool:
+    def _slot_matches_game_size(g: Game, slot: GameSlot | None) -> bool:
         if not slot or not slot.slot_date or not slot.start_time or not slot.field_instance_id or not slot.host_location_id:
             return False
         required = _field_size_for_game(g)
         actual = _field_size_for_slot(slot)
         return not required or not actual or required == actual
+
+    def _compatible(g: Game, slot: GameSlot | None) -> bool:
+        return bool(slot and _slot_is_turf(slot) and _slot_matches_game_size(g, slot) and _standard_turf_label_valid(slot))
 
     def _occupied_slot_ids(excluding: set[uuid.UUID] | None = None) -> set[uuid.UUID]:
         excluding = excluding or set()
@@ -23793,9 +23827,75 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
                 occupied.add(slot.id)
         return occupied
 
-    def _find_open_slots_for_game(g: Game) -> list[GameSlot]:
-        occupied = _occupied_slot_ids({g.id})
-        return [slot for slot in all_slots if slot.id not in occupied and _compatible(g, slot)]
+    def _block_counts() -> dict[tuple[uuid.UUID, date, time], int]:
+        blocks: dict[tuple[uuid.UUID, date, time], int] = {}
+        for g in scheduled_games:
+            slot = slots_by_game_id.get(g.id)
+            if not slot or not _slot_is_turf(slot) or not g.game_date or not g.kickoff_time or not slot.host_location_id:
+                continue
+            key = (slot.host_location_id, g.game_date, g.kickoff_time)
+            blocks[key] = blocks.get(key, 0) + 1
+        return blocks
+
+    def _turf_metrics() -> dict[str, object]:
+        blocks = _block_counts()
+        latest_minutes: int | None = None
+        per_stadium_blocks: dict[uuid.UUID, dict[tuple[date, time], int]] = {}
+        for (host_id, game_date_value, start), count in blocks.items():
+            per_stadium_blocks.setdefault(host_id, {})[(game_date_value, start)] = count
+            start_minutes = _minutes(start)
+            latest_minutes = start_minutes if latest_minutes is None else max(latest_minutes, start_minutes)
+        per_stadium = []
+        for host_id, stadium_blocks in sorted(per_stadium_blocks.items(), key=lambda item: str(item[0])):
+            host = host_cache.get(host_id) or db.get(HostLocation, host_id)
+            latest = max((_minutes(start) for (_date_value, start) in stadium_blocks), default=None)
+            per_stadium.append({
+                'host_location_id': str(host_id),
+                'host_location_name': host.name if host else None,
+                'turf_active_time_blocks': len(stadium_blocks),
+                'turf_single_game_blocks': sum(1 for count in stadium_blocks.values() if count == 1),
+                'turf_two_game_blocks': sum(1 for count in stadium_blocks.values() if count == 2),
+                'latest_turf_start_time': _time_from_minutes(latest),
+            })
+        return {
+            'total_turf_active_time_blocks': len(blocks),
+            'total_turf_single_game_blocks': sum(1 for count in blocks.values() if count == 1),
+            'total_turf_two_game_blocks': sum(1 for count in blocks.values() if count == 2),
+            'latest_turf_start_time': _time_from_minutes(latest_minutes),
+            'latest_turf_start_minutes': latest_minutes if latest_minutes is not None else 0,
+            'per_stadium': per_stadium,
+        }
+
+    def _hard_validation() -> dict[str, object]:
+        errors: list[str] = []
+        team_time: dict[tuple[uuid.UUID, date, time], uuid.UUID] = {}
+        field_time: dict[tuple[uuid.UUID | None, date, time], uuid.UUID] = {}
+        for g in scheduled_games:
+            slot = slots_by_game_id.get(g.id)
+            if not slot:
+                errors.append(f'no compatible field slot for game {g.id}')
+                continue
+            if not g.game_date or not g.kickoff_time:
+                errors.append(f'game {g.id} missing date/time')
+                continue
+            if slot.host_location_id != g.host_location_id or slot.field_instance_id != g.field_instance_id or slot.slot_date != g.game_date or slot.start_time != g.kickoff_time:
+                errors.append(f'invalid field/location relationship for game {g.id}')
+            if not _slot_matches_game_size(g, slot):
+                errors.append(f'would create invalid field/location relationship for game {g.id}')
+            if g.home_team_id == g.away_team_id:
+                errors.append(f'invalid team/division relationship for game {g.id}')
+            if _slot_is_turf(slot) and not _standard_turf_label_valid(slot):
+                errors.append(f'turf stadium label outside standard slots for game {g.id}')
+            for tid in (g.home_team_id, g.away_team_id):
+                key = (tid, g.game_date, g.kickoff_time)
+                if key in team_time:
+                    errors.append(f'team time conflict: team {tid} in games {team_time[key]} and {g.id}')
+                team_time[key] = g.id
+            key = (slot.field_instance_id, g.game_date, g.kickoff_time)
+            if key in field_time:
+                errors.append(f'duplicate exact field slot: games {field_time[key]} and {g.id}')
+            field_time[key] = g.id
+        return {'valid': not errors, 'errors': errors}
 
     def _doubleheader_issue_count() -> int:
         issues = 0
@@ -23819,78 +23919,65 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
         return issues
 
     def _host_home_issue_count() -> int:
-        if not optimize_same_community_home:
-            return 0
         count = 0
         for g in scheduled_games:
-            host = db.get(HostLocation, g.host_location_id) if g.host_location_id else None
+            slot = slots_by_game_id.get(g.id)
+            host = _host_for_slot(slot)
             home = g.home_team
             if host and home and host.organization_id == home.organization_id:
                 continue
-            if home and primary_host_by_org.get(home.organization_id):
-                count += 1
+            if home:
+                owned_hosts = db.query(HostLocation).filter(
+                    HostLocation.organization_id == home.organization_id,
+                    HostLocation.is_active.is_(True),
+                ).all()
+                if any(_is_turf_stadium_host(candidate_host) for candidate_host in owned_hosts):
+                    count += 1
         return count
 
-    def _turf_block_metrics() -> dict[str, object]:
-        blocks: dict[tuple[uuid.UUID | None, date | None, time | None], int] = {}
-        latest: time | None = None
-        for g in scheduled_games:
-            slot = slots_by_game_id.get(g.id)
-            if not _slot_is_turf(slot):
-                continue
-            key = (slot.host_location_id, g.game_date, g.kickoff_time)
-            blocks[key] = blocks.get(key, 0) + 1
-            if g.kickoff_time and (latest is None or g.kickoff_time > latest):
-                latest = g.kickoff_time
+    def _hard_metric_snapshot() -> dict[str, int]:
+        simple = _hard_validation()
+        try:
+            final_validation = _build_final_schedule_validation_result(db, season_id)
+        except Exception:
+            final_validation = {}
         return {
-            'active': len(blocks),
-            'single': sum(1 for count in blocks.values() if count == 1),
-            'two': sum(1 for count in blocks.values() if count == 2),
-            'latest_minutes': _minutes(latest),
+            'total_scheduled_games': len(scheduled_games),
+            'teams_missing_weekly_games': int(final_validation.get('required_games_missing_count') or 0),
+            'teams_below_expected_season_game_count': int(final_validation.get('season_game_count_failure_count') or 0),
+            'team_time_conflicts': sum(1 for error in simple['errors'] if 'team time conflict' in str(error).lower()),
+            'duplicate_exact_field_slot_conflicts': sum(1 for error in simple['errors'] if 'duplicate exact field slot' in str(error).lower()),
         }
 
-    def _hard_validation() -> dict[str, object]:
-        errors: list[str] = []
-        team_time: dict[tuple[uuid.UUID, date, time], uuid.UUID] = {}
-        field_time: dict[tuple[uuid.UUID | None, date, time], uuid.UUID] = {}
-        for g in scheduled_games:
-            slot = slots_by_game_id.get(g.id)
-            if not slot:
-                errors.append(f'no compatible field slot for game {g.id}')
-                continue
-            if not _compatible(g, slot):
-                errors.append(f'would create invalid field/location relationship for game {g.id}')
-            if g.home_team_id == g.away_team_id:
-                errors.append(f'duplicate/same community matchup for game {g.id}')
-            if not g.game_date or not g.kickoff_time:
-                errors.append(f'game {g.id} missing date/time')
-                continue
-            for tid in (g.home_team_id, g.away_team_id):
-                key = (tid, g.game_date, g.kickoff_time)
-                if key in team_time:
-                    errors.append(f'team time conflict: team {tid} in games {team_time[key]} and {g.id}')
-                team_time[key] = g.id
-            key = (slot.field_instance_id, g.game_date, g.kickoff_time)
-            if key in field_time:
-                errors.append(f'duplicate exact field slot: games {field_time[key]} and {g.id}')
-            field_time[key] = g.id
-        return {'valid': not errors, 'errors': errors}
+    def _hard_metrics_worsened(before: dict[str, int], after: dict[str, int]) -> str | None:
+        for key in ('total_scheduled_games', 'teams_missing_weekly_games', 'teams_below_expected_season_game_count', 'team_time_conflicts', 'duplicate_exact_field_slot_conflicts'):
+            if key == 'total_scheduled_games':
+                if int(after.get(key, 0)) < int(before.get(key, 0)):
+                    return key
+            elif int(after.get(key, 0)) > int(before.get(key, 0)):
+                return key
+        return None
 
     def _score() -> int:
-        turf = _turf_block_metrics()
+        turf = _turf_metrics()
         hard = _hard_validation()
+        latest = int(turf['latest_turf_start_minutes'] or 0)
         return (
-            int(turf['two']) * 35
-            - int(turf['single']) * 45
-            - max(0, int(turf['latest_minutes']) - (15 * 60)) // 5
-            - _doubleheader_issue_count() * 100
-            - _host_home_issue_count() * 60
-            - len(hard['errors']) * 10_000
+            int(turf['total_turf_two_game_blocks']) * 120
+            - int(turf['total_turf_active_time_blocks']) * 60
+            - int(turf['total_turf_single_game_blocks']) * 100
+            - max(0, latest - (15 * 60)) // 5
+            - _doubleheader_issue_count() * 10_000
+            - _host_home_issue_count() * 10_000
+            - len(hard['errors']) * 100_000
         )
 
-    def _candidate_detail(action: dict[str, object], reason: str | None = None, accepted: bool = False, before_score: int | None = None, after_score: int | None = None) -> dict[str, object]:
+    def _slot_label(slot: GameSlot | None) -> str | None:
+        return _field_export_display_label(slot, _field_for_slot(slot), db) if slot else None
+
+    def _candidate_detail(action: dict[str, object], reason: str | None = None, accepted: bool = False, before_score: int | None = None, after_score: int | None = None, metric_improved: str | None = None) -> dict[str, object]:
         detail = {k: (str(v) if isinstance(v, uuid.UUID) else v) for k, v in action.items() if k != 'apply'}
-        detail.update({'accepted': accepted})
+        detail['accepted'] = accepted
         if reason:
             detail['reason'] = reason
         if before_score is not None:
@@ -23898,25 +23985,51 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
         if after_score is not None:
             detail['after_score'] = after_score
             detail['score_delta'] = after_score - (before_score or 0)
+        if metric_improved:
+            detail['turf_metric_improved'] = metric_improved
         return detail
 
     def _move_action(g: Game, target: GameSlot, opportunity: str) -> dict[str, object]:
         source = slots_by_game_id.get(g.id)
+        source_host = _host_for_slot(source)
+        target_host = _host_for_slot(target)
         return {
             'type': 'move',
             'opportunity': opportunity,
             'game_id': g.id,
             'from_slot_id': source.id if source else None,
             'to_slot_id': target.id,
-            'from_date': g.game_date.isoformat() if g.game_date else None,
-            'from_time': g.kickoff_time.isoformat() if g.kickoff_time else None,
-            'to_date': target.slot_date.isoformat() if target.slot_date else None,
-            'to_time': target.start_time.isoformat() if target.start_time else None,
+            'turf_stadium_affected': target_host.name if target_host else None,
+            'old_date': g.game_date.isoformat() if g.game_date else None,
+            'old_time': g.kickoff_time.isoformat() if g.kickoff_time else None,
+            'old_location': source_host.name if source_host else None,
+            'old_field': _slot_label(source),
+            'new_date': target.slot_date.isoformat() if target.slot_date else None,
+            'new_time': target.start_time.isoformat() if target.start_time else None,
+            'new_location': target_host.name if target_host else None,
+            'new_field': _slot_label(target),
             'apply': lambda: _apply_move(g, target),
         }
 
     def _swap_action(a: Game, b: Game, opportunity: str) -> dict[str, object]:
-        return {'type': 'swap', 'opportunity': opportunity, 'game_id': a.id, 'swap_game_id': b.id, 'apply': lambda: _apply_swap(a, b)}
+        sa, sb = slots_by_game_id.get(a.id), slots_by_game_id.get(b.id)
+        host = _host_for_slot(sa) or _host_for_slot(sb)
+        return {
+            'type': 'swap',
+            'opportunity': opportunity,
+            'game_id': a.id,
+            'swap_game_id': b.id,
+            'turf_stadium_affected': host.name if host else None,
+            'old_date': a.game_date.isoformat() if a.game_date else None,
+            'old_time': a.kickoff_time.isoformat() if a.kickoff_time else None,
+            'old_location': (_host_for_slot(sa).name if _host_for_slot(sa) else None),
+            'old_field': _slot_label(sa),
+            'new_date': b.game_date.isoformat() if b.game_date else None,
+            'new_time': b.kickoff_time.isoformat() if b.kickoff_time else None,
+            'new_location': (_host_for_slot(sb).name if _host_for_slot(sb) else None),
+            'new_field': _slot_label(sb),
+            'apply': lambda: _apply_swap(a, b),
+        }
 
     def _apply_move(g: Game, target: GameSlot) -> callable:
         source = slots_by_game_id.get(g.id)
@@ -23942,7 +24055,7 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
 
     def _apply_swap(a: Game, b: Game) -> callable:
         sa, sb = slots_by_game_id.get(a.id), slots_by_game_id.get(b.id)
-        snapshot = (sa, sb, a.week_id, a.host_location_id, a.field_instance_id, a.game_date, a.kickoff_time, b.week_id, b.host_location_id, b.field_instance_id, b.game_date, b.kickoff_time)
+        snapshot = (sa, sb, a.week_id, a.host_location_id, a.field_instance_id, a.game_date, a.kickoff_time, b.week_id, b.host_location_id, b.field_instance_id, b.game_date, b.kickoff_time, sa.assigned_game_id if sa else None, sb.assigned_game_id if sb else None)
         if not sa or not sb:
             return lambda: None
         sa.assigned_game_id, sb.assigned_game_id = b.id, a.id
@@ -23950,160 +24063,243 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
         _optimization_sync_game_to_slot(b, sa)
         slots_by_game_id[a.id], slots_by_game_id[b.id] = sb, sa
         def undo() -> None:
-            old_sa, old_sb, awe, aho, afi, ad, at, bwe, bho, bfi, bd, bt = snapshot
-            old_sa.assigned_game_id, old_sb.assigned_game_id = a.id, b.id
+            old_sa, old_sb, awe, aho, afi, ad, at, bwe, bho, bfi, bd, bt, sa_game, sb_game = snapshot
+            old_sa.assigned_game_id, old_sb.assigned_game_id = sa_game, sb_game
             a.week_id, a.host_location_id, a.field_instance_id, a.game_date, a.kickoff_time = awe, aho, afi, ad, at
             b.week_id, b.host_location_id, b.field_instance_id, b.game_date, b.kickoff_time = bwe, bho, bfi, bd, bt
             slots_by_game_id[a.id], slots_by_game_id[b.id] = old_sa, old_sb
         return undo
 
+    before_turf_metrics = _turf_metrics()
+    before_hard_metrics = _hard_metric_snapshot()
+    before_doubleheaders = _doubleheader_issue_count()
+    before_host_home = _host_home_issue_count()
     baseline_opportunities: list[str] = []
-    if _doubleheader_issue_count() > 0:
-        baseline_opportunities.append('doubleheader issues detected')
-    turf_baseline = _turf_block_metrics()
-    if int(turf_baseline['single']) > 0:
+    if int(before_turf_metrics['total_turf_single_game_blocks']) > 0:
         baseline_opportunities.append('turf single-game blocks detected')
-    if int(turf_baseline['latest_minutes']) > 15 * 60:
+    if int(before_turf_metrics['total_turf_active_time_blocks']) > 0:
+        baseline_opportunities.append('turf active time blocks detected')
+    if int(before_turf_metrics['latest_turf_start_minutes'] or 0) > 15 * 60:
         baseline_opportunities.append('late turf starts detected')
-    if _host_home_issue_count() > 0:
-        baseline_opportunities.append('host-home exceptions detected')
     if _hard_validation()['errors']:
         baseline_opportunities.append('hard validation conflicts detected')
 
     candidates: list[dict[str, object]] = []
     no_candidate_reasons: set[str] = set()
-    for g in scheduled_games:
+    turf_games = [g for g in scheduled_games if _game_is_turf(g)]
+    turf_slots = [slot for slot in all_slots if _slot_is_turf(slot)]
+    occupied_without: dict[uuid.UUID, set[uuid.UUID]] = {}
+    blocks = _block_counts()
+
+    for g in turf_games:
         source = slots_by_game_id.get(g.id)
         if g.id in locked_game_ids:
             candidates.append({'type': 'move', 'opportunity': 'manual edit lock', 'game_id': g.id, 'locked': True})
             continue
-        open_slots = _find_open_slots_for_game(g)
+        if not source:
+            no_candidate_reasons.add('Scheduled turf game has no matching turf slot.')
+            continue
+        occupied_without[g.id] = _occupied_slot_ids({g.id})
+        source_count = blocks.get((source.host_location_id, g.game_date, g.kickoff_time), 0) if source.host_location_id and g.game_date and g.kickoff_time else 0
+        open_slots = [slot for slot in turf_slots if slot.id not in occupied_without[g.id] and slot.week_id == g.week_id and _compatible(g, slot)]
         if not open_slots:
-            no_candidate_reasons.add('No open compatible slots available.')
-        host_home_target = primary_host_by_org.get(getattr(g.home_team, 'organization_id', None)) if optimize_same_community_home and g.home_team else None
-        for target in open_slots[:40]:
-            if source and target.id == source.id:
+            no_candidate_reasons.add('No compatible turf slot.')
+        for target in open_slots[:80]:
+            if target.id == source.id:
                 continue
-            opportunity = 'schedule compression'
-            if source and _slot_is_turf(source) and _slot_is_turf(target) and _minutes(target.start_time) < _minutes(source.start_time):
-                opportunity = 'turf compression'
-            if host_home_target and target.host_location_id == host_home_target and g.host_location_id != host_home_target:
-                opportunity = 'host-home repair'
-            if source and source.host_location_id == target.host_location_id and abs(_minutes(target.start_time) - _minutes(source.start_time)) == GAME_DURATION_MINUTES:
-                opportunity = 'doubleheader adjacency probe'
-            if opportunity != 'schedule compression' or (source and target.slot_date == source.slot_date and _minutes(target.start_time) < _minutes(source.start_time)):
-                candidates.append(_move_action(g, target, opportunity))
-    for idx, a in enumerate(scheduled_games):
+            target_count = blocks.get((target.host_location_id, target.slot_date, target.start_time), 0) if target.host_location_id and target.slot_date and target.start_time else 0
+            if target_count <= 0 and _minutes(target.start_time) >= _minutes(source.start_time):
+                continue
+            if target.host_location_id != source.host_location_id and target.slot_date != source.slot_date:
+                continue
+            opportunity = 'turf host-time compression'
+            if source_count == 1 and target_count > 0:
+                opportunity = 'move isolated turf game'
+            if target_count == 1:
+                opportunity = 'pair turf games'
+            if _minutes(target.start_time) < _minutes(source.start_time):
+                opportunity = 'move late turf game earlier'
+            candidates.append(_move_action(g, target, opportunity))
+
+    for idx, a in enumerate(turf_games):
         if a.id in locked_game_ids:
             continue
         sa = slots_by_game_id.get(a.id)
         if not sa:
             continue
-        for b in scheduled_games[idx + 1:idx + 61]:
+        for b in turf_games[idx + 1:idx + 121]:
             if b.id in locked_game_ids or a.week_id != b.week_id:
                 continue
             sb = slots_by_game_id.get(b.id)
             if not sb or not _compatible(a, sb) or not _compatible(b, sa):
                 continue
-            opportunity = 'same-week swap'
-            if _slot_is_turf(sa) or _slot_is_turf(sb):
-                opportunity = 'turf utilization swap'
-            if (a.home_team_id in {b.home_team_id, b.away_team_id} or a.away_team_id in {b.home_team_id, b.away_team_id}):
-                opportunity = 'doubleheader repair swap'
-            candidates.append(_swap_action(a, b, opportunity))
+            same_date = sa.slot_date == sb.slot_date
+            same_week = a.week_id == b.week_id
+            if not same_date and not same_week:
+                continue
+            if sa.host_location_id != sb.host_location_id and (sa.slot_date != sb.slot_date):
+                continue
+            candidates.append(_swap_action(a, b, 'turf utilization swap'))
 
     accepted_changes: list[dict[str, object]] = []
     rejected_changes: list[dict[str, object]] = []
     rejected_by_reason: dict[str, int] = {}
-    candidate_limit = 500
+    candidate_limit = 750
     current_score = _score()
+
+    def _reject(action: dict[str, object], reason: str, before_score: int, after_score: int | None = None) -> None:
+        rejected_by_reason[reason] = rejected_by_reason.get(reason, 0) + 1
+        rejected_changes.append(_candidate_detail(action, reason=reason, before_score=before_score, after_score=current_score if after_score is None else after_score))
+
     for action in candidates[:candidate_limit]:
         if action.get('locked'):
-            reason = 'manually edited game is locked'
-            rejected_by_reason[reason] = rejected_by_reason.get(reason, 0) + 1
-            rejected_changes.append(_candidate_detail(action, reason=reason, before_score=current_score, after_score=current_score))
+            _reject(action, 'manually edited game is locked', current_score, current_score)
             continue
+        before_score = current_score
+        before_turf = _turf_metrics()
+        before_hard = _hard_metric_snapshot()
+        before_dh = _doubleheader_issue_count()
+        before_home = _host_home_issue_count()
         target_id = action.get('to_slot_id')
         if target_id and any(slot.id == target_id for gid, slot in slots_by_game_id.items() if gid != action.get('game_id')):
-            reason = 'no compatible field slot'
-            rejected_by_reason[reason] = rejected_by_reason.get(reason, 0) + 1
-            rejected_changes.append(_candidate_detail(action, reason=reason, before_score=current_score, after_score=current_score))
+            _reject(action, 'no compatible turf slot', before_score, before_score)
             continue
         if action.get('type') == 'swap':
             game_a = db.get(Game, action.get('game_id')) if action.get('game_id') else None
             game_b = db.get(Game, action.get('swap_game_id')) if action.get('swap_game_id') else None
             if not game_a or not game_b or not slots_by_game_id.get(game_a.id) or not slots_by_game_id.get(game_b.id):
-                reason = 'no compatible field slot'
-                rejected_by_reason[reason] = rejected_by_reason.get(reason, 0) + 1
-                rejected_changes.append(_candidate_detail(action, reason=reason, before_score=current_score, after_score=current_score))
+                _reject(action, 'no compatible turf slot', before_score, before_score)
                 continue
-        before_dh = _doubleheader_issue_count()
-        before_score = current_score
         undo = action['apply']()
         db.flush()
         validation = _hard_validation()
+        after_hard = _hard_metric_snapshot()
+        after_turf = _turf_metrics()
         after_dh = _doubleheader_issue_count()
+        after_home = _host_home_issue_count()
         after_score = _score()
         reason = None
+        metric_improved = None
+        worsened_metric = _hard_metrics_worsened(before_hard, after_hard)
         if not validation['valid']:
             first = str((validation['errors'] or ['hard validation failure'])[0]).lower()
             if 'team time conflict' in first:
-                reason = 'team time conflict'
+                reason = 'team-time conflict'
             elif 'duplicate exact field slot' in first:
-                reason = 'duplicate exact field slot'
-            elif 'invalid field' in first or 'relationship' in first:
-                reason = 'would create invalid field/location relationship'
+                reason = 'duplicate field-slot conflict'
+            elif 'turf stadium label' in first:
+                reason = 'invalid turf field label'
             else:
-                reason = validation['errors'][0]
+                reason = 'hard-rule metric worsened'
+        elif worsened_metric:
+            reason = f'hard-rule metric worsened: {worsened_metric}'
         elif after_dh > before_dh:
             reason = 'would split doubleheader'
+        elif after_home > before_home:
+            reason = 'would worsen host-home placement'
         elif after_score <= before_score:
-            reason = 'does not improve score'
+            reason = 'did not improve turf score'
+        else:
+            if int(after_turf['total_turf_single_game_blocks']) < int(before_turf['total_turf_single_game_blocks']):
+                metric_improved = 'total turf single-game blocks reduced'
+            elif int(after_turf['total_turf_active_time_blocks']) < int(before_turf['total_turf_active_time_blocks']):
+                metric_improved = 'total turf active time blocks reduced'
+            elif int(after_turf['total_turf_two_game_blocks']) > int(before_turf['total_turf_two_game_blocks']):
+                metric_improved = 'total turf two-game blocks increased'
+            elif int(after_turf['latest_turf_start_minutes'] or 0) < int(before_turf['latest_turf_start_minutes'] or 0):
+                metric_improved = 'latest turf start time improved'
+            else:
+                metric_improved = 'global turf utilization score improved'
         if reason:
             undo()
             db.flush()
-            rejected_by_reason[reason] = rejected_by_reason.get(reason, 0) + 1
-            rejected_changes.append(_candidate_detail(action, reason=reason, before_score=before_score, after_score=after_score))
+            _reject(action, reason, before_score, after_score)
         else:
             current_score = after_score
-            accepted_changes.append(_candidate_detail(action, accepted=True, before_score=before_score, after_score=after_score))
+            accepted_changes.append(_candidate_detail(action, accepted=True, before_score=before_score, after_score=after_score, metric_improved=metric_improved))
 
     if len(candidates) > candidate_limit:
         reason = f'candidate evaluation limit reached; {len(candidates) - candidate_limit} candidates deferred'
         rejected_by_reason[reason] = rejected_by_reason.get(reason, 0) + (len(candidates) - candidate_limit)
 
     if not candidates:
-        if locked_game_ids and len(locked_game_ids) == len(scheduled_games):
-            no_candidate_reasons.add('All games are locked due to manual edits.')
-        if not any(_slot_is_turf(slots_by_game_id.get(g.id)) for g in scheduled_games):
-            no_candidate_reasons.add('No turf games available for compression.')
-        if not baseline_opportunities:
-            no_candidate_reasons.update({'No doubleheader issues detected.', 'No host-home exceptions detected.'})
+        if not turf_games:
+            no_candidate_reasons.add('No scheduled games are assigned to configured turf stadium hosts.')
+        if not turf_slots:
+            no_candidate_reasons.add('No configured turf stadium slots are available.')
+        if locked_game_ids and all(g.id in locked_game_ids for g in turf_games):
+            no_candidate_reasons.add('All turf games are locked due to manual edits.')
         if not no_candidate_reasons:
-            no_candidate_reasons.add('No optimization candidates were generated.')
+            no_candidate_reasons.add('No turf optimization candidates were generated.')
 
     final_validation = _hard_validation()
+    final_hard = _hard_metric_snapshot()
+    final_worsened = _hard_metrics_worsened(before_hard_metrics, final_hard)
+    rollback_triggered = False
+    warnings: list[str] = []
+    if final_worsened:
+        rollback_triggered = True
+        warnings.append(f'Optimized preview rejected: hard-rule metric worsened: {final_worsened}.')
+        raise RuntimeError(warnings[-1])
+
+    after_turf_metrics = _turf_metrics()
+    per_stadium_before = {row['host_location_id']: row for row in before_turf_metrics['per_stadium']}
+    per_stadium_after = {row['host_location_id']: row for row in after_turf_metrics['per_stadium']}
+    per_stadium_metrics = []
+    for host_id in sorted(set(per_stadium_before) | set(per_stadium_after)):
+        before_row = per_stadium_before.get(host_id, {'host_location_id': host_id, 'host_location_name': None, 'turf_active_time_blocks': 0, 'turf_single_game_blocks': 0, 'turf_two_game_blocks': 0, 'latest_turf_start_time': None})
+        after_row = per_stadium_after.get(host_id, {'host_location_id': host_id, 'host_location_name': before_row.get('host_location_name'), 'turf_active_time_blocks': 0, 'turf_single_game_blocks': 0, 'turf_two_game_blocks': 0, 'latest_turf_start_time': None})
+        per_stadium_metrics.append({
+            'host_location_id': host_id,
+            'host_location_name': after_row.get('host_location_name') or before_row.get('host_location_name'),
+            'turf_active_time_blocks_before': before_row.get('turf_active_time_blocks'),
+            'turf_active_time_blocks_after': after_row.get('turf_active_time_blocks'),
+            'turf_single_game_blocks_before': before_row.get('turf_single_game_blocks'),
+            'turf_single_game_blocks_after': after_row.get('turf_single_game_blocks'),
+            'turf_two_game_blocks_before': before_row.get('turf_two_game_blocks'),
+            'turf_two_game_blocks_after': after_row.get('turf_two_game_blocks'),
+            'latest_turf_start_time_before': before_row.get('latest_turf_start_time'),
+            'latest_turf_start_time_after': after_row.get('latest_turf_start_time'),
+        })
+
     summary = {
         'games_reviewed': len(scheduled_games),
+        'optimization_scope': 'GLOBAL_TURF_STADIUM_UTILIZATION_ONLY',
         'optimization_candidates_generated': len(candidates),
         'candidate_count': len(candidates),
         'accepted_optimization_moves': len(accepted_changes),
         'rejected_optimization_moves': len(rejected_changes) + max(0, len(candidates) - candidate_limit),
-        'same_community_violations_found': _host_home_issue_count(),
-        'same_community_repairs_proposed': sum(1 for c in candidates if c.get('opportunity') == 'host-home repair'),
-        'same_community_repairs_committed': sum(1 for c in accepted_changes if c.get('opportunity') == 'host-home repair'),
-        'double_header_violations_found': _doubleheader_issue_count(),
-        'double_header_repairs_proposed': sum(1 for c in candidates if 'doubleheader' in str(c.get('opportunity') or '')),
-        'double_header_repairs_committed': sum(1 for c in accepted_changes if 'doubleheader' in str(c.get('opportunity') or '')),
+        'accepted_turf_optimization_moves': len(accepted_changes),
+        'rejected_turf_optimization_moves': len(rejected_changes) + max(0, len(candidates) - candidate_limit),
+        'total_scheduled_games': final_hard['total_scheduled_games'],
+        'teams_missing_weekly_games': final_hard['teams_missing_weekly_games'],
+        'teams_below_expected_season_game_count': final_hard['teams_below_expected_season_game_count'],
+        'team_time_conflicts': final_hard['team_time_conflicts'],
+        'duplicate_exact_field_slot_conflicts': final_hard['duplicate_exact_field_slot_conflicts'],
+        'total_turf_active_time_blocks_before': before_turf_metrics['total_turf_active_time_blocks'],
+        'total_turf_active_time_blocks_after': after_turf_metrics['total_turf_active_time_blocks'],
+        'total_turf_single_game_blocks_before': before_turf_metrics['total_turf_single_game_blocks'],
+        'total_turf_single_game_blocks_after': after_turf_metrics['total_turf_single_game_blocks'],
+        'total_turf_two_game_blocks_before': before_turf_metrics['total_turf_two_game_blocks'],
+        'total_turf_two_game_blocks_after': after_turf_metrics['total_turf_two_game_blocks'],
+        'latest_turf_start_time_before': before_turf_metrics['latest_turf_start_time'],
+        'latest_turf_start_time_after': after_turf_metrics['latest_turf_start_time'],
+        'per_stadium_turf_metrics': per_stadium_metrics,
+        'same_community_violations_found': 0,
+        'same_community_repairs_proposed': 0,
+        'same_community_repairs_committed': 0,
+        'double_header_violations_found': before_doubleheaders,
+        'double_header_repairs_proposed': 0,
+        'double_header_repairs_committed': 0,
         'repairs_rejected': len(rejected_changes),
-        'no_candidates_message': 'No optimization candidates were generated.' if not candidates else None,
+        'no_candidates_message': 'No turf optimization candidates were generated.' if not candidates else None,
         'no_candidate_reasons': sorted(no_candidate_reasons),
         'baseline_opportunities': baseline_opportunities,
         'rejected_moves_by_reason': rejected_by_reason,
         'score_after': current_score,
     }
     if candidates and not accepted_changes:
-        summary['no_safe_moves_message'] = f'No safe optimization moves were found. {len(candidates)} candidate moves evaluated, 0 accepted, {summary["rejected_optimization_moves"]} rejected.'
+        summary['no_safe_moves_message'] = f'No safe turf optimization moves were found. {len(candidates)} turf candidates evaluated, 0 accepted, {summary["rejected_optimization_moves"]} rejected.'
 
     return {
         'ran': True,
@@ -24113,16 +24309,22 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
         'rejected_changes': rejected_changes,
         'rejected_moves_by_reason': rejected_by_reason,
         'remaining_violations': [{'reason': error} for error in final_validation.get('errors') or []],
+        'turf_optimization': {
+            'before': before_turf_metrics,
+            'after': after_turf_metrics,
+            'per_stadium': per_stadium_metrics,
+            'rollback_triggered': rollback_triggered,
+        },
         'post_schedule_repair': {
             'repairs_attempted': len(candidates),
             'repairs_committed': len(accepted_changes),
             'repairs_rejected': summary['rejected_optimization_moves'],
-            'rollback_triggered': False,
+            'rollback_triggered': rollback_triggered,
             'rejected_reasons': rejected_by_reason,
         },
-        'double_header': {'violations_found': summary['double_header_violations_found'], 'repairs_attempted': summary['double_header_repairs_proposed'], 'repairs_committed': summary['double_header_repairs_committed']},
-        'same_community_home': {'violations_found': summary['same_community_violations_found'], 'repairs_attempted': summary['same_community_repairs_proposed'], 'repairs_committed': summary['same_community_repairs_committed']},
-        'warnings': [],
+        'double_header': {'violations_found': before_doubleheaders, 'repairs_attempted': 0, 'repairs_committed': 0},
+        'same_community_home': {'violations_found': before_host_home, 'repairs_attempted': 0, 'repairs_committed': 0},
+        'warnings': warnings,
     }
 
 def _season_schedule_is_published(season: Season | None) -> bool:
