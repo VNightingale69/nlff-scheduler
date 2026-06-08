@@ -24483,7 +24483,10 @@ def schedule_management_conflicts(db: Session = Depends(get_db)):
 
 
 def require_scheduling_admin_only(current_user: User = Depends(get_current_user)) -> User:
-    role_name = str(getattr(getattr(current_user, 'role', None), 'name', '') or '').upper()
+    raw_role_name = str(getattr(getattr(current_user, 'role', None), 'name', '') or '')
+    role_name = normalize_role_name(raw_role_name)
+    if role_name not in {ROLE_LEAGUE_ADMIN, ROLE_COMMUNITY_ADMIN, ROLE_SCHEDULING_ADMIN}:
+        role_name = normalize_role_name(raw_role_name.upper())
     if role_name != ROLE_SCHEDULING_ADMIN:
         raise HTTPException(status_code=403, detail='Scheduling Administrator role required')
     return current_user
