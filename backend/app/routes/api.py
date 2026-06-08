@@ -1172,6 +1172,114 @@ def _validate_turf_component_labels(db: Session, rows: list[object]) -> dict[str
     diagnostics['affected_host_dates'] = sorted(affected_host_dates)
     return diagnostics
 
+
+def _build_field_label_surface_diagnostics(db: Session, rows: list[object], season_id: uuid.UUID | str | None = None) -> dict[str, object]:
+    diagnostics: dict[str, object] = {
+        'field_label_surface_validation_ran': True,
+        'grass_park_normalized_to_turf_label_count': 0,
+        'grass_park_normalized_to_turf_label_issues': [],
+        'turf_stadium_missing_standard_slot_count': 0,
+        'turf_stadium_missing_standard_slot_issues': [],
+        'turf_stadium_host_specific_label_count': 0,
+        'turf_stadium_host_specific_label_issues': [],
+        'hiller_park_treated_as_turf_count': 0,
+        'hiller_park_treated_as_turf_issues': [],
+        'duplicate_field_dropdown_option_count': 0,
+        'duplicate_field_dropdown_option_issues': [],
+        'wave_terminology_visible_count': 0,
+        'wave_terminology_visible_issues': [],
+    }
+    eligible_host_ids = _eligible_host_location_ids(db)
+    hosts = db.query(HostLocation).filter(HostLocation.id.in_(eligible_host_ids)).all() if eligible_host_ids else []
+    active_instances = db.query(FieldInstance).filter(FieldInstance.is_active.is_(True), FieldInstance.host_location_id.in_(eligible_host_ids)).all() if eligible_host_ids else []
+    instances_by_host: dict[uuid.UUID, list[FieldInstance]] = {}
+    for instance in active_instances:
+        instances_by_host.setdefault(instance.host_location_id, []).append(instance)
+
+    for host in hosts:
+        is_turf_surface = str(getattr(host, 'surface_type', '') or '').strip().upper() == 'TURF_STADIUM'
+        labels = [_field_export_display_label(None, instance, db) for instance in instances_by_host.get(host.id, [])]
+        label_counts: dict[str, int] = {}
+        for label in labels:
+            if label:
+                label_counts[label] = label_counts.get(label, 0) + 1
+        duplicates = [{'label': label, 'count': count} for label, count in label_counts.items() if count > 1]
+        if duplicates:
+            diagnostics['duplicate_field_dropdown_option_issues'].append({
+                'host_location_id': str(host.id),
+                'host_location_name': host.name,
+                'surface_type': host.surface_type,
+                'duplicates': duplicates,
+            })
+        if is_turf_surface:
+            if 'hiller' in str(host.name or '').lower():
+                diagnostics['hiller_park_treated_as_turf_issues'].append({
+                    'host_location_id': str(host.id),
+                    'host_location_name': host.name,
+                    'surface_type': host.surface_type,
+                    'specific_reason': 'Hiller Park should be configured as a grass field/park location, not a turf stadium.',
+                })
+            missing = [label for label in STANDARD_TURF_FIELD_SLOT_LABELS if label not in label_counts]
+            if missing:
+                diagnostics['turf_stadium_missing_standard_slot_issues'].append({
+                    'host_location_id': str(host.id),
+                    'host_location_name': host.name,
+                    'surface_type': host.surface_type,
+                    'missing_standard_turf_field_slots': missing,
+                })
+            host_specific = [label for label in label_counts if label and label not in STANDARD_TURF_FIELD_SLOT_SET]
+            if host_specific:
+                diagnostics['turf_stadium_host_specific_label_issues'].append({
+                    'host_location_id': str(host.id),
+                    'host_location_name': host.name,
+                    'surface_type': host.surface_type,
+                    'host_specific_labels': sorted(host_specific),
+                })
+        else:
+            for instance in instances_by_host.get(host.id, []):
+                raw_cleaned = _strip_internal_field_label_terms(getattr(instance, 'field_name', None))
+                displayed = _field_export_display_label(None, instance, db)
+                if displayed in STANDARD_TURF_FIELD_SLOT_SET and raw_cleaned != displayed:
+                    issue = {
+                        'host_location_id': str(host.id),
+                        'host_location_name': host.name,
+                        'surface_type': host.surface_type,
+                        'field_instance_id': str(instance.id),
+                        'configured_field_label': raw_cleaned,
+                        'displayed_field_label': displayed,
+                    }
+                    diagnostics['grass_park_normalized_to_turf_label_issues'].append(issue)
+                    if 'hiller' in str(host.name or '').lower():
+                        diagnostics['hiller_park_treated_as_turf_issues'].append(issue)
+
+    for g, slot, fi, host, _home, _away, _div, _org, _status in rows:
+        display_label = _field_export_display_label(slot, fi, db)
+        if _field_export_display_issue(display_label):
+            diagnostics['wave_terminology_visible_issues'].append({
+                'game_id': str(getattr(g, 'id', '')),
+                'host_location_id': str(getattr(host, 'id', '')) if host else None,
+                'host_location_name': getattr(host, 'name', None),
+                'surface_type': getattr(host, 'surface_type', None),
+                'field': display_label,
+            })
+        if host and 'hiller' in str(getattr(host, 'name', '') or '').lower() and _is_turf_stadium_display_context(slot, fi):
+            diagnostics['hiller_park_treated_as_turf_issues'].append({
+                'game_id': str(getattr(g, 'id', '')),
+                'host_location_id': str(getattr(host, 'id', '')),
+                'host_location_name': host.name,
+                'surface_type': host.surface_type,
+                'field': display_label,
+            })
+
+    diagnostics['grass_park_normalized_to_turf_label_count'] = len(diagnostics['grass_park_normalized_to_turf_label_issues'])
+    diagnostics['turf_stadium_missing_standard_slot_count'] = len(diagnostics['turf_stadium_missing_standard_slot_issues'])
+    diagnostics['turf_stadium_host_specific_label_count'] = len(diagnostics['turf_stadium_host_specific_label_issues'])
+    diagnostics['hiller_park_treated_as_turf_count'] = len(diagnostics['hiller_park_treated_as_turf_issues'])
+    diagnostics['duplicate_field_dropdown_option_count'] = sum(len(issue.get('duplicates') or []) for issue in diagnostics['duplicate_field_dropdown_option_issues'])
+    diagnostics['wave_terminology_visible_count'] = len(diagnostics['wave_terminology_visible_issues'])
+    return diagnostics
+
+
 def _build_final_schedule_validation_result(
     db: Session,
     season_id: uuid.UUID | str | None,
@@ -1254,6 +1362,21 @@ def _build_final_schedule_validation_result(
         'labels_repaired_count': 0,
         'label_source_used': None,
         'affected_host_dates': [],
+    }
+    field_label_surface_diagnostics = _build_field_label_surface_diagnostics(db, rows, season_id) if season_id else {
+        'field_label_surface_validation_ran': False,
+        'grass_park_normalized_to_turf_label_count': 0,
+        'grass_park_normalized_to_turf_label_issues': [],
+        'turf_stadium_missing_standard_slot_count': 0,
+        'turf_stadium_missing_standard_slot_issues': [],
+        'turf_stadium_host_specific_label_count': 0,
+        'turf_stadium_host_specific_label_issues': [],
+        'hiller_park_treated_as_turf_count': 0,
+        'hiller_park_treated_as_turf_issues': [],
+        'duplicate_field_dropdown_option_count': 0,
+        'duplicate_field_dropdown_option_issues': [],
+        'wave_terminology_visible_count': 0,
+        'wave_terminology_visible_issues': [],
     }
     export_display_issues = []
     for g, slot, fi, host, _home, _away, _div, _org, _status in rows:
@@ -1702,6 +1825,14 @@ def _build_final_schedule_validation_result(
         'turf_component_label_diagnostics': turf_component_label_validation,
         'Export Display Diagnostics': export_display_diagnostics,
         'export_display_diagnostics': export_display_diagnostics,
+        'Field Label Surface Diagnostics': field_label_surface_diagnostics,
+        'field_label_surface_diagnostics': field_label_surface_diagnostics,
+        'grass_park_normalized_to_turf_label_count': field_label_surface_diagnostics.get('grass_park_normalized_to_turf_label_count'),
+        'turf_stadium_missing_standard_slot_count': field_label_surface_diagnostics.get('turf_stadium_missing_standard_slot_count'),
+        'turf_stadium_host_specific_label_count': field_label_surface_diagnostics.get('turf_stadium_host_specific_label_count'),
+        'hiller_park_treated_as_turf_count': field_label_surface_diagnostics.get('hiller_park_treated_as_turf_count'),
+        'duplicate_field_dropdown_option_count': field_label_surface_diagnostics.get('duplicate_field_dropdown_option_count'),
+        'wave_terminology_visible_count': field_label_surface_diagnostics.get('wave_terminology_visible_count'),
         'export_display_issue_count': export_display_diagnostics.get('export_display_issue_count'),
         'export_display_issues': export_display_diagnostics.get('export_display_issues'),
         'turf_component_label_validation_ran': turf_component_label_validation.get('turf_component_label_validation_ran'),
@@ -4071,6 +4202,15 @@ TURF_LAYOUT_CODE_BY_COUNTS = {
     tuple(config['counts'][size] for size in FIELD_SIZE_ORDER): code
     for code, config in TURF_STADIUM_CONFIGURATIONS.items()
 }
+STANDARD_TURF_FIELD_SLOT_LABELS = (
+    'Small Field 1',
+    'Small Field 2',
+    'Small Field 3',
+    'Medium Field 1',
+    'Medium Field 2',
+    'Large Field 1',
+)
+STANDARD_TURF_FIELD_SLOT_SET = frozenset(STANDARD_TURF_FIELD_SLOT_LABELS)
 APPROVED_TURF_FIELD_SLOT_SETS = {
     'THREE_SMALL': frozenset({'Small Field 1', 'Small Field 2', 'Small Field 3'}),
     'TWO_SMALL_ONE_MEDIUM': frozenset({'Small Field 1', 'Small Field 2', 'Medium Field 1'}),
@@ -5146,7 +5286,7 @@ def _canonical_turf_field_export_label(db: Session, slot: GameSlot | None, field
     # validation, but it is no longer the primary game assignment label.
     raw_label = getattr(field_instance or getattr(slot, 'field_instance', None), 'field_name', None)
     explicit_label = _extract_explicit_field_slot_label(raw_label, getattr(slot, 'field_type', None) or getattr(field_instance, 'field_type', None))
-    if explicit_label:
+    if explicit_label and explicit_label in STANDARD_TURF_FIELD_SLOT_SET:
         return explicit_label
     component_label = _canonical_turf_field_component_label(db, slot, field_instance)
     return _clean_explicit_field_slot_label(component_label or _turf_field_export_label(slot, field_instance), getattr(slot, 'field_type', None) or getattr(field_instance, 'field_type', None))
@@ -14375,8 +14515,8 @@ def manual_schedule_builder_options(db: Session = Depends(get_db)):
     return {
         'divisions': [{'id': d.id, 'name': d.name, 'division_group': d.division_group, 'sort_order': d.sort_order, 'required_field_layout_type': d.required_field_layout_type, 'required_field_type': 'LARGE' if '53' in (d.required_field_layout_type or '') else 'SMALL'} for d in divisions],
         'teams': [{'id': t.id, 'name': t.name, 'division_id': t.division_id, 'is_active': t.is_active} for t in teams],
-        'host_locations': [{'id': h.id, 'name': h.name} for h in host_locations],
-        'field_instances': [{'id': fi.id, 'field_instance_id': fi.id, 'host_location_id': fi.host_location_id, 'field_instance_name': _clean_explicit_field_slot_label(fi.field_name, fi.field_type), 'field_name': _clean_explicit_field_slot_label(fi.field_name, fi.field_type), 'field_type': fi.field_type, 'field_size': fi.field_type, 'instance_date': fi.instance_date, 'game_date': fi.instance_date, 'available_date': fi.instance_date, 'is_active': fi.is_active} for fi in field_instances],
+        'host_locations': [{'id': h.id, 'name': h.name, 'surface_type': h.surface_type} for h in host_locations],
+        'field_instances': [{'id': fi.id, 'field_instance_id': fi.id, 'host_location_id': fi.host_location_id, 'field_instance_name': _field_export_display_label(None, fi, db), 'field_name': _field_export_display_label(None, fi, db), 'field_type': fi.field_type, 'field_size': fi.field_type, 'instance_date': fi.instance_date, 'game_date': fi.instance_date, 'available_date': fi.instance_date, 'is_active': fi.is_active} for fi in field_instances],
         'seasons': [{'id': s.id, 'name': s.name, 'start_date': s.start_date, 'end_date': s.end_date, 'is_active': s.is_active} for s in seasons],
         'weeks': [{'id': w.id, 'season_id': w.season_id, 'week_number': w.week_number, 'label': w.label or f'Week {w.week_number}', 'start_date': w.start_date, 'end_date': w.end_date, 'primary_game_date': w.primary_game_date or w.start_date, 'status': w.status} for w in weeks],
         'organizations': [{'id': o.id, 'name': o.name} for o in organizations],
@@ -23895,14 +24035,49 @@ def _clean_explicit_field_slot_label(value: object | None, field_type: str | Non
     return ' '.join(cleaned.split())
 
 
+def _standard_turf_field_slot_display_label(value: object | None, field_type: str | None = None) -> str:
+    label = _clean_explicit_field_slot_label(value, field_type)
+    if label in STANDARD_TURF_FIELD_SLOT_SET:
+        return label
+    size = _normalize_field_size(field_type)
+    return f'{size.title()} Field 1' if size else ''
+
+
+def _field_label_host(slot: GameSlot | None = None, field_instance: FieldInstance | None = None) -> HostLocation | None:
+    return (
+        getattr(slot, 'host_location', None)
+        or getattr(field_instance, 'host_location', None)
+        or getattr(getattr(slot, 'field_instance', None), 'host_location', None)
+    )
+
+
+def _is_turf_stadium_display_context(slot: GameSlot | None = None, field_instance: FieldInstance | None = None) -> bool:
+    host = _field_label_host(slot, field_instance)
+    if host is not None:
+        # Field labels are intentionally keyed off the configured surface type,
+        # not the location name.  Grass/park hosts keep their configured labels
+        # even when a legacy turf-wave-looking value appears in field metadata.
+        return str(getattr(host, 'surface_type', '') or '').strip().upper() == 'TURF_STADIUM'
+    return bool(slot and getattr(slot, 'turf_wave_id', None))
+
+
+def _strip_internal_field_label_terms(value: object | None) -> str:
+    raw = str(value or '').strip()
+    cleaned = re.sub(r'^\s*Wave\s+\d+\s+', '', raw, flags=re.IGNORECASE)
+    cleaned = re.sub(r'\b(?:THREE_SMALL|TWO_MEDIUM|TWO_SMALL_ONE_MEDIUM|ONE_SMALL_ONE_LARGE|ONE_LARGE|ONE_MEDIUM_TWO_SMALL|ONE_LARGE_ONE_MEDIUM|TWO_LARGE)\b\s*', '', cleaned, flags=re.IGNORECASE)
+    return ' '.join(cleaned.split())
+
+
 def _field_export_display_label(slot: GameSlot | None, field_instance: FieldInstance | None = None, db: Session | None = None) -> str:
     field_type = getattr(slot, 'field_type', None) or getattr(field_instance, 'field_type', None)
     raw = None
-    if slot and getattr(slot, 'turf_wave_id', None):
-        raw = (_canonical_turf_field_export_label(db, slot, field_instance) if db is not None else _turf_field_export_label(slot, field_instance))
-    if not raw:
-        raw = getattr(field_instance, 'field_name', None)
-    return _clean_explicit_field_slot_label(raw, field_type)
+    if _is_turf_stadium_display_context(slot, field_instance):
+        raw = (_canonical_turf_field_export_label(db, slot, field_instance) if db is not None and slot else _turf_field_export_label(slot, field_instance))
+        return _standard_turf_field_slot_display_label(raw, field_type)
+    raw = getattr(field_instance, 'field_name', None)
+    if not raw and slot and getattr(slot, 'field_instance', None):
+        raw = getattr(slot.field_instance, 'field_name', None)
+    return _strip_internal_field_label_terms(raw)
 
 
 def _field_export_display_issue(label: object | None) -> str | None:

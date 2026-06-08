@@ -83,6 +83,37 @@ class ScheduleManagementExportTest(unittest.TestCase):
             self.assertNotIn('Wave', values[6])
             self.assertNotRegex(values[6], r'THREE_SMALL|TWO_MEDIUM|ONE_SMALL_ONE_LARGE')
 
+
+    def test_grass_export_preserves_host_specific_label_with_field_words(self):
+        grass_host = SimpleNamespace(name='Hiller Park', surface_type='GRASS_FIELD')
+        values = _schedule_export_row_values(
+            SimpleNamespace(game_date=date(2026, 8, 9), kickoff_time=time(9, 0)),
+            SimpleNamespace(field_type='SMALL', turf_wave_id=None, host_location=grass_host),
+            SimpleNamespace(field_name="J'burg Hiller Small Field 1", field_type='SMALL', host_location=grass_host),
+            grass_host,
+            SimpleNamespace(name='Home'),
+            SimpleNamespace(name='Away'),
+            SimpleNamespace(division_group='Coed', name='2-3'),
+            SimpleNamespace(code='scheduled'),
+        )
+
+        self.assertEqual(values[6], "J'burg Hiller Small Field 1")
+
+    def test_grass_export_strips_internal_terms_without_turf_normalizing(self):
+        grass_host = SimpleNamespace(name='Hiller Park', surface_type='GRASS_FIELD')
+        values = _schedule_export_row_values(
+            SimpleNamespace(game_date=date(2026, 8, 9), kickoff_time=time(9, 0)),
+            SimpleNamespace(field_type='SMALL', turf_wave_id='legacy-wave', host_location=grass_host),
+            SimpleNamespace(field_name="Wave 1 TWO_SMALL_ONE_MEDIUM J'burg Hiller Small Field 1", field_type='SMALL', host_location=grass_host),
+            grass_host,
+            SimpleNamespace(name='Home'),
+            SimpleNamespace(name='Away'),
+            SimpleNamespace(division_group='Coed', name='2-3'),
+            SimpleNamespace(code='scheduled'),
+        )
+
+        self.assertEqual(values[6], "J'burg Hiller Small Field 1")
+
     def test_export_display_issue_detects_visible_internal_terms(self):
         self.assertEqual(_field_export_display_issue('Wave 1 Small Field 1'), 'Export display issue: Field column contains Wave terminology.')
         self.assertEqual(_field_export_display_issue('TWO_MEDIUM Medium Field 2'), 'Export display issue: Field column should show explicit field slot only.')
