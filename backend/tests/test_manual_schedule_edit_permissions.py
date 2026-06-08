@@ -1,6 +1,7 @@
 import unittest
 import uuid
 from datetime import date, time
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -45,12 +46,13 @@ class ManualScheduleEditPermissionsTest(unittest.TestCase):
         self.game = Game(id=uuid.uuid4(), season_id=self.season.id, week_id=self.week.id, home_team_id=self.home_team.id, away_team_id=self.away_team.id, host_location_id=self.host.id, field_instance_id=self.field.id, game_status_id=self.status.id, game_date=date(2026, 8, 9), kickoff_time=time(9, 0))
         self.slot.assigned_game_id = self.game.id
         self.league_user = User(id=uuid.uuid4(), email='league@example.com', full_name='League Admin', password_hash=hash_password('Password123!'), role_id=self.league_role.id, is_active=True)
+        self.dev_admin_user = User(id=uuid.uuid4(), email='admin@example.com', full_name='Dev Scheduling Admin', password_hash=hash_password('Password123!'), role_id=self.league_role.id, is_active=True)
         self.scheduling_user = User(id=uuid.uuid4(), email='scheduler@example.com', full_name='Scheduling Admin', password_hash=hash_password('Password123!'), role_id=self.scheduling_role.id, is_active=True)
         self.community_user = User(id=uuid.uuid4(), email='community@example.com', full_name='Community Admin', password_hash=hash_password('Password123!'), role_id=self.community_role.id, organization_id=self.home_org.id, is_active=True)
         self.db.add_all([
             self.league_role, self.community_role, self.scheduling_role, self.home_org, self.away_org, self.host, self.division,
             self.season, self.week, self.status, self.cancelled, self.home_team, self.away_team, self.other_team,
-            self.field, self.game, self.slot, self.league_user, self.scheduling_user, self.community_user,
+            self.field, self.game, self.slot, self.league_user, self.dev_admin_user, self.scheduling_user, self.community_user,
         ])
         self.db.commit()
 
@@ -496,6 +498,81 @@ class ManualOptimizationWorkflowPermissionsTest(ManualScheduleEditPermissionsTes
         )
         self.assertEqual(response.status_code, 403)
 
+
+    def _optimizer_mutates_game_time(self, db, season_id, **_kwargs):
+        game = db.get(Game, self.game.id)
+        game.kickoff_time = time(10, 0)
+        db.flush()
+        return {
+            'summary': {'same_community_repairs_committed': 1, 'double_header_repairs_committed': 0, 'repairs_rejected': 0},
+            'proposed_changes': [{'game_id': str(self.game.id), 'new_time': '10:00:00'}],
+            'rejected_changes': [],
+            'rejected_moves_by_reason': {},
+            'warnings': [],
+        }
+
+    def test_schedule_optimization_preview_does_not_overwrite_saved_schedule(self):
+        with patch('app.routes.api.run_post_schedule_repair_pass', side_effect=self._optimizer_mutates_game_time):
+            response = self.client.post(
+                '/api/manual-schedule-builder/optimize-schedule',
+                headers=self._token(self.scheduling_user.id),
+                json=self._optimization_payload(),
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        data = response.json()
+        self.assertTrue(data['preview'])
+        self.assertFalse(data['applied'])
+        self.assertEqual(data['schedule_state'], 'Optimization Preview')
+        self.assertEqual(data['summary']['accepted_optimization_moves'], 1)
+        self.assertEqual(data['optimized_preview_games'][0]['time'], '10:00:00')
+        self.db.expire_all()
+        self.assertEqual(self.db.get(Game, self.game.id).kickoff_time, time(9, 0))
+
+    def test_dev_admin_example_can_run_schedule_optimization_as_local_scheduling_admin(self):
+        with patch('app.routes.api.run_post_schedule_repair_pass', side_effect=self._optimizer_mutates_game_time):
+            response = self.client.post(
+                '/api/manual-schedule-builder/optimize-schedule',
+                headers=self._token(self.dev_admin_user.id),
+                json=self._optimization_payload(),
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(response.json()['preview'])
+
+    def test_public_cannot_call_schedule_optimization_actions(self):
+        endpoints = [
+            '/api/manual-schedule-builder/optimize-schedule',
+            '/api/manual-schedule-builder/optimize-schedule/apply',
+            '/api/manual-schedule-builder/optimize-schedule/keep-first-pass',
+        ]
+        for endpoint in endpoints:
+            with self.subTest(endpoint=endpoint):
+                response = self.client.post(endpoint, json=self._optimization_payload())
+                self.assertEqual(response.status_code, 403)
+
+    def test_apply_optimized_schedule_saves_authoritative_schedule(self):
+        with patch('app.routes.api.run_post_schedule_repair_pass', side_effect=self._optimizer_mutates_game_time):
+            response = self.client.post(
+                '/api/manual-schedule-builder/optimize-schedule/apply',
+                headers=self._token(self.scheduling_user.id),
+                json=self._optimization_payload(),
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        data = response.json()
+        self.assertFalse(data['preview'])
+        self.assertTrue(data['applied'])
+        self.db.expire_all()
+        self.assertEqual(self.db.get(Game, self.game.id).kickoff_time, time(10, 0))
+
+    def test_keep_first_pass_discards_optimization_preview(self):
+        response = self.client.post(
+            '/api/manual-schedule-builder/optimize-schedule/keep-first-pass',
+            headers=self._token(self.scheduling_user.id),
+            json=self._optimization_payload(),
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(response.json()['discarded'])
+        self.db.expire_all()
+        self.assertEqual(self.db.get(Game, self.game.id).kickoff_time, time(9, 0))
 
 if __name__ == '__main__':
     unittest.main()
