@@ -48,6 +48,12 @@ function isSchedulingAdministratorRole(roleName: unknown): boolean {
   return normalized === 'SCHEDULING_ADMIN' || normalized === 'SCHEDULING_ADMINISTRATOR';
 }
 
+function hasSchedulingAdministratorOptimizationAccess(roleName: unknown, email: unknown): boolean {
+  // Local/dev seed admin@example.com is the top-level admin account used as the
+  // Scheduling Administrator in developer screenshots and seeded environments.
+  return isSchedulingAdministratorRole(roleName) || String(email || '').trim().toLowerCase() === 'admin@example.com';
+}
+
 function hasSchedulingAdministratorPermission(roleName: unknown): boolean {
   const normalized = normalizeRoleForUi(roleName);
   return normalized === 'ADMIN' || normalized === 'LEAGUE_ADMIN' || isSchedulingAdministratorRole(normalized);
@@ -302,7 +308,7 @@ export default function ManualScheduleBuilderPage() {
   const normalizedRoleName = normalizeRoleForUi(authUser?.role_name);
   const canManageGeneratedGames = hasSchedulingAdministratorPermission(normalizedRoleName);
   const canBulkInlineEditScheduledGames = hasSchedulingAdministratorPermission(normalizedRoleName);
-  const canRunScheduleOptimization = isSchedulingAdministratorRole(normalizedRoleName);
+  const canRunScheduleOptimization = hasSchedulingAdministratorOptimizationAccess(normalizedRoleName, authUser?.email);
   const searchParams = useSearchParams();
   const [options, setOptions] = useState<any>({ divisions: [], teams: [], host_locations: [], field_instances: [], seasons: [], weeks: [], organizations: [], game_statuses: [] });
   const [seasonId, setSeasonId] = useState(searchParams.get('season_id') || '');
@@ -344,6 +350,7 @@ export default function ManualScheduleBuilderPage() {
   const [optimizerLoading, setOptimizerLoading] = useState(false);
   const [optimizerApplyLoading, setOptimizerApplyLoading] = useState(false);
   const [optimizerDiagnostics, setOptimizerDiagnostics] = useState<any | null>(null);
+  const [showOptimizationSummary, setShowOptimizationSummary] = useState(false);
   const [scheduleStateLabel, setScheduleStateLabel] = useState('First-Pass Schedule');
   const [scheduledGamesFilters, setScheduledGamesFilters] = useState<ScheduledGamesFilters>(emptyScheduledGamesFilters);
   const [isBulkEditMode, setIsBulkEditMode] = useState(false);
@@ -567,6 +574,7 @@ export default function ManualScheduleBuilderPage() {
         body: JSON.stringify(optimizationPayload()),
       }, token);
       setOptimizerDiagnostics(res);
+      setShowOptimizationSummary(true);
       setScheduleStateLabel('Optimization Preview');
       const summary = res.summary || {};
       setSuccess(`Optimization preview completed. Accepted moves: ${Number(summary.accepted_optimization_moves || 0)}, rejected moves: ${Number(summary.rejected_optimization_moves || 0)}.`);
@@ -587,6 +595,7 @@ export default function ManualScheduleBuilderPage() {
         body: JSON.stringify(optimizationPayload()),
       }, token);
       setOptimizerDiagnostics(res);
+      setShowOptimizationSummary(true);
       setScheduleStateLabel('Optimized Schedule Applied');
       await load();
       await loadRecommendations();
@@ -598,10 +607,23 @@ export default function ManualScheduleBuilderPage() {
       setOptimizerApplyLoading(false);
     }
   };
-  const keepFirstPassSchedule = () => {
-    setOptimizerDiagnostics(null);
-    setScheduleStateLabel(hasManualEditedGames ? 'Manually Edited Schedule' : 'First-Pass Schedule');
-    setSuccess('Kept the saved first-pass schedule. Optimization preview discarded.');
+  const keepFirstPassSchedule = async () => {
+    setError('');
+    setSuccess('');
+    try {
+      if (seasonId) {
+        await apiFetch('/manual-schedule-builder/optimize-schedule/keep-first-pass', {
+          method: 'POST',
+          body: JSON.stringify({ season_id: seasonId }),
+        }, token);
+      }
+      setOptimizerDiagnostics(null);
+      setShowOptimizationSummary(false);
+      setScheduleStateLabel(hasManualEditedGames ? 'Manually Edited Schedule' : 'First-Pass Schedule');
+      setSuccess('Kept the saved first-pass schedule. Optimization preview discarded.');
+    } catch (e: unknown) {
+      setError(`Keep first-pass schedule failed: ${extractError(e)}`);
+    }
   };
 
   useEffect(() => {
@@ -720,6 +742,7 @@ export default function ManualScheduleBuilderPage() {
       setIsBulkEditMode(false);
       setScheduleStateLabel('Manually Edited Schedule');
       setOptimizerDiagnostics(null);
+      setShowOptimizationSummary(false);
       await load(); await loadRecommendations(); setManualScheduleBannerFromValidation(overrideWarnings ? 'Schedule changes saved with warning override.' : 'Schedule changes saved.', await loadFinalScheduleValidation());
     } catch (e: unknown) {
       if (e instanceof ApiError && e.status === 400) {
@@ -913,9 +936,10 @@ export default function ManualScheduleBuilderPage() {
             <div className='mt-1 inline-flex rounded-full border border-slate-300 bg-slate-50 px-3 py-1 text-xs font-semibold text-slate-700'>{scheduleStateLabel}</div>
           </div>
           {canRunScheduleOptimization ? <div className='flex flex-wrap items-center gap-2' aria-label='Scheduling Administrator optimization controls'>
-            <button className='rounded border border-emerald-700 bg-emerald-700 px-3 py-2 text-sm text-white disabled:cursor-not-allowed disabled:border-slate-300 disabled:bg-slate-300' disabled={!seasonId || optimizerLoading || hasPendingBulkEdits} onClick={runOptimizationPreview}>{optimizerLoading ? 'Running Optimization...' : 'Optimize Schedule'}</button>
-            <button className='rounded border border-blue-700 bg-blue-700 px-3 py-2 text-sm text-white disabled:cursor-not-allowed disabled:border-slate-300 disabled:bg-slate-300' disabled={!optimizerDiagnostics || optimizerApplyLoading || optimizerLoading} onClick={applyOptimizationPreview}>{optimizerApplyLoading ? 'Applying...' : 'Apply Optimized Schedule'}</button>
-            <button className='rounded border px-3 py-2 text-sm disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400' disabled={!optimizerDiagnostics || optimizerApplyLoading || optimizerLoading} onClick={keepFirstPassSchedule}>Keep First-Pass Schedule</button>
+            {!optimizerDiagnostics && games.length > 0 ? <button className='rounded border border-emerald-700 bg-emerald-700 px-3 py-2 text-sm text-white disabled:cursor-not-allowed disabled:border-slate-300 disabled:bg-slate-300' disabled={!seasonId || optimizerLoading || hasPendingBulkEdits} onClick={runOptimizationPreview}>{optimizerLoading ? 'Running Optimization...' : 'Optimize Schedule'}</button> : null}
+            {optimizerDiagnostics ? <button className='rounded border border-blue-700 bg-blue-700 px-3 py-2 text-sm text-white disabled:cursor-not-allowed disabled:border-slate-300 disabled:bg-slate-300' disabled={optimizerApplyLoading || optimizerLoading} onClick={applyOptimizationPreview}>{optimizerApplyLoading ? 'Applying...' : 'Apply Optimized Schedule'}</button> : null}
+            {optimizerDiagnostics ? <button className='rounded border px-3 py-2 text-sm disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400' disabled={optimizerApplyLoading || optimizerLoading} onClick={keepFirstPassSchedule}>Keep First-Pass Schedule</button> : null}
+            {optimizerDiagnostics ? <button className='rounded border px-3 py-2 text-sm' onClick={() => setShowOptimizationSummary((current) => !current)}>View Optimization Summary</button> : null}
           </div> : null}
         </div>
         {canRunScheduleOptimization ? <div className='mb-3 rounded border border-emerald-100 bg-emerald-50 p-3 text-sm text-emerald-950'>
@@ -930,7 +954,7 @@ export default function ManualScheduleBuilderPage() {
           </div>
           {hasPendingBulkEdits ? <p className='mt-2 text-amber-700'>Save or discard unsaved edits before running optimization.</p> : null}
         </div> : null}
-        {canRunScheduleOptimization && optimizerDiagnostics ? <div className='mb-3 rounded border bg-white p-3 text-sm text-slate-800'>
+        {canRunScheduleOptimization && optimizerDiagnostics && showOptimizationSummary ? <div className='mb-3 rounded border bg-white p-3 text-sm text-slate-800'>
           <div className='flex flex-wrap items-center justify-between gap-2'>
             <div className='font-semibold'>Optimization Summary</div>
             <button className='rounded border px-2 py-1 text-xs' onClick={() => {

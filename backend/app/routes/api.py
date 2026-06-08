@@ -16,7 +16,7 @@ from sqlalchemy import String, and_, delete, func, inspect as sa_inspect, or_, s
 from sqlalchemy.exc import IntegrityError, ProgrammingError, SQLAlchemyError
 from sqlalchemy.orm import Session, aliased
 
-from app.config import RULEBOOK_MAX_SIZE_BYTES, RULEBOOK_UPLOAD_DIR
+from app.config import ADMIN_SEED_EMAIL, RULEBOOK_MAX_SIZE_BYTES, RULEBOOK_UPLOAD_DIR
 from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN, enforce_organization_scope, get_current_user, is_community_admin, is_league_admin, normalize_role_name, require_roles
 from app.database import get_db
 from app.models import Division, Field, FieldConfigurationOption, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostPlanSelection, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Rulebook, ScheduleChangeLog, ScoreSubmission, Season, Team, TurfWave, User, Week
@@ -22622,6 +22622,51 @@ def _restore_manual_game_snapshots(db: Session, snapshots: dict[uuid.UUID, dict[
             slot.status = 'OPEN'
 
 
+
+def _has_schedule_optimization_admin_access(current_user: User) -> bool:
+    role_name = normalize_role_name(current_user.role.name)
+    if role_name == ROLE_SCHEDULING_ADMIN:
+        return True
+    # In local/dev, the seeded top-level admin account is the Scheduling
+    # Administrator shown in screenshots.  Do not broaden this exception to all
+    # League Admin users; optimization controls remain Scheduling Admin-only.
+    return role_name == ROLE_LEAGUE_ADMIN and current_user.email.strip().lower() == ADMIN_SEED_EMAIL.strip().lower()
+
+
+def require_schedule_optimization_admin(current_user: User = Depends(get_current_user)) -> User:
+    if not _has_schedule_optimization_admin_access(current_user):
+        raise HTTPException(status_code=403, detail='Scheduling Administrator role required')
+    return current_user
+
+
+def _optimization_preview_game_rows(db: Session, season_id: uuid.UUID | str) -> list[dict[str, object]]:
+    rows = get_scheduled_games_for_season(db, season_id, _scheduled_games_filters(season_id))
+    preview_rows: list[dict[str, object]] = []
+    for g, slot, fi, host, home, away, div, org, status in rows:
+        preview_rows.append({
+            'id': str(g.id),
+            'date': g.game_date.isoformat() if g.game_date else None,
+            'time': g.kickoff_time.strftime('%H:%M:%S') if g.kickoff_time else None,
+            'division_id': str(div.id),
+            'division_name': div.name,
+            'home_team_id': str(home.id),
+            'home_team_name': home.name,
+            'away_team_id': str(away.id),
+            'away_team_name': away.name,
+            'organization_id': str(org.id),
+            'organization_name': org.name,
+            'host_location_id': str(host.id) if host else None,
+            'host_location_name': host.name if host else None,
+            'field_id': str(fi.id) if fi else None,
+            'field': _field_export_display_label(slot, fi, db),
+            'field_type': ((slot.field_type if slot else None) or (fi.field_type if fi else None)),
+            'status': status.code,
+            'slot_id': str(slot.id) if slot else None,
+            'is_manual_edit': bool(getattr(g, 'is_manual_edit', False)),
+        })
+    return preview_rows
+
+
 def _run_manual_optimization_workflow(payload: dict, db: Session, *, apply: bool) -> dict[str, object]:
     season_id = payload.get('season_id')
     if not season_id:
@@ -22648,6 +22693,7 @@ def _run_manual_optimization_workflow(payload: dict, db: Session, *, apply: bool
             _restore_manual_game_snapshots(db, locked_manual_snapshots)
             db.flush()
         after_metrics = _build_optimization_workflow_metrics(db, season_id)
+        optimized_preview_games = _optimization_preview_game_rows(db, season_id)
     except Exception as exc:
         db.rollback()
         logger.exception('Schedule optimization failed for season_id=%s', season_id)
@@ -22660,6 +22706,7 @@ def _run_manual_optimization_workflow(payload: dict, db: Session, *, apply: bool
             'before_metrics': before_metrics if 'before_metrics' in locals() else {},
             'after_metrics': before_metrics if 'before_metrics' in locals() else {},
             'metric_comparison': _optimization_metric_comparison(before_metrics, before_metrics) if 'before_metrics' in locals() else [],
+            'optimized_preview_games': [],
             'proposed_changes': [],
             'rejected_changes': [],
             'remaining_violations': [],
@@ -22688,6 +22735,7 @@ def _run_manual_optimization_workflow(payload: dict, db: Session, *, apply: bool
         'before_metrics': before_metrics,
         'after_metrics': after_metrics,
         'metric_comparison': _optimization_metric_comparison(before_metrics, after_metrics),
+        'optimized_preview_games': optimized_preview_games,
         'proposed_changes': proposed_changes,
         'rejected_changes': rejected_changes,
         'rejected_move_reasons': diagnostics.get('rejected_moves_by_reason') or summary.get('rejected_moves_by_reason') or {},
@@ -22702,18 +22750,35 @@ def _run_manual_optimization_workflow(payload: dict, db: Session, *, apply: bool
     return response
 
 
-@router.post('/manual-schedule-builder/optimize-schedule', dependencies=[Depends(require_roles(ROLE_SCHEDULING_ADMIN))])
-def optimize_schedule(payload: dict, db: Session = Depends(get_db)):
+@router.post('/manual-schedule-builder/optimize-schedule')
+def optimize_schedule(payload: dict, _current_user: User = Depends(require_schedule_optimization_admin), db: Session = Depends(get_db)):
     payload = dict(payload or {})
     payload['dry_run'] = True
     return _run_manual_optimization_workflow(payload, db, apply=False)
 
 
-@router.post('/manual-schedule-builder/optimize-schedule/apply', dependencies=[Depends(require_roles(ROLE_SCHEDULING_ADMIN))])
-def apply_optimized_schedule(payload: dict, db: Session = Depends(get_db)):
+@router.post('/manual-schedule-builder/optimize-schedule/apply')
+def apply_optimized_schedule(payload: dict, _current_user: User = Depends(require_schedule_optimization_admin), db: Session = Depends(get_db)):
     payload = dict(payload or {})
     payload['dry_run'] = False
     return _run_manual_optimization_workflow(payload, db, apply=True)
+
+
+@router.post('/manual-schedule-builder/optimize-schedule/keep-first-pass')
+def keep_first_pass_schedule(payload: dict, _current_user: User = Depends(require_schedule_optimization_admin), db: Session = Depends(get_db)):
+    season_id = (payload or {}).get('season_id')
+    if not season_id:
+        raise HTTPException(400, 'season_id is required')
+    if not db.query(Season.id).filter(Season.id == season_id).first():
+        raise HTTPException(404, 'Season not found')
+    db.rollback()
+    return {
+        'discarded': True,
+        'applied': False,
+        'preview': False,
+        'schedule_state': 'First-Pass Schedule',
+        'message': 'Optimization preview discarded; saved authoritative schedule was not changed.',
+    }
 
 
 @router.post('/manual-schedule-builder/repair/same-community-home-fields', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
