@@ -140,8 +140,8 @@ function PublicScheduleContent() {
         <button className='rounded border px-3 py-2' onClick={() => window.print()}>Print / PDF</button>
       </div>
 
-      {loading && <div className='rounded border p-4'>Loading published schedule...</div>}
-      {empty && <div className='rounded border p-4'>{message || (hasActiveFilters ? 'No games match the selected filters.' : 'No published schedule is currently available.')}</div>}
+      {loading && <div className='rounded border p-4'>Loading saved schedule...</div>}
+      {empty && <div className='rounded border p-4'>{message || (hasActiveFilters ? 'No games match the selected filters.' : 'No saved schedule is currently available.')}</div>}
       {!loading && games.length > 0 && (
         <div className='overflow-x-auto rounded border'>
           <table className='min-w-full text-sm'>
@@ -184,7 +184,7 @@ function PublicScheduleContent() {
 
 export default function PublicSchedulePage() {
   return (
-    <Suspense fallback={<div className='mx-auto max-w-6xl p-4'>Loading published schedule...</div>}>
+    <Suspense fallback={<div className='mx-auto max-w-6xl p-4'>Loading saved schedule...</div>}>
       <PublicScheduleContent />
     </Suspense>
   );

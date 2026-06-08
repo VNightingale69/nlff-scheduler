@@ -260,17 +260,10 @@ export default function ScheduleManagementPage() {
       {error ? <div className='rounded border border-red-300 bg-red-50 p-2 text-red-700'>{error}</div> : null}
 
       {publishDiagnostics ? <div className='rounded border bg-slate-50 p-3 text-sm'>
-        <div className='flex flex-wrap items-center justify-between gap-2'>
-          <div><span className='font-semibold'>Season:</span> {publishDiagnostics.season_name} · <span className='font-semibold'>Schedule Status:</span> {String(publishDiagnostics.schedule_status || 'draft').toUpperCase()}</div>
-          <div className='flex gap-2'>
-            <button className='rounded bg-emerald-700 px-3 py-1 text-white' onClick={async()=>{ await apiFetch(`/seasons/${publishDiagnostics.season_id}/publish-schedule`, { method:'POST' }, token); await load(); }}>Publish Schedule</button>
-            <button className='rounded border px-3 py-1' onClick={async()=>{ await apiFetch(`/seasons/${publishDiagnostics.season_id}/unpublish-schedule`, { method:'POST' }, token); await load(); }}>Unpublish</button>
-          </div>
-        </div>
-        <div className='mt-2 grid grid-cols-2 gap-2 md:grid-cols-4'>
-          <div>Total Scheduled Games: <span className='font-semibold'>{publishDiagnostics.total_scheduled_games ?? 0}</span></div>
-          <div>Published Games: <span className='font-semibold'>{publishDiagnostics.published_games ?? 0}</span></div>
-          <div>Draft Games: <span className='font-semibold'>{publishDiagnostics.draft_games ?? 0}</span></div>
+        <div className='font-semibold'>Season: {publishDiagnostics.season_name}</div>
+        <div className='mt-2 grid grid-cols-2 gap-2 md:grid-cols-3'>
+          <div>Saved Scheduled Games: <span className='font-semibold'>{publishDiagnostics.saved_games ?? publishDiagnostics.total_scheduled_games ?? 0}</span></div>
+          <div>Authoritative Source: <span className='font-semibold'>Saved scheduled games</span></div>
           <div>Archived Games: <span className='font-semibold'>{publishDiagnostics.archived_games ?? 0}</span></div>
         </div>
       </div> : null}
