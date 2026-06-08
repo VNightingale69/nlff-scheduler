@@ -35,6 +35,19 @@ function uniqueByValue<T extends { value: string }>(items: T[]): T[] {
   });
 }
 
+function normalizeRoleForUi(roleName: unknown): string {
+  return String(roleName || '')
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+function isSchedulingAdministratorRole(roleName: unknown): boolean {
+  const normalized = normalizeRoleForUi(roleName);
+  return normalized === 'SCHEDULING_ADMIN' || normalized === 'SCHEDULING_ADMINISTRATOR';
+}
+
 function gameDateValue(game: any): string {
   return String(game?.game_date || '');
 }
@@ -264,9 +277,9 @@ function summarizeAutoScheduleDiagnostics(value: any): AutoScheduleDiagnosticsSu
 export default function ManualScheduleBuilderPage() {
   const token = getToken();
   const authUser = getAuthUser();
-  const normalizedRoleName = String(authUser?.role_name || '').toUpperCase();
-  const canManageGeneratedGames = normalizedRoleName === 'LEAGUE_ADMIN' || normalizedRoleName === 'SCHEDULING_ADMIN';
-  const canBulkInlineEditScheduledGames = normalizedRoleName === 'SCHEDULING_ADMIN';
+  const normalizedRoleName = normalizeRoleForUi(authUser?.role_name);
+  const canManageGeneratedGames = normalizedRoleName === 'LEAGUE_ADMIN' || isSchedulingAdministratorRole(normalizedRoleName);
+  const canBulkInlineEditScheduledGames = isSchedulingAdministratorRole(normalizedRoleName);
   const searchParams = useSearchParams();
   const [options, setOptions] = useState<any>({ divisions: [], teams: [], host_locations: [], field_instances: [], seasons: [], weeks: [], organizations: [], game_statuses: [] });
   const [seasonId, setSeasonId] = useState(searchParams.get('season_id') || '');
@@ -582,13 +595,27 @@ export default function ManualScheduleBuilderPage() {
       manual_edit_locked: true,
     })),
   });
+  const flattenGroupedMessages = (grouped: any): any[] => {
+    if (Array.isArray(grouped)) return grouped;
+    if (!grouped || typeof grouped !== 'object') return [];
+    return Object.values(grouped).flatMap((value: any) => Array.isArray(value) ? value : [value]);
+  };
   const summarizeWarnings = (warningsByGame: any) => {
     const counts = new Map<string, number>();
-    Object.values(warningsByGame || {}).flat().forEach((warning: any) => {
-      const label = String(warning?.code || 'SCHEDULE_WARNING').replaceAll('_', ' ').toLowerCase();
+    flattenGroupedMessages(warningsByGame).forEach((warning: any) => {
+      const label = String(warning?.code || warning?.error || 'SCHEDULE_WARNING').replaceAll('_', ' ').toLowerCase();
       counts.set(label, (counts.get(label) || 0) + 1);
     });
     return Array.from(counts.entries()).map(([label, count]) => `• ${count} ${label} ${count === 1 ? 'warning' : 'warnings'}`).join('\n') || '• These edits create one or more schedule warnings.';
+  };
+  const summarizeBulkHardErrors = (errorsByGame: any) => {
+    const entries = Object.entries(errorsByGame || {});
+    if (!entries.length) return '';
+    return entries.map(([gameId, detail]: [string, any]) => {
+      const code = String(detail?.error || detail || 'VALIDATION_ERROR').replaceAll('_', ' ').toLowerCase();
+      const fields = Array.isArray(detail?.fields) && detail.fields.length ? ` (${detail.fields.join(', ')})` : '';
+      return `${gameId}: ${code}${fields}`;
+    }).join('; ');
   };
   const saveBulkInlineEdits = async (overrideWarnings = false) => {
     if (!canBulkInlineEditScheduledGames || !hasPendingBulkEdits) return;
@@ -601,6 +628,10 @@ export default function ManualScheduleBuilderPage() {
       setIsBulkEditMode(false);
       await load(); await loadRecommendations(); setManualScheduleBannerFromValidation(overrideWarnings ? 'Schedule changes saved with warning override.' : 'Schedule changes saved.', await loadFinalScheduleValidation());
     } catch (e: unknown) {
+      if (e instanceof ApiError && e.status === 400) {
+        const bulkErrors = (e.details as any)?.detail?.errors;
+        if (bulkErrors) { setError(`Unable to save bulk schedule changes: ${summarizeBulkHardErrors(bulkErrors)}`); return; }
+      }
       if (e instanceof ApiError && e.status === 409) {
         const warnings = (e.details as any)?.detail?.warnings || {};
         const confirmed = window.confirm(`Manual Override Warnings\n\n${summarizeWarnings(warnings)}\n\nThese edits create schedule warnings and may require manual rebalancing of turf time slots or field configurations. As Scheduling Administrator, you may override and save these changes.\n\nSave Anyway?`);
@@ -867,8 +898,7 @@ export default function ManualScheduleBuilderPage() {
           </div>
           <div className='mt-2 text-sm text-slate-600'>Showing {filteredGames.length} of {games.length} scheduled games</div>
         </div>
-        {games.length > 0 && filteredGames.length === 0 ? <div className='rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800'>No scheduled games match the selected filters.</div> : null}
-        {canBulkInlineEditScheduledGames ? <div className='mb-3 flex flex-wrap items-center gap-3 rounded border border-blue-100 bg-blue-50 p-3'>
+        {canBulkInlineEditScheduledGames ? <div className='mb-3 flex flex-wrap items-center gap-3 rounded border border-blue-100 bg-blue-50 p-3' aria-label='Scheduling Administrator bulk edit toolbar'>
           {!isBulkEditMode ? <>
             <button className='rounded bg-blue-600 px-3 py-2 text-sm text-white' onClick={() => { setError(''); setSuccess(''); setIsBulkEditMode(true); }}>Modify Schedule</button>
             <span className='text-sm text-slate-600'>Enable global inline editing to update multiple scheduled games before saving once.</span>
@@ -880,6 +910,7 @@ export default function ManualScheduleBuilderPage() {
             {hasInvalidPendingDrafts ? <span className='text-sm text-red-700'>Fix invalid changed rows before saving.</span> : null}
           </>}
         </div> : null}
+        {games.length > 0 && filteredGames.length === 0 ? <div className='rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800'>No scheduled games match the selected filters.</div> : null}
         <div className='overflow-auto'>
           <table className='min-w-full text-sm'>
             <thead><tr>{['Date', 'Time', 'Division', 'Home Team', 'Away Team', 'Host Location', 'Field', 'Notes', ...(canManageGeneratedGames ? ['Actions'] : [])].map((h) => <th key={h} className='px-2 py-2 text-left'>{h}</th>)}</tr></thead>

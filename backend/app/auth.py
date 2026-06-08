@@ -1,3 +1,4 @@
+import re
 import uuid
 
 from fastapi import Depends, HTTPException, status
@@ -23,11 +24,18 @@ _ROLE_ALIASES = {
     LEGACY_ROLE_COMMUNITY_SCHEDULER: ROLE_COMMUNITY_ADMIN,
     ROLE_COMMUNITY_ADMIN: ROLE_COMMUNITY_ADMIN,
     ROLE_SCHEDULING_ADMIN: ROLE_SCHEDULING_ADMIN,
+    'SCHEDULING_ADMINISTRATOR': ROLE_SCHEDULING_ADMIN,
+    'Scheduling Administrator': ROLE_SCHEDULING_ADMIN,
+    'scheduling_administrator': ROLE_SCHEDULING_ADMIN,
 }
 
 
 def normalize_role_name(role_name: str | None) -> str:
-    return _ROLE_ALIASES.get(role_name or '', role_name or '')
+    raw_role_name = role_name or ''
+    if raw_role_name in _ROLE_ALIASES:
+        return _ROLE_ALIASES[raw_role_name]
+    normalized_role_name = re.sub(r'[^A-Za-z0-9]+', '_', raw_role_name.strip()).strip('_').upper()
+    return _ROLE_ALIASES.get(normalized_role_name, raw_role_name)
 
 
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)) -> User:
