@@ -21,7 +21,7 @@ from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_AD
 from app.database import get_db
 from app.models import Division, Field, FieldConfigurationOption, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostPlanSelection, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Rulebook, ScheduleChangeLog, ScoreSubmission, Season, Team, TurfWave, User, Week
 from app.schemas import (
-    DivisionCreate, DivisionRead, FieldConfigurationOptionCreate, FieldConfigurationOptionRead, FieldCreate, FieldRead, GameCreate, GameRead, GameSaveResponse, ManualGameEditRequest, ManualGameEditResponse, ScheduleChangeLogRead, ScheduleEditWarning,
+    DivisionCreate, DivisionRead, FieldConfigurationOptionCreate, FieldConfigurationOptionRead, FieldCreate, FieldRead, GameCreate, GameRead, GameSaveResponse, ManualGameBulkEditRequest, ManualGameBulkEditResponse, ManualGameEditRequest, ManualGameEditResponse, ScheduleChangeLogRead, ScheduleEditWarning,
     OrganizationDivisionParticipationBulkUpsertRequest, OrganizationDivisionParticipationRead,
     GeneratedSlotRead, GeneratedSlotsClearResponse, HostAvailabilityMatrixSaveRequest, HostAvailabilityMatrixSaveResponse, HostLocationCreate, HostLocationRead, HostLocationConfigurationCreate, HostLocationConfigurationRead, HostingAvailabilityCreate, HostingAvailabilityRead, HostingAvailabilityBulkUpsertRequest, HostingAvailabilityBulkUpsertResponse, HostingGenerationRunResult, HostingGenerationLocationResult, PhysicalFieldAreaCreate, PhysicalFieldAreaRead, SavedAvailabilityResponse,
     LoginRequest, OrganizationCreate, OrganizationRead, PagedResponse, PublicGameRead, RefreshRequest, RulebookRead, ScoreApprovePayload, ScorePayload,
@@ -24481,6 +24481,14 @@ def schedule_management_conflicts(db: Session = Depends(get_db)):
 
 
 
+
+def require_scheduling_admin_only(current_user: User = Depends(get_current_user)) -> User:
+    role_name = str(getattr(getattr(current_user, 'role', None), 'name', '') or '').upper()
+    if role_name != ROLE_SCHEDULING_ADMIN:
+        raise HTTPException(status_code=403, detail='Scheduling Administrator role required')
+    return current_user
+
+
 def _game_snapshot(game: Game) -> dict[str, object]:
     return {
         'season_id': str(game.season_id) if game.season_id else None,
@@ -24820,18 +24828,12 @@ def _raise_if_invalid_manual_game_edit(db: Session, game: Game, payload: ManualG
     )
 
 
-@router.patch('/schedule-management/games/{game_id}/manual-edit', response_model=ManualGameEditResponse, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
-def manual_edit_generated_game(game_id: uuid.UUID, payload: ManualGameEditRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    game = db.query(Game).filter(Game.id == game_id).first()
-    if not game:
-        raise HTTPException(404, 'Game not found')
-    _raise_if_invalid_manual_game_edit(db, game, payload)
-    warnings = _manual_game_edit_warnings(db, game, payload)
-    if any(w.code == 'SCORED_GAME_CHANGE' for w in warnings) and not payload.score_change_confirmed:
-        raise HTTPException(status_code=409, detail={'error': 'SCORED_GAME_CHANGE_REQUIRES_CONFIRMATION', 'warnings': [w.model_dump() for w in warnings]})
-    if warnings and not payload.override_warnings:
-        raise HTTPException(status_code=409, detail={'error': 'SCHEDULE_WARNINGS_REQUIRE_OVERRIDE', 'warnings': [w.model_dump() for w in warnings]})
 
+def _manual_edit_warning_payload(warnings: list[ScheduleEditWarning]) -> list[dict[str, str]]:
+    return [w.model_dump() for w in warnings]
+
+
+def _apply_manual_game_edit(db: Session, game: Game, payload: ManualGameEditRequest, current_user: User, warnings: list[ScheduleEditWarning]) -> list[ScheduleChangeLog]:
     if not getattr(game, 'original_game_snapshot', None):
         game.original_game_snapshot = json.dumps(_game_snapshot(game), sort_keys=True)
     old_values = _game_snapshot(game)
@@ -24864,7 +24866,7 @@ def manual_edit_generated_game(game_id: uuid.UUID, payload: ManualGameEditReques
     game.manual_updated_by_user_id = current_user.id
     game.manual_updated_at = datetime.utcnow()
 
-    warning_json = json.dumps([w.model_dump() for w in warnings], sort_keys=True) if warnings else None
+    warning_json = json.dumps(_manual_edit_warning_payload(warnings), sort_keys=True) if warnings else None
     changed_logs: list[ScheduleChangeLog] = []
     new_values = _game_snapshot(game)
     for field_name, old_value in old_values.items():
@@ -24882,12 +24884,97 @@ def manual_edit_generated_game(game_id: uuid.UUID, payload: ManualGameEditReques
             )
             db.add(row)
             changed_logs.append(row)
+    return changed_logs
+
+
+@router.patch('/schedule-management/games/{game_id}/manual-edit', response_model=ManualGameEditResponse)
+def manual_edit_generated_game(game_id: uuid.UUID, payload: ManualGameEditRequest, current_user: User = Depends(require_scheduling_admin_only), db: Session = Depends(get_db)):
+    game = db.query(Game).filter(Game.id == game_id).first()
+    if not game:
+        raise HTTPException(404, 'Game not found')
+    _raise_if_invalid_manual_game_edit(db, game, payload)
+    warnings = _manual_game_edit_warnings(db, game, payload)
+    if any(w.code == 'SCORED_GAME_CHANGE' for w in warnings) and not payload.score_change_confirmed:
+        raise HTTPException(status_code=409, detail={'error': 'SCORED_GAME_CHANGE_REQUIRES_CONFIRMATION', 'warnings': _manual_edit_warning_payload(warnings)})
+    if warnings and not payload.override_warnings:
+        raise HTTPException(status_code=409, detail={'error': 'SCHEDULE_WARNINGS_REQUIRE_OVERRIDE', 'warnings': _manual_edit_warning_payload(warnings)})
+
+    changed_logs = _apply_manual_game_edit(db, game, payload, current_user, warnings)
     db.commit()
     db.refresh(game)
     for row in changed_logs:
         db.refresh(row)
     slot = db.query(GameSlot).filter(GameSlot.assigned_game_id == game.id).first()
     return ManualGameEditResponse(game=_to_game_read(game, db=db, generated_slot=slot), warnings=warnings, change_log=[_schedule_change_log_read(row) for row in changed_logs])
+
+
+@router.patch('/schedule-management/games/manual-edit/bulk', response_model=ManualGameBulkEditResponse)
+def bulk_manual_edit_generated_games(payload: ManualGameBulkEditRequest, current_user: User = Depends(require_scheduling_admin_only), db: Session = Depends(get_db)):
+    if not payload.changes:
+        raise HTTPException(status_code=400, detail={'error': 'NO_CHANGES'})
+
+    games_by_id: dict[uuid.UUID, Game] = {}
+    hard_errors: dict[str, object] = {}
+    warnings_by_game: dict[str, list[ScheduleEditWarning]] = {}
+    seen_field_assignments: dict[tuple[uuid.UUID | None, date, time, uuid.UUID | None], str] = {}
+
+    for change in payload.changes:
+        game = db.query(Game).filter(Game.id == change.game_id).first()
+        game_key = str(change.game_id)
+        if not game:
+            hard_errors[game_key] = {'error': 'GAME_NOT_FOUND'}
+            continue
+        games_by_id[change.game_id] = game
+        change.override_warnings = bool(payload.override_warnings)
+        if payload.override_warnings:
+            change.score_change_confirmed = True
+        try:
+            _raise_if_invalid_manual_game_edit(db, game, change)
+            game_warnings = _manual_game_edit_warnings(db, game, change)
+            assignment_key = (change.host_location_id, change.game_date, change.kickoff_time, change.field_instance_id)
+            if change.field_instance_id and assignment_key in seen_field_assignments:
+                game_warnings.append(ScheduleEditWarning(
+                    code='FIELD_TIME_CONFLICT',
+                    message='The selected field is assigned to multiple changed games in this bulk save.',
+                ))
+            seen_field_assignments[assignment_key] = game_key
+            if game_warnings:
+                warnings_by_game[game_key] = game_warnings
+        except HTTPException as exc:
+            hard_errors[game_key] = exc.detail
+
+    if hard_errors:
+        raise HTTPException(status_code=400, detail={'error': 'BULK_MANUAL_EDIT_VALIDATION_FAILED', 'errors': hard_errors})
+    if warnings_by_game and not payload.override_warnings:
+        raise HTTPException(status_code=409, detail={
+            'error': 'SCHEDULE_WARNINGS_REQUIRE_OVERRIDE',
+            'warnings': {game_id: _manual_edit_warning_payload(warnings) for game_id, warnings in warnings_by_game.items()},
+        })
+
+    changed_logs: list[ScheduleChangeLog] = []
+    updated_games: list[GameRead] = []
+    try:
+        for change in payload.changes:
+            game = games_by_id[change.game_id]
+            game_warnings = warnings_by_game.get(str(change.game_id), [])
+            changed_logs.extend(_apply_manual_game_edit(db, game, change, current_user, game_warnings))
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    for change in payload.changes:
+        game = games_by_id[change.game_id]
+        db.refresh(game)
+        slot = db.query(GameSlot).filter(GameSlot.assigned_game_id == game.id).first()
+        updated_games.append(_to_game_read(game, db=db, generated_slot=slot))
+    for row in changed_logs:
+        db.refresh(row)
+    return ManualGameBulkEditResponse(
+        games=updated_games,
+        warnings={game_id: warnings for game_id, warnings in warnings_by_game.items()},
+        change_log=[_schedule_change_log_read(row) for row in changed_logs],
+    )
 
 
 @router.get('/schedule-management/games/{game_id}/manual-edit-history', response_model=list[ScheduleChangeLogRead], dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])

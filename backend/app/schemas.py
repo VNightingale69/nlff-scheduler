@@ -713,6 +713,27 @@ class ManualGameEditResponse(BaseModel):
     change_log: list[ScheduleChangeLogRead] = []
 
 
+
+
+class ManualGameBulkEditChange(ManualGameEditRequest):
+    game_id: uuid.UUID
+
+
+class ManualGameBulkEditRequest(BaseModel):
+    def __init__(self, **data):
+        if 'overrideWarnings' in data and 'override_warnings' not in data:
+            data['override_warnings'] = data['overrideWarnings']
+        super().__init__(**data)
+
+    override_warnings: bool = False
+    changes: list[ManualGameBulkEditChange]
+
+
+class ManualGameBulkEditResponse(BaseModel):
+    games: list[GameRead]
+    warnings: dict[str, list[ScheduleEditWarning]] = {}
+    change_log: list[ScheduleChangeLogRead] = []
+
 class GameSaveResponse(BaseModel):
     game: GameRead
     validation: "GameValidationResponse"

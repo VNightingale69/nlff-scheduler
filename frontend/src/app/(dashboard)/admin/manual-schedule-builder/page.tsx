@@ -266,6 +266,7 @@ export default function ManualScheduleBuilderPage() {
   const authUser = getAuthUser();
   const normalizedRoleName = String(authUser?.role_name || '').toUpperCase();
   const canManageGeneratedGames = normalizedRoleName === 'LEAGUE_ADMIN' || normalizedRoleName === 'SCHEDULING_ADMIN';
+  const canBulkInlineEditScheduledGames = normalizedRoleName === 'SCHEDULING_ADMIN';
   const searchParams = useSearchParams();
   const [options, setOptions] = useState<any>({ divisions: [], teams: [], host_locations: [], field_instances: [], seasons: [], weeks: [], organizations: [], game_statuses: [] });
   const [seasonId, setSeasonId] = useState(searchParams.get('season_id') || '');
@@ -289,7 +290,7 @@ export default function ManualScheduleBuilderPage() {
   const [autoFillSkipped, setAutoFillSkipped] = useState<any[]>([]);
   const [autoFillLoading, setAutoFillLoading] = useState(false);
   const [schedulerDiagnostics, setSchedulerDiagnostics] = useState<any | null>(null);
-  const [editGame, setEditGame] = useState<any | null>(null);
+  const [pendingGameEdits, setPendingGameEdits] = useState<Record<string, any>>({});
   const [moveGame, setMoveGame] = useState<any | null>(null);
   const [showClearScheduleModal, setShowClearScheduleModal] = useState(false);
   const [clearScheduleInput, setClearScheduleInput] = useState('');
@@ -332,79 +333,19 @@ export default function ManualScheduleBuilderPage() {
     };
     return { ...draft, __original: editableGameSnapshot(draft) };
   };
-  const editDivisionTeams = useMemo(() => options.teams.filter((t: any) => t.division_id === editGame?.division_id && t.is_active), [options.teams, editGame?.division_id]);
   const seasonDateOptions = useMemo(() => {
-    const editSeasonId = editGame?.season_id || seasonId;
-    const dates = options.weeks.filter((w: any) => !editSeasonId || w.season_id === editSeasonId).map((w: any) => w.primary_game_date || w.start_date).filter(Boolean);
-    if (editGame?.game_date) dates.push(editGame.game_date);
+    const dates = options.weeks.filter((w: any) => !seasonId || w.season_id === seasonId).map((w: any) => w.primary_game_date || w.start_date).filter(Boolean);
+    games.forEach((game: any) => { if (game?.game_date) dates.push(game.game_date); });
     return Array.from(new Set(dates)).sort();
-  }, [options.weeks, seasonId, editGame?.season_id, editGame?.game_date]);
+  }, [options.weeks, seasonId, games]);
   const validStartTimeOptions = useMemo(() => {
-    const editSeasonId = editGame?.season_id || seasonId;
-    const editWeekId = editGame?.week_id;
     const configuredTimes = generatedSlots
-      .filter((slot: any) => (!editSeasonId || slot.season_id === editSeasonId) && (!editWeekId || !slot.week_id || slot.week_id === editWeekId || slot.season_week_id === editWeekId))
+      .filter((slot: any) => !seasonId || slot.season_id === seasonId)
       .map((slot: any) => slot.start_time)
       .filter(Boolean);
-    if (editGame?.kickoff_time) configuredTimes.push(editGame.kickoff_time);
+    games.forEach((game: any) => { if (game?.kickoff_time) configuredTimes.push(game.kickoff_time); });
     return Array.from(new Set(configuredTimes)).sort();
-  }, [generatedSlots, editGame?.season_id, editGame?.week_id, editGame?.kickoff_time, seasonId]);
-  const editFieldOptions = useMemo(() => {
-    const byField = new Map<string, any>();
-    const selectedHostId = String(editGame?.host_location_id || '');
-    const selectedDate = String(editGame?.game_date || '');
-    const preferredDate = (slot: any) => String(slot.game_date || slot.available_date || '');
-    const isExplicitManualField = (slot: any) => {
-      const label = explicitFieldSlotLabel(slot);
-      return Boolean(label) &&
-        !/\bWave\s+\d+\b|THREE_SMALL|TWO_MEDIUM|ONE_SMALL_ONE_LARGE|TWO_SMALL_ONE_MEDIUM|ONE_LARGE|ONE_MEDIUM_TWO_SMALL|ONE_LARGE_ONE_MEDIUM|TWO_LARGE/i.test(label);
-    };
-    const addSlot = (slot: any) => {
-      const id = String(slot.field_instance_id || slot.field_id || '');
-      if (!id || !isExplicitManualField(slot)) return;
-      const label = explicitFieldSlotLabel(slot);
-      const current = byField.get(id);
-      const slotDate = preferredDate(slot);
-      if (!current || (selectedDate && slotDate === selectedDate && preferredDate(current) !== selectedDate)) {
-        byField.set(id, { ...slot, explicit_field_slot_label: label });
-      }
-    };
-    (options.field_instances || [])
-      .filter((field: any) => (!selectedHostId || String(field.host_location_id || '') === selectedHostId))
-      .forEach(addSlot);
-    generatedSlots
-      .filter((slot: any) => (
-        (!editGame?.season_id || slot.season_id === editGame.season_id) &&
-        (!selectedHostId || String(slot.host_location_id || '') === selectedHostId)
-      ))
-      .forEach(addSlot);
-    const currentFieldInstanceId = String(editGame?.field_instance_id || '');
-    if (editGame && currentFieldInstanceId && String(editGame.host_location_id || '') === selectedHostId && !byField.has(currentFieldInstanceId)) {
-      addSlot({
-        field_instance_id: currentFieldInstanceId,
-        field_id: editGame.field_id,
-        host_location_id: editGame.host_location_id,
-        host_location_name: editGame.host_location_name,
-        field_instance_name: editGame.field_instance_name || 'Current field',
-        field_type: editGame.field_type,
-        field_size: editGame.field_size,
-        start_time: editGame.kickoff_time,
-        game_date: editGame.game_date,
-        available_date: editGame.game_date,
-      });
-    }
-    return Array.from(byField.values()).sort((a: any, b: any) => explicitFieldSlotLabel(a).localeCompare(explicitFieldSlotLabel(b), undefined, { numeric: true }));
-  }, [options.field_instances, generatedSlots, editGame?.season_id, editGame?.game_date, editGame?.host_location_id, editGame?.field_instance_id, editGame?.field_id, editGame?.field_instance_name, editGame?.host_location_name, editGame?.field_type, editGame?.field_size, editGame?.kickoff_time]);
-  const editSelectedField = useMemo(() => editFieldOptions.find((slot: any) => String(slot.field_instance_id || slot.field_id) === String(editGame?.field_instance_id || editGame?.field_id || '')), [editFieldOptions, editGame?.field_instance_id, editGame?.field_id]);
-  const editSelectedDivision = useMemo(() => options.divisions.find((d: any) => d.id === editGame?.division_id), [options.divisions, editGame?.division_id]);
-  const editSelectedFieldType = String(editSelectedField?.field_size || editSelectedField?.field_type || '').toUpperCase();
-  const editDivisionDefaultFieldType = String(editSelectedDivision?.required_field_type || '').toUpperCase();
-  const editFieldSizeMismatch = Boolean(editSelectedFieldType && editDivisionDefaultFieldType && editSelectedFieldType !== editDivisionDefaultFieldType);
-  const editFieldSizeLabel = editSelectedFieldType
-    ? `Selected field type: ${editSelectedFieldType}${editDivisionDefaultFieldType ? ` • Division default field type: ${editDivisionDefaultFieldType}` : ''}`
-    : (editDivisionDefaultFieldType ? `Division default field type: ${editDivisionDefaultFieldType}` : 'Select a field to view field type');
-  const isEditFieldValid = Boolean(editGame?.field_instance_id && editFieldOptions.some((slot: any) => String(slot.field_instance_id || slot.field_id) === String(editGame.field_instance_id)));
-  const editSaveDisabled = !canManageGeneratedGames || !editGame || !editGame.game_date || !seasonDateOptions.includes(editGame.game_date) || !editGame.kickoff_time || !validStartTimeOptions.includes(editGame.kickoff_time) || !editGame.division_id || !editGame.home_team_id || !editGame.away_team_id || editGame.home_team_id === editGame.away_team_id || !editGame.host_location_id || !isEditFieldValid || !editDivisionTeams.some((team: any) => team.id === editGame.home_team_id) || !editDivisionTeams.some((team: any) => team.id === editGame.away_team_id);
+  }, [generatedSlots, games, seasonId]);
   const scheduledGamesFilterOptions = useMemo(() => {
     const divisionOrder = new Map<string, number>((options.divisions || []).map((division: any, index: number) => [String(division.id), index]));
     const dates = uniqueByValue(games.map((game: any) => ({ value: gameDateValue(game), label: formatDisplayDate(game.game_date) })))
@@ -553,85 +494,121 @@ export default function ManualScheduleBuilderPage() {
   useEffect(() => { loadRecommendations().catch((e) => setError(extractError(e))); }, [seasonId, weekId, divisionId, organizationId, hostLocationId, homeTeamId, awayTeamId]);
 
   const compactSelectClass = 'w-full min-w-32 rounded border bg-white px-2 py-1 text-xs text-slate-900';
-  const inlineEditDirty = hasEditableGameChanges(editGame);
-  const confirmDiscardInlineEdit = () => {
-    if (!inlineEditDirty) return true;
-    return window.confirm('Discard unsaved row edits?');
+  const dirtyDrafts = useMemo(() => Object.values(pendingGameEdits).filter((draft: any) => hasEditableGameChanges(draft)), [pendingGameEdits]);
+  const pendingChangedCellCount = useMemo(() => dirtyDrafts.reduce((total: number, draft: any) => {
+    const original = draft.__original || {};
+    return total + Object.entries(editableGameSnapshot(draft)).filter(([key, value]) => JSON.stringify(value) !== JSON.stringify((original as any)[key])).length;
+  }, 0), [dirtyDrafts]);
+  const hasPendingBulkEdits = dirtyDrafts.length > 0;
+  const pendingChangesLabel = `${pendingChangedCellCount} unsaved ${pendingChangedCellCount === 1 ? 'change' : 'changes'} across ${dirtyDrafts.length} ${dirtyDrafts.length === 1 ? 'game' : 'games'}`;
+  const confirmDiscardBulkEdits = () => !hasPendingBulkEdits || window.confirm('Discard all unsaved schedule edits?');
+
+  useEffect(() => {
+    if (!hasPendingBulkEdits) return;
+    const handler = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, [hasPendingBulkEdits]);
+
+  const getDraftForGame = (game: any) => pendingGameEdits[game.id] || buildEditableGame(game);
+  const isDirtyCell = (draft: any, fieldName: string) => JSON.stringify(editableGameSnapshot(draft)[fieldName]) !== JSON.stringify(draft.__original?.[fieldName]);
+  const dirtyCellClass = (draft: any, fieldName: string) => isDirtyCell(draft, fieldName) ? ' bg-amber-50 ring-1 ring-inset ring-amber-300' : '';
+  const getTeamsForDivision = (divisionIdValue: string) => options.teams.filter((t: any) => t.division_id === divisionIdValue && t.is_active);
+  const getFieldOptionsForDraft = (draft: any) => {
+    const byField = new Map<string, any>();
+    const selectedHostId = String(draft?.host_location_id || '');
+    const isExplicitManualField = (slot: any) => {
+      const label = explicitFieldSlotLabel(slot);
+      return Boolean(label) && !/\bWave\s+\d+\b|THREE_SMALL|TWO_MEDIUM|ONE_SMALL_ONE_LARGE|TWO_SMALL_ONE_MEDIUM|ONE_LARGE|ONE_MEDIUM_TWO_SMALL|ONE_LARGE_ONE_MEDIUM|TWO_LARGE/i.test(label);
+    };
+    const addSlot = (slot: any) => {
+      const id = String(slot.field_instance_id || slot.field_id || '');
+      if (!id || !isExplicitManualField(slot)) return;
+      byField.set(id, { ...slot, explicit_field_slot_label: explicitFieldSlotLabel(slot) });
+    };
+    (options.field_instances || []).filter((field: any) => !selectedHostId || String(field.host_location_id || '') === selectedHostId).forEach(addSlot);
+    generatedSlots.filter((slot: any) => (!selectedHostId || String(slot.host_location_id || '') === selectedHostId)).forEach(addSlot);
+    if (draft?.field_instance_id && !byField.has(String(draft.field_instance_id))) {
+      addSlot({ field_instance_id: draft.field_instance_id, field_id: draft.field_id, host_location_id: draft.host_location_id, field_instance_name: draft.field_instance_name || 'Current field', field_type: draft.field_type, field_size: draft.field_size });
+    }
+    return Array.from(byField.values()).sort((a: any, b: any) => explicitFieldSlotLabel(a).localeCompare(explicitFieldSlotLabel(b), undefined, { numeric: true }));
   };
-  const startInlineEdit = (game: any) => {
-    if (editGame?.id === game.id) return;
-    if (!confirmDiscardInlineEdit()) return;
-    setError('');
-    setMoveGame(null);
-    setEditGame(buildEditableGame(game));
+  const isDraftValid = (draft: any) => {
+    const teams = getTeamsForDivision(draft.division_id);
+    const fields = getFieldOptionsForDraft(draft);
+    return Boolean(draft.game_date && seasonDateOptions.includes(draft.game_date) && draft.kickoff_time && validStartTimeOptions.includes(draft.kickoff_time) && draft.division_id && draft.home_team_id && draft.away_team_id && draft.home_team_id !== draft.away_team_id && draft.host_location_id && draft.field_instance_id && teams.some((team: any) => team.id === draft.home_team_id) && teams.some((team: any) => team.id === draft.away_team_id) && fields.some((slot: any) => String(slot.field_instance_id || slot.field_id) === String(draft.field_instance_id)));
   };
-  const updateEditGame = (patch: Record<string, unknown>) => setEditGame((current: any) => current ? { ...current, ...patch } : current);
+  const hasInvalidPendingDrafts = dirtyDrafts.some((draft: any) => !isDraftValid(draft));
+  const updateDraftForGame = (game: any, patch: Record<string, unknown>) => {
+    if (!canBulkInlineEditScheduledGames) return;
+    setPendingGameEdits((current) => {
+      const base = current[game.id] || buildEditableGame(game);
+      return { ...current, [game.id]: { ...base, ...patch } };
+    });
+  };
   const updateScheduledGamesFilters = (patch: Partial<ScheduledGamesFilters>) => {
-    if (!confirmDiscardInlineEdit()) return;
-    setEditGame(null);
+    if (!confirmDiscardBulkEdits()) return;
+    setPendingGameEdits({});
     setScheduledGamesFilters((current) => ({ ...current, ...patch }));
   };
   const applyScheduledGameUpdate = (updatedGame: any) => {
     setGames((prev) => prev.map((game: any) => game.id === updatedGame.id ? { ...game, ...updatedGame, game_status_code: updatedGame.status_code } : game));
   };
-  const saveInlineEditedGame = async () => {
-    if (!editGame) return;
-    setError('');
-    if (editSaveDisabled) { setError('Select a valid date, time, division, two different division teams, host location, and field before saving.'); return; }
-    if (!editGame.kickoff_time || !validStartTimeOptions.includes(editGame.kickoff_time)) { setError('Select a valid start time.'); return; }
-    if (editGame.home_team_id === editGame.away_team_id) { setError('Home and away cannot be the same.'); return; }
-    const home = options.teams.find((t: any) => t.id === editGame.home_team_id);
-    const away = options.teams.find((t: any) => t.id === editGame.away_team_id);
-    if (!home || !away || home.division_id !== editGame.division_id || away.division_id !== editGame.division_id) { setError('Teams must belong to selected division.'); return; }
-    const buildPayload = (overrideWarnings: boolean, scoreConfirmed: boolean) => ({
-      season_id: editGame.season_id,
-      week_id: editGame.week_id,
-      division_id: editGame.division_id,
-      home_team_id: editGame.home_team_id,
-      away_team_id: editGame.away_team_id,
-      host_location_id: editGame.host_location_id,
-      field_instance_id: editGame.field_instance_id,
-      game_status_id: editGame.game_status_id || scheduledStatusId || null,
-      game_date: editGame.game_date,
-      kickoff_time: editGame.kickoff_time,
-      public_notes: editGame.public_notes || null,
-      internal_admin_notes: editGame.internal_admin_notes || null,
+  const buildBulkPayload = (overrideWarnings: boolean) => ({
+    overrideWarnings,
+    override_warnings: overrideWarnings,
+    changes: dirtyDrafts.map((draft: any) => ({
+      game_id: draft.id,
+      gameId: draft.id,
+      season_id: draft.season_id,
+      week_id: draft.week_id,
+      division_id: draft.division_id,
+      home_team_id: draft.home_team_id,
+      away_team_id: draft.away_team_id,
+      host_location_id: draft.host_location_id,
+      field_instance_id: draft.field_instance_id,
+      game_status_id: draft.game_status_id || null,
+      game_date: draft.game_date,
+      kickoff_time: draft.kickoff_time,
+      public_notes: draft.public_notes || null,
+      internal_admin_notes: draft.internal_admin_notes || null,
       override_warnings: overrideWarnings,
       overrideWarnings,
-      score_change_confirmed: scoreConfirmed,
+      score_change_confirmed: overrideWarnings,
       manual_edit_locked: true,
+    })),
+  });
+  const summarizeWarnings = (warningsByGame: any) => {
+    const counts = new Map<string, number>();
+    Object.values(warningsByGame || {}).flat().forEach((warning: any) => {
+      const label = String(warning?.code || 'SCHEDULE_WARNING').replaceAll('_', ' ').toLowerCase();
+      counts.set(label, (counts.get(label) || 0) + 1);
     });
-    const save = async (overrideWarnings: boolean, scoreConfirmed: boolean) => apiFetch(`/schedule-management/games/${editGame.id}/manual-edit`, { method: 'PATCH', body: JSON.stringify(buildPayload(overrideWarnings, scoreConfirmed)) }, token);
+    return Array.from(counts.entries()).map(([label, count]) => `• ${count} ${label} ${count === 1 ? 'warning' : 'warnings'}`).join('\n') || '• These edits create one or more schedule warnings.';
+  };
+  const saveBulkInlineEdits = async (overrideWarnings = false) => {
+    if (!canBulkInlineEditScheduledGames || !hasPendingBulkEdits) return;
+    setError('');
+    if (hasInvalidPendingDrafts) { setError('Select a valid date, time, division, two different division teams, host location, and configured field for every changed row before saving.'); return; }
     try {
-      const res: any = await save(false, false);
-      setEditGame(null);
-      applyScheduledGameUpdate(res.game);
-      await load(); await loadRecommendations(); setManualScheduleBannerFromValidation('Game manually edited.', await loadFinalScheduleValidation());
+      const res: any = await apiFetch('/schedule-management/games/manual-edit/bulk', { method: 'PATCH', body: JSON.stringify(buildBulkPayload(overrideWarnings)) }, token);
+      (res.games || []).forEach(applyScheduledGameUpdate);
+      setPendingGameEdits({});
+      await load(); await loadRecommendations(); setManualScheduleBannerFromValidation(overrideWarnings ? 'Schedule changes saved with warning override.' : 'Schedule changes saved.', await loadFinalScheduleValidation());
     } catch (e: unknown) {
       if (e instanceof ApiError && e.status === 409) {
-        const warnings = (e.details as any)?.detail?.warnings || [];
-        const needsScoreConfirm = (e.details as any)?.detail?.error === 'SCORED_GAME_CHANGE_REQUIRES_CONFIRMATION';
-        const message = warnings.map((w: any) => `• ${w.message || w.code}`).join('\n') || '• This change creates one or more schedule warnings.';
-        const confirmed = window.confirm(`Manual Override Warning
-
-${message}
-
-This change creates schedule warnings and may require manual rebalancing of turf time slots or field configurations. As Scheduling Admin / League Admin, you may override and save this row.
-
-Save Anyway?`);
-        if (confirmed) {
-          try {
-            const res: any = await save(true, needsScoreConfirm);
-            setEditGame(null);
-            applyScheduledGameUpdate(res.game);
-            await load(); await loadRecommendations(); setManualScheduleBannerFromValidation('Game manually edited with warning override.', await loadFinalScheduleValidation());
-          } catch (inner: unknown) { setError(extractError(inner)); }
-        }
+        const warnings = (e.details as any)?.detail?.warnings || {};
+        const confirmed = window.confirm(`Manual Override Warnings\n\n${summarizeWarnings(warnings)}\n\nThese edits create schedule warnings and may require manual rebalancing of turf time slots or field configurations. As Scheduling Administrator, you may override and save these changes.\n\nSave Anyway?`);
+        if (confirmed) await saveBulkInlineEdits(true);
         return;
       }
       setError(extractError(e));
     }
   };
+
 
   return (
     <div className='space-y-4'>
@@ -889,51 +866,60 @@ Save Anyway?`);
           <div className='mt-2 text-sm text-slate-600'>Showing {filteredGames.length} of {games.length} scheduled games</div>
         </div>
         {games.length > 0 && filteredGames.length === 0 ? <div className='rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800'>No scheduled games match the selected filters.</div> : null}
+        {canBulkInlineEditScheduledGames ? <div className='mb-3 flex flex-wrap items-center gap-3 rounded border border-blue-100 bg-blue-50 p-3'>
+          <span className={`text-sm font-semibold ${hasPendingBulkEdits ? 'text-blue-900' : 'text-slate-600'}`}>{hasPendingBulkEdits ? pendingChangesLabel : 'No unsaved schedule changes'}</span>
+          <button className='rounded bg-blue-600 px-3 py-2 text-sm text-white disabled:cursor-not-allowed disabled:bg-slate-300' disabled={!hasPendingBulkEdits || hasInvalidPendingDrafts} onClick={() => saveBulkInlineEdits(false)}>Save Changes</button>
+          <button className='rounded border bg-white px-3 py-2 text-sm disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400' disabled={!hasPendingBulkEdits} onClick={() => setPendingGameEdits({})}>Discard Changes</button>
+          {hasInvalidPendingDrafts ? <span className='text-sm text-red-700'>Fix invalid changed rows before saving.</span> : null}
+        </div> : null}
         <div className='overflow-auto'>
           <table className='min-w-full text-sm'>
             <thead><tr>{['Date', 'Time', 'Division', 'Home Team', 'Away Team', 'Host Location', 'Field', 'Notes', ...(canManageGeneratedGames ? ['Actions'] : [])].map((h) => <th key={h} className='px-2 py-2 text-left'>{h}</th>)}</tr></thead>
             <tbody>
               {filteredGames.map((g: any) => {
-                const isEditing = editGame?.id === g.id;
-                const rowTeams = options.teams.filter((t: any) => t.division_id === (isEditing ? editGame?.division_id : g.division_id) && t.is_active);
-                return <tr key={g.id} className={`border-t align-top ${isEditing ? 'bg-blue-50/40' : ''}`}>
-                  <td className='p-2'>{isEditing ? <select className={compactSelectClass} value={editGame.game_date || ''} onChange={(e) => updateEditGame({ game_date: e.target.value })}><option value=''>Date</option>{seasonDateOptions.map((d: any) => <option key={d} value={d}>{formatDisplayDate(d)}</option>)}</select> : formatDisplayDate(g.game_date)}</td>
-                  <td className='p-2'>{isEditing ? <select className={compactSelectClass} value={editGame.kickoff_time || ''} onChange={(e) => updateEditGame({ kickoff_time: e.target.value })}><option value=''>Time</option>{validStartTimeOptions.map((t: any) => <option key={t} value={t}>{formatDisplayTime(t)}</option>)}</select> : formatDisplayTime(g.kickoff_time)}</td>
-                  <td className='p-2'>{isEditing ? <select className={compactSelectClass} value={editGame.division_id || ''} onChange={(e) => updateEditGame({ division_id: e.target.value, home_team_id: '', away_team_id: '' })}><option value=''>Division</option>{options.divisions.map((d: any) => <option key={d.id} value={d.id}>{getDivisionLabel(d)}</option>)}</select> : (g.division_name || 'Unknown Division')}</td>
-                  <td className='p-2'>{isEditing ? <select className={compactSelectClass} value={editGame.home_team_id || ''} onChange={(e) => updateEditGame({ home_team_id: e.target.value })}><option value=''>Home Team</option>{rowTeams.map((t: any) => <option key={t.id} value={t.id} disabled={t.id === editGame.away_team_id}>{t.name}</option>)}</select> : (g.home_team_name || 'Unknown Team')}</td>
-                  <td className='p-2'>{isEditing ? <select className={compactSelectClass} value={editGame.away_team_id || ''} onChange={(e) => updateEditGame({ away_team_id: e.target.value })}><option value=''>Away Team</option>{rowTeams.map((t: any) => <option key={t.id} value={t.id} disabled={t.id === editGame.home_team_id}>{t.name}</option>)}</select> : (g.away_team_name || 'Unknown Team')}</td>
-                  <td className='p-2'>{isEditing ? <select className={compactSelectClass} value={editGame.host_location_id || ''} onChange={(e) => updateEditGame({ host_location_id: e.target.value, field_instance_id: '' })}><option value=''>Host Location</option>{options.host_locations.map((h: any) => <option key={h.id} value={h.id}>{h.name}</option>)}</select> : (g.host_location_name || '-')}</td>
-                  <td className='p-2'>{isEditing ? <div className='space-y-1'><select className={compactSelectClass} value={editGame.field_instance_id || ''} onChange={(e) => { const selected = editFieldOptions.find((slot: any) => String(slot.field_instance_id || slot.field_id) === e.target.value); updateEditGame({ field_instance_id: e.target.value, field_id: selected?.field_id || editGame.field_id, host_location_id: selected?.host_location_id || editGame.host_location_id }); }}><option value=''>Field</option>{editFieldOptions.map((s: any) => <option key={`${s.field_instance_id || s.field_id}-${s.slot_id || s.id}`} value={s.field_instance_id || s.field_id}>{s.explicit_field_slot_label || explicitFieldSlotLabel(s)}</option>)}</select><div className={`text-[11px] ${editFieldSizeMismatch ? 'text-amber-700' : 'text-slate-500'}`}>{editFieldSizeLabel}</div></div> : (explicitFieldSlotLabel(g) || '-')}</td>
-                  <td className='p-2'>{isEditing ? <details><summary className='cursor-pointer text-xs text-blue-700 underline'>Edit notes</summary><div className='mt-2 grid min-w-64 gap-2'><textarea className='rounded border p-2 text-xs' value={editGame.public_notes || ''} onChange={(e) => updateEditGame({ public_notes: e.target.value })} placeholder='Public notes' /><textarea className='rounded border p-2 text-xs' value={editGame.internal_admin_notes || ''} onChange={(e) => updateEditGame({ internal_admin_notes: e.target.value })} placeholder='Internal admin notes' /></div></details> : ((g.public_notes || g.internal_admin_notes) ? <details><summary className='cursor-pointer text-xs text-blue-700 underline'>View notes</summary><div className='mt-1 min-w-48 space-y-1 text-xs text-slate-700'>{g.public_notes ? <p><span className='font-semibold'>Public:</span> {g.public_notes}</p> : null}{g.internal_admin_notes ? <p><span className='font-semibold'>Internal:</span> {g.internal_admin_notes}</p> : null}</div></details> : <span className='text-slate-400'>-</span>)}</td>
+                const draft = getDraftForGame(g);
+                const isDirtyRow = hasEditableGameChanges(draft);
+                const rowTeams = getTeamsForDivision(draft.division_id);
+                const rowFieldOptions = getFieldOptionsForDraft(draft);
+                const selectedField = rowFieldOptions.find((slot: any) => String(slot.field_instance_id || slot.field_id) === String(draft.field_instance_id || draft.field_id || ''));
+                const selectedDivision = options.divisions.find((d: any) => d.id === draft.division_id);
+                const selectedFieldType = String(selectedField?.field_size || selectedField?.field_type || '').toUpperCase();
+                const divisionDefaultFieldType = String(selectedDivision?.required_field_type || '').toUpperCase();
+                const fieldSizeMismatch = Boolean(selectedFieldType && divisionDefaultFieldType && selectedFieldType !== divisionDefaultFieldType);
+                const fieldSizeLabel = selectedFieldType ? `Selected field type: ${selectedFieldType}${divisionDefaultFieldType ? ` • Division default field type: ${divisionDefaultFieldType}` : ''}` : (divisionDefaultFieldType ? `Division default field type: ${divisionDefaultFieldType}` : 'Select a field to view field type');
+                const editable = canBulkInlineEditScheduledGames;
+                return <tr key={g.id} className={`border-t align-top ${isDirtyRow ? 'bg-amber-50/40 outline outline-1 outline-amber-200' : ''}`}>
+                  <td className={`p-2${dirtyCellClass(draft, 'game_date')}`}>{editable ? <select className={compactSelectClass} value={draft.game_date || ''} onChange={(e) => updateDraftForGame(g, { game_date: e.target.value })}><option value=''>Date</option>{seasonDateOptions.map((d: any) => <option key={d} value={d}>{formatDisplayDate(d)}</option>)}</select> : formatDisplayDate(g.game_date)}</td>
+                  <td className={`p-2${dirtyCellClass(draft, 'kickoff_time')}`}>{editable ? <select className={compactSelectClass} value={draft.kickoff_time || ''} onChange={(e) => updateDraftForGame(g, { kickoff_time: e.target.value })}><option value=''>Time</option>{validStartTimeOptions.map((t: any) => <option key={t} value={t}>{formatDisplayTime(t)}</option>)}</select> : formatDisplayTime(g.kickoff_time)}</td>
+                  <td className={`p-2${dirtyCellClass(draft, 'division_id')}`}>{editable ? <select className={compactSelectClass} value={draft.division_id || ''} onChange={(e) => updateDraftForGame(g, { division_id: e.target.value, home_team_id: '', away_team_id: '' })}><option value=''>Division</option>{options.divisions.map((d: any) => <option key={d.id} value={d.id}>{getDivisionLabel(d)}</option>)}</select> : (g.division_name || 'Unknown Division')}</td>
+                  <td className={`p-2${dirtyCellClass(draft, 'home_team_id')}`}>{editable ? <select className={compactSelectClass} value={draft.home_team_id || ''} onChange={(e) => updateDraftForGame(g, { home_team_id: e.target.value })}><option value=''>Home Team</option>{rowTeams.map((t: any) => <option key={t.id} value={t.id} disabled={t.id === draft.away_team_id}>{t.name}</option>)}</select> : (g.home_team_name || 'Unknown Team')}</td>
+                  <td className={`p-2${dirtyCellClass(draft, 'away_team_id')}`}>{editable ? <select className={compactSelectClass} value={draft.away_team_id || ''} onChange={(e) => updateDraftForGame(g, { away_team_id: e.target.value })}><option value=''>Away Team</option>{rowTeams.map((t: any) => <option key={t.id} value={t.id} disabled={t.id === draft.home_team_id}>{t.name}</option>)}</select> : (g.away_team_name || 'Unknown Team')}</td>
+                  <td className={`p-2${dirtyCellClass(draft, 'host_location_id')}`}>{editable ? <select className={compactSelectClass} value={draft.host_location_id || ''} onChange={(e) => updateDraftForGame(g, { host_location_id: e.target.value, field_instance_id: '' })}><option value=''>Host Location</option>{options.host_locations.map((h: any) => <option key={h.id} value={h.id}>{h.name}</option>)}</select> : (g.host_location_name || '-')}</td>
+                  <td className={`p-2${dirtyCellClass(draft, 'field_instance_id')}`}>{editable ? <div className='space-y-1'><select className={compactSelectClass} value={draft.field_instance_id || ''} onChange={(e) => { const selected = rowFieldOptions.find((slot: any) => String(slot.field_instance_id || slot.field_id) === e.target.value); updateDraftForGame(g, { field_instance_id: e.target.value, field_id: selected?.field_id || draft.field_id, host_location_id: selected?.host_location_id || draft.host_location_id }); }}><option value=''>Field</option>{rowFieldOptions.map((s: any) => <option key={`${s.field_instance_id || s.field_id}-${s.slot_id || s.id}`} value={s.field_instance_id || s.field_id}>{s.explicit_field_slot_label || explicitFieldSlotLabel(s)}</option>)}</select><div className={`text-[11px] ${fieldSizeMismatch ? 'text-amber-700' : 'text-slate-500'}`}>{fieldSizeLabel}</div></div> : (explicitFieldSlotLabel(g) || '-')}</td>
+                  <td className={`p-2${dirtyCellClass(draft, 'public_notes')}${dirtyCellClass(draft, 'internal_admin_notes')}`}>{editable ? <details><summary className='cursor-pointer text-xs text-blue-700 underline'>Edit notes</summary><div className='mt-2 grid min-w-64 gap-2'><textarea className='rounded border p-2 text-xs' value={draft.public_notes || ''} onChange={(e) => updateDraftForGame(g, { public_notes: e.target.value })} placeholder='Public notes' /><textarea className='rounded border p-2 text-xs' value={draft.internal_admin_notes || ''} onChange={(e) => updateDraftForGame(g, { internal_admin_notes: e.target.value })} placeholder='Internal admin notes' /></div></details> : ((g.public_notes || g.internal_admin_notes) ? <details><summary className='cursor-pointer text-xs text-blue-700 underline'>View notes</summary><div className='mt-1 min-w-48 space-y-1 text-xs text-slate-700'>{g.public_notes ? <p><span className='font-semibold'>Public:</span> {g.public_notes}</p> : null}{g.internal_admin_notes ? <p><span className='font-semibold'>Internal:</span> {g.internal_admin_notes}</p> : null}</div></details> : <span className='text-slate-400'>-</span>)}</td>
                   {canManageGeneratedGames ? <td className='p-2'><div className='flex flex-wrap gap-2'>
-                    {isEditing ? <>
-                      <button onClick={saveInlineEditedGame} disabled={editSaveDisabled} className='rounded bg-blue-600 px-2 py-1 text-xs text-white disabled:cursor-not-allowed disabled:bg-slate-300'>Save</button>
-                      <button className='rounded border px-2 py-1 text-xs' onClick={() => setEditGame(null)}>Cancel / Revert</button>
-                      <button className='rounded border px-2 py-1 text-xs' onClick={() => updateEditGame({ home_team_id: editGame.away_team_id, away_team_id: editGame.home_team_id })}>Swap</button>
-                    </> : <>
-                      <button className='rounded border px-2 py-1 text-xs' onClick={() => startInlineEdit(g)}>Modify</button>
-                      <button className='rounded border px-2 py-1 text-xs' onClick={() => { if (!confirmDiscardInlineEdit()) return; setEditGame(null); setMoveGame(g); }}>Move</button>
-                      <button className='rounded border border-red-300 px-2 py-1 text-xs text-red-700' onClick={async () => {
-                        if (!confirmDiscardInlineEdit()) return;
-                        if (!window.confirm('Remove this scheduled game?')) return;
-                        setError('');
-                        setEditGame(null);
-                        setAutoFillSkipped([]);
-                        setAutoFillPreview([]);
-                        try {
-                          setGames((prev) => prev.filter((game: any) => game.id !== g.id));
-                          await apiFetch(`/schedule-management/games/${g.id}/unschedule`, { method: 'PATCH' }, token);
-                          await load();
-                          await loadRecommendations();
-                          setManualScheduleBannerFromValidation('Game unscheduled.', await loadFinalScheduleValidation());
-                        }
-                        catch (e: unknown) {
-                          await load();
-                          await loadRecommendations();
-                          setError(extractError(e));
-                        }
-                      }}>Delete / Unschedule</button>
-                    </>}
+                    <button className='rounded border px-2 py-1 text-xs' onClick={() => { if (!confirmDiscardBulkEdits()) return; setPendingGameEdits({}); setMoveGame(g); }}>Move</button>
+                    <button className='rounded border border-red-300 px-2 py-1 text-xs text-red-700' onClick={async () => {
+                      if (!confirmDiscardBulkEdits()) return;
+                      if (!window.confirm('Remove this scheduled game?')) return;
+                      setError('');
+                      setPendingGameEdits({});
+                      setAutoFillSkipped([]);
+                      setAutoFillPreview([]);
+                      try {
+                        setGames((prev) => prev.filter((game: any) => game.id !== g.id));
+                        await apiFetch(`/schedule-management/games/${g.id}/unschedule`, { method: 'PATCH' }, token);
+                        await load();
+                        await loadRecommendations();
+                        setManualScheduleBannerFromValidation('Game unscheduled.', await loadFinalScheduleValidation());
+                      }
+                      catch (e: unknown) {
+                        await load();
+                        await loadRecommendations();
+                        setError(extractError(e));
+                      }
+                    }}>Delete / Unschedule</button>
+                    {isDirtyRow && canBulkInlineEditScheduledGames ? <button className='rounded border px-2 py-1 text-xs' onClick={() => setPendingGameEdits((current) => { const next = { ...current }; delete next[g.id]; return next; })}>Reset Row</button> : null}
                   </div></td> : null}
                 </tr>;
               })}
