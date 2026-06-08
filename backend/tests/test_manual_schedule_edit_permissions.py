@@ -563,6 +563,120 @@ class ManualOptimizationWorkflowPermissionsTest(ManualScheduleEditPermissionsTes
         self.db.expire_all()
         self.assertEqual(self.db.get(Game, self.game.id).kickoff_time, time(10, 0))
 
+
+    def _add_optimizer_slot(self, start, *, assigned_game=None, host=None, field=None, status='OPEN'):
+        host = host or self.host
+        field = field or self.field
+        slot = GameSlot(
+            id=uuid.uuid4(),
+            field_instance_id=field.id,
+            host_location_id=host.id,
+            season_id=self.season.id,
+            week_id=self.week.id,
+            slot_date=date(2026, 8, 9),
+            start_time=start,
+            end_time=time(start.hour + 1, start.minute),
+            field_type='SMALL',
+            status=status,
+            assigned_game_id=assigned_game.id if assigned_game else None,
+        )
+        self.db.add(slot)
+        return slot
+
+    def _add_optimizer_game(self, kickoff, home=None, away=None, *, host=None, field=None, manual=False):
+        host = host or self.host
+        field = field or self.field
+        game = Game(
+            id=uuid.uuid4(),
+            season_id=self.season.id,
+            week_id=self.week.id,
+            home_team_id=(home or self.away_team).id,
+            away_team_id=(away or self.other_team).id,
+            host_location_id=host.id,
+            field_instance_id=field.id,
+            game_status_id=self.status.id,
+            game_date=date(2026, 8, 9),
+            kickoff_time=kickoff,
+            is_manual_edit=manual,
+        )
+        self.db.add(game)
+        self.db.flush()
+        slot = self._add_optimizer_slot(kickoff, assigned_game=game, host=host, field=field, status='ASSIGNED')
+        self.db.flush()
+        return game, slot
+
+    def test_optimizer_reports_zero_candidates_only_with_reason(self):
+        response = self.client.post(
+            '/api/manual-schedule-builder/optimize-schedule',
+            headers=self._token(self.scheduling_user.id),
+            json=self._optimization_payload(),
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        summary = response.json()['summary']
+        self.assertEqual(summary['optimization_candidates_generated'], 0)
+        self.assertEqual(summary['accepted_optimization_moves'], 0)
+        self.assertEqual(summary['rejected_optimization_moves'], 0)
+        self.assertEqual(summary['no_candidates_message'], 'No optimization candidates were generated.')
+        self.assertTrue(summary['no_candidate_reasons'])
+
+    def test_optimizer_logs_rejected_locked_manual_moves(self):
+        self.host.surface_type = 'TURF_STADIUM'
+        self.game.is_manual_edit = True
+        self._add_optimizer_slot(time(8, 0))
+        self.db.commit()
+        response = self.client.post(
+            '/api/manual-schedule-builder/optimize-schedule',
+            headers=self._token(self.scheduling_user.id),
+            json=self._optimization_payload(include_manual_edits=False),
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        data = response.json()
+        self.assertGreaterEqual(data['summary']['optimization_candidates_generated'], 1)
+        self.assertGreaterEqual(data['summary']['rejected_optimization_moves'], 1)
+        self.assertIn('manually edited game is locked', data['rejected_move_reasons'])
+        self.db.expire_all()
+        self.assertEqual(self.db.get(Game, self.game.id).kickoff_time, time(9, 0))
+
+    def test_optimizer_accepts_safe_earlier_turf_move_and_preview_only(self):
+        self.host.surface_type = 'TURF_STADIUM'
+        late_game, _late_slot = self._add_optimizer_game(time(16, 0))
+        self._add_optimizer_slot(time(10, 0))
+        self.db.commit()
+        response = self.client.post(
+            '/api/manual-schedule-builder/optimize-schedule',
+            headers=self._token(self.scheduling_user.id),
+            json=self._optimization_payload(),
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        data = response.json()
+        self.assertGreater(data['summary']['optimization_candidates_generated'], 0)
+        self.assertGreater(data['summary']['accepted_optimization_moves'], 0)
+        preview = {row['id']: row for row in data['optimized_preview_games']}
+        self.assertEqual(preview[str(late_game.id)]['time'], '10:00:00')
+        self.assertLessEqual(str(data['after_metrics']['latest_turf_start_time']), str(data['before_metrics']['latest_turf_start_time']))
+        self.db.expire_all()
+        self.assertEqual(self.db.get(Game, late_game.id).kickoff_time, time(16, 0))
+
+    def test_optimizer_generates_candidates_for_host_home_exception(self):
+        away_host = HostLocation(id=uuid.uuid4(), organization_id=self.away_org.id, name='Away Park', is_active=True)
+        away_field = FieldInstance(id=uuid.uuid4(), host_location_id=away_host.id, hosting_availability_id=uuid.uuid4(), instance_date=date(2026, 8, 9), field_name='Away Small 1', field_type='SMALL', is_active=True)
+        self.db.add_all([away_host, away_field])
+        self.game.host_location_id = away_host.id
+        self.game.field_instance_id = away_field.id
+        self.slot.assigned_game_id = None
+        self._add_optimizer_slot(time(9, 0), assigned_game=self.game, host=away_host, field=away_field, status='ASSIGNED')
+        self._add_optimizer_slot(time(10, 0), host=self.host, field=self.field)
+        self.db.commit()
+        response = self.client.post(
+            '/api/manual-schedule-builder/optimize-schedule',
+            headers=self._token(self.scheduling_user.id),
+            json=self._optimization_payload(),
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        data = response.json()
+        self.assertGreater(data['summary']['optimization_candidates_generated'], 0)
+        self.assertTrue(any(change.get('opportunity') == 'host-home repair' for change in data['proposed_changes'] + data['rejected_changes']))
+
     def test_keep_first_pass_discards_optimization_preview(self):
         response = self.client.post(
             '/api/manual-schedule-builder/optimize-schedule/keep-first-pass',
