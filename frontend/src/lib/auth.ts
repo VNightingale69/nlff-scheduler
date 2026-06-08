@@ -1,6 +1,6 @@
 'use client';
 
-export type UserRole = 'LEAGUE_ADMIN' | 'SCHEDULING_ADMIN' | 'COMMUNITY_ADMIN';
+export type UserRole = 'ADMIN' | 'LEAGUE_ADMIN' | 'SCHEDULING_ADMIN' | 'COMMUNITY_ADMIN';
 
 export interface AuthUser {
   email: string;

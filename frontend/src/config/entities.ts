@@ -3,7 +3,7 @@ export type EntityConfig = {
   path: string;
   fields: { key: string; label: string; type?: 'text' | 'number' | 'date' | 'time' | 'checkbox' | 'select' }[];
   nav: boolean;
-  roles?: ('LEAGUE_ADMIN' | 'SCHEDULING_ADMIN' | 'COMMUNITY_ADMIN')[];
+  roles?: ('ADMIN' | 'LEAGUE_ADMIN' | 'SCHEDULING_ADMIN' | 'COMMUNITY_ADMIN')[];
 };
 
 export const ENTITIES: Record<string, EntityConfig> = {
