@@ -24025,6 +24025,113 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
         ]
         return sorted(candidates, key=lambda slot: (_slot_label(slot) or '', str(slot.id)))
 
+    def _turf_host_date_key_for_slot(slot: GameSlot | None) -> tuple[uuid.UUID, date] | None:
+        if not slot or not slot.host_location_id or slot.host_location_id not in turf_host_ids or not slot.slot_date:
+            return None
+        return (slot.host_location_id, slot.slot_date)
+
+    def _regular_season_turf_host_date(slot: GameSlot | None) -> tuple[uuid.UUID, date] | None:
+        key = _turf_host_date_key_for_slot(slot)
+        if not key:
+            return None
+        week = getattr(slot, 'week', None) or (db.get(Week, slot.week_id) if slot.week_id else None)
+        date_type = _normalize_week_date_type(getattr(week, 'date_type', None)) if week else REGULAR_SEASON_DATE_TYPE
+        return key if date_type == REGULAR_SEASON_DATE_TYPE else None
+
+    def _is_locked_manual_game(game: Game | None) -> bool:
+        return bool(game and getattr(game, 'is_manual_edit', False) and getattr(game, 'manual_edit_locked', True) and not include_manual_edits)
+
+    def _ensure_standard_turf_slot(host_id: uuid.UUID, slot_date: date, start_time: time, week_id: uuid.UUID | None, label: str, field_size: str) -> GameSlot | None:
+        existing = next((
+            slot for slot in all_turf_slots
+            if slot.host_location_id == host_id
+            and slot.slot_date == slot_date
+            and slot.start_time == start_time
+            and _slot_label(slot) == label
+        ), None)
+        if existing:
+            return existing
+        field = db.query(FieldInstance).filter(
+            FieldInstance.host_location_id == host_id,
+            FieldInstance.instance_date == slot_date,
+            FieldInstance.field_name == label,
+        ).first()
+        if not field:
+            return None
+        existing_slot = db.query(GameSlot).filter(
+            GameSlot.field_instance_id == field.id,
+            GameSlot.start_time == start_time,
+            GameSlot.end_time == (datetime.combine(slot_date, start_time) + timedelta(minutes=GAME_DURATION_MINUTES)).time(),
+        ).first()
+        if existing_slot:
+            if existing_slot not in all_turf_slots:
+                all_turf_slots.append(existing_slot)
+            return existing_slot
+        slot = GameSlot(
+            id=uuid.uuid4(),
+            field_instance_id=field.id,
+            host_location_id=host_id,
+            season_id=season_id,
+            week_id=week_id,
+            slot_date=slot_date,
+            start_time=start_time,
+            end_time=(datetime.combine(slot_date, start_time) + timedelta(minutes=GAME_DURATION_MINUTES)).time(),
+            field_type=field_size,
+            status='OPEN',
+            assigned_game_id=None,
+        )
+        db.add(slot)
+        db.flush()
+        all_turf_slots.append(slot)
+        return slot
+
+    def _large_bottleneck_metric_for(host_id: uuid.UUID, slot_date: date) -> dict[str, object]:
+        blocks = {key: games for key, games in _blocks().items() if key[0] == host_id and key[1] == slot_date}
+        counts = {FIELD_SIZE_SMALL: 0, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_LARGE: 0}
+        latest_minutes: int | None = None
+        large_after = {'after_noon': 0, 'after_1pm': 0, 'after_2pm': 0, 'after_3pm': 0, 'after_4pm': 0}
+        three_small_while_large_remained = 0
+        sorted_blocks = sorted(blocks.items(), key=lambda item: _minutes(item[0][2]))
+        large_remaining_after: dict[tuple[uuid.UUID, date, time], int] = {}
+        remaining_large = sum(1 for _key, games in sorted_blocks for game in games if _field_size_for_game(game) == FIELD_SIZE_LARGE)
+        for key, games in sorted_blocks:
+            latest_minutes = max(latest_minutes or 0, _minutes(key[2])) if latest_minutes is not None else _minutes(key[2])
+            sizes = [_field_size_for_game(game) for game in games]
+            for size in sizes:
+                if size in counts:
+                    counts[size] += 1
+            large_remaining_after[key] = remaining_large - sizes.count(FIELD_SIZE_LARGE)
+            if sizes.count(FIELD_SIZE_SMALL) >= 3 and not sizes.count(FIELD_SIZE_MEDIUM) and not sizes.count(FIELD_SIZE_LARGE) and large_remaining_after[key] > 0:
+                three_small_while_large_remained += 1
+            for game in games:
+                if _field_size_for_game(game) != FIELD_SIZE_LARGE:
+                    continue
+                minute = _minutes(key[2])
+                if minute > 12 * 60:
+                    large_after['after_noon'] += 1
+                if minute > 13 * 60:
+                    large_after['after_1pm'] += 1
+                if minute > 14 * 60:
+                    large_after['after_2pm'] += 1
+                if minute > 15 * 60:
+                    large_after['after_3pm'] += 1
+                if minute > 16 * 60:
+                    large_after['after_4pm'] += 1
+        return {
+            'host_location_id': str(host_id),
+            'host_location_name': (host_cache.get(host_id).name if host_cache.get(host_id) else None),
+            'date': _fmt_date(slot_date),
+            'small_count': counts[FIELD_SIZE_SMALL],
+            'medium_count': counts[FIELD_SIZE_MEDIUM],
+            'large_count': counts[FIELD_SIZE_LARGE],
+            'active_turf_time_blocks': len(blocks),
+            'single_game_turf_blocks': sum(1 for games in blocks.values() if len(games) == 1),
+            'two_game_turf_blocks': sum(1 for games in blocks.values() if len(games) == 2),
+            'latest_turf_start_time': (f'{latest_minutes // 60:02d}:{latest_minutes % 60:02d}:00' if latest_minutes is not None else None),
+            'large_games_after_thresholds': large_after,
+            'three_small_blocks_while_large_demand_remained': three_small_while_large_remained,
+        }
+
     before_turf_metrics = _turf_metrics()
     before_hard_metrics = _hard_metric_snapshot()
     accepted_changes: list[dict[str, object]] = []
@@ -24034,6 +24141,7 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
     candidate_blocks_evaluated: set[tuple[uuid.UUID, date, time]] = set()
     no_candidate_reasons: set[str] = set()
     rollback_stack: list[tuple[Game, GameSlot, GameSlot]] = []
+    large_bottleneck_diagnostics: dict[tuple[uuid.UUID, date], dict[str, object]] = {}
 
     logger.info(
         'turf_optimizer_start season_id=%s scheduled_game_count=%s turf_stadium_count=%s turf_game_count=%s single_game_blocks=%s max_runtime_seconds=%s max_candidates_evaluated=%s max_accepted_moves=%s',
@@ -24047,7 +24155,191 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
         max_accepted_moves,
     )
 
+    def _record_large_bottleneck_decision(key: tuple[uuid.UUID, date], message: str, *, accepted: bool = False, rejected_reason: str | None = None) -> None:
+        row = large_bottleneck_diagnostics.setdefault(key, {
+            'before': _large_bottleneck_metric_for(key[0], key[1]),
+            'after': None,
+            'decisions': [],
+            'candidate_three_small_to_small_large_conversions_considered': 0,
+            'accepted_conversions': 0,
+            'rejected_conversions': 0,
+            'rejected_conversion_reasons': {},
+        })
+        row['decisions'].append(message)
+        if accepted:
+            row['accepted_conversions'] = int(row.get('accepted_conversions') or 0) + 1
+        if rejected_reason:
+            row['rejected_conversions'] = int(row.get('rejected_conversions') or 0) + 1
+            reasons = row.setdefault('rejected_conversion_reasons', {})
+            reasons[rejected_reason] = int(reasons.get(rejected_reason, 0)) + 1
+
+    def _game_has_team_time_conflict_for_slot(game: Game, slot: GameSlot, moving_ids: set[uuid.UUID]) -> bool:
+        for other in scheduled_games:
+            if other.id == game.id or other.id in moving_ids:
+                continue
+            other_slot = slots_by_game_id.get(other.id)
+            if not other_slot or other_slot.slot_date != slot.slot_date or other_slot.start_time != slot.start_time:
+                continue
+            if game.home_team_id in {other.home_team_id, other.away_team_id} or game.away_team_id in {other.home_team_id, other.away_team_id}:
+                return True
+        return False
+
+    def _candidate_small_targets(displaced_games: list[Game], target_key: tuple[uuid.UUID, date, time], source_key: tuple[uuid.UUID, date, time]) -> dict[uuid.UUID, GameSlot] | None:
+        moving_ids = {game.id for game in displaced_games}
+        occupied = _occupied_slot_ids() - moving_ids
+        used_slot_ids: set[uuid.UUID] = set()
+        assignments: dict[uuid.UUID, GameSlot] = {}
+        active_keys = set(_blocks().keys())
+        source_minutes = _minutes(source_key[2])
+        for game in displaced_games:
+            candidates = [
+                slot for slot in all_turf_slots
+                if slot.host_location_id == target_key[0]
+                and slot.slot_date == target_key[1]
+                and slot.id not in occupied
+                and slot.id not in used_slot_ids
+                and _block_key_for_slot(slot) != target_key
+                and _slot_matches_game(game, slot)
+                and not _game_has_team_time_conflict_for_slot(game, slot, moving_ids)
+            ]
+            def _candidate_sort(slot: GameSlot) -> tuple[int, int, str, str]:
+                key = _block_key_for_slot(slot)
+                creates_new_block = 1 if key not in active_keys else 0
+                after_source = 1 if key and _minutes(key[2]) > source_minutes else 0
+                return (creates_new_block, after_source, _fmt_time(slot.start_time) or '', str(slot.id))
+            candidates = sorted(candidates, key=_candidate_sort)
+            if not candidates:
+                return None
+            chosen = candidates[0]
+            assignments[game.id] = chosen
+            used_slot_ids.add(chosen.id)
+        return assignments
+
+    def _run_large_field_bottleneck_pass() -> bool:
+        nonlocal candidates_evaluated, stop_reason
+        blocks = _blocks()
+        made_move = False
+        host_dates = sorted({key[:2] for key in blocks if _regular_season_turf_host_date(slots_by_game_id.get(blocks[key][0].id))}, key=lambda item: (str(item[0]), item[1].isoformat()))
+        for host_id, slot_date in host_dates:
+            if _runtime_exceeded() or len(accepted_changes) >= max_accepted_moves or candidates_evaluated >= max_candidates_evaluated:
+                break
+            metric = _large_bottleneck_metric_for(host_id, slot_date)
+            large_bottleneck_diagnostics.setdefault((host_id, slot_date), {
+                'before': metric,
+                'after': None,
+                'decisions': [],
+                'candidate_three_small_to_small_large_conversions_considered': 0,
+                'accepted_conversions': 0,
+                'rejected_conversions': 0,
+                'rejected_conversion_reasons': {},
+            })
+            if int(metric['large_count']) <= 0 or int(metric['small_count']) <= 0:
+                continue
+            day_blocks = {key: games for key, games in _blocks().items() if key[0] == host_id and key[1] == slot_date}
+            early_three_small = []
+            late_large = []
+            for key, games in day_blocks.items():
+                sizes = [_field_size_for_game(game) for game in games]
+                if sizes.count(FIELD_SIZE_SMALL) >= 3 and not sizes.count(FIELD_SIZE_MEDIUM) and not sizes.count(FIELD_SIZE_LARGE):
+                    early_three_small.append((key, games))
+                if sizes.count(FIELD_SIZE_LARGE) == 1 and len(games) == 1:
+                    late_large.append((key, next(game for game in games if _field_size_for_game(game) == FIELD_SIZE_LARGE)))
+            for target_key, small_games in sorted(early_three_small, key=lambda item: _minutes(item[0][2])):
+                later_large_games = [(key, game) for key, game in late_large if _minutes(key[2]) > _minutes(target_key[2])]
+                if not later_large_games:
+                    continue
+                _record_large_bottleneck_decision((host_id, slot_date), 'Large-field bottleneck detected: Large games remain while earlier THREE_SMALL block exists.')
+                for source_key, large_game in sorted(later_large_games, key=lambda item: -_minutes(item[0][2])):
+                    if _runtime_exceeded() or len(accepted_changes) >= max_accepted_moves or candidates_evaluated >= max_candidates_evaluated:
+                        return made_move
+                    diag = large_bottleneck_diagnostics[(host_id, slot_date)]
+                    diag['candidate_three_small_to_small_large_conversions_considered'] = int(diag.get('candidate_three_small_to_small_large_conversions_considered') or 0) + 1
+                    candidates_evaluated += 1
+                    candidate_blocks_evaluated.add(target_key)
+                    locked_displaced_candidates = [game for game in small_games if _is_locked_manual_game(game)]
+                    movable_smalls = [game for game in small_games if not _is_locked_manual_game(game)]
+                    if _is_locked_manual_game(large_game) or len(movable_smalls) < max(0, len(small_games) - 1):
+                        reason = 'manually edited game locked'
+                        _reject(reason, {'type': 'large_field_bottleneck_conversion', 'game_id': str(large_game.id), 'target_block': [_fmt_date(target_key[1]), _fmt_time(target_key[2])]})
+                        _record_large_bottleneck_decision((host_id, slot_date), 'Rejected conversion: manually edited game locked.', rejected_reason=reason)
+                        continue
+                    keep_small = locked_displaced_candidates[0] if locked_displaced_candidates else sorted(small_games, key=lambda game: str(game.id))[0]
+                    displaced = [game for game in small_games if game.id != keep_small.id]
+                    large_slot = _ensure_standard_turf_slot(host_id, slot_date, target_key[2], slots_by_game_id.get(keep_small.id).week_id if slots_by_game_id.get(keep_small.id) else large_game.week_id, 'Large Field 1', FIELD_SIZE_LARGE)
+                    if not large_slot or (large_slot.assigned_game_id and large_slot.assigned_game_id != large_game.id):
+                        reason = 'no compatible large field slot'
+                        _reject(reason, {'type': 'large_field_bottleneck_conversion', 'game_id': str(large_game.id), 'target_block': [_fmt_date(target_key[1]), _fmt_time(target_key[2])]})
+                        _record_large_bottleneck_decision((host_id, slot_date), 'Rejected conversion: moving Large game earlier was not safe.', rejected_reason=reason)
+                        continue
+                    small_assignments = _candidate_small_targets(displaced, target_key, source_key)
+                    if small_assignments is None:
+                        reason = 'displaced Small games could not be safely reassigned without team-time conflict'
+                        _reject(reason, {'type': 'large_field_bottleneck_conversion', 'game_id': str(large_game.id), 'target_block': [_fmt_date(target_key[1]), _fmt_time(target_key[2])]})
+                        _record_large_bottleneck_decision((host_id, slot_date), 'Rejected conversion: displaced Small games could not be reassigned without team-time conflict.', rejected_reason=reason)
+                        continue
+                    before_turf = _turf_metrics()
+                    before_hard = _hard_metric_snapshot()
+                    old_slots = {game.id: slots_by_game_id[game.id] for game in [large_game, *displaced] if game.id in slots_by_game_id}
+                    candidate = {
+                        'type': 'large_field_bottleneck_conversion',
+                        'large_game_id': str(large_game.id),
+                        'kept_small_game_id': str(keep_small.id),
+                        'displaced_small_game_ids': [str(game.id) for game in displaced],
+                        'old_large': _game_detail(large_game, slots_by_game_id.get(large_game.id)),
+                        'new_large': _game_detail(large_game, large_slot),
+                    }
+                    _set_game_slot(large_game, large_slot)
+                    for game in displaced:
+                        _set_game_slot(game, small_assignments[game.id])
+                    db.flush()
+                    validation = _hard_validation()
+                    after_hard = _hard_metric_snapshot()
+                    after_turf = _turf_metrics()
+                    hard_worsened = _hard_metrics_worsened(before_hard, after_hard)
+                    score, improvements = _score_delta(before_turf, after_turf, hard_violation=(not validation['valid'] or bool(hard_worsened)))
+                    if _minutes(large_slot.start_time) < _minutes(source_key[2]):
+                        score += 125
+                        improvements.append('late Large game moved earlier')
+                    before_latest = before_turf.get('latest_turf_start_minutes')
+                    after_latest = after_turf.get('latest_turf_start_minutes')
+                    if after_latest is not None and before_latest is not None and int(after_latest) < int(before_latest):
+                        score += 100
+                    reject_reason = None
+                    if not validation['valid']:
+                        first_error = str((validation['errors'] or ['hard-rule metric worsened'])[0]).lower()
+                        reject_reason = 'team-time conflict' if 'team time conflict' in first_error else 'duplicate field-slot conflict' if 'duplicate exact field slot' in first_error else 'hard-rule metric worsened'
+                    elif hard_worsened:
+                        reject_reason = 'hard-rule metric worsened'
+                    elif score <= 0 or not improvements:
+                        reject_reason = 'latest turf start did not improve'
+                    if reject_reason:
+                        for game in reversed([large_game, *displaced]):
+                            old_slot = old_slots.get(game.id)
+                            new_slot = slots_by_game_id.get(game.id)
+                            if old_slot and new_slot:
+                                _restore_game_slot(game, old_slot, new_slot)
+                        db.flush()
+                        _reject(reject_reason, {**candidate, 'score_change': score, 'turf_metric_improved': improvements})
+                        _record_large_bottleneck_decision((host_id, slot_date), f'Rejected conversion: {reject_reason}.', rejected_reason=reject_reason)
+                        continue
+                    for game in [large_game, *displaced]:
+                        rollback_stack.append((game, old_slots[game.id], slots_by_game_id[game.id]))
+                    accepted_changes.append({
+                        **candidate,
+                        'displaced_small_new_slots': {str(game.id): _game_detail(game, small_assignments[game.id]) for game in displaced},
+                        'turf_metric_improved': improvements,
+                        'score_change': score,
+                        'before_turf_metrics': before_turf,
+                        'after_turf_metrics': after_turf,
+                    })
+                    _record_large_bottleneck_decision((host_id, slot_date), f'Accepted conversion: {_fmt_time(target_key[2])} THREE_SMALL converted to Small + Large, moving Large game from {_fmt_time(source_key[2])} to {_fmt_time(target_key[2])}.', accepted=True)
+                    made_move = True
+                    return True
+        return made_move
+
     while not _runtime_exceeded() and len(accepted_changes) < max_accepted_moves and candidates_evaluated < max_candidates_evaluated:
+        if _run_large_field_bottleneck_pass():
+            continue
         blocks = _blocks()
         single_blocks = sorted(
             [(key, games[0]) for key, games in blocks.items() if len(games) == 1],
@@ -24177,6 +24469,12 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
         stop_reason = f'preview rejected: hard-rule metric worsened ({final_worsened})'
 
     after_turf_metrics = _turf_metrics()
+    for diag_key, diag_row in large_bottleneck_diagnostics.items():
+        diag_row['after'] = _large_bottleneck_metric_for(diag_key[0], diag_key[1])
+        before_latest = (diag_row.get('before') or {}).get('latest_turf_start_time') if isinstance(diag_row.get('before'), dict) else None
+        after_latest = (diag_row.get('after') or {}).get('latest_turf_start_time') if isinstance(diag_row.get('after'), dict) else None
+        diag_row['latest_turf_start_time_before'] = before_latest
+        diag_row['latest_turf_start_time_after'] = after_latest
     per_stadium_before = {row['host_location_id']: row for row in before_turf_metrics['per_stadium']}
     per_stadium_after = {row['host_location_id']: row for row in after_turf_metrics['per_stadium']}
     per_stadium_metrics = []
@@ -24242,6 +24540,7 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
         'latest_turf_start_time_before': before_turf_metrics['latest_turf_start_time'],
         'latest_turf_start_time_after': after_turf_metrics['latest_turf_start_time'],
         'per_stadium_turf_metrics': per_stadium_metrics,
+        'large_field_bottleneck_diagnostics': list(large_bottleneck_diagnostics.values()),
         'same_community_violations_found': 0,
         'same_community_repairs_proposed': 0,
         'same_community_repairs_committed': 0,
@@ -24279,6 +24578,7 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
             'before': before_turf_metrics,
             'after': after_turf_metrics,
             'per_stadium': per_stadium_metrics,
+            'large_field_bottleneck': list(large_bottleneck_diagnostics.values()),
             'rollback_triggered': rollback_triggered,
         },
         'post_schedule_repair': {
