@@ -58,10 +58,27 @@ function gameDateValue(game: any): string {
 }
 
 
+const TURF_FIELD_SLOT_LABELS = [
+  'Small Field 1',
+  'Small Field 2',
+  'Small Field 3',
+  'Medium Field 1',
+  'Medium Field 2',
+  'Large Field 1',
+];
+const INTERNAL_TURF_LAYOUT_PATTERN = /\b(?:THREE_SMALL|TWO_MEDIUM|ONE_SMALL_ONE_LARGE|TWO_SMALL_ONE_MEDIUM|ONE_LARGE|ONE_MEDIUM_TWO_SMALL|ONE_LARGE_ONE_MEDIUM|TWO_LARGE)\b/gi;
+
+function cleanVisibleFieldLabel(rawValue: unknown): string {
+  return String(rawValue || '')
+    .trim()
+    .replace(/^\s*Wave\s+\d+\s+/i, '')
+    .replace(INTERNAL_TURF_LAYOUT_PATTERN, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function explicitFieldSlotLabel(value: any): string {
-  const raw = String(value?.field_instance_name || value?.field_name || value?.field || '').trim();
-  const match = raw.match(/\b(Small|Medium|Large)\s+Field\s+(\d+)\b/i);
-  if (match) return `${match[1][0].toUpperCase()}${match[1].slice(1).toLowerCase()} Field ${match[2]}`;
+  const raw = cleanVisibleFieldLabel(value?.explicit_field_slot_label || value?.field_instance_name || value?.field_name || value?.field);
   return raw || String(value?.field_type ? `${value.field_type} Field` : 'Field');
 }
 
@@ -78,7 +95,7 @@ function gameHostLocationValue(game: any): string {
 }
 
 function gameFieldValue(game: any): string {
-  return String(game?.field_instance_id || game?.field_id || game?.field_instance_name || '');
+  return explicitFieldSlotLabel(game);
 }
 
 function editableGameSnapshot(game: any): Record<string, unknown> {
@@ -385,7 +402,7 @@ export default function ManualScheduleBuilderPage() {
     const fieldSourceGames = scheduledGamesFilters.hostLocation
       ? games.filter((game: any) => gameHostLocationValue(game) === scheduledGamesFilters.hostLocation)
       : games;
-    const fields = uniqueByValue(fieldSourceGames.map((game: any) => ({ value: gameFieldValue(game), label: explicitFieldSlotLabel(game) || '-' })))
+    const fields = uniqueByValue(fieldSourceGames.map((game: any) => ({ value: explicitFieldSlotLabel(game), label: explicitFieldSlotLabel(game) || '-' })))
       .sort((a, b) => naturalCollator.compare(a.label, b.label));
     return { dates, times, divisions, hostLocations, fields };
   }, [games, options.divisions, scheduledGamesFilters.hostLocation]);
@@ -394,7 +411,7 @@ export default function ManualScheduleBuilderPage() {
     (!scheduledGamesFilters.time || gameTimeValue(game) === scheduledGamesFilters.time) &&
     (!scheduledGamesFilters.division || gameDivisionValue(game) === scheduledGamesFilters.division) &&
     (!scheduledGamesFilters.hostLocation || gameHostLocationValue(game) === scheduledGamesFilters.hostLocation) &&
-    (!scheduledGamesFilters.field || gameFieldValue(game) === scheduledGamesFilters.field)
+    (!scheduledGamesFilters.field || explicitFieldSlotLabel(game) === scheduledGamesFilters.field)
   )), [games, scheduledGamesFilters]);
   const hasScheduledGamesFilters = Object.values(scheduledGamesFilters).some(Boolean);
 
@@ -536,24 +553,29 @@ export default function ManualScheduleBuilderPage() {
   const isDirtyCell = (draft: any, fieldName: string) => JSON.stringify(editableGameSnapshot(draft)[fieldName]) !== JSON.stringify(draft.__original?.[fieldName]);
   const dirtyCellClass = (draft: any, fieldName: string) => isDirtyCell(draft, fieldName) ? ' bg-amber-50 ring-1 ring-inset ring-amber-300' : '';
   const getTeamsForDivision = (divisionIdValue: string) => options.teams.filter((t: any) => t.division_id === divisionIdValue && t.is_active);
+  const hostSurfaceType = (hostId: string) => String((options.host_locations || []).find((host: any) => String(host.id) === hostId)?.surface_type || '').toUpperCase();
   const getFieldOptionsForDraft = (draft: any) => {
-    const byField = new Map<string, any>();
+    const byDisplayLabel = new Map<string, any>();
     const selectedHostId = String(draft?.host_location_id || '');
-    const isExplicitManualField = (slot: any) => {
-      const label = explicitFieldSlotLabel(slot);
-      return Boolean(label) && !/\bWave\s+\d+\b|THREE_SMALL|TWO_MEDIUM|ONE_SMALL_ONE_LARGE|TWO_SMALL_ONE_MEDIUM|ONE_LARGE|ONE_MEDIUM_TWO_SMALL|ONE_LARGE_ONE_MEDIUM|TWO_LARGE/i.test(label);
-    };
-    const addSlot = (slot: any) => {
+    const selectedHostIsTurf = hostSurfaceType(selectedHostId) === 'TURF_STADIUM';
+    const addSlot = (slot: any, preferCurrent = false) => {
       const id = String(slot.field_instance_id || slot.field_id || '');
-      if (!id || !isExplicitManualField(slot)) return;
-      byField.set(id, { ...slot, explicit_field_slot_label: explicitFieldSlotLabel(slot) });
+      const label = explicitFieldSlotLabel(slot);
+      if (!id || !label) return;
+      if (selectedHostIsTurf && !TURF_FIELD_SLOT_LABELS.includes(label)) return;
+      if (byDisplayLabel.has(label) && !preferCurrent) return;
+      byDisplayLabel.set(label, { ...slot, explicit_field_slot_label: label });
     };
-    (options.field_instances || []).filter((field: any) => !selectedHostId || String(field.host_location_id || '') === selectedHostId).forEach(addSlot);
-    generatedSlots.filter((slot: any) => (!selectedHostId || String(slot.host_location_id || '') === selectedHostId)).forEach(addSlot);
-    if (draft?.field_instance_id && !byField.has(String(draft.field_instance_id))) {
-      addSlot({ field_instance_id: draft.field_instance_id, field_id: draft.field_id, host_location_id: draft.host_location_id, field_instance_name: draft.field_instance_name || 'Current field', field_type: draft.field_type, field_size: draft.field_size });
+    (options.field_instances || []).filter((field: any) => !selectedHostId || String(field.host_location_id || '') === selectedHostId).forEach((slot: any) => addSlot(slot));
+    generatedSlots.filter((slot: any) => (!selectedHostId || String(slot.host_location_id || '') === selectedHostId)).forEach((slot: any) => addSlot(slot));
+    if (draft?.field_instance_id && !Array.from(byDisplayLabel.values()).some((slot: any) => String(slot.field_instance_id || slot.field_id) === String(draft.field_instance_id))) {
+      addSlot({ field_instance_id: draft.field_instance_id, field_id: draft.field_id, host_location_id: draft.host_location_id, field_instance_name: draft.field_instance_name || 'Current field', field_type: draft.field_type, field_size: draft.field_size }, true);
     }
-    return Array.from(byField.values()).sort((a: any, b: any) => explicitFieldSlotLabel(a).localeCompare(explicitFieldSlotLabel(b), undefined, { numeric: true }));
+    const values = Array.from(byDisplayLabel.values());
+    return (selectedHostIsTurf
+      ? values.sort((a: any, b: any) => TURF_FIELD_SLOT_LABELS.indexOf(explicitFieldSlotLabel(a)) - TURF_FIELD_SLOT_LABELS.indexOf(explicitFieldSlotLabel(b)))
+      : values.sort((a: any, b: any) => explicitFieldSlotLabel(a).localeCompare(explicitFieldSlotLabel(b), undefined, { numeric: true }))
+    );
   };
   const isDraftValid = (draft: any) => {
     const teams = getTeamsForDivision(draft.division_id);
