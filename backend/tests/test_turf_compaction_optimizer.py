@@ -114,6 +114,12 @@ class TurfCompactionOptimizerTest(unittest.TestCase):
         self.assertEqual(diagnostics['summary']['optimization_scope'], 'TARGETED_TURF_STADIUM_COMPACTION_ONLY')
         self.assertGreaterEqual(diagnostics['summary']['optimization_candidates_evaluated'], 1)
         self.assertEqual(diagnostics['summary']['accepted_optimization_moves'], 1)
+        self.assertEqual(diagnostics['summary']['measurable_improvements_found'], 'Yes')
+        self.assertEqual(diagnostics['summary']['metrics_calculated_from_preview_state'], 'Yes')
+        accepted_change = diagnostics['accepted_changes'][0]
+        self.assertEqual(accepted_change['atomic_or_bundled'], 'atomic')
+        self.assertTrue(accepted_change['turf_metric_improved'])
+        self.assertGreater(accepted_change['score_delta'], 0)
         self.assertEqual(diagnostics['summary']['total_turf_single_game_blocks_after'], 0)
         self.assertEqual(diagnostics['summary']['total_turf_two_game_blocks_after'], 1)
         self.assertLessEqual(diagnostics['summary']['optimization_runtime_seconds'], diagnostics['summary']['optimization_runtime_limit_seconds'])
@@ -132,8 +138,9 @@ class TurfCompactionOptimizerTest(unittest.TestCase):
         diagnostics = run_post_schedule_repair_pass(self.db, self.season.id)
 
         self.assertEqual(diagnostics['summary']['accepted_optimization_moves'], 0)
+        self.assertEqual(diagnostics['summary']['measurable_improvements_found'], 'No')
         self.assertIn('team-time conflict', diagnostics['summary']['rejected_moves_by_reason'])
-        self.assertIn('No turf compaction moves were accepted.', diagnostics['summary']['no_safe_moves_message'])
+        self.assertIn('No measurable turf improvement found.', diagnostics['summary']['no_safe_moves_message'])
 
     def test_manual_edited_games_are_locked_unless_included(self):
         target_booked = self._slot('Small Field 1', time(9, 0))
@@ -186,6 +193,11 @@ class TurfCompactionOptimizerTest(unittest.TestCase):
 
         self.assertLessEqual(diagnostics['summary']['optimization_candidates_evaluated'], 1)
         self.assertEqual(diagnostics['summary']['stop_reason'], 'candidate evaluation limit reached')
+        self.assertIn('candidate_blocks_skipped', diagnostics['summary'])
+        self.assertIn('high_priority_blocks_evaluated_before_timeout', diagnostics['summary'])
+        self.assertIn('slowest_phase', diagnostics['summary'])
+        self.assertIn('slowest_candidate_type', diagnostics['summary'])
+        self.assertIn('slowest_validation_step', diagnostics['summary'])
 
 
     def test_large_field_bottleneck_converts_three_small_when_full_day_improves(self):
@@ -204,7 +216,11 @@ class TurfCompactionOptimizerTest(unittest.TestCase):
         self.assertEqual(large_game.kickoff_time, time(9, 0))
         self.assertEqual(diagnostics['summary']['latest_turf_start_time_after'], '10:00:00')
         self.assertLess(diagnostics['summary']['total_turf_active_time_blocks_after'], diagnostics['summary']['total_turf_active_time_blocks_before'])
-        self.assertTrue(any(change['type'] == 'large_field_bottleneck_conversion' for change in diagnostics['accepted_changes']))
+        bundled_change = next(change for change in diagnostics['accepted_changes'] if change['type'] == 'large_field_bottleneck_conversion')
+        self.assertEqual(bundled_change['atomic_or_bundled'], 'bundled')
+        self.assertTrue(bundled_change['turf_metric_improved'])
+        self.assertGreater(bundled_change['score_delta'], 0)
+        self.assertEqual(diagnostics['summary']['measurable_improvements_found'], 'Yes')
         bottleneck = diagnostics['summary']['large_field_bottleneck_diagnostics'][0]
         self.assertEqual(bottleneck['before']['small_count'], 4)
         self.assertEqual(bottleneck['before']['large_count'], 1)
@@ -236,6 +252,8 @@ class TurfCompactionOptimizerTest(unittest.TestCase):
         self.db.refresh(large_game)
         self.assertEqual(large_game.kickoff_time, time(16, 0))
         bottleneck = diagnostics['summary']['large_field_bottleneck_diagnostics'][0]
+        self.assertEqual(diagnostics['summary']['accepted_optimization_moves'], 0)
+        self.assertEqual(diagnostics['summary']['no_op_accepted_moves_rejected_or_rolled_back'], 0)
         self.assertGreaterEqual(bottleneck['rejected_conversions'], 1)
         self.assertIn('displaced Small games could not be safely reassigned without team-time conflict', bottleneck['rejected_conversion_reasons'])
 
@@ -270,6 +288,40 @@ class TurfCompactionOptimizerTest(unittest.TestCase):
                 self.assertEqual(before['small_count'], small_count)
                 self.assertEqual(before['medium_count'], medium_count)
                 self.assertEqual(before['large_count'], large_count)
+
+    def test_high_priority_large_bottleneck_runs_before_generic_single_game_pairing(self):
+        early_small_slots = [self._slot(f'Small Field {idx}', time(9, 0)) for idx in (1, 2, 3)]
+        later_small_slots = [self._slot(f'Small Field {idx}', time(10, 0)) for idx in (1, 2, 3)]
+        self._slot('Large Field 1', time(9, 0))
+        late_large_slot = self._slot('Large Field 1', time(16, 0))
+        generic_target = self._slot('Medium Field 1', time(12, 0))
+        self._slot('Medium Field 2', time(12, 0))
+        generic_source = self._slot('Medium Field 1', time(13, 0))
+        for idx, slot in enumerate(early_small_slots):
+            self._game(idx * 2, idx * 2 + 1, slot)
+        self._game(6, 7, later_small_slots[0])
+        large_game = self._game(20, 21, late_large_slot)
+        self._game(8, 9, generic_target)
+        self._game(10, 11, generic_source)
+        self.db.commit()
+
+        diagnostics = run_post_schedule_repair_pass(self.db, self.season.id)
+
+        self.db.refresh(large_game)
+        self.assertEqual(large_game.kickoff_time, time(9, 0))
+        self.assertEqual(diagnostics['accepted_changes'][0]['candidate_type'], 'large_field_bottleneck_conversion')
+        self.assertEqual(diagnostics['summary']['high_priority_blocks_evaluated_before_timeout'], 'Yes')
+
+    def test_no_op_optimization_is_reported_when_no_measurable_improvement_exists(self):
+        self._game(0, 1, self._slot('Small Field 1', time(9, 0)))
+        self.db.commit()
+
+        diagnostics = run_post_schedule_repair_pass(self.db, self.season.id)
+
+        self.assertEqual(diagnostics['summary']['accepted_optimization_moves'], 0)
+        self.assertEqual(diagnostics['summary']['measurable_improvements_found'], 'No')
+        self.assertIn('No measurable turf improvement found.', diagnostics['summary']['no_safe_moves_message'])
+        self.assertEqual(diagnostics['summary']['metrics_calculated_from_preview_state'], 'Yes')
 
 if __name__ == '__main__':
     unittest.main()
