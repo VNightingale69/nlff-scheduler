@@ -616,7 +616,7 @@ class ManualOptimizationWorkflowPermissionsTest(ManualScheduleEditPermissionsTes
         self.assertEqual(summary['optimization_candidates_generated'], 0)
         self.assertEqual(summary['accepted_optimization_moves'], 0)
         self.assertEqual(summary['rejected_optimization_moves'], 0)
-        self.assertEqual(summary['no_candidates_message'], 'No optimization candidates were generated.')
+        self.assertEqual(summary['no_candidates_message'], 'No turf optimization candidates were generated.')
         self.assertTrue(summary['no_candidate_reasons'])
 
     def test_optimizer_logs_rejected_locked_manual_moves(self):
@@ -657,7 +657,7 @@ class ManualOptimizationWorkflowPermissionsTest(ManualScheduleEditPermissionsTes
         self.db.expire_all()
         self.assertEqual(self.db.get(Game, late_game.id).kickoff_time, time(16, 0))
 
-    def test_optimizer_generates_candidates_for_host_home_exception(self):
+    def test_optimizer_does_not_generate_broad_host_home_repair_candidates(self):
         away_host = HostLocation(id=uuid.uuid4(), organization_id=self.away_org.id, name='Away Park', is_active=True)
         away_field = FieldInstance(id=uuid.uuid4(), host_location_id=away_host.id, hosting_availability_id=uuid.uuid4(), instance_date=date(2026, 8, 9), field_name='Away Small 1', field_type='SMALL', is_active=True)
         self.db.add_all([away_host, away_field])
@@ -674,8 +674,99 @@ class ManualOptimizationWorkflowPermissionsTest(ManualScheduleEditPermissionsTes
         )
         self.assertEqual(response.status_code, 200, response.text)
         data = response.json()
+        self.assertFalse(any(change.get('opportunity') == 'host-home repair' for change in data['proposed_changes'] + data['rejected_changes']))
+        self.assertEqual(data['summary']['same_community_repairs_proposed'], 0)
+
+
+    def _add_optimizer_team(self, name, org=None):
+        team = Team(id=uuid.uuid4(), organization_id=(org or self.away_org).id, division_id=self.division.id, name=name, is_active=True)
+        self.db.add(team)
+        self.db.flush()
+        return team
+
+    def _add_turf_field(self, label='Small Field 2', host=None):
+        host = host or self.host
+        field = FieldInstance(id=uuid.uuid4(), host_location_id=host.id, hosting_availability_id=uuid.uuid4(), instance_date=date(2026, 8, 9), field_name=label, field_type='SMALL', is_active=True)
+        self.db.add(field)
+        self.db.flush()
+        return field
+
+    def test_turf_optimizer_pairs_single_game_blocks_across_all_turf_stadiums(self):
+        self.host.surface_type = 'TURF_STADIUM'
+        field2 = self._add_turf_field('Small Field 2')
+        third = self._add_optimizer_team('Away 3')
+        fourth = self._add_optimizer_team('Away 4')
+        late_game, _late_slot = self._add_optimizer_game(time(11, 0), home=third, away=fourth)
+        self._add_optimizer_slot(time(9, 0), field=field2)
+        second_host = HostLocation(id=uuid.uuid4(), organization_id=self.away_org.id, name='Second Turf Stadium', surface_type='TURF_STADIUM', is_active=True)
+        second_field = FieldInstance(id=uuid.uuid4(), host_location_id=second_host.id, hosting_availability_id=uuid.uuid4(), instance_date=date(2026, 8, 9), field_name='Small Field 1', field_type='SMALL', is_active=True)
+        self.db.add_all([second_host, second_field])
+        self._add_optimizer_game(time(14, 0), home=self._add_optimizer_team('Away 5'), away=self._add_optimizer_team('Away 6'), host=second_host, field=second_field)
+        self._add_optimizer_slot(time(12, 0), host=second_host, field=second_field)
+        self.db.commit()
+
+        response = self.client.post('/api/manual-schedule-builder/optimize-schedule', headers=self._token(self.scheduling_user.id), json=self._optimization_payload())
+        self.assertEqual(response.status_code, 200, response.text)
+        data = response.json()
         self.assertGreater(data['summary']['optimization_candidates_generated'], 0)
-        self.assertTrue(any(change.get('opportunity') == 'host-home repair' for change in data['proposed_changes'] + data['rejected_changes']))
+        self.assertGreater(data['summary']['accepted_optimization_moves'], 0)
+        self.assertGreaterEqual(len(data['summary']['per_stadium_turf_metrics']), 2)
+        self.assertLess(data['summary']['total_turf_single_game_blocks_after'], data['summary']['total_turf_single_game_blocks_before'])
+        self.assertGreater(data['summary']['total_turf_two_game_blocks_after'], data['summary']['total_turf_two_game_blocks_before'])
+        preview = {row['id']: row for row in data['optimized_preview_games']}
+        self.assertEqual(preview[str(late_game.id)]['time'], '09:00:00')
+
+    def test_turf_optimizer_rejects_team_time_conflicts(self):
+        self.host.surface_type = 'TURF_STADIUM'
+        field2 = self._add_turf_field('Small Field 2')
+        # This game shares Away 1 with the existing 9:00 game, so the open 9:00 turf slot is unsafe.
+        self._add_optimizer_game(time(11, 0), home=self.away_team, away=self.other_team)
+        self._add_optimizer_slot(time(9, 0), field=field2)
+        self.db.commit()
+
+        response = self.client.post('/api/manual-schedule-builder/optimize-schedule', headers=self._token(self.scheduling_user.id), json=self._optimization_payload())
+        self.assertEqual(response.status_code, 200, response.text)
+        data = response.json()
+        self.assertIn('team-time conflict', data['rejected_move_reasons'])
+        self.assertEqual(data['summary']['accepted_optimization_moves'], 0)
+
+    def test_turf_optimizer_rejects_duplicate_exact_field_slot_conflicts(self):
+        self.host.surface_type = 'TURF_STADIUM'
+        third = self._add_optimizer_team('Away 3')
+        fourth = self._add_optimizer_team('Away 4')
+        self._add_optimizer_game(time(11, 0), home=third, away=fourth)
+        # Deliberately stale/duplicate open slot: same exact field/date/time as an occupied game.
+        self._add_optimizer_slot(time(9, 0), field=self.field)
+        self.db.commit()
+
+        response = self.client.post('/api/manual-schedule-builder/optimize-schedule', headers=self._token(self.scheduling_user.id), json=self._optimization_payload())
+        self.assertEqual(response.status_code, 200, response.text)
+        data = response.json()
+        self.assertIn('duplicate field-slot conflict', data['rejected_move_reasons'])
+        self.assertEqual(data['summary']['accepted_optimization_moves'], 0)
+
+    def test_turf_optimizer_preserves_grass_field_labels_and_avoids_wave_output(self):
+        self.host.surface_type = 'TURF_STADIUM'
+        field2 = self._add_turf_field('Wave 1 THREE_SMALL Small Field 2')
+        grass_host = HostLocation(id=uuid.uuid4(), organization_id=self.away_org.id, name='Grass Park', surface_type='GRASS_FIELD', is_active=True)
+        grass_field = FieldInstance(id=uuid.uuid4(), host_location_id=grass_host.id, hosting_availability_id=uuid.uuid4(), instance_date=date(2026, 8, 9), field_name='Community Grass Meadow', field_type='SMALL', is_active=True)
+        self.db.add_all([grass_host, grass_field])
+        grass_game, _ = self._add_optimizer_game(time(10, 0), home=self._add_optimizer_team('Away 7'), away=self._add_optimizer_team('Away 8'), host=grass_host, field=grass_field)
+        turf_game, _ = self._add_optimizer_game(time(11, 0), home=self._add_optimizer_team('Away 9'), away=self._add_optimizer_team('Away 10'))
+        self._add_optimizer_slot(time(9, 0), field=field2)
+        self.db.commit()
+
+        response = self.client.post('/api/manual-schedule-builder/optimize-schedule', headers=self._token(self.scheduling_user.id), json=self._optimization_payload())
+        self.assertEqual(response.status_code, 200, response.text)
+        data = response.json()
+        preview = {row['id']: row for row in data['optimized_preview_games']}
+        self.assertEqual(preview[str(grass_game.id)]['field'], 'Community Grass Meadow')
+        self.assertNotIn('Wave', str(data))
+        self.assertIn(preview[str(turf_game.id)]['field'], {'Small Field 1', 'Small Field 2', 'Small Field 3', 'Medium Field 1', 'Medium Field 2', 'Large Field 1'})
+
+    def test_community_admin_cannot_call_schedule_optimization(self):
+        response = self.client.post('/api/manual-schedule-builder/optimize-schedule', headers=self._token(self.community_user.id), json=self._optimization_payload())
+        self.assertEqual(response.status_code, 403)
 
     def test_keep_first_pass_discards_optimization_preview(self):
         response = self.client.post(

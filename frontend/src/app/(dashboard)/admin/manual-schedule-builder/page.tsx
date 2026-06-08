@@ -342,10 +342,6 @@ export default function ManualScheduleBuilderPage() {
   const [autoScheduleDryRun, setAutoScheduleDryRun] = useState(true);
   const [autoScheduleSeasonLoading, setAutoScheduleSeasonLoading] = useState(false);
   const [autoScheduleDiagnostics, setAutoScheduleDiagnostics] = useState<AutoScheduleDiagnosticsSummary | null>(null);
-  const [optimizeSameCommunityHome, setOptimizeSameCommunityHome] = useState(true);
-  const [repairDoubleHeaders, setRepairDoubleHeaders] = useState(true);
-  const [reduceRepeatMatchups, setReduceRepeatMatchups] = useState(false);
-  const [preserveTwoLocationLimit, setPreserveTwoLocationLimit] = useState(true);
   const [includeManualEditedGames, setIncludeManualEditedGames] = useState(false);
   const [optimizerLoading, setOptimizerLoading] = useState(false);
   const [optimizerApplyLoading, setOptimizerApplyLoading] = useState(false);
@@ -552,10 +548,6 @@ export default function ManualScheduleBuilderPage() {
   const hasManualEditedGames = useMemo(() => games.some((game: any) => Boolean(game.is_manual_edit)), [games]);
   const optimizationPayload = () => ({
     season_id: seasonId,
-    optimize_same_community_home: optimizeSameCommunityHome,
-    repair_double_headers: repairDoubleHeaders,
-    reduce_repeat_matchups: reduceRepeatMatchups,
-    preserve_two_location_limit: preserveTwoLocationLimit,
     include_manual_edits: includeManualEditedGames,
   });
   const runOptimizationPreview = async () => {
@@ -577,7 +569,7 @@ export default function ManualScheduleBuilderPage() {
       setShowOptimizationSummary(true);
       setScheduleStateLabel('Optimization Preview');
       const summary = res.summary || {};
-      setSuccess(`Optimization preview completed. Candidates: ${Number(summary.optimization_candidates_generated ?? summary.candidate_count ?? 0)}, accepted moves: ${Number(summary.accepted_optimization_moves || 0)}, rejected moves: ${Number(summary.rejected_optimization_moves || 0)}.`);
+      setSuccess(`Turf optimization preview completed. Candidates: ${Number(summary.optimization_candidates_generated ?? summary.candidate_count ?? 0)}, accepted moves: ${Number(summary.accepted_optimization_moves || 0)}, rejected moves: ${Number(summary.rejected_optimization_moves || 0)}.`);
     } catch (e: unknown) {
       setError(`Schedule optimization failed: ${extractError(e)}`);
     } finally {
@@ -600,7 +592,7 @@ export default function ManualScheduleBuilderPage() {
       await load();
       await loadRecommendations();
       const summary = res.summary || {};
-      setSuccess(`Optimized schedule applied. Candidates: ${Number(summary.optimization_candidates_generated ?? summary.candidate_count ?? 0)}, accepted moves: ${Number(summary.accepted_optimization_moves || 0)}, rejected moves: ${Number(summary.rejected_optimization_moves || 0)}.`);
+      setSuccess(`Turf-optimized schedule applied. Candidates: ${Number(summary.optimization_candidates_generated ?? summary.candidate_count ?? 0)}, accepted moves: ${Number(summary.accepted_optimization_moves || 0)}, rejected moves: ${Number(summary.rejected_optimization_moves || 0)}.`);
     } catch (e: unknown) {
       setError(`Apply optimized schedule failed: ${extractError(e)}`);
     } finally {
@@ -943,20 +935,17 @@ export default function ManualScheduleBuilderPage() {
           </div> : null}
         </div>
         {canRunScheduleOptimization ? <div className='mb-3 rounded border border-emerald-100 bg-emerald-50 p-3 text-sm text-emerald-950'>
-          <div className='font-semibold'>Scheduling Administrator Optimization Workflow</div>
-          <p className='mt-1'>Generate Schedule saves the first-pass schedule only. Use Optimize Schedule after review to create a temporary optimization preview; normal exports continue to use the saved authoritative schedule until Apply Optimized Schedule is selected.</p>
+          <div className='font-semibold'>Scheduling Administrator Turf Optimization Workflow</div>
+          <p className='mt-1'>Generate Schedule saves the first-pass schedule only. Use Optimize Schedule after review to create a temporary turf-stadium utilization preview across all configured turf stadiums and regular-season dates; normal exports continue to use the saved authoritative schedule until Apply Optimized Schedule is selected.</p>
+          <p className='mt-1 text-xs text-emerald-900'>This pass is limited to turf stadium utilization. It preserves hard schedule rules and does not broadly repair grass/park placement, opponent pairing, host equity, doubleheaders, or season balance.</p>
           <div className='mt-2 grid gap-2 md:grid-cols-2'>
-            <label className='flex items-center gap-2'><input type='checkbox' checked={optimizeSameCommunityHome} onChange={(e) => setOptimizeSameCommunityHome(e.target.checked)} />Preserve hosting-community home teams</label>
-            <label className='flex items-center gap-2'><input type='checkbox' checked={repairDoubleHeaders} onChange={(e) => setRepairDoubleHeaders(e.target.checked)} />Repair doubleheaders</label>
-            <label className='flex items-center gap-2'><input type='checkbox' checked={reduceRepeatMatchups} onChange={(e) => setReduceRepeatMatchups(e.target.checked)} />Reduce repeat matchups where practical</label>
-            <label className='flex items-center gap-2'><input type='checkbox' checked={preserveTwoLocationLimit} onChange={(e) => setPreserveTwoLocationLimit(e.target.checked)} />Preserve two-location limit</label>
             <label className='flex items-center gap-2 md:col-span-2'><input type='checkbox' checked={includeManualEditedGames} onChange={(e) => setIncludeManualEditedGames(e.target.checked)} />Include manually edited games <span className='text-xs text-emerald-800'>(default unchecked; manual edits stay locked)</span></label>
           </div>
           {hasPendingBulkEdits ? <p className='mt-2 text-amber-700'>Save or discard unsaved edits before running optimization.</p> : null}
         </div> : null}
         {canRunScheduleOptimization && optimizerDiagnostics && showOptimizationSummary ? <div className='mb-3 rounded border bg-white p-3 text-sm text-slate-800'>
           <div className='flex flex-wrap items-center justify-between gap-2'>
-            <div className='font-semibold'>Optimization Summary</div>
+            <div className='font-semibold'>Turf Optimization Summary</div>
             <button className='rounded border px-2 py-1 text-xs' onClick={() => {
               const blob = new Blob([JSON.stringify(optimizerDiagnostics, null, 2)], { type: 'application/json' });
               const url = URL.createObjectURL(blob);
@@ -973,7 +962,7 @@ export default function ManualScheduleBuilderPage() {
             <div>Rejected optimization moves: <span className='font-semibold'>{optimizerDiagnostics.summary?.rejected_optimization_moves ?? 0}</span></div>
             <div>Manual edits locked: <span className='font-semibold'>{optimizerDiagnostics.summary?.manual_edits_locked ? 'Yes' : 'No'}</span></div>
           </div>
-          {optimizerDiagnostics.summary?.no_candidates_message ? <div className='mt-2 rounded border border-amber-200 bg-amber-50 p-2 text-amber-900'>No optimization candidates were generated.{optimizerDiagnostics.summary?.no_candidate_reasons?.length ? ` ${optimizerDiagnostics.summary.no_candidate_reasons.join(' ')}` : ''}</div> : null}
+          {optimizerDiagnostics.summary?.no_candidates_message ? <div className='mt-2 rounded border border-amber-200 bg-amber-50 p-2 text-amber-900'>No turf optimization candidates were generated.{optimizerDiagnostics.summary?.no_candidate_reasons?.length ? ` ${optimizerDiagnostics.summary.no_candidate_reasons.join(' ')}` : ''}</div> : null}
           {optimizerDiagnostics.summary?.no_safe_moves_message ? <div className='mt-2 rounded border border-slate-200 bg-slate-50 p-2 text-slate-900'>{optimizerDiagnostics.summary.no_safe_moves_message}</div> : null}
           <div className='mt-3 overflow-auto rounded border'>
             <table className='min-w-full text-sm'><thead><tr className='bg-slate-50 text-left'><th className='p-2'>Metric</th><th className='p-2'>First-Pass Schedule</th><th className='p-2'>Optimized Preview</th></tr></thead><tbody>
