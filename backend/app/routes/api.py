@@ -14872,6 +14872,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     third_meeting_warnings: list[dict[str, object]] = []
     search_limit_warnings: list[str] = []
     placement_priority_diagnostics: list[dict[str, object]] = []
+    both_hosting_decision_diagnostics: list[dict[str, object]] = []
     preferred_home_site_failures: list[dict[str, object]] = []
     overflow_host_ids: set[uuid.UUID] = set()
     two_location_rule_relaxed = False
@@ -15537,6 +15538,26 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         for org in db.query(Organization).filter(Organization.id.in_(list(available_host_community_ids))).all()
     } if available_host_community_ids else {}
     community_games_hosted_to_date = _scheduled_game_counts_by_host_community(db, season_id, week_game_date)
+    community_home_games_to_date: dict[uuid.UUID, int] = {org_id: 0 for org_id in available_host_community_ids}
+    home_game_rows = (
+        db.query(Team.organization_id, func.count(Game.id))
+        .select_from(Game)
+        .join(Team, Team.id == Game.home_team_id)
+        .join(Game.status)
+        .filter(
+            Game.season_id == season_id,
+            Game.game_date < week_game_date,
+            GameStatus.code == 'SCHEDULED',
+            GameStatus.is_active.is_(True),
+            Team.organization_id.isnot(None),
+        )
+        .group_by(Team.organization_id)
+        .all()
+    )
+    for org_id, count in home_game_rows:
+        if org_id in available_host_community_ids:
+            community_home_games_to_date[org_id] = int(count or 0)
+    projected_home_games_by_community: dict[uuid.UUID, int] = {}
     community_team_count_by_org: dict[uuid.UUID, int] = {org_id: 0 for org_id in available_host_community_ids}
     active_team_count_rows = (
         db.query(Team.organization_id, func.count(Team.id))
@@ -16811,6 +16832,159 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         })
         remaining_slots = []
     normal_placement_started_after_doubleheader_pair = bool(not (is_odd_division and no_byes) or atomic_pair_placement_success)
+    def _both_hosting_priority_for_candidate(
+        candidate_slot: GameSlot | None,
+        team_a: Team,
+        team_b: Team,
+        candidate_score: int,
+        reason_bits: list[str],
+        warning_bits: list[str],
+    ) -> tuple[bool, tuple[int, int, int, int, int, int, int, int, int], dict[str, object] | None]:
+        """Return deterministic both-hosting priority without using field-fit as its own tie-breaker."""
+        if not candidate_slot or not candidate_slot.host_location_id or not candidate_slot.slot_date:
+            return False, (0, 0, 0, 0, 0, 0, 0, 0, candidate_score), None
+        org_a = team_a.organization_id
+        org_b = team_b.organization_id
+        if not org_a or not org_b or org_a == org_b:
+            return False, (0, 0, 0, 0, 0, 0, 0, 0, candidate_score), None
+        hosts_a = set(host_ids_by_org.get(org_a, set()))
+        hosts_b = set(host_ids_by_org.get(org_b, set()))
+        if not hosts_a or not hosts_b:
+            return False, (0, 0, 0, 0, 0, 0, 0, 0, candidate_score), None
+        candidate_host_org = host_org_by_id.get(candidate_slot.host_location_id)
+        if candidate_host_org not in {org_a, org_b}:
+            return False, (0, 0, 0, 0, 0, 0, 0, 0, candidate_score), None
+
+        considered_host_ids = sorted(hosts_a | hosts_b, key=lambda hid: (host_name_by_id.get(hid, ''), str(hid)))
+        candidate_host_location_ids = [str(host_id) for host_id in considered_host_ids]
+
+        def _team_prior_plan(team_id: uuid.UUID) -> dict | None:
+            return next((p for p in plans if p.get('home_team_id') == str(team_id) or p.get('away_team_id') == str(team_id)), None)
+
+        doubleheader_same_location_score = 0
+        doubleheader_back_to_back_score = 0
+        split_doubleheader_penalty = 0
+        for team_id in (team_a.id, team_b.id):
+            prior = _team_prior_plan(team_id)
+            if not prior:
+                continue
+            if str(prior.get('host_location_id')) == str(candidate_slot.host_location_id):
+                doubleheader_same_location_score += 1
+            else:
+                split_doubleheader_penalty += 1
+            try:
+                prior_minutes = _minutes_from_time(time.fromisoformat(str(prior.get('proposed_start_time'))))
+            except Exception:
+                prior_minutes = None
+            candidate_minutes = _minutes_from_time(candidate_slot.start_time)
+            if prior_minutes is not None and candidate_minutes is not None and abs(candidate_minutes - prior_minutes) == GAME_DURATION_MINUTES:
+                doubleheader_back_to_back_score += 1
+            elif prior is not None:
+                split_doubleheader_penalty += 1
+
+        projected_home_games = {
+            org_a: community_home_games_to_date.get(org_a, 0) + projected_home_games_by_community.get(org_a, 0),
+            org_b: community_home_games_to_date.get(org_b, 0) + projected_home_games_by_community.get(org_b, 0),
+        }
+        home_game_equity_score = -projected_home_games.get(candidate_host_org, 0)
+
+        existing_home_team_score = 0
+        for p in plans:
+            try:
+                plan_host_id = uuid.UUID(str(p.get('host_location_id')))
+                plan_home_team_id = uuid.UUID(str(p.get('home_team_id')))
+            except (TypeError, ValueError):
+                continue
+            plan_home_team = teams_by_id.get(plan_home_team_id)
+            if host_org_by_id.get(plan_host_id) == candidate_host_org and plan_home_team and plan_home_team.organization_id == candidate_host_org:
+                existing_home_team_score += 1
+        host_community_home_team_score = sum(
+            1
+            for candidate_team in (team_a, team_b)
+            if candidate_team.organization_id == candidate_host_org
+        ) + existing_home_team_score
+
+        compatible_capacity = sum(
+            1
+            for s in remaining_slots
+            if s.host_location_id in {candidate_slot.host_location_id}
+            and _normalize_field_size(s.field_type) == _normalize_field_size(required_field_type)
+        )
+        current_host_load = projected_games_by_host.get(candidate_slot.host_location_id, 0)
+        current_community_load = projected_games_by_community.get(candidate_host_org, 0)
+        host_day_load_balance_score = (compatible_capacity * 2) - current_host_load - current_community_load
+
+        kickoff_minutes = _minutes_from_time(candidate_slot.start_time) or 24 * 60
+        younger_division_time_fit_score = max(0, (12 * 60) - kickoff_minutes) if _normalize_field_size(required_field_type) == FIELD_SIZE_SMALL else max(0, (15 * 60) - kickoff_minutes) // 2
+
+        turf_utilization_score = 0
+        unnecessary_reconfiguration_penalty = 0
+        if candidate_slot.turf_wave_id:
+            capacity, assigned, proposed = _turf_wave_capacity_snapshot(candidate_slot.turf_wave_id, _normalize_field_size(required_field_type))
+            turf_utilization_score = int(((assigned + proposed + 1) / max(capacity, 1)) * 100)
+            if assigned == 0 and proposed == 0 and _has_existing_turf_wave_capacity(required_field_type):
+                unnecessary_reconfiguration_penalty = 1
+
+        duplicate_matchup_penalty = matchup_counts.get(tuple(sorted((team_a.id, team_b.id))), 0)
+        same_community_penalty = 1 if team_a.organization_id == team_b.organization_id else 0
+        over_capacity_penalty = 1 if compatible_capacity <= current_host_load else 0
+        rotation_rank = community_rotation_rank_by_org.get(candidate_host_org, 999)
+        stable_alpha = org_names_by_id.get(candidate_host_org, str(candidate_host_org))
+        stable_alpha_rank = -sum(ord(ch) for ch in stable_alpha.lower())
+
+        priority_tuple = (
+            doubleheader_same_location_score * 1000 + doubleheader_back_to_back_score * 500 - split_doubleheader_penalty * 1000,
+            home_game_equity_score,
+            host_community_home_team_score,
+            host_day_load_balance_score - over_capacity_penalty * 100,
+            younger_division_time_fit_score,
+            turf_utilization_score - unnecessary_reconfiguration_penalty * 100,
+            -duplicate_matchup_penalty * 100 - same_community_penalty * 50,
+            -rotation_rank,
+            stable_alpha_rank,
+        )
+        driver_names = [
+            ('doubleheader protection', priority_tuple[0]),
+            ('home equity', priority_tuple[1]),
+            ('host-community placement', priority_tuple[2]),
+            ('load balance', priority_tuple[3]),
+            ('time preference', priority_tuple[4]),
+            ('turf utilization', priority_tuple[5]),
+            ('matchup logic', priority_tuple[6]),
+            ('deterministic fallback', priority_tuple[7]),
+        ]
+        active_drivers = [name for name, value in driver_names if value]
+        detail = {
+            'date': str(candidate_slot.slot_date),
+            'matchup': f'{team_a.name} vs {team_b.name}',
+            'team_a_community_id': str(org_a),
+            'team_a_community': org_names_by_id.get(org_a, str(org_a)),
+            'team_b_community_id': str(org_b),
+            'team_b_community': org_names_by_id.get(org_b, str(org_b)),
+            'candidate_host_locations_considered': candidate_host_location_ids,
+            'selected_host_location_id': str(candidate_slot.host_location_id),
+            'selected_host_location': host_name_by_id.get(candidate_slot.host_location_id, str(candidate_slot.host_location_id)),
+            'reason_selected': 'Both communities hosting: selected host location based on ' + (', '.join(active_drivers[:3]) if active_drivers else 'deterministic fallback') + '.',
+            'decision_drivers': active_drivers or ['deterministic fallback'],
+            'score_components': {
+                'doubleheader_same_location_score': doubleheader_same_location_score,
+                'doubleheader_back_to_back_score': doubleheader_back_to_back_score,
+                'home_game_equity_score': home_game_equity_score,
+                'host_community_home_team_score': host_community_home_team_score,
+                'host_day_load_balance_score': host_day_load_balance_score,
+                'younger_division_time_fit_score': younger_division_time_fit_score,
+                'turf_utilization_score': turf_utilization_score,
+                'over_capacity_penalty': over_capacity_penalty,
+                'duplicate_matchup_penalty': duplicate_matchup_penalty,
+                'same_community_penalty': same_community_penalty,
+                'split_doubleheader_penalty': split_doubleheader_penalty,
+                'unnecessary_reconfiguration_penalty': unnecessary_reconfiguration_penalty,
+            },
+            'home_placement_possible': True,
+        }
+        reason_bits.append(detail['reason_selected'])
+        return True, priority_tuple, detail
+
     while remaining_slots and len(plans) < max_new_games:
         if is_odd_division and no_byes and selected_double_header_team_id:
             available_team_ids = [tid for tid in teams_by_id if week_team_game_counts.get(tid, 0) < 1]
@@ -16915,8 +17089,8 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                         host_org_id = slot.host_location.organization_id if slot.host_location else None
                         same_community = bool(team_a.organization_id and team_a.organization_id == team_b.organization_id)
                         preferred_home_host_id = primary_host_by_org.get(team_a.organization_id) if same_community and team_a.organization_id else None
-                        active_owned_host_ids_a = set(selected_week_host_ids_by_org.get(team_a.organization_id, set())) if team_a.organization_id in selected_week_org_ids else set()
-                        active_owned_host_ids_b = set(selected_week_host_ids_by_org.get(team_b.organization_id, set())) if team_b.organization_id in selected_week_org_ids else set()
+                        active_owned_host_ids_a = set(host_ids_by_org.get(team_a.organization_id, set())) if team_a.organization_id else set()
+                        active_owned_host_ids_b = set(host_ids_by_org.get(team_b.organization_id, set())) if team_b.organization_id else set()
                         active_owned_participant_host_ids = active_owned_host_ids_a | active_owned_host_ids_b
                         hosted_by_own_community = bool(same_community and team_a.organization_id and candidate_host_id in active_owned_host_ids_a)
                         host_pref = bool(host_org_id and host_org_id in {team_a.organization_id, team_b.organization_id})
@@ -16966,7 +17140,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                             }
                             if valid_hosts_for_org:
                                 valid_owned_host_ids_by_hosting_org[org_id] = valid_hosts_for_org
-                        if valid_owned_host_ids_by_hosting_org and any(candidate_host_id not in host_ids for host_ids in valid_owned_host_ids_by_hosting_org.values()):
+                        if valid_owned_host_ids_by_hosting_org and candidate_host_id not in set().union(*valid_owned_host_ids_by_hosting_org.values()):
                             _record_placement_attempt(
                                 selected_field_slot,
                                 a,
@@ -17246,6 +17420,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                             selected_host_ids
                             and candidate_host_id
                             and candidate_host_id not in selected_host_ids
+                            and candidate_host_id not in active_owned_participant_host_ids
                             and not admin_override_third_host
                         ):
                             continue
@@ -17779,6 +17954,14 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                             reserved_slots_exposed_to_normal_placement = True
                             reserved_doubleheader_slot_skip_count += 1
                             continue
+                        both_hosting_candidate, both_hosting_priority_tuple, both_hosting_detail = _both_hosting_priority_for_candidate(
+                            selected_field_slot,
+                            team_a,
+                            team_b,
+                            score,
+                            reason_bits,
+                            warning_bits,
+                        )
                         all_candidates.append({
                             'slot': slot,
                             'selected_field_slot': selected_field_slot,
@@ -17786,6 +17969,9 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                             'away_team_id': b,
                             'pair': pair,
                             'score': score,
+                            'both_hosting_candidate': both_hosting_candidate,
+                            'both_hosting_priority_tuple': both_hosting_priority_tuple,
+                            'both_hosting_detail': both_hosting_detail,
                             'slot_start_minutes': _slot_start_minutes(selected_field_slot),
                             'turf_wave_number': _slot_wave_number(selected_field_slot),
                             'selected_wave_configuration': _slot_wave_configuration(selected_field_slot),
@@ -17827,14 +18013,15 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                 pair: min(
                     int(c.get('home_host_priority_tier', 2))
                     for c in all_candidates
-                    if c.get('hosting_community_game') and c.get('pair') == pair
+                    if c.get('hosting_community_game') and c.get('pair') == pair and not c.get('both_hosting_candidate')
                 )
-                for pair in {c['pair'] for c in all_candidates if c.get('hosting_community_game')}
+                for pair in {c['pair'] for c in all_candidates if c.get('hosting_community_game') and not c.get('both_hosting_candidate')}
             }
             if best_home_host_tier_by_pair:
                 for rejected_candidate in all_candidates:
                     if (
                         rejected_candidate.get('hosting_community_game')
+                        and not rejected_candidate.get('both_hosting_candidate')
                         and int(rejected_candidate.get('home_host_priority_tier', 2)) > best_home_host_tier_by_pair.get(rejected_candidate['pair'], 2)
                     ):
                         _record_placement_attempt(
@@ -17848,6 +18035,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                     c for c in all_candidates
                     if not (
                         c.get('hosting_community_game')
+                        and not c.get('both_hosting_candidate')
                         and int(c.get('home_host_priority_tier', 2)) > best_home_host_tier_by_pair.get(c['pair'], 2)
                     )
                 ]
@@ -17869,14 +18057,14 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         if valid_candidates:
             global_home_host_pairs = {
                 c['pair'] for c in valid_candidates
-                if c.get('hosting_community_game') and c.get('true_home_host_candidate')
+                if c.get('hosting_community_game') and c.get('true_home_host_candidate') and not c.get('both_hosting_candidate')
             }
             if global_home_host_pairs:
                 best_global_home_host_tier_by_pair = {
                     pair: min(
                         int(c.get('home_host_priority_tier', 2))
                         for c in valid_candidates
-                        if c.get('hosting_community_game') and c.get('pair') == pair
+                        if c.get('hosting_community_game') and c.get('pair') == pair and not c.get('both_hosting_candidate')
                     )
                     for pair in global_home_host_pairs
                 }
@@ -17884,24 +18072,30 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                     c for c in valid_candidates
                     if not (
                         c.get('hosting_community_game')
+                        and not c.get('both_hosting_candidate')
                         and int(c.get('home_host_priority_tier', 2)) > best_global_home_host_tier_by_pair.get(c['pair'], 2)
                     )
                 ]
         if not valid_candidates:
             break
 
-        def _candidate_hard_priority_key(candidate: dict[str, object]) -> tuple[int, int, int, int, int, int, int]:
+        def _candidate_hard_priority_key(candidate: dict[str, object]) -> tuple:
             # Hard-rule ordering happens before soft score: true home-host priority,
-            # then chronological turf wave fill, then the existing detailed score.
+            # then the explicit both-hosting community tie-breaker when both teams'
+            # communities have active home capacity, then chronological turf wave fill,
+            # then the existing detailed score.
             true_home = bool(candidate.get('true_home_host_candidate'))
             home_bucket = 2 if true_home else 1
+            both_hosting_bucket = 1 if candidate.get('both_hosting_candidate') else 0
+            both_hosting_priority = tuple(candidate.get('both_hosting_priority_tuple') or ())
             owned_rank = int(candidate.get('home_host_priority_tier') or len(OWNED_HOST_PRIORITY_ORDER) + 1)
+            effective_owned_rank = 0 if both_hosting_bucket else -owned_rank
             rotation_rank = int(candidate.get('host_rotation_rank') or 999)
             wave_number = int(candidate.get('turf_wave_number') or 9999)
             is_turf = 1 if candidate.get('turf_wave_number') is not None else 0
             start_minutes = int(candidate.get('slot_start_minutes') or 24 * 60)
             score_value = int(candidate.get('score') or 0)
-            return (home_bucket, -owned_rank, -rotation_rank, is_turf, -start_minutes, -wave_number, score_value)
+            return (home_bucket, both_hosting_bucket, both_hosting_priority, effective_owned_rank, -rotation_rank, is_turf, -start_minutes, -wave_number, score_value)
 
         best = max(valid_candidates, key=_candidate_hard_priority_key)
         selected_field_slot = best['selected_field_slot']
@@ -17923,6 +18117,9 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             reason_bits.insert(0, 'Accepted as required double header due to odd team count')
         if adjustment_reason:
             reason_bits.append(adjustment_reason)
+        selected_both_hosting_detail = best.get('both_hosting_detail')
+        if selected_both_hosting_detail:
+            both_hosting_decision_diagnostics.append(dict(selected_both_hosting_detail))
         _record_placement_attempt(selected_field_slot, home_team.id, away_team.id, 'accepted', 'Selected highest-scoring valid assignment for this placement pass.', selected_field_slot)
         plans.append({
             'slot_id': str(selected_field_slot.id),
@@ -17955,6 +18152,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'home_host_priority_tier': best.get('home_host_priority_tier'),
             'listed_home_owned_host_candidate': bool(best.get('listed_home_owned_host_candidate')),
             'listed_away_owned_host_candidate': bool(best.get('listed_away_owned_host_candidate')),
+            'both_hosting_community_decision': dict(selected_both_hosting_detail) if selected_both_hosting_detail else None,
         })
         selected_host_candidate_ids_considered = sorted({
             str(c.get('selected_field_slot').host_location_id)
@@ -18037,6 +18235,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             selected_host_org_id = host_org_by_id.get(selected_field_slot.host_location_id)
             if selected_host_org_id:
                 projected_games_by_community[selected_host_org_id] = projected_games_by_community.get(selected_host_org_id, 0) + 1
+                projected_home_games_by_community[selected_host_org_id] = projected_home_games_by_community.get(selected_host_org_id, 0) + 1
             if not postseason_week and selected_field_slot.slot_date:
                 regular_season_host_occurrences_by_location.setdefault(selected_field_slot.host_location_id, set()).add(selected_field_slot.slot_date)
                 selected_host_org_id = selected_field_slot.host_location.organization_id if selected_field_slot.host_location else None
@@ -18587,8 +18786,10 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
                 'skipped_placement_reasons': [_get_skip_reason(row) for row in skipped],
                 'placement_attempt_details': placement_attempt_details,
                 'auto_schedule_placement_priority_diagnostics': placement_priority_diagnostics,
+                'both_hosting_community_decisions': both_hosting_decision_diagnostics,
             },
             'Auto-Schedule Placement Priority Diagnostics': placement_priority_diagnostics,
+            'Both-Hosting Community Decision Diagnostics': both_hosting_decision_diagnostics,
             'odd_team_double_header_reservation': {
                 'selected_team_id': str(selected_double_header_team_id) if selected_double_header_team_id else None,
                 'selected_team_name': teams_by_id[selected_double_header_team_id].name if selected_double_header_team_id and selected_double_header_team_id in teams_by_id else None,
