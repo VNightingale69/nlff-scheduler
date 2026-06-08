@@ -1,3 +1,4 @@
+import os
 import unittest
 import uuid
 from datetime import date, time
@@ -450,6 +451,68 @@ class ManualOptimizationWorkflowPermissionsTest(ManualScheduleEditPermissionsTes
         }
         payload.update(overrides)
         return payload
+
+
+    def test_optimize_schedule_options_preflight_allows_post(self):
+        response = self.client.options(
+            '/api/manual-schedule-builder/optimize-schedule',
+            headers={
+                'Origin': 'http://localhost:3000',
+                'Access-Control-Request-Method': 'POST',
+                'Access-Control-Request-Headers': 'authorization,content-type',
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn('POST', response.headers.get('access-control-allow-methods', ''))
+
+    def test_optimize_endpoint_responds_within_configured_time_limit(self):
+        self.host.surface_type = 'TURF_STADIUM'
+        self._add_optimizer_slot(time(8, 0))
+        self.db.commit()
+        with patch.dict(os.environ, {'SCHEDULE_OPTIMIZATION_MAX_RUNTIME_SECONDS': '1', 'SCHEDULE_OPTIMIZATION_MAX_CANDIDATES_EVALUATED': '10'}):
+            response = self.client.post(
+                '/api/manual-schedule-builder/optimize-schedule',
+                headers=self._token(self.scheduling_user.id),
+                json=self._optimization_payload(),
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn('summary', response.json())
+
+    def test_optimizer_candidate_cap_returns_partial_diagnostics(self):
+        self.host.surface_type = 'TURF_STADIUM'
+        for hour in range(8, 14):
+            self._add_optimizer_slot(time(hour, 0))
+        self.db.commit()
+        with patch.dict(os.environ, {'SCHEDULE_OPTIMIZATION_MAX_CANDIDATES_GENERATED': '2', 'SCHEDULE_OPTIMIZATION_MAX_CANDIDATES_EVALUATED': '1'}):
+            response = self.client.post(
+                '/api/manual-schedule-builder/optimize-schedule',
+                headers=self._token(self.scheduling_user.id),
+                json=self._optimization_payload(),
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        summary = response.json()['summary']
+        self.assertLessEqual(summary['optimization_candidates_generated'], 2)
+        self.assertEqual(summary['optimization_candidates_evaluated'], 1)
+        self.assertTrue(summary['guard_limit_reached'])
+        self.assertIn('Optimization stopped after reaching guard limit', summary['partial_diagnostics_message'])
+
+    def test_optimizer_deduplicates_candidates_across_passes(self):
+        self.host.surface_type = 'TURF_STADIUM'
+        self._add_optimizer_slot(time(8, 0))
+        self.db.commit()
+        with patch.dict(os.environ, {'SCHEDULE_OPTIMIZATION_MAX_PASSES': '2'}):
+            response = self.client.post(
+                '/api/manual-schedule-builder/optimize-schedule',
+                headers=self._token(self.scheduling_user.id),
+                json=self._optimization_payload(),
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        data = response.json()
+        identities = {
+            (change.get('type'), change.get('game_id'), change.get('from_slot_id'), change.get('to_slot_id'))
+            for change in data['proposed_changes'] + data['rejected_changes']
+        }
+        self.assertEqual(len(identities), len(data['proposed_changes'] + data['rejected_changes']))
 
     def test_scheduling_admin_can_run_manual_optimization_preview_with_metrics(self):
         response = self.client.post(
