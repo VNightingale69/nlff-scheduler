@@ -308,6 +308,7 @@ export default function ManualScheduleBuilderPage() {
   const [optimizerLoading, setOptimizerLoading] = useState(false);
   const [optimizerDiagnostics, setOptimizerDiagnostics] = useState<any | null>(null);
   const [scheduledGamesFilters, setScheduledGamesFilters] = useState<ScheduledGamesFilters>(emptyScheduledGamesFilters);
+  const [isBulkEditMode, setIsBulkEditMode] = useState(false);
 
   useEffect(() => () => {
     if (autoScheduleDiagnostics?.downloadUrl) URL.revokeObjectURL(autoScheduleDiagnostics.downloadUrl);
@@ -543,7 +544,7 @@ export default function ManualScheduleBuilderPage() {
   };
   const hasInvalidPendingDrafts = dirtyDrafts.some((draft: any) => !isDraftValid(draft));
   const updateDraftForGame = (game: any, patch: Record<string, unknown>) => {
-    if (!canBulkInlineEditScheduledGames) return;
+    if (!canBulkInlineEditScheduledGames || !isBulkEditMode) return;
     setPendingGameEdits((current) => {
       const base = current[game.id] || buildEditableGame(game);
       return { ...current, [game.id]: { ...base, ...patch } };
@@ -597,6 +598,7 @@ export default function ManualScheduleBuilderPage() {
       const res: any = await apiFetch('/schedule-management/games/manual-edit/bulk', { method: 'PATCH', body: JSON.stringify(buildBulkPayload(overrideWarnings)) }, token);
       (res.games || []).forEach(applyScheduledGameUpdate);
       setPendingGameEdits({});
+      setIsBulkEditMode(false);
       await load(); await loadRecommendations(); setManualScheduleBannerFromValidation(overrideWarnings ? 'Schedule changes saved with warning override.' : 'Schedule changes saved.', await loadFinalScheduleValidation());
     } catch (e: unknown) {
       if (e instanceof ApiError && e.status === 409) {
@@ -867,10 +869,16 @@ export default function ManualScheduleBuilderPage() {
         </div>
         {games.length > 0 && filteredGames.length === 0 ? <div className='rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800'>No scheduled games match the selected filters.</div> : null}
         {canBulkInlineEditScheduledGames ? <div className='mb-3 flex flex-wrap items-center gap-3 rounded border border-blue-100 bg-blue-50 p-3'>
-          <span className={`text-sm font-semibold ${hasPendingBulkEdits ? 'text-blue-900' : 'text-slate-600'}`}>{hasPendingBulkEdits ? pendingChangesLabel : 'No unsaved schedule changes'}</span>
-          <button className='rounded bg-blue-600 px-3 py-2 text-sm text-white disabled:cursor-not-allowed disabled:bg-slate-300' disabled={!hasPendingBulkEdits || hasInvalidPendingDrafts} onClick={() => saveBulkInlineEdits(false)}>Save Changes</button>
-          <button className='rounded border bg-white px-3 py-2 text-sm disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400' disabled={!hasPendingBulkEdits} onClick={() => setPendingGameEdits({})}>Discard Changes</button>
-          {hasInvalidPendingDrafts ? <span className='text-sm text-red-700'>Fix invalid changed rows before saving.</span> : null}
+          {!isBulkEditMode ? <>
+            <button className='rounded bg-blue-600 px-3 py-2 text-sm text-white' onClick={() => { setError(''); setSuccess(''); setIsBulkEditMode(true); }}>Modify Schedule</button>
+            <span className='text-sm text-slate-600'>Enable global inline editing to update multiple scheduled games before saving once.</span>
+          </> : <>
+            <span className={`text-sm font-semibold ${hasPendingBulkEdits ? 'text-blue-900' : 'text-slate-600'}`}>{hasPendingBulkEdits ? pendingChangesLabel : '0 unsaved changes across 0 games'}</span>
+            <button className='rounded bg-blue-600 px-3 py-2 text-sm text-white disabled:cursor-not-allowed disabled:bg-slate-300' disabled={!hasPendingBulkEdits || hasInvalidPendingDrafts} onClick={() => saveBulkInlineEdits(false)}>Save Changes</button>
+            <button className='rounded border bg-white px-3 py-2 text-sm disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400' disabled={!hasPendingBulkEdits} onClick={() => setPendingGameEdits({})}>Discard Changes</button>
+            <button className='rounded border bg-white px-3 py-2 text-sm' onClick={() => { if (!confirmDiscardBulkEdits()) return; setPendingGameEdits({}); setIsBulkEditMode(false); }}>Exit Edit Mode</button>
+            {hasInvalidPendingDrafts ? <span className='text-sm text-red-700'>Fix invalid changed rows before saving.</span> : null}
+          </>}
         </div> : null}
         <div className='overflow-auto'>
           <table className='min-w-full text-sm'>
@@ -887,7 +895,7 @@ export default function ManualScheduleBuilderPage() {
                 const divisionDefaultFieldType = String(selectedDivision?.required_field_type || '').toUpperCase();
                 const fieldSizeMismatch = Boolean(selectedFieldType && divisionDefaultFieldType && selectedFieldType !== divisionDefaultFieldType);
                 const fieldSizeLabel = selectedFieldType ? `Selected field type: ${selectedFieldType}${divisionDefaultFieldType ? ` • Division default field type: ${divisionDefaultFieldType}` : ''}` : (divisionDefaultFieldType ? `Division default field type: ${divisionDefaultFieldType}` : 'Select a field to view field type');
-                const editable = canBulkInlineEditScheduledGames;
+                const editable = canBulkInlineEditScheduledGames && isBulkEditMode;
                 return <tr key={g.id} className={`border-t align-top ${isDirtyRow ? 'bg-amber-50/40 outline outline-1 outline-amber-200' : ''}`}>
                   <td className={`p-2${dirtyCellClass(draft, 'game_date')}`}>{editable ? <select className={compactSelectClass} value={draft.game_date || ''} onChange={(e) => updateDraftForGame(g, { game_date: e.target.value })}><option value=''>Date</option>{seasonDateOptions.map((d: any) => <option key={d} value={d}>{formatDisplayDate(d)}</option>)}</select> : formatDisplayDate(g.game_date)}</td>
                   <td className={`p-2${dirtyCellClass(draft, 'kickoff_time')}`}>{editable ? <select className={compactSelectClass} value={draft.kickoff_time || ''} onChange={(e) => updateDraftForGame(g, { kickoff_time: e.target.value })}><option value=''>Time</option>{validStartTimeOptions.map((t: any) => <option key={t} value={t}>{formatDisplayTime(t)}</option>)}</select> : formatDisplayTime(g.kickoff_time)}</td>
@@ -898,28 +906,32 @@ export default function ManualScheduleBuilderPage() {
                   <td className={`p-2${dirtyCellClass(draft, 'field_instance_id')}`}>{editable ? <div className='space-y-1'><select className={compactSelectClass} value={draft.field_instance_id || ''} onChange={(e) => { const selected = rowFieldOptions.find((slot: any) => String(slot.field_instance_id || slot.field_id) === e.target.value); updateDraftForGame(g, { field_instance_id: e.target.value, field_id: selected?.field_id || draft.field_id, host_location_id: selected?.host_location_id || draft.host_location_id }); }}><option value=''>Field</option>{rowFieldOptions.map((s: any) => <option key={`${s.field_instance_id || s.field_id}-${s.slot_id || s.id}`} value={s.field_instance_id || s.field_id}>{s.explicit_field_slot_label || explicitFieldSlotLabel(s)}</option>)}</select><div className={`text-[11px] ${fieldSizeMismatch ? 'text-amber-700' : 'text-slate-500'}`}>{fieldSizeLabel}</div></div> : (explicitFieldSlotLabel(g) || '-')}</td>
                   <td className={`p-2${dirtyCellClass(draft, 'public_notes')}${dirtyCellClass(draft, 'internal_admin_notes')}`}>{editable ? <details><summary className='cursor-pointer text-xs text-blue-700 underline'>Edit notes</summary><div className='mt-2 grid min-w-64 gap-2'><textarea className='rounded border p-2 text-xs' value={draft.public_notes || ''} onChange={(e) => updateDraftForGame(g, { public_notes: e.target.value })} placeholder='Public notes' /><textarea className='rounded border p-2 text-xs' value={draft.internal_admin_notes || ''} onChange={(e) => updateDraftForGame(g, { internal_admin_notes: e.target.value })} placeholder='Internal admin notes' /></div></details> : ((g.public_notes || g.internal_admin_notes) ? <details><summary className='cursor-pointer text-xs text-blue-700 underline'>View notes</summary><div className='mt-1 min-w-48 space-y-1 text-xs text-slate-700'>{g.public_notes ? <p><span className='font-semibold'>Public:</span> {g.public_notes}</p> : null}{g.internal_admin_notes ? <p><span className='font-semibold'>Internal:</span> {g.internal_admin_notes}</p> : null}</div></details> : <span className='text-slate-400'>-</span>)}</td>
                   {canManageGeneratedGames ? <td className='p-2'><div className='flex flex-wrap gap-2'>
-                    <button className='rounded border px-2 py-1 text-xs' onClick={() => { if (!confirmDiscardBulkEdits()) return; setPendingGameEdits({}); setMoveGame(g); }}>Move</button>
-                    <button className='rounded border border-red-300 px-2 py-1 text-xs text-red-700' onClick={async () => {
-                      if (!confirmDiscardBulkEdits()) return;
-                      if (!window.confirm('Remove this scheduled game?')) return;
-                      setError('');
-                      setPendingGameEdits({});
-                      setAutoFillSkipped([]);
-                      setAutoFillPreview([]);
-                      try {
-                        setGames((prev) => prev.filter((game: any) => game.id !== g.id));
-                        await apiFetch(`/schedule-management/games/${g.id}/unschedule`, { method: 'PATCH' }, token);
-                        await load();
-                        await loadRecommendations();
-                        setManualScheduleBannerFromValidation('Game unscheduled.', await loadFinalScheduleValidation());
-                      }
-                      catch (e: unknown) {
-                        await load();
-                        await loadRecommendations();
-                        setError(extractError(e));
-                      }
-                    }}>Delete / Unschedule</button>
-                    {isDirtyRow && canBulkInlineEditScheduledGames ? <button className='rounded border px-2 py-1 text-xs' onClick={() => setPendingGameEdits((current) => { const next = { ...current }; delete next[g.id]; return next; })}>Reset Row</button> : null}
+                    {isBulkEditMode ? <>
+                      <span className='rounded border border-blue-100 bg-blue-50 px-2 py-1 text-xs text-blue-800'>Inline edit mode</span>
+                      {isDirtyRow && canBulkInlineEditScheduledGames ? <button className='rounded border px-2 py-1 text-xs' onClick={() => setPendingGameEdits((current) => { const next = { ...current }; delete next[g.id]; return next; })}>Reset Row</button> : null}
+                    </> : <>
+                      <button className='rounded border px-2 py-1 text-xs' onClick={() => { if (!confirmDiscardBulkEdits()) return; setPendingGameEdits({}); setMoveGame(g); }}>Move</button>
+                      <button className='rounded border border-red-300 px-2 py-1 text-xs text-red-700' onClick={async () => {
+                        if (!confirmDiscardBulkEdits()) return;
+                        if (!window.confirm('Remove this scheduled game?')) return;
+                        setError('');
+                        setPendingGameEdits({});
+                        setAutoFillSkipped([]);
+                        setAutoFillPreview([]);
+                        try {
+                          setGames((prev) => prev.filter((game: any) => game.id !== g.id));
+                          await apiFetch(`/schedule-management/games/${g.id}/unschedule`, { method: 'PATCH' }, token);
+                          await load();
+                          await loadRecommendations();
+                          setManualScheduleBannerFromValidation('Game unscheduled.', await loadFinalScheduleValidation());
+                        }
+                        catch (e: unknown) {
+                          await load();
+                          await loadRecommendations();
+                          setError(extractError(e));
+                        }
+                      }}>Delete / Unschedule</button>
+                    </>}
                   </div></td> : null}
                 </tr>;
               })}
