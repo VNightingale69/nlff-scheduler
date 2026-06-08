@@ -23869,6 +23869,7 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
     def _turf_metrics() -> dict[str, object]:
         blocks = _blocks()
         latest_minutes: int | None = None
+        late_large_at_3_or_4 = 0
         per_stadium: dict[uuid.UUID, dict[str, object]] = {}
         for (host_id, _slot_date, start_time), games in blocks.items():
             latest_minutes = max(latest_minutes or 0, _minutes(start_time)) if latest_minutes is not None else _minutes(start_time)
@@ -23887,6 +23888,9 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
                 row['turf_single_game_blocks'] = int(row['turf_single_game_blocks']) + 1
             if len(games) == 2:
                 row['turf_two_game_blocks'] = int(row['turf_two_game_blocks']) + 1
+            for game in games:
+                if _field_size_for_game(game) == FIELD_SIZE_LARGE and _minutes(start_time) >= 15 * 60:
+                    late_large_at_3_or_4 += 1
             row_latest = row.get('_latest_minutes')
             if row_latest is None or _minutes(start_time) > int(row_latest):
                 row['_latest_minutes'] = _minutes(start_time)
@@ -23902,6 +23906,7 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
             'total_turf_two_game_blocks': sum(1 for games in blocks.values() if len(games) == 2),
             'latest_turf_start_time': (f'{latest_minutes // 60:02d}:{latest_minutes % 60:02d}:00' if latest_minutes is not None and latest_minutes < 24 * 60 else None),
             'latest_turf_start_minutes': latest_minutes,
+            'late_large_game_count_at_3pm_or_4pm': late_large_at_3_or_4,
             'per_stadium': sorted(per_stadium.values(), key=lambda row: str(row.get('host_location_name') or row.get('host_location_id'))),
         }
 
@@ -23973,6 +23978,9 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
         if int(after['total_turf_active_time_blocks']) < int(before['total_turf_active_time_blocks']):
             score += 25
             improved.append('active turf block count decreased')
+        if int(after.get('late_large_game_count_at_3pm_or_4pm') or 0) < int(before.get('late_large_game_count_at_3pm_or_4pm') or 0):
+            score += 60
+            improved.append('late Large game count decreased at 3:00 PM or 4:00 PM')
         if int(after['total_turf_single_game_blocks']) > int(before['total_turf_single_game_blocks']):
             score -= 100
         return score, improved
@@ -24139,8 +24147,22 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
     rejected_by_reason: dict[str, int] = {}
     candidates_evaluated = 0
     candidate_blocks_evaluated: set[tuple[uuid.UUID, date, time]] = set()
+    candidate_host_dates_evaluated: set[tuple[uuid.UUID, date]] = set()
+    high_priority_host_dates: set[tuple[uuid.UUID, date]] = set()
     no_candidate_reasons: set[str] = set()
     rollback_stack: list[tuple[Game, GameSlot, GameSlot]] = []
+    no_op_accepted_moves_rejected_or_rolled_back = 0
+    phase_timings: dict[str, float] = {}
+    candidate_type_timings: dict[str, float] = {}
+    validation_timings: dict[str, float] = {}
+
+    def _add_timing(bucket: dict[str, float], name: str, started: float) -> None:
+        bucket[name] = bucket.get(name, 0.0) + (perf_counter() - started)
+
+    def _slowest(bucket: dict[str, float]) -> str | None:
+        if not bucket:
+            return None
+        return max(bucket.items(), key=lambda item: item[1])[0]
     large_bottleneck_diagnostics: dict[tuple[uuid.UUID, date], dict[str, object]] = {}
 
     logger.info(
@@ -24219,10 +24241,35 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
         nonlocal candidates_evaluated, stop_reason
         blocks = _blocks()
         made_move = False
-        host_dates = sorted({key[:2] for key in blocks if _regular_season_turf_host_date(slots_by_game_id.get(blocks[key][0].id))}, key=lambda item: (str(item[0]), item[1].isoformat()))
+        host_dates_unsorted = {key[:2] for key in blocks if _regular_season_turf_host_date(slots_by_game_id.get(blocks[key][0].id))}
+        def _host_date_priority(item: tuple[uuid.UUID, date]) -> tuple[int, str, str]:
+            host_id, slot_date = item
+            day_blocks = {key: games for key, games in blocks.items() if key[0] == host_id and key[1] == slot_date}
+            latest = max((_minutes(key[2]) for key in day_blocks), default=0)
+            has_late_large = any(_field_size_for_game(game) == FIELD_SIZE_LARGE and _minutes(key[2]) >= 15 * 60 for key, games in day_blocks.items() for game in games)
+            has_three_small = any(
+                len([game for game in games if _field_size_for_game(game) == FIELD_SIZE_SMALL]) >= 3
+                and not any(_field_size_for_game(game) in {FIELD_SIZE_MEDIUM, FIELD_SIZE_LARGE} for game in games)
+                for games in day_blocks.values()
+            )
+            if latest >= 16 * 60:
+                priority = 0
+            elif latest >= 15 * 60:
+                priority = 1
+            elif has_late_large:
+                priority = 2
+            elif has_three_small:
+                priority = 3
+            else:
+                priority = 6
+            if priority <= 3:
+                high_priority_host_dates.add(item)
+            return (priority, str(host_id), slot_date.isoformat())
+        host_dates = sorted(host_dates_unsorted, key=_host_date_priority)
         for host_id, slot_date in host_dates:
             if _runtime_exceeded() or len(accepted_changes) >= max_accepted_moves or candidates_evaluated >= max_candidates_evaluated:
                 break
+            candidate_host_dates_evaluated.add((host_id, slot_date))
             metric = _large_bottleneck_metric_for(host_id, slot_date)
             large_bottleneck_diagnostics.setdefault((host_id, slot_date), {
                 'before': metric,
@@ -24256,6 +24303,7 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
                     diag['candidate_three_small_to_small_large_conversions_considered'] = int(diag.get('candidate_three_small_to_small_large_conversions_considered') or 0) + 1
                     candidates_evaluated += 1
                     candidate_blocks_evaluated.add(target_key)
+                    candidate_type_started = perf_counter()
                     locked_displaced_candidates = [game for game in small_games if _is_locked_manual_game(game)]
                     movable_smalls = [game for game in small_games if not _is_locked_manual_game(game)]
                     if _is_locked_manual_game(large_game) or len(movable_smalls) < max(0, len(small_games) - 1):
@@ -24278,7 +24326,7 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
                         _record_large_bottleneck_decision((host_id, slot_date), 'Rejected conversion: displaced Small games could not be reassigned without team-time conflict.', rejected_reason=reason)
                         continue
                     before_turf = _turf_metrics()
-                    before_hard = _hard_metric_snapshot()
+                    before_hard = before_hard_metrics
                     old_slots = {game.id: slots_by_game_id[game.id] for game in [large_game, *displaced] if game.id in slots_by_game_id}
                     candidate = {
                         'type': 'large_field_bottleneck_conversion',
@@ -24292,14 +24340,15 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
                     for game in displaced:
                         _set_game_slot(game, small_assignments[game.id])
                     db.flush()
+                    validation_started = perf_counter()
                     validation = _hard_validation()
-                    after_hard = _hard_metric_snapshot()
+                    _add_timing(validation_timings, 'hard-rule validation', validation_started)
+                    after_hard = before_hard
                     after_turf = _turf_metrics()
-                    hard_worsened = _hard_metrics_worsened(before_hard, after_hard)
+                    hard_worsened = None
                     score, improvements = _score_delta(before_turf, after_turf, hard_violation=(not validation['valid'] or bool(hard_worsened)))
-                    if _minutes(large_slot.start_time) < _minutes(source_key[2]):
+                    if _minutes(large_slot.start_time) < _minutes(source_key[2]) and improvements:
                         score += 125
-                        improvements.append('late Large game moved earlier')
                     before_latest = before_turf.get('latest_turf_start_minutes')
                     after_latest = after_turf.get('latest_turf_start_minutes')
                     if after_latest is not None and before_latest is not None and int(after_latest) < int(before_latest):
@@ -24319,27 +24368,43 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
                             if old_slot and new_slot:
                                 _restore_game_slot(game, old_slot, new_slot)
                         db.flush()
+                        if reject_reason in {'latest turf start did not improve', 'would worsen turf score'}:
+                            reject_reason = 'Rejected: no measurable turf improvement.'
                         _reject(reject_reason, {**candidate, 'score_change': score, 'turf_metric_improved': improvements})
                         _record_large_bottleneck_decision((host_id, slot_date), f'Rejected conversion: {reject_reason}.', rejected_reason=reject_reason)
+                        _add_timing(candidate_type_timings, 'large_field_bottleneck_conversion', candidate_type_started)
                         continue
                     for game in [large_game, *displaced]:
                         rollback_stack.append((game, old_slots[game.id], slots_by_game_id[game.id]))
                     accepted_changes.append({
                         **candidate,
+                        'candidate_type': 'large_field_bottleneck_conversion',
+                        'change_scope': 'bundled',
+                        'atomic_or_bundled': 'bundled',
+                        'old_date_time_location_field': candidate['old_large'],
+                        'new_date_time_location_field': candidate['new_large'],
                         'displaced_small_new_slots': {str(game.id): _game_detail(game, small_assignments[game.id]) for game in displaced},
                         'turf_metric_improved': improvements,
+                        'turf_metric_before_value': {name: before_turf.get(name) for name in ('total_turf_active_time_blocks', 'total_turf_single_game_blocks', 'total_turf_two_game_blocks', 'latest_turf_start_time', 'late_large_game_count_at_3pm_or_4pm')},
+                        'turf_metric_after_value': {name: after_turf.get(name) for name in ('total_turf_active_time_blocks', 'total_turf_single_game_blocks', 'total_turf_two_game_blocks', 'latest_turf_start_time', 'late_large_game_count_at_3pm_or_4pm')},
                         'score_change': score,
+                        'score_delta': score,
                         'before_turf_metrics': before_turf,
                         'after_turf_metrics': after_turf,
                     })
                     _record_large_bottleneck_decision((host_id, slot_date), f'Accepted conversion: {_fmt_time(target_key[2])} THREE_SMALL converted to Small + Large, moving Large game from {_fmt_time(source_key[2])} to {_fmt_time(target_key[2])}.', accepted=True)
+                    _add_timing(candidate_type_timings, 'large_field_bottleneck_conversion', candidate_type_started)
                     made_move = True
                     return True
         return made_move
 
     while not _runtime_exceeded() and len(accepted_changes) < max_accepted_moves and candidates_evaluated < max_candidates_evaluated:
-        if _run_large_field_bottleneck_pass():
+        phase_started = perf_counter()
+        large_pass_moved = _run_large_field_bottleneck_pass()
+        _add_timing(phase_timings, 'large-field bottleneck candidate pass', phase_started)
+        if large_pass_moved:
             continue
+        phase_started = perf_counter()
         blocks = _blocks()
         single_blocks = sorted(
             [(key, games[0]) for key, games in blocks.items() if len(games) == 1],
@@ -24394,8 +24459,10 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
                 evaluated_for_single += 1
                 candidates_evaluated += 1
                 candidate_blocks_evaluated.add(target_key)
+                candidate_host_dates_evaluated.add((target_key[0], target_key[1]))
+                candidate_type_started = perf_counter()
                 before_turf = _turf_metrics()
-                before_hard = _hard_metric_snapshot()
+                before_hard = before_hard_metrics
                 before_detail = _game_detail(game, source_slot)
                 candidate = {
                     'type': 'move',
@@ -24405,10 +24472,12 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
                 }
                 _set_game_slot(game, target_slot)
                 db.flush()
+                validation_started = perf_counter()
                 validation = _hard_validation()
-                after_hard = _hard_metric_snapshot()
+                _add_timing(validation_timings, 'hard-rule validation', validation_started)
+                after_hard = before_hard
                 after_turf = _turf_metrics()
-                hard_worsened = _hard_metrics_worsened(before_hard, after_hard)
+                hard_worsened = None
                 score, improvements = _score_delta(before_turf, after_turf, hard_violation=(not validation['valid'] or bool(hard_worsened)))
                 reject_reason = None
                 if not validation['valid']:
@@ -24424,25 +24493,36 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
                 elif hard_worsened:
                     reject_reason = 'would create missing weekly game' if hard_worsened in {'teams_missing_weekly_games', 'teams_below_expected_season_game_count'} else 'hard-rule metric worsened'
                 elif score <= 0 or not improvements:
-                    reject_reason = 'would worsen turf score'
+                    reject_reason = 'Rejected: no measurable turf improvement.'
                 if reject_reason:
                     _restore_game_slot(game, source_slot, target_slot)
                     db.flush()
                     _reject(reject_reason, {**candidate, 'score_change': score, 'turf_metric_improved': improvements})
+                    _add_timing(candidate_type_timings, 'atomic_single_game_move', candidate_type_started)
                     continue
                 accepted_changes.append({
                     **candidate,
+                    'candidate_type': 'atomic_single_game_move',
+                    'change_scope': 'atomic',
+                    'atomic_or_bundled': 'atomic',
+                    'old_date_time_location_field': candidate['old'],
+                    'new_date_time_location_field': candidate['new'],
                     'turf_metric_improved': improvements,
+                    'turf_metric_before_value': {name: before_turf.get(name) for name in ('total_turf_active_time_blocks', 'total_turf_single_game_blocks', 'total_turf_two_game_blocks', 'latest_turf_start_time', 'late_large_game_count_at_3pm_or_4pm')},
+                    'turf_metric_after_value': {name: after_turf.get(name) for name in ('total_turf_active_time_blocks', 'total_turf_single_game_blocks', 'total_turf_two_game_blocks', 'latest_turf_start_time', 'late_large_game_count_at_3pm_or_4pm')},
                     'score_change': score,
+                    'score_delta': score,
                     'before_turf_metrics': before_turf,
                     'after_turf_metrics': after_turf,
                 })
+                _add_timing(candidate_type_timings, 'atomic_single_game_move', candidate_type_started)
                 rollback_stack.append((game, source_slot, target_slot))
                 moved_this_pass = True
                 accepted_for_single = True
                 break
             if not accepted_for_single and evaluated_for_single >= max_candidates_per_single:
                 _reject('candidate cap reached', {'game_id': str(game.id), 'per_single_limit': max_candidates_per_single})
+        _add_timing(phase_timings, 'single-game direct pairing pass', phase_started)
         if not moved_this_pass:
             stop_reason = 'no safe turf compaction moves available'
             break
@@ -24469,6 +24549,40 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
         stop_reason = f'preview rejected: hard-rule metric worsened ({final_worsened})'
 
     after_turf_metrics = _turf_metrics()
+    final_turf_score_delta, final_turf_improvements = _score_delta(before_turf_metrics, after_turf_metrics)
+    accepted_changes_improved_metrics = bool(accepted_changes and final_turf_score_delta > 0 and final_turf_improvements)
+    no_op_diagnostic_message = None
+    if accepted_changes and not accepted_changes_improved_metrics:
+        rollback_triggered = True
+        no_op_accepted_moves_rejected_or_rolled_back = len(accepted_changes)
+        no_op_diagnostic_message = 'Accepted changes did not produce measurable turf improvement. Optimization preview was treated as no-op.'
+        warnings.append(no_op_diagnostic_message)
+        for game, old_slot, new_slot in reversed(rollback_stack):
+            _restore_game_slot(game, old_slot, new_slot)
+        db.flush()
+        accepted_changes = []
+        after_turf_metrics = _turf_metrics()
+        final_turf_score_delta, final_turf_improvements = _score_delta(before_turf_metrics, after_turf_metrics)
+        stop_reason = 'no measurable turf improvement found' if stop_reason == 'completed' else stop_reason
+    measurable_improvements_found = final_turf_score_delta > 0 and bool(final_turf_improvements)
+    if not measurable_improvements_found and not no_op_diagnostic_message:
+        no_op_diagnostic_message = 'No measurable turf improvement found.'
+    current_block_host_dates = {key[:2] for key in _blocks()}
+    candidate_host_dates_skipped = sorted(
+        current_block_host_dates - candidate_host_dates_evaluated,
+        key=lambda item: (str(item[0]), item[1].isoformat()),
+    )
+    candidate_blocks_skipped_details = [
+        {
+            'host_location_id': str(host_id),
+            'host_location_name': (host_cache.get(host_id).name if host_cache.get(host_id) else None),
+            'date': _fmt_date(slot_date),
+            'reason': 'runtime limit reached before evaluation' if stop_reason == 'runtime limit reached' else 'no bounded high-value candidate generated',
+        }
+        for host_id, slot_date in candidate_host_dates_skipped[:50]
+    ]
+    high_priority_blocks_evaluated_before_timeout = high_priority_host_dates.issubset(candidate_host_dates_evaluated)
+    runtime_ended_before_high_priority_blocks_evaluated = stop_reason == 'runtime limit reached' and not high_priority_blocks_evaluated_before_timeout
     for diag_key, diag_row in large_bottleneck_diagnostics.items():
         diag_row['after'] = _large_bottleneck_metric_for(diag_key[0], diag_key[1])
         before_latest = (diag_row.get('before') or {}).get('latest_turf_start_time') if isinstance(diag_row.get('before'), dict) else None
@@ -24499,8 +24613,10 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
     if not accepted_changes:
         top_reasons = ', '.join(reason for reason, _count in sorted(rejected_by_reason.items(), key=lambda item: (-item[1], item[0]))[:3]) or 'no compatible turf block'
         no_op_message = (
-            f'No turf compaction moves were accepted. {before_turf_metrics["total_turf_single_game_blocks"]} single-game turf blocks found, '
-            f'{candidates_evaluated} candidates evaluated, 0 accepted. Top rejection reasons: {top_reasons}.'
+            f'{no_op_diagnostic_message or "No measurable turf improvement found."} '
+            f'{before_turf_metrics["total_turf_single_game_blocks"]} single-game turf blocks found, '
+            f'{candidates_evaluated} candidates evaluated, {no_op_accepted_moves_rejected_or_rolled_back} accepted candidates rolled back or treated as no-op. '
+            f'Top rejection reasons: {top_reasons}.'
         )
 
     summary = {
@@ -24509,7 +24625,23 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
         'turf_stadium_count': turf_stadium_count,
         'turf_game_count': before_turf_metrics['turf_game_count'],
         'turf_single_game_blocks_found': before_turf_metrics['total_turf_single_game_blocks'],
+        'measurable_improvements_found': 'Yes' if measurable_improvements_found else 'No',
+        'accepted_changes_with_metric_impact': accepted_changes,
+        'accepted_changes_improved_metrics': accepted_changes_improved_metrics,
+        'no_op_accepted_moves_rejected_or_rolled_back': no_op_accepted_moves_rejected_or_rolled_back,
         'candidate_blocks_evaluated': len(candidate_blocks_evaluated),
+        'candidate_blocks_skipped_due_to_runtime': len(candidate_blocks_skipped_details) if stop_reason == 'runtime limit reached' else 0,
+        'candidate_blocks_skipped': candidate_blocks_skipped_details,
+        'high_priority_blocks_evaluated_before_timeout': 'Yes' if high_priority_blocks_evaluated_before_timeout else 'No',
+        'runtime_ended_before_high_priority_blocks_evaluated': runtime_ended_before_high_priority_blocks_evaluated,
+        'slowest_phase': _slowest(phase_timings),
+        'slowest_candidate_type': _slowest(candidate_type_timings),
+        'slowest_validation_step': _slowest(validation_timings),
+        'phase_runtime_seconds': {key: round(value, 3) for key, value in phase_timings.items()},
+        'candidate_type_runtime_seconds': {key: round(value, 3) for key, value in candidate_type_timings.items()},
+        'validation_runtime_seconds': {key: round(value, 3) for key, value in validation_timings.items()},
+        'metrics_calculated_from_preview_state': 'Yes',
+        'no_op_diagnostic_message': no_op_diagnostic_message,
         'optimization_candidates_generated': candidates_evaluated,
         'optimization_candidates_evaluated': candidates_evaluated,
         'optimization_candidate_generation_limit': max_candidates_evaluated,
@@ -24539,6 +24671,10 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
         'total_turf_two_game_blocks_after': after_turf_metrics['total_turf_two_game_blocks'],
         'latest_turf_start_time_before': before_turf_metrics['latest_turf_start_time'],
         'latest_turf_start_time_after': after_turf_metrics['latest_turf_start_time'],
+        'late_large_game_count_at_3pm_or_4pm_before': before_turf_metrics.get('late_large_game_count_at_3pm_or_4pm'),
+        'late_large_game_count_at_3pm_or_4pm_after': after_turf_metrics.get('late_large_game_count_at_3pm_or_4pm'),
+        'final_turf_score_delta': final_turf_score_delta,
+        'final_turf_metric_improvements': final_turf_improvements,
         'per_stadium_turf_metrics': per_stadium_metrics,
         'large_field_bottleneck_diagnostics': list(large_bottleneck_diagnostics.values()),
         'same_community_violations_found': 0,
@@ -24555,7 +24691,14 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
         'score_after': None,
     }
     if stop_reason in {'runtime limit reached', 'candidate evaluation limit reached', 'accepted move limit reached'}:
-        summary['partial_diagnostics_message'] = f'Optimization stopped after reaching guard limit: {stop_reason}.'
+        summary['partial_diagnostics_message'] = (
+            f'Optimization stopped after reaching guard limit: {stop_reason}. '
+            f'Accepted changes improved metrics: {"Yes" if accepted_changes_improved_metrics else "No"}. '
+            f'Candidate blocks evaluated: {len(candidate_blocks_evaluated)}; skipped due to runtime: {summary.get("candidate_blocks_skipped_due_to_runtime", 0)}. '
+            f'Top rejection reasons: {", ".join(reason for reason, _ in sorted(rejected_by_reason.items(), key=lambda item: (-item[1], item[0]))[:3]) or "none"}. '
+            f'Slowest phase: {summary.get("slowest_phase") or "unknown"}; slowest candidate type: {summary.get("slowest_candidate_type") or "unknown"}; '
+            f'high-priority blocks evaluated before timeout: {summary.get("high_priority_blocks_evaluated_before_timeout")}. '
+        )
 
     logger.info(
         'turf_optimizer_end status=completed stop_reason=%s candidates_evaluated=%s accepted_moves=%s rejected_moves=%s elapsed_seconds=%.3f',
