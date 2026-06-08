@@ -109,13 +109,15 @@ class ManualScheduleEditPermissionsTest(unittest.TestCase):
         self.assertEqual(response.status_code, 403)
 
 
-    def test_league_admin_direct_edit_api_is_forbidden_when_not_scheduling_admin(self):
+    def test_league_admin_direct_edit_api_is_allowed_as_scheduling_admin_mapping(self):
         response = self.client.patch(
             f'/api/schedule-management/games/{self.game.id}/manual-edit',
             headers=self._token(self.league_user.id),
             json=self._payload(),
         )
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.db.expire_all()
+        self.assertEqual(self.db.get(Game, self.game.id).away_team_id, self.other_team.id)
 
     def test_community_admin_direct_bulk_edit_api_is_forbidden(self):
         response = self.client.patch(
@@ -150,6 +152,20 @@ class ManualScheduleEditPermissionsTest(unittest.TestCase):
         self.assertTrue(game.is_manual_edit)
         self.assertEqual(game.internal_admin_notes, 'Internal note')
         self.assertGreaterEqual(self.db.query(ScheduleChangeLog).filter(ScheduleChangeLog.game_id == self.game.id).count(), 1)
+
+    def test_league_admin_can_bulk_edit_as_dev_top_level_admin(self):
+        response = self.client.patch(
+            '/api/schedule-management/games/manual-edit/bulk',
+            headers=self._token(self.league_user.id),
+            json={
+                'overrideWarnings': True,
+                'changes': [dict(self._payload(internal_admin_notes='League admin bulk edit'), game_id=str(self.game.id))],
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(len(response.json()['games']), 1)
+        self.db.expire_all()
+        self.assertEqual(self.db.get(Game, self.game.id).away_team_id, self.other_team.id)
 
     def test_scheduling_admin_can_bulk_edit_multiple_games_and_save_once(self):
         second_game = Game(id=uuid.uuid4(), season_id=self.season.id, week_id=self.week.id, home_team_id=self.away_team.id, away_team_id=self.other_team.id, host_location_id=self.host.id, field_instance_id=self.field.id, game_status_id=self.status.id, game_date=date(2026, 8, 9), kickoff_time=time(9, 0))

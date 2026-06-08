@@ -48,6 +48,11 @@ function isSchedulingAdministratorRole(roleName: unknown): boolean {
   return normalized === 'SCHEDULING_ADMIN' || normalized === 'SCHEDULING_ADMINISTRATOR';
 }
 
+function hasSchedulingAdministratorPermission(roleName: unknown): boolean {
+  const normalized = normalizeRoleForUi(roleName);
+  return normalized === 'ADMIN' || normalized === 'LEAGUE_ADMIN' || isSchedulingAdministratorRole(normalized);
+}
+
 function gameDateValue(game: any): string {
   return String(game?.game_date || '');
 }
@@ -278,8 +283,8 @@ export default function ManualScheduleBuilderPage() {
   const token = getToken();
   const authUser = getAuthUser();
   const normalizedRoleName = normalizeRoleForUi(authUser?.role_name);
-  const canManageGeneratedGames = normalizedRoleName === 'LEAGUE_ADMIN' || isSchedulingAdministratorRole(normalizedRoleName);
-  const canBulkInlineEditScheduledGames = isSchedulingAdministratorRole(normalizedRoleName);
+  const canManageGeneratedGames = hasSchedulingAdministratorPermission(normalizedRoleName);
+  const canBulkInlineEditScheduledGames = hasSchedulingAdministratorPermission(normalizedRoleName);
   const searchParams = useSearchParams();
   const [options, setOptions] = useState<any>({ divisions: [], teams: [], host_locations: [], field_instances: [], seasons: [], weeks: [], organizations: [], game_statuses: [] });
   const [seasonId, setSeasonId] = useState(searchParams.get('season_id') || '');
