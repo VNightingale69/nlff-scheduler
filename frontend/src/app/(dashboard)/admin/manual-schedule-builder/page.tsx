@@ -585,7 +585,14 @@ export default function ManualScheduleBuilderPage() {
       const summary = res.summary || {};
       const partial = summary.partial_diagnostics_message ? ` ${summary.partial_diagnostics_message}` : '';
       const noChange = summary.no_candidates_message || summary.no_safe_moves_message ? ` ${summary.no_candidates_message || summary.no_safe_moves_message}` : '';
-      setSuccess(`Turf optimization preview completed. Candidates: ${Number(summary.optimization_candidates_generated ?? summary.candidate_count ?? 0)}, accepted moves: ${Number(summary.accepted_optimization_moves || 0)}, rejected moves: ${Number(summary.rejected_optimization_moves || 0)}.${partial}${noChange}`);
+      const candidatesEvaluated = Number(summary.optimization_candidates_evaluated ?? 0);
+      const acceptedMoves = Number(summary.accepted_optimization_moves || 0);
+      const completionMessage = `Turf optimization preview completed. Candidates evaluated: ${candidatesEvaluated}, accepted moves: ${acceptedMoves}, rejected moves: ${Number(summary.rejected_optimization_moves || 0)}, runtime: ${summary.optimization_runtime_seconds ?? '—'}s, stop reason: ${summary.stop_reason || summary.guard_stop_reason || 'completed'}.${partial}${noChange}`;
+      if (!candidatesEvaluated || !acceptedMoves) {
+        setError(completionMessage);
+      } else {
+        setSuccess(completionMessage);
+      }
     } catch (e: unknown) {
       setError(isAbortError(e) ? 'Optimization is taking longer than expected. Check backend logs or try again.' : `Schedule optimization failed: ${extractError(e)}`);
     } finally {
@@ -945,7 +952,7 @@ export default function ManualScheduleBuilderPage() {
             <div className='mt-1 inline-flex rounded-full border border-slate-300 bg-slate-50 px-3 py-1 text-xs font-semibold text-slate-700'>{scheduleStateLabel}</div>
           </div>
           {canRunScheduleOptimization ? <div className='flex flex-wrap items-center gap-2' aria-label='Scheduling Administrator optimization controls'>
-            {!optimizerDiagnostics && games.length > 0 ? <button className='rounded border border-emerald-700 bg-emerald-700 px-3 py-2 text-sm text-white disabled:cursor-not-allowed disabled:border-slate-300 disabled:bg-slate-300' disabled={!seasonId || optimizerLoading || hasPendingBulkEdits} onClick={runOptimizationPreview}>{optimizerLoading ? 'Running optimization...' : 'Optimize Schedule'}</button> : null}
+            {!optimizerDiagnostics && games.length > 0 ? <button className='rounded border border-emerald-700 bg-emerald-700 px-3 py-2 text-sm text-white disabled:cursor-not-allowed disabled:border-slate-300 disabled:bg-slate-300' disabled={!seasonId || optimizerLoading || hasPendingBulkEdits} onClick={runOptimizationPreview}>{optimizerLoading ? 'Running turf optimization…' : 'Optimize Schedule'}</button> : null}
             {optimizerDiagnostics ? <button className='rounded border border-blue-700 bg-blue-700 px-3 py-2 text-sm text-white disabled:cursor-not-allowed disabled:border-slate-300 disabled:bg-slate-300' disabled={optimizerApplyLoading || optimizerLoading} onClick={applyOptimizationPreview}>{optimizerApplyLoading ? 'Applying...' : 'Apply Optimized Schedule'}</button> : null}
             {optimizerDiagnostics ? <button className='rounded border px-3 py-2 text-sm disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400' disabled={optimizerApplyLoading || optimizerLoading} onClick={keepFirstPassSchedule}>Keep First-Pass Schedule</button> : null}
             {optimizerDiagnostics ? <button className='rounded border px-3 py-2 text-sm' onClick={() => setShowOptimizationSummary((current) => !current)}>View Optimization Summary</button> : null}
@@ -974,9 +981,15 @@ export default function ManualScheduleBuilderPage() {
             }}>Export Optimization Comparison</button>
           </div>
           <div className='mt-2 grid gap-2 md:grid-cols-4'>
-            <div>Candidates generated: <span className='font-semibold'>{optimizerDiagnostics.summary?.optimization_candidates_generated ?? optimizerDiagnostics.summary?.candidate_count ?? 0}</span></div>
+            <div>Turf stadiums: <span className='font-semibold'>{optimizerDiagnostics.summary?.turf_stadium_count ?? 0}</span></div>
+            <div>Turf games: <span className='font-semibold'>{optimizerDiagnostics.summary?.turf_game_count ?? 0}</span></div>
+            <div>Single-game blocks found: <span className='font-semibold'>{optimizerDiagnostics.summary?.turf_single_game_blocks_found ?? 0}</span></div>
+            <div>Candidate blocks evaluated: <span className='font-semibold'>{optimizerDiagnostics.summary?.candidate_blocks_evaluated ?? 0}</span></div>
+            <div>Candidates evaluated: <span className='font-semibold'>{optimizerDiagnostics.summary?.optimization_candidates_evaluated ?? 0}</span></div>
             <div>Accepted optimization moves: <span className='font-semibold'>{optimizerDiagnostics.summary?.accepted_optimization_moves ?? 0}</span></div>
             <div>Rejected optimization moves: <span className='font-semibold'>{optimizerDiagnostics.summary?.rejected_optimization_moves ?? 0}</span></div>
+            <div>Runtime: <span className='font-semibold'>{optimizerDiagnostics.summary?.optimization_runtime_seconds ?? '—'}s</span></div>
+            <div>Stop reason: <span className='font-semibold'>{optimizerDiagnostics.summary?.stop_reason || optimizerDiagnostics.summary?.guard_stop_reason || 'completed'}</span></div>
             <div>Manual edits locked: <span className='font-semibold'>{optimizerDiagnostics.summary?.manual_edits_locked ? 'Yes' : 'No'}</span></div>
           </div>
           {optimizerDiagnostics.summary?.partial_diagnostics_message ? <div className='mt-2 rounded border border-amber-200 bg-amber-50 p-2 text-amber-900'>{optimizerDiagnostics.summary.partial_diagnostics_message}</div> : null}
