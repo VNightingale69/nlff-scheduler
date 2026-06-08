@@ -23721,6 +23721,38 @@ def get_scheduled_games_for_season(db: Session, season_id: uuid.UUID | None, fil
     return _schedule_management_rows(db, shared_filters, organization_filter_any_team=organization_filter_any_team)
 
 
+def get_saved_scheduled_game_rows_for_export(db: Session, season_id: uuid.UUID | None, filters: dict | None = None, organization_filter_any_team: bool = False):
+    """Return persisted scheduled Game rows for the normal schedule export.
+
+    The Manual Schedule Builder Scheduled Games table saves manual edits to the
+    Game row itself. Export must therefore read date, time, host location, and
+    field directly from Game.host_location_id/Game.field_instance_id instead of
+    generated GameSlot assignments that may represent stale optimizer metadata.
+    """
+    filters = dict(filters or {})
+    if season_id:
+        filters['season_id'] = season_id
+    home = aliased(Team)
+    away = aliased(Team)
+    q = db.query(Game, GameSlot, FieldInstance, HostLocation, home, away, Division, Organization, GameStatus).join(Game.status).join(home, Game.home_team_id == home.id).join(away, Game.away_team_id == away.id).join(Division, home.division_id == Division.id).join(Organization, home.organization_id == Organization.id).outerjoin(GameSlot, and_(GameSlot.assigned_game_id == Game.id, GameSlot.field_instance_id == Game.field_instance_id, GameSlot.host_location_id == Game.host_location_id, GameSlot.slot_date == Game.game_date, GameSlot.start_time == Game.kickoff_time)).outerjoin(FieldInstance, FieldInstance.id == Game.field_instance_id).outerjoin(HostLocation, HostLocation.id == Game.host_location_id)
+    q = q.filter(GameStatus.is_active.is_(True), _final_schedule_status_filter(db))
+    if filters.get('date'): q = q.filter(Game.game_date == filters['date'])
+    if filters.get('division_id'): q = q.filter(Division.id == filters['division_id'])
+    if filters.get('organization_id'):
+        if organization_filter_any_team:
+            q = q.filter(or_(home.organization_id == filters['organization_id'], away.organization_id == filters['organization_id']))
+        else:
+            q = q.filter(home.organization_id == filters['organization_id'])
+    if filters.get('host_location_id'): q = q.filter(Game.host_location_id == filters['host_location_id'])
+    if filters.get('field_type'): q = q.filter(FieldInstance.field_type == filters['field_type'])
+    if filters.get('field_id'): q = q.filter(FieldInstance.id == filters['field_id'])
+    if filters.get('team_id'): q = q.filter((home.id == filters['team_id']) | (away.id == filters['team_id']))
+    if filters.get('week_id'): q = q.filter(Game.week_id == filters['week_id'])
+    if filters.get('status_code'): q = q.filter(func.lower(GameStatus.code) == str(filters['status_code']).strip().lower())
+    if filters.get('season_id'): q = q.filter(Game.season_id == filters['season_id'])
+    return q.order_by(Game.game_date, Game.kickoff_time, HostLocation.name, FieldInstance.field_name, home.name, away.name).all()
+
+
 SCORE_STATUS_SCHEDULED = 'SCHEDULED'
 SCORE_STATUS_PENDING = 'SCORE_PENDING'
 SCORE_STATUS_SUBMITTED = 'SUBMITTED'
@@ -25297,13 +25329,10 @@ def _schedule_export_row_values(g, slot, fi, host, home, away, div, status, db: 
 
 @router.get('/schedule-management/export.csv', dependencies=[Depends(get_current_user)])
 def export_schedule_management_csv(date: date | None = None, division_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, host_location_id: uuid.UUID | None = None, field_type: str | None = None, field_id: uuid.UUID | None = None, team_id: uuid.UUID | None = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    validation_season_id = None
     active_season = db.query(Season).filter(Season.is_active.is_(True)).order_by(Season.start_date.desc()).first()
     validation_season_id = active_season.id if active_season else None
-    if validation_season_id:
-        _run_generated_slot_integrity_validation_and_repair(db, validation_season_id, repair=True)
     export_filters = {'date': date, 'division_id': division_id, 'organization_id': organization_id, 'host_location_id': host_location_id, 'field_type': field_type, 'field_id': field_id, 'team_id': team_id}
-    rows = get_scheduled_games_for_season(db, validation_season_id, export_filters) if validation_season_id else _schedule_management_rows(db, export_filters)
+    rows = get_saved_scheduled_game_rows_for_export(db, validation_season_id, export_filters) if validation_season_id else get_saved_scheduled_game_rows_for_export(db, None, export_filters)
     out = io.StringIO()
     w = csv.writer(out)
     include_admin_columns = is_league_admin(current_user)
