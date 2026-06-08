@@ -108,10 +108,34 @@ class ManualScheduleEditPermissionsTest(unittest.TestCase):
         response = self.client.patch(f'/api/schedule-management/games/{self.game.id}/manual-edit', json=self._payload())
         self.assertEqual(response.status_code, 403)
 
-    def test_league_admin_can_save_manual_edit_and_audit_log(self):
+
+    def test_league_admin_direct_edit_api_is_forbidden_when_not_scheduling_admin(self):
         response = self.client.patch(
             f'/api/schedule-management/games/{self.game.id}/manual-edit',
             headers=self._token(self.league_user.id),
+            json=self._payload(),
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_community_admin_direct_bulk_edit_api_is_forbidden(self):
+        response = self.client.patch(
+            '/api/schedule-management/games/manual-edit/bulk',
+            headers=self._token(self.community_user.id),
+            json={'overrideWarnings': True, 'changes': [dict(self._payload(), game_id=str(self.game.id))]},
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_public_user_cannot_access_bulk_edit_endpoint(self):
+        response = self.client.patch(
+            '/api/schedule-management/games/manual-edit/bulk',
+            json={'overrideWarnings': True, 'changes': [dict(self._payload(), game_id=str(self.game.id))]},
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_scheduling_admin_can_save_manual_edit_and_audit_log(self):
+        response = self.client.patch(
+            f'/api/schedule-management/games/{self.game.id}/manual-edit',
+            headers=self._token(self.scheduling_user.id),
             json=self._payload(),
         )
         self.assertEqual(response.status_code, 200, response.text)
@@ -126,6 +150,27 @@ class ManualScheduleEditPermissionsTest(unittest.TestCase):
         self.assertTrue(game.is_manual_edit)
         self.assertEqual(game.internal_admin_notes, 'Internal note')
         self.assertGreaterEqual(self.db.query(ScheduleChangeLog).filter(ScheduleChangeLog.game_id == self.game.id).count(), 1)
+
+    def test_scheduling_admin_can_bulk_edit_multiple_games_and_save_once(self):
+        second_game = Game(id=uuid.uuid4(), season_id=self.season.id, week_id=self.week.id, home_team_id=self.away_team.id, away_team_id=self.other_team.id, host_location_id=self.host.id, field_instance_id=self.field.id, game_status_id=self.status.id, game_date=date(2026, 8, 9), kickoff_time=time(9, 0))
+        self.db.add(second_game)
+        self.db.commit()
+        response = self.client.patch(
+            '/api/schedule-management/games/manual-edit/bulk',
+            headers=self._token(self.scheduling_user.id),
+            json={
+                'overrideWarnings': True,
+                'changes': [
+                    dict(self._payload(away_team_id=str(self.other_team.id), internal_admin_notes='Bulk 1'), game_id=str(self.game.id)),
+                    dict(self._payload(home_team_id=str(self.home_team.id), away_team_id=str(self.away_team.id), internal_admin_notes='Bulk 2'), game_id=str(second_game.id)),
+                ],
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(len(response.json()['games']), 2)
+        self.db.expire_all()
+        self.assertEqual(self.db.get(Game, self.game.id).away_team_id, self.other_team.id)
+        self.assertEqual(self.db.get(Game, second_game.id).away_team_id, self.away_team.id)
 
 
     def test_scheduling_admin_can_save_generated_game_without_status_payload_and_status_is_preserved(self):
@@ -174,7 +219,7 @@ class ManualScheduleEditPermissionsTest(unittest.TestCase):
 
         response = self.client.patch(
             f'/api/schedule-management/games/{self.game.id}/manual-edit',
-            headers=self._token(self.league_user.id),
+            headers=self._token(self.scheduling_user.id),
             json=self._payload(field_instance_id=str(large_field.id), override_warnings=False),
         )
         self.assertEqual(response.status_code, 409)
@@ -184,7 +229,7 @@ class ManualScheduleEditPermissionsTest(unittest.TestCase):
 
         response = self.client.patch(
             f'/api/schedule-management/games/{self.game.id}/manual-edit',
-            headers=self._token(self.league_user.id),
+            headers=self._token(self.scheduling_user.id),
             json=self._payload(field_instance_id=str(large_field.id), override_warnings=True),
         )
         self.assertEqual(response.status_code, 200, response.text)
@@ -204,7 +249,7 @@ class ManualScheduleEditPermissionsTest(unittest.TestCase):
 
         response = self.client.patch(
             f'/api/schedule-management/games/{self.game.id}/manual-edit',
-            headers=self._token(self.league_user.id),
+            headers=self._token(self.scheduling_user.id),
             json=self._payload(field_instance_id=str(large_field.id), override_warnings=True),
         )
         self.assertEqual(response.status_code, 200, response.text)
@@ -235,7 +280,7 @@ class ManualScheduleEditPermissionsTest(unittest.TestCase):
 
         response = self.client.patch(
             f'/api/schedule-management/games/{self.game.id}/manual-edit',
-            headers=self._token(self.league_user.id),
+            headers=self._token(self.scheduling_user.id),
             json=self._payload(field_instance_id=str(large_field_2.id), override_warnings=False),
         )
         self.assertEqual(response.status_code, 409, response.text)
@@ -244,7 +289,7 @@ class ManualScheduleEditPermissionsTest(unittest.TestCase):
 
         response = self.client.patch(
             f'/api/schedule-management/games/{self.game.id}/manual-edit',
-            headers=self._token(self.league_user.id),
+            headers=self._token(self.scheduling_user.id),
             json=self._payload(field_instance_id=str(large_field_2.id), override_warnings=True),
         )
         self.assertEqual(response.status_code, 200, response.text)
@@ -259,7 +304,7 @@ class ManualScheduleEditPermissionsTest(unittest.TestCase):
 
         response = self.client.patch(
             f'/api/schedule-management/games/{self.game.id}/manual-edit',
-            headers=self._token(self.league_user.id),
+            headers=self._token(self.scheduling_user.id),
             json=self._payload(field_instance_id=str(large_field_2.id), override_warnings=True),
         )
         self.assertEqual(response.status_code, 400)
@@ -301,7 +346,7 @@ class ManualScheduleEditPermissionsTest(unittest.TestCase):
 
         response = self.client.patch(
             f'/api/schedule-management/games/{self.game.id}/manual-edit',
-            headers=self._token(self.league_user.id),
+            headers=self._token(self.scheduling_user.id),
             json=self._payload(field_instance_id=str(self.field.id), override_warnings=False),
         )
         self.assertEqual(response.status_code, 409, response.text)
@@ -310,7 +355,7 @@ class ManualScheduleEditPermissionsTest(unittest.TestCase):
 
         response = self.client.patch(
             f'/api/schedule-management/games/{self.game.id}/manual-edit',
-            headers=self._token(self.league_user.id),
+            headers=self._token(self.scheduling_user.id),
             json=self._payload(field_instance_id=str(self.field.id), override_warnings=True),
         )
         self.assertEqual(response.status_code, 200, response.text)
@@ -336,7 +381,7 @@ class ManualScheduleEditPermissionsTest(unittest.TestCase):
 
         response = self.client.patch(
             f'/api/schedule-management/games/{self.game.id}/manual-edit',
-            headers=self._token(self.league_user.id),
+            headers=self._token(self.scheduling_user.id),
             json=self._payload(override_warnings=False),
         )
         self.assertEqual(response.status_code, 409, response.text)
@@ -345,7 +390,7 @@ class ManualScheduleEditPermissionsTest(unittest.TestCase):
 
         response = self.client.patch(
             f'/api/schedule-management/games/{self.game.id}/manual-edit',
-            headers=self._token(self.league_user.id),
+            headers=self._token(self.scheduling_user.id),
             json=self._payload(override_warnings=True),
         )
         self.assertEqual(response.status_code, 200, response.text)
@@ -354,10 +399,10 @@ class ManualScheduleEditPermissionsTest(unittest.TestCase):
         game = self.db.get(Game, self.game.id)
         self.assertEqual(game.field_instance_id, self.field.id)
 
-    def test_same_team_is_hard_blocked_for_league_admin(self):
+    def test_same_team_is_hard_blocked_for_scheduling_admin(self):
         response = self.client.patch(
             f'/api/schedule-management/games/{self.game.id}/manual-edit',
-            headers=self._token(self.league_user.id),
+            headers=self._token(self.scheduling_user.id),
             json=self._payload(away_team_id=str(self.home_team.id)),
         )
         self.assertEqual(response.status_code, 400)
@@ -368,7 +413,7 @@ class ManualScheduleEditPermissionsTest(unittest.TestCase):
         self.db.commit()
         response = self.client.patch(
             f'/api/schedule-management/games/{self.game.id}/manual-edit',
-            headers=self._token(self.league_user.id),
+            headers=self._token(self.scheduling_user.id),
             json=self._payload(score_change_confirmed=False, override_warnings=True),
         )
         self.assertEqual(response.status_code, 409)

@@ -8,7 +8,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
-from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN
+from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN
 from app.branding import APP_API_TITLE
 from app.config import ADMIN_SEED_EMAIL, ADMIN_SEED_FULL_NAME, ADMIN_SEED_PASSWORD, CORS_ORIGINS
 from app.database import get_db
@@ -115,6 +115,7 @@ def seed_auth_data() -> None:
         for role_name, description in [
             (ROLE_LEAGUE_ADMIN, 'Global administrative access across all organizations'),
             (ROLE_COMMUNITY_ADMIN, 'Community-scoped administrative access'),
+            (ROLE_SCHEDULING_ADMIN, 'Scheduling administrative access for global schedule editing'),
         ]:
             role = db.query(Role).filter(Role.name == role_name).first()
             if not role:
