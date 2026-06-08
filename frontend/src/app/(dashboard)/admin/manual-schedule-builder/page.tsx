@@ -577,7 +577,7 @@ export default function ManualScheduleBuilderPage() {
       setShowOptimizationSummary(true);
       setScheduleStateLabel('Optimization Preview');
       const summary = res.summary || {};
-      setSuccess(`Optimization preview completed. Accepted moves: ${Number(summary.accepted_optimization_moves || 0)}, rejected moves: ${Number(summary.rejected_optimization_moves || 0)}.`);
+      setSuccess(`Optimization preview completed. Candidates: ${Number(summary.optimization_candidates_generated ?? summary.candidate_count ?? 0)}, accepted moves: ${Number(summary.accepted_optimization_moves || 0)}, rejected moves: ${Number(summary.rejected_optimization_moves || 0)}.`);
     } catch (e: unknown) {
       setError(`Schedule optimization failed: ${extractError(e)}`);
     } finally {
@@ -600,7 +600,7 @@ export default function ManualScheduleBuilderPage() {
       await load();
       await loadRecommendations();
       const summary = res.summary || {};
-      setSuccess(`Optimized schedule applied. Accepted moves: ${Number(summary.accepted_optimization_moves || 0)}, rejected moves: ${Number(summary.rejected_optimization_moves || 0)}.`);
+      setSuccess(`Optimized schedule applied. Candidates: ${Number(summary.optimization_candidates_generated ?? summary.candidate_count ?? 0)}, accepted moves: ${Number(summary.accepted_optimization_moves || 0)}, rejected moves: ${Number(summary.rejected_optimization_moves || 0)}.`);
     } catch (e: unknown) {
       setError(`Apply optimized schedule failed: ${extractError(e)}`);
     } finally {
@@ -967,16 +967,21 @@ export default function ManualScheduleBuilderPage() {
               URL.revokeObjectURL(url);
             }}>Export Optimization Comparison</button>
           </div>
-          <div className='mt-2 grid gap-2 md:grid-cols-3'>
+          <div className='mt-2 grid gap-2 md:grid-cols-4'>
+            <div>Candidates generated: <span className='font-semibold'>{optimizerDiagnostics.summary?.optimization_candidates_generated ?? optimizerDiagnostics.summary?.candidate_count ?? 0}</span></div>
             <div>Accepted optimization moves: <span className='font-semibold'>{optimizerDiagnostics.summary?.accepted_optimization_moves ?? 0}</span></div>
             <div>Rejected optimization moves: <span className='font-semibold'>{optimizerDiagnostics.summary?.rejected_optimization_moves ?? 0}</span></div>
             <div>Manual edits locked: <span className='font-semibold'>{optimizerDiagnostics.summary?.manual_edits_locked ? 'Yes' : 'No'}</span></div>
           </div>
+          {optimizerDiagnostics.summary?.no_candidates_message ? <div className='mt-2 rounded border border-amber-200 bg-amber-50 p-2 text-amber-900'>No optimization candidates were generated.{optimizerDiagnostics.summary?.no_candidate_reasons?.length ? ` ${optimizerDiagnostics.summary.no_candidate_reasons.join(' ')}` : ''}</div> : null}
+          {optimizerDiagnostics.summary?.no_safe_moves_message ? <div className='mt-2 rounded border border-slate-200 bg-slate-50 p-2 text-slate-900'>{optimizerDiagnostics.summary.no_safe_moves_message}</div> : null}
           <div className='mt-3 overflow-auto rounded border'>
             <table className='min-w-full text-sm'><thead><tr className='bg-slate-50 text-left'><th className='p-2'>Metric</th><th className='p-2'>First-Pass Schedule</th><th className='p-2'>Optimized Preview</th></tr></thead><tbody>
               {(optimizerDiagnostics.metric_comparison || []).map((metric: any) => <tr key={metric.key} className='border-t'><td className='p-2'>{metric.label}</td><td className='p-2'>{String(metric.before ?? '—')}</td><td className='p-2'>{String(metric.after ?? '—')}</td></tr>)}
             </tbody></table>
           </div>
+          {optimizerDiagnostics.proposed_changes?.length ? <details className='mt-3'><summary className='cursor-pointer text-blue-700 underline'>View accepted moves</summary><pre className='mt-2 max-h-64 overflow-auto rounded bg-slate-900 p-2 text-xs text-slate-50'>{safeStringify(optimizerDiagnostics.proposed_changes, 8000)}</pre></details> : null}
+          {optimizerDiagnostics.rejected_changes?.length ? <details className='mt-3'><summary className='cursor-pointer text-blue-700 underline'>View rejected moves</summary><pre className='mt-2 max-h-64 overflow-auto rounded bg-slate-900 p-2 text-xs text-slate-50'>{safeStringify(optimizerDiagnostics.rejected_changes, 8000)}</pre></details> : null}
           {optimizerDiagnostics.rejected_move_reasons && Object.keys(optimizerDiagnostics.rejected_move_reasons).length ? <details className='mt-3'><summary className='cursor-pointer text-blue-700 underline'>View rejected move reasons</summary><pre className='mt-2 max-h-64 overflow-auto rounded bg-slate-900 p-2 text-xs text-slate-50'>{safeStringify(optimizerDiagnostics.rejected_move_reasons, 8000)}</pre></details> : null}
           <details className='mt-3'><summary className='cursor-pointer text-blue-700 underline'>View Optimization Summary Diagnostics</summary><pre className='mt-2 max-h-80 overflow-auto rounded bg-slate-900 p-2 text-xs text-slate-50'>{safeStringify(optimizerDiagnostics, 12000)}</pre></details>
         </div> : null}
