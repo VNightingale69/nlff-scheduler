@@ -169,17 +169,15 @@ class SchedulingValidationTest(unittest.TestCase):
         with self.assertRaises(HTTPException):
             create_game(payload, db=self.db)
 
-    def test_create_game_allows_draft_with_hard_conflicts(self):
+    def test_create_game_rejects_draft_schedule_status(self):
         draft = GameStatus(id=uuid.uuid4(), code='draft', label='Draft', is_active=True)
         self.db.add(draft)
         self.db.commit()
-        self.field.layout_type = 'FIFTY_THREE_YARD_WIDTH'
-        self.db.commit()
         payload = self.base_payload().model_copy(update={'game_status_id': draft.id})
-        result = create_game(payload, db=self.db)
-        self.assertEqual(result.game.status_code, 'draft')
+        with self.assertRaises(HTTPException):
+            create_game(payload, db=self.db)
 
-    def test_public_games_excludes_drafts(self):
+    def test_public_games_uses_saved_records_and_excludes_legacy_drafts(self):
         published = GameStatus(id=uuid.uuid4(), code='published', label='Published', is_active=True)
         draft = GameStatus(id=uuid.uuid4(), code='draft', label='Draft', is_active=True)
         self.db.add_all([published, draft])
@@ -194,6 +192,9 @@ class SchedulingValidationTest(unittest.TestCase):
             field_id=self.field.id, game_status_id=published.id, game_date=date(2026, 5, 4), kickoff_time=time(11, 0)
         )
         self.db.add_all([draft_game, published_game])
+        self.db.commit()
+
+        self.season.schedule_status = 'draft'
         self.db.commit()
 
         result = list_public_games(db=self.db)

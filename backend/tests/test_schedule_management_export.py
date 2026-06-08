@@ -84,6 +84,22 @@ class ScheduleManagementExportTest(unittest.TestCase):
             self.assertNotRegex(values[6], r'THREE_SMALL|TWO_MEDIUM|ONE_SMALL_ONE_LARGE')
 
 
+    def test_normal_export_rows_are_games_only_not_diagnostics(self):
+        values = _schedule_export_row_values(
+            SimpleNamespace(game_date=date(2026, 8, 9), kickoff_time=time(9, 0)),
+            SimpleNamespace(field_type='SMALL'),
+            SimpleNamespace(field_name='Small Field 1'),
+            SimpleNamespace(name='Westosha Stadium'),
+            SimpleNamespace(name='Home'),
+            SimpleNamespace(name='Away'),
+            SimpleNamespace(division_group='Coed', name='2-3'),
+            SimpleNamespace(code='scheduled'),
+        )
+
+        self.assertFalse(any('EXPORT VALIDATION' in value for value in values))
+        self.assertEqual(values[6], 'Small Field 1')
+
+
     def test_grass_export_preserves_host_specific_label_with_field_words(self):
         grass_host = SimpleNamespace(name='Hiller Park', surface_type='GRASS_FIELD')
         values = _schedule_export_row_values(

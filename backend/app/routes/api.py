@@ -11712,7 +11712,7 @@ def list_weeks(season_id:uuid.UUID|None=None, status:str|None=None, start_date:d
 
 @router.post('/seasons', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def create_season(payload: dict, db: Session = Depends(get_db)):
-    season = Season(name=payload['name'], start_date=payload['start_date'], end_date=payload['end_date'], schedule_status=payload.get('schedule_status', 'draft'), is_active=bool(payload.get('is_active', True)))
+    season = Season(name=payload['name'], start_date=payload['start_date'], end_date=payload['end_date'], schedule_status='saved', is_active=bool(payload.get('is_active', True)))
     db.add(season); db.commit(); db.refresh(season)
     return {"id": season.id, "name": season.name}
 
@@ -11720,7 +11720,7 @@ def create_season(payload: dict, db: Session = Depends(get_db)):
 def update_season(season_id: uuid.UUID, payload: dict, db: Session = Depends(get_db)):
     season = db.query(Season).filter(Season.id == season_id).first()
     if not season: raise HTTPException(404, 'Season not found')
-    season.name = payload.get('name', season.name); season.start_date = payload.get('start_date', season.start_date); season.end_date = payload.get('end_date', season.end_date); season.schedule_status = payload.get('schedule_status', season.schedule_status); season.is_active = bool(payload.get('is_active', season.is_active))
+    season.name = payload.get('name', season.name); season.start_date = payload.get('start_date', season.start_date); season.end_date = payload.get('end_date', season.end_date); season.schedule_status = 'saved'; season.is_active = bool(payload.get('is_active', season.is_active))
     db.commit(); db.refresh(season); return {"id": season.id, "name": season.name}
 
 
@@ -14336,7 +14336,7 @@ def publish_schedule(season_id: uuid.UUID, db: Session = Depends(get_db)):
         or validation['hard_errors']
     ):
         raise HTTPException(status_code=400, detail={'error': 'publish_validation_failed', **validation, 'generated_slot_integrity_diagnostics': integrity})
-    season.schedule_status = 'published'
+    season.schedule_status = 'saved'
     db.commit()
     return {'ok': True, 'season_id': str(season_id), 'schedule_status': season.schedule_status, 'warnings': validation['warnings'], 'overall_health': validation['overall_health'], 'generated_slot_integrity_diagnostics': integrity}
 
@@ -14345,9 +14345,7 @@ def publish_schedule(season_id: uuid.UUID, db: Session = Depends(get_db)):
 def unpublish_schedule(season_id: uuid.UUID, db: Session = Depends(get_db)):
     season = db.query(Season).filter(Season.id == season_id).first()
     if not season: raise HTTPException(404, 'Season not found')
-    season.schedule_status = 'draft'
-    db.commit()
-    return {'ok': True, 'season_id': str(season_id), 'schedule_status': season.schedule_status}
+    raise HTTPException(status_code=410, detail='Draft schedule state is disabled; saved scheduled games are authoritative.')
 
 @router.post('/weeks', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def create_week(payload: dict, db: Session = Depends(get_db)):
@@ -14475,6 +14473,7 @@ def list_games(division_id:uuid.UUID|None=None, week_id:uuid.UUID|None=None, tea
         FieldInstance.field_name.label('field_instance_name'),
         HostLocation.name.label('host_location_name'),
     ).join(Game.status).join(home_team, Game.home_team_id == home_team.id).join(away_team, Game.away_team_id == away_team.id).join(Division, home_team.division_id == Division.id).outerjoin(Game.field).outerjoin(GameSlot, GameSlot.assigned_game_id == Game.id).outerjoin(FieldInstance, FieldInstance.id == GameSlot.field_instance_id).outerjoin(HostLocation, HostLocation.id == GameSlot.host_location_id)
+    q = q.filter(GameStatus.is_active.is_(True), _final_schedule_status_filter(db))
     if division_id: q=q.filter(home_team.division_id==division_id)
     if week_id: q=q.filter(Game.week_id==week_id)
     if team_id: q=q.filter((Game.home_team_id==team_id)|(Game.away_team_id==team_id))
@@ -22413,13 +22412,13 @@ def list_public_games(season_id: uuid.UUID | None = None, host_location_id: uuid
         status_code=status_code,
     )
 
-    if not season or not _season_schedule_is_published(season):
+    if not season:
         return PagedResponse(
             items=[],
             total=0,
             page=page,
             page_size=page_size,
-            message='No published schedule is currently available.',
+            message='No saved schedule is currently available.',
         )
 
     rows = [
@@ -22454,8 +22453,8 @@ def public_schedule_debug(season_id: uuid.UUID | None = None, host_location_id: 
         status_code=status_code,
     )
     admin_rows = get_scheduled_games_for_season(db, season.id if season else None, base_filters) if season else []
-    public_before_filters = admin_rows if season and _season_schedule_is_published(season) else []
-    public_after_filters = get_scheduled_games_for_season(db, season.id, active_filters, organization_filter_any_team=True) if season and _season_schedule_is_published(season) else []
+    public_before_filters = admin_rows if season else []
+    public_after_filters = get_scheduled_games_for_season(db, season.id, active_filters, organization_filter_any_team=True) if season else []
     return {
         'season_status': season.schedule_status if season else None,
         'admin_schedule_management_count': len(admin_rows),
@@ -22472,7 +22471,7 @@ def list_public_schedule_filters(season_id: uuid.UUID | None = None, db: Session
     rows = [
         row for row in get_scheduled_games_for_season(db, season.id, _scheduled_games_filters(season.id))
         if row[6] and row[6].is_active
-    ] if season and _season_schedule_is_published(season) else []
+    ] if season else []
 
     if rows:
         host_locations_by_id = {host.id: host for _, _, _, host, _, _, _, _, _ in rows if host}
@@ -23659,7 +23658,9 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
 
 
 def _season_schedule_is_published(season: Season | None) -> bool:
-    return str(getattr(season, 'schedule_status', '') or '').lower() == 'published'
+    # Draft/published season flags are no longer authoritative for normal schedule display.
+    # Any active scoped season with persisted scheduled games can be shown.
+    return season is not None
 
 
 def _get_schedule_scope_season(db: Session, season_id: uuid.UUID | None = None) -> Season | None:
@@ -24386,18 +24387,15 @@ def schedule_publish_diagnostics(season_id: uuid.UUID | None = None, db: Session
         .group_by(func.lower(GameStatus.code))
         .all()
     )
-    total = int(sum(counts.values()))
-    schedule_is_published = str(season.schedule_status or '').lower() == 'published'
-    published = total if schedule_is_published else int(counts.get('published', 0))
     archived = int(counts.get('archived', 0))
-    draft = 0 if schedule_is_published else max(total - published - archived, 0)
+    authoritative_rows = get_scheduled_games_for_season(db, season.id)
+    total = len(authoritative_rows)
     return {
         'season_id': str(season.id),
         'season_name': season.name,
-        'schedule_status': season.schedule_status,
+        'schedule_status': 'saved',
         'total_scheduled_games': total,
-        'published_games': published,
-        'draft_games': draft,
+        'saved_games': total,
         'archived_games': archived,
         'final_validation_status': final_validation.get('final_validation_status'),
         'schedule_quality_status': final_validation.get('schedule_quality_status'),
@@ -24979,7 +24977,7 @@ def _raise_if_invalid_manual_game_edit(db: Session, game: Game, payload: ManualG
     if not home or not away or home.division_id != payload.division_id or away.division_id != payload.division_id:
         raise HTTPException(status_code=400, detail={'error': 'INVALID_TEAM_DIVISION_RELATIONSHIP'})
     status = db.get(GameStatus, payload.game_status_id)
-    if not status or not status.is_active:
+    if not status or not status.is_active or str(status.code or '').strip().upper() in FINAL_SCHEDULE_EXCLUDED_STATUS_CODES:
         raise HTTPException(status_code=400, detail={'error': 'INVALID_GAME_STATUS'})
     if payload.season_id:
         valid_dates = {row[0] for row in db.query(Week.primary_game_date).filter(Week.season_id == payload.season_id, Week.primary_game_date.isnot(None)).all()}
@@ -25319,57 +25317,10 @@ def export_schedule_management_csv(date: date | None = None, division_id: uuid.U
         export_division_names.add(f'{div.division_group} {div.name}'.strip())
         w.writerow(_schedule_export_row_values(g, slot, fi, host, home, away, div, status, db, include_admin_columns=include_admin_columns))
 
+    # Normal schedule export intentionally contains only authoritative saved game rows.
+    # Diagnostics and hard-rule issues remain available from the quality report endpoints/exports.
     export_validation_warnings: list[dict[str, object]] = []
-    validation_season_id = next((g.season_id for g, *_ in rows if getattr(g, 'season_id', None)), validation_season_id)
-    if validation_season_id:
-        export_filters_applied = any(value not in (None, '') for value in export_filters.values())
-        final_validation = _build_final_schedule_validation_result(
-            db,
-            validation_season_id,
-            export_games_count=None if export_filters_applied else len(rows),
-            export_source=FINAL_SCHEDULE_SOURCE_NAME,
-        )
-        for failure in final_validation.get('final_validation_failures') or []:
-            if not isinstance(failure, dict):
-                continue
-            details = failure.get('details') if isinstance(failure.get('details'), list) else []
-            if failure.get('code') == 'REQUIRED_GAMES_MISSING':
-                export_validation_warnings.extend(details)
-                for row in details:
-                    division_name = str(row.get('division') or '')
-                    warning_message = f"EXPORT VALIDATION: incomplete division/week schedule; Week {row.get('week')} expected {row.get('required_games')}, scheduled {row.get('scheduled_games')}, missing {row.get('missing_games')}"
-                    w.writerow([
-                        str(row.get('week_start_date') or ''),
-                        '',
-                        normalized_division_key('', division_name),
-                        warning_message,
-                        '',
-                        '',
-                        '',
-                        '',
-                        'EXPORT_VALIDATION_INCOMPLETE',
-                    ])
-        for failure in final_validation.get('final_validation_failures') or []:
-            if isinstance(failure, dict) and failure.get('code') != 'REQUIRED_GAMES_MISSING':
-                details = failure.get('details') if isinstance(failure.get('details'), list) else []
-                if details:
-                    for detail in details:
-                        if not isinstance(detail, dict):
-                            continue
-                        locator = detail.get('game_id') or detail.get('team_id') or detail.get('game_slot_id') or detail.get('field_instance_id') or detail.get('host_location_id') or detail.get('validation_run_id') or ''
-                        w.writerow([
-                            str(detail.get('game_date') or detail.get('slot_date') or ''),
-                            str(detail.get('kickoff_time') or detail.get('start_time') or ''),
-                            str(detail.get('division_name') or detail.get('validation_scope') or 'FINAL_VALIDATION'),
-                            f"EXPORT VALIDATION: {failure.get('code')} - {detail.get('specific_reason') or failure.get('message')}",
-                            str(detail.get('home_team_name') or detail.get('team_name') or ''),
-                            str(detail.get('away_team_name') or ''),
-                            str(detail.get('host_location_name') or locator),
-                            str(detail.get('field_name') or detail.get('field_type') or ''),
-                            str(failure.get('severity') or final_validation.get('final_validation_status') or 'VALIDATION_FAILED'),
-                        ])
-                else:
-                    w.writerow(['', '', 'FINAL_VALIDATION', f"EXPORT VALIDATION AUDIT ISSUE: {failure.get('code')} - Schedule validation details unavailable.", '', '', '', '', str(final_validation.get('diagnostics_status') or 'NEEDS_REVIEW')])
+
     if export_validation_warnings:
         logger.warning('export_schedule_management_csv incomplete_division_week_schedules=%s', export_validation_warnings)
     logger.info('export_schedule_management_csv division_entries=%s', sorted(export_division_names))
@@ -25451,7 +25402,8 @@ def create_game(payload:GameCreate, db:Session=Depends(get_db)):
     validation=validate_game(db,payload); status=db.query(GameStatus).filter(GameStatus.id==payload.game_status_id).first()
     _raise_if_invalid_scheduled_game_payload(db, payload)
     if not status: raise HTTPException(400,'Invalid game status')
-    if status.code=='published' and validation.hard_conflicts: raise HTTPException(status_code=400, detail={'error':'hard_conflicts','validation':validation.model_dump()})
+    if str(status.code or '').strip().upper() in FINAL_SCHEDULE_EXCLUDED_STATUS_CODES: raise HTTPException(400, 'Draft schedule game statuses are disabled; save games as scheduled records.')
+    if validation.hard_conflicts: raise HTTPException(status_code=400, detail={'error':'hard_conflicts','validation':validation.model_dump()})
     obj=Game(**payload.model_dump(exclude={'division_id'})); db.add(obj); db.flush()
     final_doubleheader = _build_global_doubleheader_validation(db, obj.season_id)
     if any(str(obj.id) in {str(row.get('game_1_id')), str(row.get('game_2_id'))} or str(obj.id) in {str(value) for value in (row.get('game_ids') or [])} for row in final_doubleheader.get('failures') or []):
@@ -25468,7 +25420,8 @@ def update_game(game_id:uuid.UUID,payload:GameCreate, db:Session=Depends(get_db)
     validation=validate_game(db,payload,game_id=game_id); status=db.query(GameStatus).filter(GameStatus.id==payload.game_status_id).first()
     _raise_if_invalid_scheduled_game_payload(db, payload, game_id=game_id)
     if not status: raise HTTPException(400,'Invalid game status')
-    if status.code=='published' and validation.hard_conflicts: raise HTTPException(status_code=400, detail={'error':'hard_conflicts','validation':validation.model_dump()})
+    if str(status.code or '').strip().upper() in FINAL_SCHEDULE_EXCLUDED_STATUS_CODES: raise HTTPException(400, 'Draft schedule game statuses are disabled; save games as scheduled records.')
+    if validation.hard_conflicts: raise HTTPException(status_code=400, detail={'error':'hard_conflicts','validation':validation.model_dump()})
     for k,v in payload.model_dump(exclude={'division_id'}).items(): setattr(obj,k,v)
     db.flush()
     final_doubleheader = _build_global_doubleheader_validation(db, obj.season_id)
