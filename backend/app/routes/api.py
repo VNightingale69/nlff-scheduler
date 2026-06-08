@@ -22089,11 +22089,18 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
     optional_optimization_skip_reason = '; '.join(optional_optimization_skip_reasons) if optional_optimization_skipped else None
     auto_schedule_diagnostics['optional_optimization_skipped'] = optional_optimization_skipped
     auto_schedule_diagnostics['optional_optimization_skip_reason'] = optional_optimization_skip_reason
-    pull_forward_phase = _start_phase('pull-forward pass')
+    # Post-generation optimization is intentionally manual-only.  The season auto-scheduler
+    # creates and saves the first-pass schedule, then stops so the Scheduling Administrator
+    # can review the baseline before requesting an optimization preview.
+    optional_optimization_skipped = True
+    optional_optimization_skip_reason = 'manual_optimization_required'
+    auto_schedule_diagnostics['optional_optimization_skipped'] = True
+    auto_schedule_diagnostics['optional_optimization_skip_reason'] = optional_optimization_skip_reason
+    pull_forward_phase = _start_phase('manual-only turf compaction skipped')
     turf_wave_compaction = _run_turf_wave_compaction_pass(
         db,
         season_id,
-        enabled=bool(pre_compaction_complete and not dry_run and optional_budget_remaining),
+        enabled=False,
         runtime_limits=runtime_limits,
     )
     pull_forward_phase['_rejection_reasons_override'] = dict(turf_wave_compaction.get('rejected_moves_by_reason') or {})
@@ -22105,9 +22112,9 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         moves_rejected=int(turf_wave_compaction.get('rejected_moves_count') or 0),
     )
     auto_schedule_diagnostics['turf_wave_compaction'] = turf_wave_compaction
-    turf_pull_forward_phase = _start_phase('mandatory turf pull-forward repair')
+    turf_pull_forward_phase = _start_phase('manual-only turf pull-forward repair skipped')
     try:
-        turf_pull_forward_repair_diagnostics = _run_turf_pull_forward_repair(db, season_id) if not dry_run else _default_turf_pull_forward_repair_diagnostics(ran=False, status='SKIPPED_DRY_RUN', reason='dry_run')
+        turf_pull_forward_repair_diagnostics = _default_turf_pull_forward_repair_diagnostics(ran=False, status='SKIPPED_MANUAL_ONLY', reason='manual_optimization_required')
     except Exception as exc:
         logger.exception('mandatory_turf_pull_forward_repair_failed season_id=%s', season_id)
         diagnostics_error = f'turf pull-forward repair unavailable ({exc})'
@@ -22133,7 +22140,7 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         auto_schedule_diagnostics['turf_pull_forward_repair_status'] = turf_pull_forward_repair_diagnostics.get('turf_pull_forward_repair_status')
     except Exception as exc:
         _mark_diagnostics_attachment_failure(exc, 'turf_pull_forward_repair')
-    if not bool(turf_pull_forward_repair_diagnostics.get('turf_pull_forward_repair_ran')) and not dry_run:
+    if not bool(turf_pull_forward_repair_diagnostics.get('turf_pull_forward_repair_ran')) and not dry_run and turf_pull_forward_repair_diagnostics.get('turf_pull_forward_repair_status') != 'SKIPPED_MANUAL_ONLY':
         validation_errors.append('TURF_PULL_FORWARD_REPAIR_NOT_RUN: mandatory turf pull-forward repair did not run.')
     if turf_pull_forward_repair_diagnostics.get('turf_pull_forward_repair_status') == 'FAILED' and not dry_run:
         validation_errors.append('TURF_PULL_FORWARD_REPAIR_FAILED: mandatory turf pull-forward repair failed.')
@@ -22526,8 +22533,96 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
 
 
 
-@router.post('/manual-schedule-builder/optimize-schedule', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
-def optimize_schedule(payload: dict, db: Session = Depends(get_db)):
+
+def _build_optimization_workflow_metrics(db: Session, season_id: uuid.UUID | str) -> dict[str, object]:
+    rows = get_scheduled_games_for_season(db, season_id, _scheduled_games_filters(season_id))
+    try:
+        final_validation = _build_final_schedule_validation_result(db, season_id)
+    except Exception as exc:
+        logger.exception('optimization metrics final validation failed season_id=%s', season_id)
+        final_validation = {'metrics_warning': f'Final validation unavailable: {exc}'}
+    try:
+        hierarchy = _build_revised_scheduling_hierarchy_diagnostics(db, season_id)
+    except Exception as exc:
+        logger.exception('optimization metrics hierarchy diagnostics failed season_id=%s', season_id)
+        hierarchy = {'metrics_warning': f'Hierarchy diagnostics unavailable: {exc}'}
+    turf_summary = hierarchy.get('turf_stadium_schedule_summary') or []
+    turf_active_time_blocks = 0
+    turf_single_game_blocks = 0
+    turf_two_game_blocks = 0
+    latest_turf_start_time = None
+    for row in turf_summary if isinstance(turf_summary, list) else []:
+        games_by_start = row.get('games_by_start_time') or {}
+        if isinstance(games_by_start, dict):
+            turf_active_time_blocks += len([count for count in games_by_start.values() if int(count or 0) > 0])
+            turf_single_game_blocks += sum(1 for count in games_by_start.values() if int(count or 0) == 1)
+            turf_two_game_blocks += sum(1 for count in games_by_start.values() if int(count or 0) == 2)
+        latest = row.get('latest_start_time')
+        if latest and (latest_turf_start_time is None or str(latest) > str(latest_turf_start_time)):
+            latest_turf_start_time = latest
+    doubleheader_issues = sum(int(final_validation.get(key) or 0) for key in [
+        'doubleheader_not_back_to_back_count',
+        'doubleheader_split_location_count',
+        'doubleheader_field_type_mismatch_count',
+        'doubleheader_pair_validation_failure_count',
+        'doubleheader_too_many_games_count',
+    ])
+    return {
+        'total_scheduled_games': len(rows),
+        'teams_missing_weekly_games': int(final_validation.get('required_games_missing_count') or 0),
+        'teams_below_expected_season_game_count': int(final_validation.get('season_game_count_failure_count') or 0),
+        'team_time_conflicts': int(final_validation.get('team_time_conflict_count') or 0),
+        'duplicate_exact_field_slot_conflicts': int(final_validation.get('field_time_conflict_count') or 0),
+        'doubleheader_issues': doubleheader_issues,
+        'host_community_teams_not_at_home_while_hosting': int((hierarchy.get('true_home_host_diagnostics') or {}).get('host_owner_as_away_count') or 0),
+        'turf_active_time_blocks': turf_active_time_blocks,
+        'turf_single_game_blocks': turf_single_game_blocks,
+        'turf_two_game_blocks': turf_two_game_blocks,
+        'latest_turf_start_time': latest_turf_start_time,
+    }
+
+
+def _optimization_metric_comparison(before: dict[str, object], after: dict[str, object]) -> list[dict[str, object]]:
+    labels = {
+        'total_scheduled_games': 'Total scheduled games',
+        'teams_missing_weekly_games': 'Teams missing weekly games',
+        'teams_below_expected_season_game_count': 'Teams below expected season game count',
+        'team_time_conflicts': 'Team-time conflicts',
+        'duplicate_exact_field_slot_conflicts': 'Duplicate exact field-slot conflicts',
+        'doubleheader_issues': 'Doubleheader issues',
+        'host_community_teams_not_at_home_while_hosting': 'Host-community teams not at home while hosting',
+        'turf_active_time_blocks': 'Turf active time blocks',
+        'turf_single_game_blocks': 'Turf single-game blocks',
+        'turf_two_game_blocks': 'Turf two-game blocks',
+        'latest_turf_start_time': 'Latest turf start time',
+    }
+    return [{'key': key, 'label': label, 'before': before.get(key), 'after': after.get(key)} for key, label in labels.items()]
+
+
+def _manual_game_snapshots(db: Session, season_id: uuid.UUID | str) -> dict[uuid.UUID, dict[str, object]]:
+    games = db.query(Game).filter(Game.season_id == season_id, Game.is_manual_edit.is_(True)).all()
+    return {game.id: _game_snapshot(game) for game in games}
+
+
+def _restore_manual_game_snapshots(db: Session, snapshots: dict[uuid.UUID, dict[str, object]]) -> None:
+    for game_id, snapshot in snapshots.items():
+        game = db.query(Game).filter(Game.id == game_id).first()
+        if not game:
+            continue
+        game.week_id = uuid.UUID(snapshot['week_id']) if snapshot.get('week_id') else None
+        game.host_location_id = uuid.UUID(snapshot['host_location_id']) if snapshot.get('host_location_id') else None
+        game.field_instance_id = uuid.UUID(snapshot['field_instance_id']) if snapshot.get('field_instance_id') else None
+        game.game_date = date.fromisoformat(str(snapshot['game_date'])) if snapshot.get('game_date') else game.game_date
+        game.kickoff_time = time.fromisoformat(str(snapshot['kickoff_time'])) if snapshot.get('kickoff_time') else game.kickoff_time
+        game.public_notes = snapshot.get('public_notes')
+        game.internal_admin_notes = snapshot.get('internal_admin_notes')
+        slot = db.query(GameSlot).filter(GameSlot.assigned_game_id == game.id).first()
+        if slot and (slot.host_location_id != game.host_location_id or slot.field_instance_id != game.field_instance_id or slot.slot_date != game.game_date or slot.start_time != game.kickoff_time):
+            slot.assigned_game_id = None
+            slot.status = 'OPEN'
+
+
+def _run_manual_optimization_workflow(payload: dict, db: Session, *, apply: bool) -> dict[str, object]:
     season_id = payload.get('season_id')
     if not season_id:
         raise HTTPException(400, 'season_id is required')
@@ -22535,28 +22630,36 @@ def optimize_schedule(payload: dict, db: Session = Depends(get_db)):
     if not season:
         raise HTTPException(404, 'Season not found')
 
-    optimize_same_community_home = bool(payload.get('optimize_same_community_home', True))
-    repair_double_headers = bool(payload.get('repair_double_headers', True))
-    reduce_repeat_matchups = bool(payload.get('reduce_repeat_matchups', False))
-    preserve_two_location_limit = bool(payload.get('preserve_two_location_limit', True))
-    dry_run = bool(payload.get('dry_run', True))
+    include_manual_edits = bool(payload.get('include_manual_edits', False))
+    manual_edit_count = db.query(Game.id).filter(Game.season_id == season_id, Game.is_manual_edit.is_(True)).count()
+    locked_manual_snapshots = {} if include_manual_edits else _manual_game_snapshots(db, season_id)
+    before_metrics = _build_optimization_workflow_metrics(db, season_id)
 
     try:
         diagnostics = run_post_schedule_repair_pass(
             db,
             season_id,
-            optimize_same_community_home=optimize_same_community_home,
-            repair_double_headers=repair_double_headers,
-            reduce_repeat_matchups=reduce_repeat_matchups,
-            preserve_two_location_limit=preserve_two_location_limit,
+            optimize_same_community_home=bool(payload.get('optimize_same_community_home', True)),
+            repair_double_headers=bool(payload.get('repair_double_headers', True)),
+            reduce_repeat_matchups=bool(payload.get('reduce_repeat_matchups', False)),
+            preserve_two_location_limit=bool(payload.get('preserve_two_location_limit', True)),
         )
+        if locked_manual_snapshots:
+            _restore_manual_game_snapshots(db, locked_manual_snapshots)
+            db.flush()
+        after_metrics = _build_optimization_workflow_metrics(db, season_id)
     except Exception as exc:
         db.rollback()
         logger.exception('Schedule optimization failed for season_id=%s', season_id)
         return {
             'ran': False,
-            'dry_run': dry_run,
+            'preview': not apply,
+            'applied': False,
+            'schedule_state': 'First-Pass Schedule',
             'summary': {'error': str(exc)},
+            'before_metrics': before_metrics if 'before_metrics' in locals() else {},
+            'after_metrics': before_metrics if 'before_metrics' in locals() else {},
+            'metric_comparison': _optimization_metric_comparison(before_metrics, before_metrics) if 'before_metrics' in locals() else [],
             'proposed_changes': [],
             'rejected_changes': [],
             'remaining_violations': [],
@@ -22565,22 +22668,54 @@ def optimize_schedule(payload: dict, db: Session = Depends(get_db)):
 
     proposed_changes = list((diagnostics.get('proposed_changes') or []))
     rejected_changes = list((diagnostics.get('rejected_changes') or []))
+    summary = dict(diagnostics.get('summary') or {})
+    accepted_moves = int(summary.get('same_community_repairs_committed') or 0) + int(summary.get('double_header_repairs_committed') or 0)
+    rejected_moves = int(summary.get('repairs_rejected') or len(rejected_changes) or 0)
+    summary.update({
+        'accepted_optimization_moves': accepted_moves,
+        'rejected_optimization_moves': rejected_moves,
+        'manual_edit_count': int(manual_edit_count or 0),
+        'manual_edits_included': include_manual_edits,
+        'manual_edits_locked': bool(manual_edit_count and not include_manual_edits),
+    })
 
-    if dry_run:
-        db.rollback()
-    else:
-        db.commit()
-
-    summary = diagnostics.get('summary') or {}
-    return {
+    response = {
         'ran': True,
-        'dry_run': dry_run,
+        'preview': not apply,
+        'applied': apply,
+        'schedule_state': 'Optimized Schedule Applied' if apply else 'Optimization Preview',
         'summary': summary,
+        'before_metrics': before_metrics,
+        'after_metrics': after_metrics,
+        'metric_comparison': _optimization_metric_comparison(before_metrics, after_metrics),
         'proposed_changes': proposed_changes,
         'rejected_changes': rejected_changes,
+        'rejected_move_reasons': diagnostics.get('rejected_moves_by_reason') or summary.get('rejected_moves_by_reason') or {},
         'remaining_violations': diagnostics.get('remaining_violations') or [],
         'warnings': diagnostics.get('warnings') or [],
+        'diagnostics': diagnostics,
     }
+    if apply:
+        db.commit()
+    else:
+        db.rollback()
+    return response
+
+
+@router.post('/manual-schedule-builder/optimize-schedule', dependencies=[Depends(require_roles(ROLE_SCHEDULING_ADMIN))])
+def optimize_schedule(payload: dict, db: Session = Depends(get_db)):
+    payload = dict(payload or {})
+    payload['dry_run'] = True
+    return _run_manual_optimization_workflow(payload, db, apply=False)
+
+
+@router.post('/manual-schedule-builder/optimize-schedule/apply', dependencies=[Depends(require_roles(ROLE_SCHEDULING_ADMIN))])
+def apply_optimized_schedule(payload: dict, db: Session = Depends(get_db)):
+    payload = dict(payload or {})
+    payload['dry_run'] = False
+    return _run_manual_optimization_workflow(payload, db, apply=True)
+
+
 @router.post('/manual-schedule-builder/repair/same-community-home-fields', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def run_same_community_home_field_repair(payload: dict, db: Session = Depends(get_db)):
     season_id = payload.get('season_id')

@@ -302,6 +302,7 @@ export default function ManualScheduleBuilderPage() {
   const normalizedRoleName = normalizeRoleForUi(authUser?.role_name);
   const canManageGeneratedGames = hasSchedulingAdministratorPermission(normalizedRoleName);
   const canBulkInlineEditScheduledGames = hasSchedulingAdministratorPermission(normalizedRoleName);
+  const canRunScheduleOptimization = isSchedulingAdministratorRole(normalizedRoleName);
   const searchParams = useSearchParams();
   const [options, setOptions] = useState<any>({ divisions: [], teams: [], host_locations: [], field_instances: [], seasons: [], weeks: [], organizations: [], game_statuses: [] });
   const [seasonId, setSeasonId] = useState(searchParams.get('season_id') || '');
@@ -339,9 +340,11 @@ export default function ManualScheduleBuilderPage() {
   const [repairDoubleHeaders, setRepairDoubleHeaders] = useState(true);
   const [reduceRepeatMatchups, setReduceRepeatMatchups] = useState(false);
   const [preserveTwoLocationLimit, setPreserveTwoLocationLimit] = useState(true);
-  const [optimizerDryRun, setOptimizerDryRun] = useState(true);
+  const [includeManualEditedGames, setIncludeManualEditedGames] = useState(false);
   const [optimizerLoading, setOptimizerLoading] = useState(false);
+  const [optimizerApplyLoading, setOptimizerApplyLoading] = useState(false);
   const [optimizerDiagnostics, setOptimizerDiagnostics] = useState<any | null>(null);
+  const [scheduleStateLabel, setScheduleStateLabel] = useState('First-Pass Schedule');
   const [scheduledGamesFilters, setScheduledGamesFilters] = useState<ScheduledGamesFilters>(emptyScheduledGamesFilters);
   const [isBulkEditMode, setIsBulkEditMode] = useState(false);
 
@@ -539,6 +542,68 @@ export default function ManualScheduleBuilderPage() {
   const pendingChangesLabel = `${pendingChangedCellCount} unsaved ${pendingChangedCellCount === 1 ? 'change' : 'changes'} across ${dirtyPendingEdits.length} ${dirtyPendingEdits.length === 1 ? 'game' : 'games'}`;
   const confirmDiscardBulkEdits = () => !hasPendingBulkEdits || window.confirm('Discard all unsaved schedule edits?');
 
+  const hasManualEditedGames = useMemo(() => games.some((game: any) => Boolean(game.is_manual_edit)), [games]);
+  const optimizationPayload = () => ({
+    season_id: seasonId,
+    optimize_same_community_home: optimizeSameCommunityHome,
+    repair_double_headers: repairDoubleHeaders,
+    reduce_repeat_matchups: reduceRepeatMatchups,
+    preserve_two_location_limit: preserveTwoLocationLimit,
+    include_manual_edits: includeManualEditedGames,
+  });
+  const runOptimizationPreview = async () => {
+    if (!seasonId || optimizerLoading) return;
+    if (hasPendingBulkEdits) {
+      setError('Save or discard unsaved manual edits before running optimization.');
+      return;
+    }
+    if (hasManualEditedGames && !includeManualEditedGames && !window.confirm('This schedule contains manual edits. Running optimization may move unlocked games. Continue?')) return;
+    setError('');
+    setSuccess('');
+    setOptimizerLoading(true);
+    try {
+      const res: any = await apiFetch('/manual-schedule-builder/optimize-schedule', {
+        method: 'POST',
+        body: JSON.stringify(optimizationPayload()),
+      }, token);
+      setOptimizerDiagnostics(res);
+      setScheduleStateLabel('Optimization Preview');
+      const summary = res.summary || {};
+      setSuccess(`Optimization preview completed. Accepted moves: ${Number(summary.accepted_optimization_moves || 0)}, rejected moves: ${Number(summary.rejected_optimization_moves || 0)}.`);
+    } catch (e: unknown) {
+      setError(`Schedule optimization failed: ${extractError(e)}`);
+    } finally {
+      setOptimizerLoading(false);
+    }
+  };
+  const applyOptimizationPreview = async () => {
+    if (!seasonId || optimizerApplyLoading) return;
+    setError('');
+    setSuccess('');
+    setOptimizerApplyLoading(true);
+    try {
+      const res: any = await apiFetch('/manual-schedule-builder/optimize-schedule/apply', {
+        method: 'POST',
+        body: JSON.stringify(optimizationPayload()),
+      }, token);
+      setOptimizerDiagnostics(res);
+      setScheduleStateLabel('Optimized Schedule Applied');
+      await load();
+      await loadRecommendations();
+      const summary = res.summary || {};
+      setSuccess(`Optimized schedule applied. Accepted moves: ${Number(summary.accepted_optimization_moves || 0)}, rejected moves: ${Number(summary.rejected_optimization_moves || 0)}.`);
+    } catch (e: unknown) {
+      setError(`Apply optimized schedule failed: ${extractError(e)}`);
+    } finally {
+      setOptimizerApplyLoading(false);
+    }
+  };
+  const keepFirstPassSchedule = () => {
+    setOptimizerDiagnostics(null);
+    setScheduleStateLabel(hasManualEditedGames ? 'Manually Edited Schedule' : 'First-Pass Schedule');
+    setSuccess('Kept the saved first-pass schedule. Optimization preview discarded.');
+  };
+
   useEffect(() => {
     if (!hasPendingBulkEdits) return;
     const handler = (event: BeforeUnloadEvent) => {
@@ -653,6 +718,8 @@ export default function ManualScheduleBuilderPage() {
       (res.games || []).forEach(applyScheduledGameUpdate);
       setPendingGameEdits({});
       setIsBulkEditMode(false);
+      setScheduleStateLabel('Manually Edited Schedule');
+      setOptimizerDiagnostics(null);
       await load(); await loadRecommendations(); setManualScheduleBannerFromValidation(overrideWarnings ? 'Schedule changes saved with warning override.' : 'Schedule changes saved.', await loadFinalScheduleValidation());
     } catch (e: unknown) {
       if (e instanceof ApiError && e.status === 400) {
@@ -799,38 +866,6 @@ export default function ManualScheduleBuilderPage() {
           Auto-Schedule Entire Season
         </button>
         <button
-          className='mt-3 mr-2 rounded border border-emerald-700 bg-emerald-700 px-3 py-2 text-white disabled:cursor-not-allowed disabled:bg-slate-300 disabled:border-slate-300'
-          disabled={!seasonId || optimizerLoading}
-          onClick={async () => {
-            setError('');
-            setSuccess('');
-            setOptimizerLoading(true);
-            try {
-              const res: any = await apiFetch('/manual-schedule-builder/optimize-schedule', {
-                method: 'POST',
-                body: JSON.stringify({
-                  season_id: seasonId,
-                  optimize_same_community_home: optimizeSameCommunityHome,
-                  repair_double_headers: repairDoubleHeaders,
-                  reduce_repeat_matchups: reduceRepeatMatchups,
-                  preserve_two_location_limit: preserveTwoLocationLimit,
-                  dry_run: optimizerDryRun,
-                }),
-              }, token);
-              setOptimizerDiagnostics(res);
-              const summary = res.summary || {};
-              setSuccess(`Optimization ${optimizerDryRun ? 'preview' : 'run'} completed. Proposed: ${Number(summary.same_community_repairs_proposed || 0) + Number(summary.double_header_repairs_proposed || 0)}, committed: ${Number(summary.same_community_repairs_committed || 0) + Number(summary.double_header_repairs_committed || 0)}, rejected: ${Number(summary.repairs_rejected || 0)}.`);
-              await load();
-            } catch (e: unknown) {
-              setError(`Schedule optimization failed: ${extractError(e)}`);
-            } finally {
-              setOptimizerLoading(false);
-            }
-          }}
-        >
-          {optimizerLoading ? 'Running Optimization...' : 'Run Schedule Optimization'}
-        </button>
-        <button
           className='mt-3 rounded border border-red-600 bg-red-600 px-3 py-2 text-white disabled:cursor-not-allowed disabled:bg-slate-300 disabled:border-slate-300'
           disabled={!seasonId}
           onClick={() => {
@@ -842,20 +877,6 @@ export default function ManualScheduleBuilderPage() {
         >
           Clear All Scheduled Games
         </button>
-        <div className='mt-3 grid gap-2 text-sm text-red-900 md:grid-cols-2'>
-          <label className='flex items-center gap-2'><input type='checkbox' checked={optimizeSameCommunityHome} onChange={(e) => setOptimizeSameCommunityHome(e.target.checked)} />Optimize same-community home games</label>
-          <label className='flex items-center gap-2'><input type='checkbox' checked={repairDoubleHeaders} onChange={(e) => setRepairDoubleHeaders(e.target.checked)} />Repair double headers</label>
-          <label className='flex items-center gap-2'><input type='checkbox' checked={reduceRepeatMatchups} onChange={(e) => setReduceRepeatMatchups(e.target.checked)} />Reduce repeat matchups</label>
-          <label className='flex items-center gap-2'><input type='checkbox' checked={preserveTwoLocationLimit} onChange={(e) => setPreserveTwoLocationLimit(e.target.checked)} />Preserve two-location limit</label>
-          <label className='flex items-center gap-2 md:col-span-2'><input type='checkbox' checked={optimizerDryRun} onChange={(e) => setOptimizerDryRun(e.target.checked)} />Dry run (preview only, do not save)</label>
-        </div>
-        {optimizerDiagnostics ? <div className='mt-3 rounded border bg-white p-3 text-sm text-slate-800'>
-          <div className='font-semibold'>Optimization Diagnostics</div>
-          <div>Games reviewed: {optimizerDiagnostics.summary?.games_reviewed ?? 0}</div>
-          <div>Same-community violations: {optimizerDiagnostics.summary?.same_community_violations_found ?? 0}</div>
-          <div>Double-header violations: {optimizerDiagnostics.summary?.double_header_violations_found ?? 0}</div>
-          <div>Repairs rejected: {optimizerDiagnostics.summary?.repairs_rejected ?? 0}</div>
-        </div> : null}
       </div>
 
       <div className='rounded border p-3'>
@@ -886,7 +907,55 @@ export default function ManualScheduleBuilderPage() {
         </tbody></table>
       </div>
       <div className='rounded border p-3'>
-        <h2 className='mb-2 text-lg font-semibold'>Scheduled Games</h2>
+        <div className='mb-3 flex flex-wrap items-center justify-between gap-3'>
+          <div>
+            <h2 className='text-lg font-semibold'>Scheduled Games</h2>
+            <div className='mt-1 inline-flex rounded-full border border-slate-300 bg-slate-50 px-3 py-1 text-xs font-semibold text-slate-700'>{scheduleStateLabel}</div>
+          </div>
+          {canRunScheduleOptimization ? <div className='flex flex-wrap items-center gap-2' aria-label='Scheduling Administrator optimization controls'>
+            <button className='rounded border border-emerald-700 bg-emerald-700 px-3 py-2 text-sm text-white disabled:cursor-not-allowed disabled:border-slate-300 disabled:bg-slate-300' disabled={!seasonId || optimizerLoading || hasPendingBulkEdits} onClick={runOptimizationPreview}>{optimizerLoading ? 'Running Optimization...' : 'Optimize Schedule'}</button>
+            <button className='rounded border border-blue-700 bg-blue-700 px-3 py-2 text-sm text-white disabled:cursor-not-allowed disabled:border-slate-300 disabled:bg-slate-300' disabled={!optimizerDiagnostics || optimizerApplyLoading || optimizerLoading} onClick={applyOptimizationPreview}>{optimizerApplyLoading ? 'Applying...' : 'Apply Optimized Schedule'}</button>
+            <button className='rounded border px-3 py-2 text-sm disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400' disabled={!optimizerDiagnostics || optimizerApplyLoading || optimizerLoading} onClick={keepFirstPassSchedule}>Keep First-Pass Schedule</button>
+          </div> : null}
+        </div>
+        {canRunScheduleOptimization ? <div className='mb-3 rounded border border-emerald-100 bg-emerald-50 p-3 text-sm text-emerald-950'>
+          <div className='font-semibold'>Scheduling Administrator Optimization Workflow</div>
+          <p className='mt-1'>Generate Schedule saves the first-pass schedule only. Use Optimize Schedule after review to create a temporary optimization preview; normal exports continue to use the saved authoritative schedule until Apply Optimized Schedule is selected.</p>
+          <div className='mt-2 grid gap-2 md:grid-cols-2'>
+            <label className='flex items-center gap-2'><input type='checkbox' checked={optimizeSameCommunityHome} onChange={(e) => setOptimizeSameCommunityHome(e.target.checked)} />Preserve hosting-community home teams</label>
+            <label className='flex items-center gap-2'><input type='checkbox' checked={repairDoubleHeaders} onChange={(e) => setRepairDoubleHeaders(e.target.checked)} />Repair doubleheaders</label>
+            <label className='flex items-center gap-2'><input type='checkbox' checked={reduceRepeatMatchups} onChange={(e) => setReduceRepeatMatchups(e.target.checked)} />Reduce repeat matchups where practical</label>
+            <label className='flex items-center gap-2'><input type='checkbox' checked={preserveTwoLocationLimit} onChange={(e) => setPreserveTwoLocationLimit(e.target.checked)} />Preserve two-location limit</label>
+            <label className='flex items-center gap-2 md:col-span-2'><input type='checkbox' checked={includeManualEditedGames} onChange={(e) => setIncludeManualEditedGames(e.target.checked)} />Include manually edited games <span className='text-xs text-emerald-800'>(default unchecked; manual edits stay locked)</span></label>
+          </div>
+          {hasPendingBulkEdits ? <p className='mt-2 text-amber-700'>Save or discard unsaved edits before running optimization.</p> : null}
+        </div> : null}
+        {canRunScheduleOptimization && optimizerDiagnostics ? <div className='mb-3 rounded border bg-white p-3 text-sm text-slate-800'>
+          <div className='flex flex-wrap items-center justify-between gap-2'>
+            <div className='font-semibold'>Optimization Summary</div>
+            <button className='rounded border px-2 py-1 text-xs' onClick={() => {
+              const blob = new Blob([JSON.stringify(optimizerDiagnostics, null, 2)], { type: 'application/json' });
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement('a');
+              a.href = url;
+              a.download = 'optimization-comparison.json';
+              a.click();
+              URL.revokeObjectURL(url);
+            }}>Export Optimization Comparison</button>
+          </div>
+          <div className='mt-2 grid gap-2 md:grid-cols-3'>
+            <div>Accepted optimization moves: <span className='font-semibold'>{optimizerDiagnostics.summary?.accepted_optimization_moves ?? 0}</span></div>
+            <div>Rejected optimization moves: <span className='font-semibold'>{optimizerDiagnostics.summary?.rejected_optimization_moves ?? 0}</span></div>
+            <div>Manual edits locked: <span className='font-semibold'>{optimizerDiagnostics.summary?.manual_edits_locked ? 'Yes' : 'No'}</span></div>
+          </div>
+          <div className='mt-3 overflow-auto rounded border'>
+            <table className='min-w-full text-sm'><thead><tr className='bg-slate-50 text-left'><th className='p-2'>Metric</th><th className='p-2'>First-Pass Schedule</th><th className='p-2'>Optimized Preview</th></tr></thead><tbody>
+              {(optimizerDiagnostics.metric_comparison || []).map((metric: any) => <tr key={metric.key} className='border-t'><td className='p-2'>{metric.label}</td><td className='p-2'>{String(metric.before ?? '—')}</td><td className='p-2'>{String(metric.after ?? '—')}</td></tr>)}
+            </tbody></table>
+          </div>
+          {optimizerDiagnostics.rejected_move_reasons && Object.keys(optimizerDiagnostics.rejected_move_reasons).length ? <details className='mt-3'><summary className='cursor-pointer text-blue-700 underline'>View rejected move reasons</summary><pre className='mt-2 max-h-64 overflow-auto rounded bg-slate-900 p-2 text-xs text-slate-50'>{safeStringify(optimizerDiagnostics.rejected_move_reasons, 8000)}</pre></details> : null}
+          <details className='mt-3'><summary className='cursor-pointer text-blue-700 underline'>View Optimization Summary Diagnostics</summary><pre className='mt-2 max-h-80 overflow-auto rounded bg-slate-900 p-2 text-xs text-slate-50'>{safeStringify(optimizerDiagnostics, 12000)}</pre></details>
+        </div> : null}
         <div className='mb-3 rounded border bg-slate-50 p-3'>
           <div className='grid gap-2 sm:grid-cols-2 lg:grid-cols-6'>
             <label className='flex flex-col gap-1 text-xs font-semibold text-slate-700'>Date
@@ -1098,6 +1167,10 @@ export default function ManualScheduleBuilderPage() {
                   await load();
                   await loadRecommendations();
                   setAutoScheduleDiagnostics(summarizeAutoScheduleDiagnostics(res));
+                  if (!res.dry_run) {
+                    setScheduleStateLabel('First-Pass Schedule');
+                    setOptimizerDiagnostics(null);
+                  }
                   const finalValidation = res.final_validation || res.auto_schedule_diagnostics?.final_validation || {};
                   const finalStatus = String(finalValidation.final_validation_status || res.final_validation_status || res.status || '').toUpperCase();
                   const rootCauses = (res.root_cause_categories || res.auto_schedule_diagnostics?.root_cause_categories || []).join(', ');
