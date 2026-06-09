@@ -585,10 +585,11 @@ export default function ManualScheduleBuilderPage() {
       const summary = res.summary || {};
       const partial = summary.partial_diagnostics_message ? ` ${summary.partial_diagnostics_message}` : '';
       const noChange = summary.no_candidates_message || summary.no_safe_moves_message ? ` ${summary.no_candidates_message || summary.no_safe_moves_message}` : '';
-      const candidatesEvaluated = Number(summary.optimization_candidates_evaluated ?? 0);
-      const acceptedMoves = Number(summary.accepted_optimization_moves || 0);
-      const completionMessage = `Turf optimization preview completed. Candidates evaluated: ${candidatesEvaluated}, accepted moves: ${acceptedMoves}, candidates rejected: ${Number(summary.candidates_rejected ?? summary.rejected_optimization_moves ?? 0)}, runtime: ${summary.optimization_runtime_seconds ?? '—'}s, stop reason: ${summary.stop_reason || summary.guard_stop_reason || 'completed'}.${partial}${noChange}`;
-      if (!candidatesEvaluated || !acceptedMoves) {
+      const repacksEvaluated = Number(summary.turf_stadium_date_repacks_evaluated ?? summary.optimization_candidates_evaluated ?? 0);
+      const acceptedRepacks = Number(summary.repacked_dates_accepted ?? summary.accepted_optimization_moves ?? 0);
+      const rejectedRepacks = Number(summary.repacked_dates_rejected_no_op ?? summary.candidates_rejected ?? summary.rejected_optimization_moves ?? 0);
+      const completionMessage = `Turf stadium/date repacking preview completed. Repacks evaluated: ${repacksEvaluated}, accepted: ${acceptedRepacks}, rejected/no-op: ${rejectedRepacks}, runtime: ${summary.optimization_runtime_seconds ?? '—'}s, stop reason: ${summary.stop_reason || summary.guard_stop_reason || 'completed'}.${partial}${noChange}`;
+      if (!repacksEvaluated || !acceptedRepacks) {
         setError(completionMessage);
       } else {
         setSuccess(completionMessage);
@@ -616,7 +617,7 @@ export default function ManualScheduleBuilderPage() {
       await load();
       await loadRecommendations();
       const summary = res.summary || {};
-      setSuccess(`Turf-optimized schedule applied. Candidates: ${Number(summary.optimization_candidates_generated ?? summary.candidate_count ?? 0)}, accepted moves: ${Number(summary.accepted_optimization_moves || 0)}, rejected moves: ${Number(summary.rejected_optimization_moves || 0)}.`);
+      setSuccess(`Turf stadium/date repacks applied. Repacks evaluated: ${Number(summary.turf_stadium_date_repacks_evaluated ?? summary.optimization_candidates_generated ?? summary.candidate_count ?? 0)}, accepted: ${Number(summary.repacked_dates_accepted ?? summary.accepted_optimization_moves ?? 0)}, rejected/no-op: ${Number(summary.repacked_dates_rejected_no_op ?? summary.rejected_optimization_moves ?? 0)}.`);
     } catch (e: unknown) {
       setError(`Apply optimized schedule failed: ${extractError(e)}`);
     } finally {
@@ -974,7 +975,7 @@ export default function ManualScheduleBuilderPage() {
         </div> : null}
         {canRunScheduleOptimization && optimizerDiagnostics && showOptimizationSummary ? <div className='mb-3 rounded border bg-white p-3 text-sm text-slate-800'>
           <div className='flex flex-wrap items-center justify-between gap-2'>
-            <div className='font-semibold'>Turf Optimization Summary</div>
+            <div className='font-semibold'>Turf Stadium Repacking Summary</div>
             <button className='rounded border px-2 py-1 text-xs' onClick={() => {
               const blob = new Blob([JSON.stringify(optimizerDiagnostics, null, 2)], { type: 'application/json' });
               const url = URL.createObjectURL(blob);
@@ -988,19 +989,19 @@ export default function ManualScheduleBuilderPage() {
           <div className='mt-2 grid gap-2 md:grid-cols-4'>
             <div>Turf stadiums: <span className='font-semibold'>{optimizerDiagnostics.summary?.turf_stadium_count ?? 0}</span></div>
             <div>Turf games: <span className='font-semibold'>{optimizerDiagnostics.summary?.turf_game_count ?? 0}</span></div>
-            <div>Single-game blocks found: <span className='font-semibold'>{optimizerDiagnostics.summary?.turf_single_game_blocks_found ?? 0}</span></div>
-            <div>Candidate blocks evaluated: <span className='font-semibold'>{optimizerDiagnostics.summary?.candidate_blocks_evaluated ?? 0}</span></div>
-            <div>Candidates generated: <span className='font-semibold'>{optimizerDiagnostics.summary?.candidates_generated ?? optimizerDiagnostics.summary?.optimization_candidates_generated ?? 0}</span></div>
-            <div>Candidates evaluated: <span className='font-semibold'>{optimizerDiagnostics.summary?.candidates_evaluated ?? optimizerDiagnostics.summary?.optimization_candidates_evaluated ?? 0}</span></div>
-            <div>Candidates accepted: <span className='font-semibold'>{optimizerDiagnostics.summary?.candidates_accepted ?? optimizerDiagnostics.summary?.accepted_optimization_moves ?? 0}</span></div>
-            <div>Candidates rejected: <span className='font-semibold'>{optimizerDiagnostics.summary?.candidates_rejected ?? optimizerDiagnostics.summary?.rejected_optimization_moves ?? 0}</span></div>
-            <div>Rejection reasons logged: <span className='font-semibold'>{optimizerDiagnostics.summary?.rejection_reasons_logged ?? 0}</span></div>
+            <div>Single-game blocks before: <span className='font-semibold'>{optimizerDiagnostics.summary?.total_turf_single_game_blocks_before ?? 0}</span></div>
+            <div>Repacks evaluated: <span className='font-semibold'>{optimizerDiagnostics.summary?.turf_stadium_date_repacks_evaluated ?? 0}</span></div>
+            <div>Repacked dates accepted: <span className='font-semibold'>{optimizerDiagnostics.summary?.repacked_dates_accepted ?? optimizerDiagnostics.summary?.accepted_optimization_moves ?? 0}</span></div>
+            <div>Repacked dates rejected/no-op: <span className='font-semibold'>{optimizerDiagnostics.summary?.repacked_dates_rejected_no_op ?? optimizerDiagnostics.summary?.rejected_optimization_moves ?? 0}</span></div>
+            <div>Latest turf start: <span className='font-semibold'>{String(optimizerDiagnostics.summary?.latest_turf_start_time_before ?? '—')} → {String(optimizerDiagnostics.summary?.latest_turf_start_time_after ?? '—')}</span></div>
+            <div>Two-game blocks: <span className='font-semibold'>{String(optimizerDiagnostics.summary?.total_turf_two_game_blocks_before ?? '—')} → {String(optimizerDiagnostics.summary?.total_turf_two_game_blocks_after ?? '—')}</span></div>
+            <div>Rejection/no-op reasons logged: <span className='font-semibold'>{optimizerDiagnostics.summary?.rejection_no_op_reasons_logged ?? optimizerDiagnostics.summary?.rejection_reasons_logged ?? 0}</span></div>
             <div>Runtime: <span className='font-semibold'>{optimizerDiagnostics.summary?.optimization_runtime_seconds ?? '—'}s</span></div>
             <div>Stop reason: <span className='font-semibold'>{optimizerDiagnostics.summary?.stop_reason || optimizerDiagnostics.summary?.guard_stop_reason || 'completed'}</span></div>
             <div>Manual edits locked: <span className='font-semibold'>{optimizerDiagnostics.summary?.manual_edits_locked ? 'Yes' : 'No'}</span></div>
           </div>
           {optimizerDiagnostics.summary?.partial_diagnostics_message ? <div className='mt-2 rounded border border-amber-200 bg-amber-50 p-2 text-amber-900'>{optimizerDiagnostics.summary.partial_diagnostics_message}</div> : null}
-          {optimizerDiagnostics.summary?.no_candidates_message ? <div className='mt-2 rounded border border-amber-200 bg-amber-50 p-2 text-amber-900'>No turf optimization candidates were generated.{optimizerDiagnostics.summary?.no_candidate_reasons?.length ? ` ${optimizerDiagnostics.summary.no_candidate_reasons.join(' ')}` : ''}</div> : null}
+          {optimizerDiagnostics.summary?.no_candidates_message ? <div className='mt-2 rounded border border-amber-200 bg-amber-50 p-2 text-amber-900'>No turf stadium/date repacks were evaluated.{optimizerDiagnostics.summary?.no_candidate_reasons?.length ? ` ${optimizerDiagnostics.summary.no_candidate_reasons.join(' ')}` : ''}</div> : null}
           {optimizationNoMeasurableTurfImprovement ? <div className='mt-2 rounded border border-amber-300 bg-amber-50 p-2 text-amber-900'>No measurable turf stadium improvement found. Apply Optimized Schedule is disabled because the preview is not meaningfully optimized.</div> : null}
           {optimizerDiagnostics.summary?.no_safe_moves_message ? <div className='mt-2 rounded border border-slate-200 bg-slate-50 p-2 text-slate-900'>{optimizerDiagnostics.summary.no_safe_moves_message}</div> : null}
           <div className='mt-3 overflow-auto rounded border'>
@@ -1009,24 +1010,24 @@ export default function ManualScheduleBuilderPage() {
             </tbody></table>
           </div>
           {optimizerDiagnostics.summary?.per_stadium_turf_metrics?.length ? <div className='mt-3 overflow-auto rounded border'>
-            <table className='min-w-full text-sm'><thead><tr className='bg-slate-50 text-left'>{['Turf Stadium', 'Turf Games', 'Active Blocks', 'Single Blocks', 'Two-Game Blocks', 'Latest Start', 'Late Large', 'Accepted', 'Rejected', 'Top Rejection Reasons'].map((heading) => <th key={heading} className='p-2'>{heading}</th>)}</tr></thead><tbody>
+            <table className='min-w-full text-sm'><thead><tr className='bg-slate-50 text-left'>{['Turf Stadium', 'Turf Games', 'Active Blocks', 'Single Blocks', 'Two-Game Blocks', 'Latest Start', 'Late Large', 'Accepted Dates', 'Rejected/No-op Dates', 'Top No-op Reason'].map((heading) => <th key={heading} className='p-2'>{heading}</th>)}</tr></thead><tbody>
               {optimizerDiagnostics.summary.per_stadium_turf_metrics.map((row: any) => <tr key={row.host_location_id || row.host_location_name} className='border-t'>
                 <td className='p-2'>{row.host_location_name || row.host_location_id}</td>
-                <td className='p-2'>{row.turf_games_found ?? 0}</td>
-                <td className='p-2'>{String(row.turf_active_time_blocks_before ?? '—')} → {String(row.turf_active_time_blocks_after ?? '—')}</td>
-                <td className='p-2'>{String(row.turf_single_game_blocks_before ?? '—')} → {String(row.turf_single_game_blocks_after ?? '—')}</td>
-                <td className='p-2'>{String(row.turf_two_game_blocks_before ?? '—')} → {String(row.turf_two_game_blocks_after ?? '—')}</td>
-                <td className='p-2'>{String(row.latest_turf_start_time_before ?? '—')} → {String(row.latest_turf_start_time_after ?? '—')}</td>
+                <td className='p-2'>{row.turf_games ?? row.turf_games_found ?? 0}</td>
+                <td className='p-2'>{String(row.active_blocks_before ?? row.turf_active_time_blocks_before ?? '—')} → {String(row.active_blocks_after ?? row.turf_active_time_blocks_after ?? '—')}</td>
+                <td className='p-2'>{String(row.single_game_blocks_before ?? row.turf_single_game_blocks_before ?? '—')} → {String(row.single_game_blocks_after ?? row.turf_single_game_blocks_after ?? '—')}</td>
+                <td className='p-2'>{String(row.two_game_blocks_before ?? row.turf_two_game_blocks_before ?? '—')} → {String(row.two_game_blocks_after ?? row.turf_two_game_blocks_after ?? '—')}</td>
+                <td className='p-2'>{String(row.latest_start_before ?? row.latest_turf_start_time_before ?? '—')} → {String(row.latest_start_after ?? row.latest_turf_start_time_after ?? '—')}</td>
                 <td className='p-2'>{String(row.late_large_game_count_at_3pm_or_4pm_before ?? 0)} → {String(row.late_large_game_count_at_3pm_or_4pm_after ?? 0)}</td>
-                <td className='p-2'>{row.candidates_accepted ?? 0}</td>
-                <td className='p-2'>{row.candidates_rejected ?? 0}</td>
-                <td className='p-2'>{row.top_rejection_reasons ? Object.keys(row.top_rejection_reasons).slice(0, 3).join(', ') : '—'}</td>
+                <td className='p-2'>{row.accepted_repacked_dates ?? row.candidates_accepted ?? 0}</td>
+                <td className='p-2'>{row.rejected_no_op_dates ?? row.candidates_rejected ?? 0}</td>
+                <td className='p-2'>{row.top_no_op_reason ?? (row.top_rejection_reasons ? Object.keys(row.top_rejection_reasons).slice(0, 3).join(', ') : '—')}</td>
               </tr>)}
             </tbody></table>
           </div> : null}
-          {optimizerDiagnostics.proposed_changes?.length ? <details className='mt-3'><summary className='cursor-pointer text-blue-700 underline'>View accepted moves</summary><pre className='mt-2 max-h-64 overflow-auto rounded bg-slate-900 p-2 text-xs text-slate-50'>{safeStringify(optimizerDiagnostics.proposed_changes, 8000)}</pre></details> : null}
-          {optimizerDiagnostics.rejected_changes?.length ? <details className='mt-3'><summary className='cursor-pointer text-blue-700 underline'>View rejected candidates</summary><pre className='mt-2 max-h-64 overflow-auto rounded bg-slate-900 p-2 text-xs text-slate-50'>{safeStringify(optimizerDiagnostics.rejected_changes, 8000)}</pre></details> : null}
-          {optimizerDiagnostics.rejected_move_reasons && Object.keys(optimizerDiagnostics.rejected_move_reasons).length ? <details className='mt-3'><summary className='cursor-pointer text-blue-700 underline'>View rejection reasons logged</summary><pre className='mt-2 max-h-64 overflow-auto rounded bg-slate-900 p-2 text-xs text-slate-50'>{safeStringify(optimizerDiagnostics.rejected_move_reasons, 8000)}</pre></details> : null}
+          {optimizerDiagnostics.proposed_changes?.length ? <details className='mt-3'><summary className='cursor-pointer text-blue-700 underline'>View accepted repacks</summary><pre className='mt-2 max-h-64 overflow-auto rounded bg-slate-900 p-2 text-xs text-slate-50'>{safeStringify(optimizerDiagnostics.proposed_changes, 8000)}</pre></details> : null}
+          {optimizerDiagnostics.rejected_changes?.length ? <details className='mt-3'><summary className='cursor-pointer text-blue-700 underline'>View rejected/no-op repacks</summary><pre className='mt-2 max-h-64 overflow-auto rounded bg-slate-900 p-2 text-xs text-slate-50'>{safeStringify(optimizerDiagnostics.rejected_changes, 8000)}</pre></details> : null}
+          {optimizerDiagnostics.rejected_move_reasons && Object.keys(optimizerDiagnostics.rejected_move_reasons).length ? <details className='mt-3'><summary className='cursor-pointer text-blue-700 underline'>View rejection/no-op reasons logged</summary><pre className='mt-2 max-h-64 overflow-auto rounded bg-slate-900 p-2 text-xs text-slate-50'>{safeStringify(optimizerDiagnostics.rejected_move_reasons, 8000)}</pre></details> : null}
           <details className='mt-3'><summary className='cursor-pointer text-blue-700 underline'>View Optimization Summary Diagnostics</summary><pre className='mt-2 max-h-80 overflow-auto rounded bg-slate-900 p-2 text-xs text-slate-50'>{safeStringify(optimizerDiagnostics, 12000)}</pre></details>
         </div> : null}
         <div className='mb-3 rounded border bg-slate-50 p-3'>
