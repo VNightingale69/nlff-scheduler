@@ -51,13 +51,26 @@ export async function apiFetch(path: string, opts: RequestInit = {}, token?: str
     const raw = await res.text();
     const parsed = await parseJsonSafely(raw);
 
+    const detail = typeof parsed === 'object' && parsed ? (parsed as { detail?: unknown }).detail : undefined;
+    const validationSummary =
+      detail && typeof detail === 'object' && typeof (detail as { validation_summary?: unknown }).validation_summary === 'object'
+        ? (detail as { validation_summary: { message?: unknown; issues?: unknown } }).validation_summary
+        : null;
+    const validationIssueLines = Array.isArray(validationSummary?.issues)
+      ? validationSummary.issues.flatMap((issue: any) => Array.isArray(issue?.summaries) ? issue.summaries : [issue?.issue_type]).filter(Boolean)
+      : [];
+
     const message =
-      typeof parsed === 'object' && parsed && typeof (parsed as { detail?: unknown }).detail === 'string'
-        ? (parsed as { detail: string }).detail
+      validationSummary && typeof validationSummary.message === 'string'
+        ? [validationSummary.message, ...validationIssueLines.map((line: unknown) => `• ${String(line)}`)].join('\n')
+        : typeof detail === 'string'
+        ? detail
+        : detail && typeof detail === 'object' && typeof (detail as { message?: unknown }).message === 'string'
+        ? (detail as { message: string }).message
         : typeof parsed === 'object' && parsed && typeof (parsed as { message?: unknown }).message === 'string'
         ? (parsed as { message: string }).message
         : parsed
-        ? JSON.stringify(parsed)
+        ? 'Request failed. Please review the validation summary and try again.'
         : 'Request failed';
 
     throw new ApiError(message, res.status, parsed);
