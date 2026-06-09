@@ -750,8 +750,8 @@ class GameValidationResponse(BaseModel):
 
 
 class ScorePayload(BaseModel):
-    home_score: int
-    away_score: int
+    home_score: int | str
+    away_score: int | str
     community_admin_notes: str | None = None
     league_admin_notes: str | None = None
 
@@ -790,8 +790,10 @@ class PublicGameRead(BaseModel):
     game_status_code: str
     game_status_label: str
     public_score_status: str | None = None
-    home_score: int | None = None
-    away_score: int | None = None
+    home_score: int | str | None = None
+    away_score: int | str | None = None
+    home_forfeit: bool = False
+    away_forfeit: bool = False
     public_notes: str | None = None
 
 

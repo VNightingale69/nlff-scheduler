@@ -21,8 +21,8 @@ type Game = {
   away_team_name: string;
   game_status_label: string;
   public_score_status?: string | null;
-  home_score?: number | null;
-  away_score?: number | null;
+  home_score?: number | string | null;
+  away_score?: number | string | null;
   week_label?: string | null;
   date_type?: string | null;
 };
@@ -171,7 +171,7 @@ function PublicScheduleContent() {
                   <td className='p-2'>{g.away_team_name}</td>
                   <td className='p-2'>{g.date_type === 'PLAYOFF' ? 'PLAYOFF' : g.week_label || 'Regular Season'}</td>
                   <td className='p-2'>{g.game_status_label}</td>
-                  <td className='p-2'>{g.public_score_status === 'APPROVED' ? `${g.home_team_name} ${g.home_score}, ${g.away_team_name} ${g.away_score}` : g.public_score_status === 'SCORE_PENDING' ? 'Score Pending' : ''}</td>
+                  <td className='p-2'>{['APPROVED','PUBLISHED'].includes(g.public_score_status || '') ? `${g.home_team_name} ${g.home_score}, ${g.away_team_name} ${g.away_score}` : g.public_score_status === 'SCORE_PENDING' ? 'Score Pending' : ''}</td>
                 </tr>
               ))}
             </tbody>

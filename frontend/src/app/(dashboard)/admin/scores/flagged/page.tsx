@@ -17,7 +17,7 @@ export default function FlaggedScoresPage() {
     const away = window.prompt('Official away score', game.away_score ?? '');
     if (away === null) return;
     const note = window.prompt('Resolution note', game.league_admin_notes ?? '') || '';
-    await apiFetch(`/scores/${game.game_id}/resolve-conflict`, { method: 'POST', body: JSON.stringify({ home_score: Number(home), away_score: Number(away), league_admin_notes: note }) }, token);
+    await apiFetch(`/scores/${game.game_id}/resolve-conflict`, { method: 'POST', body: JSON.stringify({ home_score: String(home).trim(), away_score: String(away).trim(), league_admin_notes: note }) }, token);
     setMessage('Flagged score resolved and approved.');
     await load();
   };

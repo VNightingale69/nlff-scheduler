@@ -63,6 +63,66 @@ class ScoreTrackingTest(unittest.TestCase):
     def _submit(self, user, game=None, home=20, away=12):
         return self.client.patch(f'/api/scores/{game or self.game.id}/submit', headers=self._token(user.id), json={'home_score': home, 'away_score': away})
 
+    def test_missing_score_summary_scopes_to_community_and_clears_after_submit(self):
+        home_summary = self.client.get('/api/scores/missing-summary', headers=self._token(self.home_user.id))
+        self.assertEqual(home_summary.status_code, 200, home_summary.text)
+        self.assertEqual(home_summary.json()['missing_count'], 1)
+        self.assertEqual(home_summary.json()['link_target'], '/admin/score-entry')
+        self.assertEqual(home_summary.json()['missing_games'][0]['game_id'], str(self.game.id))
+
+        other_summary = self.client.get('/api/scores/missing-summary', headers=self._token(self.other_user.id))
+        self.assertEqual(other_summary.status_code, 200, other_summary.text)
+        self.assertEqual(other_summary.json()['missing_count'], 1)
+        self.assertEqual(other_summary.json()['missing_games'][0]['game_id'], str(self.other_game.id))
+
+        submit = self.client.patch(f'/api/scores/{self.game.id}/submit', headers=self._token(self.home_user.id), json={'home_score': '', 'away_score': '14'})
+        self.assertEqual(submit.status_code, 200, submit.text)
+        self.assertEqual(submit.json()['score']['home_score'], 0)
+        self.assertEqual(submit.json()['score']['away_score'], 14)
+        cleared = self.client.get('/api/scores/missing-summary', headers=self._token(self.home_user.id))
+        self.assertEqual(cleared.status_code, 200, cleared.text)
+        self.assertEqual(cleared.json()['missing_count'], 0)
+
+    def test_blank_normalization_validation_and_forfeits(self):
+        blank_away = self.client.patch(f'/api/scores/{self.game.id}/submit', headers=self._token(self.home_user.id), json={'home_score': '21', 'away_score': ''})
+        self.assertEqual(blank_away.status_code, 200, blank_away.text)
+        self.assertEqual(blank_away.json()['score']['away_score'], 0)
+
+        for bad_home in ['-1', '1.5', 'W', '7F']:
+            response = self.client.patch(f'/api/scores/{self.other_game.id}/submit', headers=self._token(self.away_user.id), json={'home_score': bad_home, 'away_score': '1'})
+            self.assertEqual(response.status_code, 422, response.text)
+            self.assertIn('Scores must be non-negative whole numbers, or F for a forfeiting team.', response.text)
+
+        home_forfeit = self.client.patch(f'/api/scores/{self.other_game.id}/submit', headers=self._token(self.away_user.id), json={'home_score': 'f', 'away_score': ''})
+        self.assertEqual(home_forfeit.status_code, 200, home_forfeit.text)
+        self.assertEqual(home_forfeit.json()['score']['home_score'], 'F')
+        self.assertEqual(home_forfeit.json()['score']['away_score'], 1)
+        self.assertTrue(home_forfeit.json()['score']['home_forfeit'])
+        submission = home_forfeit.json()['submission_id']
+        self.assertTrue(submission)
+
+        ff = self.client.patch(f'/api/scores/{self.game.id}/submit', headers=self._token(self.home_user.id), json={'home_score': 'F', 'away_score': 'F'})
+        self.assertEqual(ff.status_code, 422, ff.text)
+
+    def test_scheduling_admin_can_publish_forfeit_and_public_hides_until_published(self):
+        edit = self.client.patch(f'/api/scores/{self.game.id}', headers=self._token(self.scheduling_user.id), json={'home_score': '', 'away_score': 'F'})
+        self.assertEqual(edit.status_code, 200, edit.text)
+        self.assertEqual(edit.json()['score']['home_score'], 1)
+        self.assertEqual(edit.json()['score']['away_score'], 'F')
+        approve = self.client.post(f'/api/scores/{self.game.id}/approve', headers=self._token(self.scheduling_user.id), json={})
+        self.assertEqual(approve.status_code, 200, approve.text)
+        hidden_public = self.client.get('/api/public/schedule?page_size=100')
+        item = next(item for item in hidden_public.json()['items'] if item['id'] == str(self.game.id))
+        self.assertIsNone(item['home_score'])
+
+        publish = self.client.post(f'/api/scores/{self.game.id}/publish', headers=self._token(self.scheduling_user.id))
+        self.assertEqual(publish.status_code, 200, publish.text)
+        public = self.client.get('/api/public/schedule?page_size=100')
+        item = next(item for item in public.json()['items'] if item['id'] == str(self.game.id))
+        self.assertEqual(item['home_score'], 1)
+        self.assertEqual(item['away_score'], 'F')
+        self.assertEqual(item['public_score_status'], 'PUBLISHED')
+
     def test_community_admin_can_submit_when_home_or_away_but_not_unrelated(self):
         home_response = self._submit(self.home_user)
         self.assertEqual(home_response.status_code, 200, home_response.text)
