@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session, aliased
 from app.config import ADMIN_SEED_EMAIL, ENABLE_TURF_OPTIMIZATION, RULEBOOK_MAX_SIZE_BYTES, RULEBOOK_UPLOAD_DIR
 from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN, enforce_organization_scope, get_current_user, is_community_admin, is_league_admin, normalize_role_name, require_roles
 from app.database import get_db
-from app.models import Division, Field, FieldConfigurationOption, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostPlanSelection, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Rulebook, ScheduleChangeLog, ScoreSubmission, Season, Team, TurfWave, User, Week
+from app.models import Division, Field, FieldConfigurationOption, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostPlanSelection, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Rulebook, ScheduleChangeLog, ScoreHistory, ScoreSubmission, Season, Team, TurfWave, User, Week
 from app.schemas import (
     DivisionCreate, DivisionRead, FieldConfigurationOptionCreate, FieldConfigurationOptionRead, FieldCreate, FieldRead, GameCreate, GameRead, GameSaveResponse, ManualGameBulkEditRequest, ManualGameBulkEditResponse, ManualGameEditRequest, ManualGameEditResponse, ScheduleChangeLogRead, ScheduleEditWarning,
     OrganizationDivisionParticipationBulkUpsertRequest, OrganizationDivisionParticipationRead,
@@ -25078,11 +25078,17 @@ def get_saved_scheduled_game_rows_for_export(db: Session, season_id: uuid.UUID |
     return q.order_by(Game.game_date, Game.kickoff_time, HostLocation.name, FieldInstance.field_name, home.name, away.name).all()
 
 
-SCORE_STATUS_SCHEDULED = 'SCHEDULED'
-SCORE_STATUS_PENDING = 'SCORE_PENDING'
+SCORE_STATUS_MISSING = 'MISSING'
+SCORE_STATUS_SCHEDULED = SCORE_STATUS_MISSING
+SCORE_STATUS_PENDING = 'MISSING'
 SCORE_STATUS_SUBMITTED = 'SUBMITTED'
 SCORE_STATUS_FLAGGED = 'FLAGGED'
+SCORE_STATUS_CONFLICT = 'CONFLICT'
 SCORE_STATUS_APPROVED = 'APPROVED'
+SCORE_STATUS_PUBLISHED = 'PUBLISHED'
+SCORE_STATUS_UNPUBLISHED = 'UNPUBLISHED'
+SCORE_STATUS_CORRECTION_PENDING = 'CORRECTION_PENDING'
+SCORE_REVIEW_STATUSES = {SCORE_STATUS_FLAGGED, SCORE_STATUS_CONFLICT, SCORE_STATUS_UNPUBLISHED, SCORE_STATUS_CORRECTION_PENDING}
 
 
 def _game_has_started(game: Game) -> bool:
@@ -25097,6 +25103,7 @@ def _effective_score_status(game: Game, score: GameScore | None = None) -> str:
     if active_score and active_score.score_status:
         return active_score.score_status
     return SCORE_STATUS_PENDING if _game_has_started(game) else SCORE_STATUS_SCHEDULED
+
 
 
 def _score_outcome(home_score: int, away_score: int) -> str:
@@ -25139,21 +25146,53 @@ def _get_or_create_game_score(db: Session, game: Game) -> GameScore:
     score = db.query(GameScore).filter(GameScore.game_id == game.id).first()
     if score:
         return score
-    score = GameScore(game_id=game.id, score_status=_effective_score_status(game, None))
+    score = GameScore(game_id=game.id, score_status=SCORE_STATUS_MISSING, is_published=False)
     db.add(score)
     db.flush()
     return score
 
 
-def _has_outcome_conflict(submissions: list[ScoreSubmission]) -> bool:
-    outcomes = {_score_outcome(item.home_score, item.away_score) for item in submissions}
-    return len(outcomes) > 1
+def _same_score_submission_exists(submissions: list[ScoreSubmission], home_score: int, away_score: int, community_id: uuid.UUID | None) -> bool:
+    return any(s.submission_source_community_id != community_id and s.home_score == home_score and s.away_score == away_score for s in submissions)
+
+
+def _different_score_submission_exists(submissions: list[ScoreSubmission], home_score: int, away_score: int, community_id: uuid.UUID | None) -> bool:
+    return any(s.submission_source_community_id != community_id and (s.home_score != home_score or s.away_score != away_score) for s in submissions)
 
 
 def _score_user_dict(user: User | None) -> dict | None:
     if not user:
         return None
     return {'id': str(user.id), 'full_name': user.full_name, 'email': user.email}
+
+
+def _score_snapshot(score: GameScore | None) -> dict:
+    return {
+        'home_score': score.home_score if score else None,
+        'away_score': score.away_score if score else None,
+        'score_status': score.score_status if score else SCORE_STATUS_MISSING,
+        'is_published': bool(score.is_published) if score else False,
+    }
+
+
+def _record_score_history(db: Session, game_id: uuid.UUID, action: str, before: dict, after_score: GameScore | None, actor: User | None, reason: str | None = None, actor_community_id: uuid.UUID | None = None) -> None:
+    after = _score_snapshot(after_score)
+    db.add(ScoreHistory(
+        game_id=game_id,
+        action=action,
+        previous_home_score=before.get('home_score'),
+        previous_away_score=before.get('away_score'),
+        new_home_score=after.get('home_score'),
+        new_away_score=after.get('away_score'),
+        previous_status=before.get('score_status'),
+        new_status=after.get('score_status'),
+        previous_is_published=before.get('is_published'),
+        new_is_published=after.get('is_published'),
+        actor_user_id=getattr(actor, 'id', None),
+        actor_role=normalize_role_name(getattr(getattr(actor, 'role', None), 'name', None)) if actor else None,
+        actor_community_id=actor_community_id or getattr(actor, 'organization_id', None),
+        reason=reason,
+    ))
 
 
 def _score_submission_dict(submission: ScoreSubmission) -> dict:
@@ -25173,22 +25212,55 @@ def _score_submission_dict(submission: ScoreSubmission) -> dict:
     }
 
 
+def _score_history_dict(item: ScoreHistory) -> dict:
+    return {
+        'id': str(item.id), 'game_id': str(item.game_id), 'action': item.action,
+        'previous_home_score': item.previous_home_score, 'previous_away_score': item.previous_away_score,
+        'new_home_score': item.new_home_score, 'new_away_score': item.new_away_score,
+        'previous_status': item.previous_status, 'new_status': item.new_status,
+        'previous_is_published': item.previous_is_published, 'new_is_published': item.new_is_published,
+        'actor_user_id': str(item.actor_user_id) if item.actor_user_id else None,
+        'actor': _score_user_dict(getattr(item, 'actor', None)),
+        'actor_role': item.actor_role,
+        'actor_community_id': str(item.actor_community_id) if item.actor_community_id else None,
+        'actor_community_name': getattr(getattr(item, 'actor_community', None), 'name', None),
+        'reason': item.reason,
+        'created_at': item.created_at.isoformat() if item.created_at else None,
+    }
+
+
 def _score_fields(score: GameScore | None, game: Game | None = None, public: bool = False) -> dict:
-    status_value = _effective_score_status(game, score) if game else (score.score_status if score else SCORE_STATUS_SCHEDULED)
+    status_value = (score.score_status if score and score.score_status else SCORE_STATUS_MISSING)
     if public:
-        if score and score.score_status == SCORE_STATUS_APPROVED:
-            return {'public_score_status': SCORE_STATUS_APPROVED, 'home_score': score.home_score, 'away_score': score.away_score}
-        return {'public_score_status': SCORE_STATUS_PENDING if game and _game_has_started(game) else SCORE_STATUS_SCHEDULED, 'home_score': None, 'away_score': None}
+        if score and score.is_published:
+            return {'public_score_status': SCORE_STATUS_PUBLISHED, 'home_score': score.home_score, 'away_score': score.away_score}
+        return {'public_score_status': SCORE_STATUS_MISSING, 'home_score': None, 'away_score': None}
     return {
         'score_status': status_value,
+        'published_status': 'Published' if score and score.is_published else 'Unpublished',
+        'is_published': bool(score.is_published) if score else False,
         'home_score': score.home_score if score else None,
         'away_score': score.away_score if score else None,
         'submitted_by_user_id': str(score.submitted_by_user_id) if score and score.submitted_by_user_id else None,
+        'submitted_by_community_id': str(score.submitted_by_community_id) if score and score.submitted_by_community_id else None,
         'submitted_by': _score_user_dict(getattr(score, 'submitted_by', None)) if score else None,
         'submitted_at': score.submitted_at.isoformat() if score and score.submitted_at else None,
         'approved_by_user_id': str(score.approved_by_user_id) if score and score.approved_by_user_id else None,
         'approved_by': _score_user_dict(getattr(score, 'approved_by', None)) if score else None,
         'approved_at': score.approved_at.isoformat() if score and score.approved_at else None,
+        'published_by_user_id': str(score.published_by_user_id) if score and score.published_by_user_id else None,
+        'published_by': _score_user_dict(getattr(score, 'published_by', None)) if score else None,
+        'published_at': score.published_at.isoformat() if score and score.published_at else None,
+        'unpublished_by_user_id': str(score.unpublished_by_user_id) if score and score.unpublished_by_user_id else None,
+        'unpublished_at': score.unpublished_at.isoformat() if score and score.unpublished_at else None,
+        'unpublished_reason': score.unpublished_reason if score else None,
+        'score_conflict': bool(score.score_conflict) if score else False,
+        'confirmed_by_opponent': bool(score.confirmed_by_opponent) if score else False,
+        'flagged': bool(score.flagged) if score else False,
+        'flag_reason': score.flag_reason if score else None,
+        'last_updated_by_user_id': str(score.last_updated_by_user_id) if score and score.last_updated_by_user_id else None,
+        'last_updated_by': _score_user_dict(getattr(score, 'last_updated_by', None)) if score else None,
+        'last_updated_at': score.last_updated_at.isoformat() if score and score.last_updated_at else None,
         'league_admin_notes': score.league_admin_notes if score else None,
         'community_admin_notes': score.community_admin_notes if score else None,
     }
@@ -25200,41 +25272,27 @@ def _score_game_dict(row, include_history: bool = False, db: Session | None = No
     wave = slot.turf_wave if slot and slot.turf_wave_id else None
     turf_configuration_code = _normalize_configuration_name(wave.preferred_layout_code) if wave else None
     data = {
-        'id': str(g.id),
-        'game_id': str(g.id),
-        'game_date': g.game_date.isoformat(),
-        'kickoff_time': g.kickoff_time.isoformat(),
-        'host_location_id': str(host.id) if host else None,
-        'host_location_name': host.name if host else '',
-        'field_id': str(fi.id) if fi else None,
-        'field_name': _field_export_display_label(slot, fi, db),
-        'field_type': slot.field_type if slot else None,
-        'turf_wave_id': str(slot.turf_wave_id) if slot and slot.turf_wave_id else None,
+        'id': str(g.id), 'game_id': str(g.id), 'game_date': g.game_date.isoformat(), 'kickoff_time': g.kickoff_time.isoformat(),
+        'host_location_id': str(host.id) if host else None, 'host_location_name': host.name if host else '',
+        'field_id': str(fi.id) if fi else None, 'field_name': _field_export_display_label(slot, fi, db),
+        'field_type': slot.field_type if slot else None, 'turf_wave_id': str(slot.turf_wave_id) if slot and slot.turf_wave_id else None,
         'turf_wave_start_time': wave.start_time.isoformat() if wave else None,
         'turf_configuration_code': turf_configuration_code if turf_configuration_code in TURF_APPROVED_LAYOUT_CODES else None,
         'turf_field_slot': _canonical_turf_field_slot_label(db, slot, fi) if slot and slot.turf_wave_id else _turf_field_slot_label(slot, fi),
         'host_community_id': str(host.organization_id) if host and host.organization_id else None,
         'host_community_name': getattr(getattr(host, 'organization', None), 'name', None) if host else None,
-        'division_id': str(div.id),
-        'division_name': div.name,
-        'division_group': div.division_group,
-        'week_id': str(g.week_id) if g.week_id else None,
-        'week_number': g.week.week_number if g.week else None,
-        'week_label': _week_label(g.week),
-        'date_type': _week_date_type(g.week),
-        'home_team_id': str(home.id),
-        'home_team_name': home.name,
-        'home_community_id': str(home.organization_id),
-        'away_team_id': str(away.id),
-        'away_team_name': away.name,
-        'away_community_id': str(away.organization_id),
-        'game_status_id': str(g.game_status_id),
-        'game_status_code': status.code,
-        'game_status_label': status.label,
+        'division_id': str(div.id), 'division_name': div.name, 'division_group': div.division_group,
+        'week_id': str(g.week_id) if g.week_id else None, 'week_number': g.week.week_number if g.week else None,
+        'week_label': _week_label(g.week), 'date_type': _week_date_type(g.week),
+        'home_team_id': str(home.id), 'home_team_name': home.name, 'home_community_id': str(home.organization_id),
+        'away_team_id': str(away.id), 'away_team_name': away.name, 'away_community_id': str(away.organization_id),
+        'game_status_id': str(g.game_status_id), 'game_status_code': status.code, 'game_status_label': status.label,
         **_score_fields(score, g),
     }
     if include_history:
         data['score_submissions'] = [_score_submission_dict(item) for item in sorted(g.score_submissions, key=lambda s: s.submitted_at or s.created_at)]
+        if db is not None:
+            data['score_history'] = [_score_history_dict(item) for item in db.query(ScoreHistory).filter(ScoreHistory.game_id == g.id).order_by(ScoreHistory.created_at, ScoreHistory.id).all()]
     return data
 
 
@@ -25242,130 +25300,298 @@ def _score_rows(db: Session, filters: dict | None = None, organization_filter_an
     return _schedule_management_rows(db, filters or {}, organization_filter_any_team=organization_filter_any_team)
 
 
-def _apply_score_filters(rows: list, status: str | None = None) -> list:
-    if not status:
-        return rows
-    normalized = status.strip().upper()
-    return [row for row in rows if _effective_score_status(row[0], getattr(row[0], 'score', None)) == normalized]
+def _apply_score_filters(rows: list, status: str | None = None, published: str | None = None, missing: bool = False, flagged: bool = False, conflicts: bool = False) -> list:
+    if status:
+        normalized = status.strip().upper()
+        rows = [row for row in rows if _effective_score_status(row[0], getattr(row[0], 'score', None)) == normalized]
+    if published:
+        want = published.strip().lower() in {'true', '1', 'published'}
+        rows = [row for row in rows if bool(getattr(getattr(row[0], 'score', None), 'is_published', False)) == want]
+    if missing:
+        rows = [row for row in rows if _effective_score_status(row[0], getattr(row[0], 'score', None)) == SCORE_STATUS_MISSING or getattr(getattr(row[0], 'score', None), 'home_score', None) is None or getattr(getattr(row[0], 'score', None), 'away_score', None) is None]
+    if flagged:
+        rows = [row for row in rows if _effective_score_status(row[0], getattr(row[0], 'score', None)) in SCORE_REVIEW_STATUSES or bool(getattr(getattr(row[0], 'score', None), 'flagged', False))]
+    if conflicts:
+        rows = [row for row in rows if _effective_score_status(row[0], getattr(row[0], 'score', None)) == SCORE_STATUS_CONFLICT or bool(getattr(getattr(row[0], 'score', None), 'score_conflict', False))]
+    return rows
 
 
+def _score_now() -> datetime:
+    return datetime.utcnow()
+
+
+def _mark_last_updated(score: GameScore, user: User) -> None:
+    score.last_updated_by_user_id = user.id
+    score.last_updated_at = _score_now()
+
+
+
+@router.get('/scores/my-community', dependencies=[Depends(require_roles(ROLE_COMMUNITY_ADMIN))])
 @router.get('/community/scores', dependencies=[Depends(require_roles(ROLE_COMMUNITY_ADMIN))])
-def community_scores(week_id: uuid.UUID | None = None, division_id: uuid.UUID | None = None, team_id: uuid.UUID | None = None, host_location_id: uuid.UUID | None = None, status: str | None = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def community_scores(week_id: uuid.UUID | None = None, division_id: uuid.UUID | None = None, team_id: uuid.UUID | None = None, host_location_id: uuid.UUID | None = None, status: str | None = None, published: str | None = None, missing: bool = False, flagged: bool = False, conflicts: bool = False, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     if not current_user.organization_id:
         raise HTTPException(403, 'User has no community scope')
-    rows = _score_rows(db, {
-        'organization_id': current_user.organization_id,
-        'week_id': week_id,
-        'division_id': division_id,
-        'team_id': team_id,
-        'host_location_id': host_location_id,
-    }, organization_filter_any_team=True)
-    rows = _apply_score_filters(rows, status)
+    rows = _score_rows(db, {'organization_id': current_user.organization_id, 'week_id': week_id, 'division_id': division_id, 'team_id': team_id, 'host_location_id': host_location_id}, organization_filter_any_team=True)
+    rows = _apply_score_filters(rows, status, published, missing, flagged, conflicts)
     return {'items': [_score_game_dict(row, include_history=True, db=db) for row in rows], 'total': len(rows)}
 
 
+@router.patch('/scores/{game_id}/submit', dependencies=[Depends(require_roles(ROLE_COMMUNITY_ADMIN))])
 @router.post('/community/games/{game_id}/score', dependencies=[Depends(require_roles(ROLE_COMMUNITY_ADMIN))])
 def submit_community_score(game_id: uuid.UUID, payload: ScorePayload, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     home_score, away_score = _validate_score_numbers(payload.home_score, payload.away_score)
     game = _ensure_scheduled_game(db, game_id)
     community_id = _ensure_community_can_score(game, current_user)
     active_score = _get_or_create_game_score(db, game)
-    if active_score.score_status == SCORE_STATUS_APPROVED:
-        raise HTTPException(400, 'Approved scores cannot be changed by community admins.')
-    if active_score.score_status == SCORE_STATUS_FLAGGED:
-        raise HTTPException(400, 'Flagged scores require League Admin review before additional community updates.')
-    submission = ScoreSubmission(
-        game_id=game.id,
-        home_score=home_score,
-        away_score=away_score,
-        submitted_by_user_id=current_user.id,
-        submitted_at=datetime.utcnow(),
-        submission_source_community_id=community_id,
-        community_admin_notes=payload.community_admin_notes,
-    )
+    if active_score.score_status in {SCORE_STATUS_APPROVED, SCORE_STATUS_PUBLISHED} or active_score.is_published:
+        raise HTTPException(400, 'Approved or published scores cannot be changed by community admins; flag an issue instead.')
+    if active_score.score_status in {SCORE_STATUS_CONFLICT, SCORE_STATUS_CORRECTION_PENDING}:
+        raise HTTPException(400, 'Scores under administrator review cannot be changed by community admins; flag an issue instead.')
+    before = _score_snapshot(active_score)
+    submission = ScoreSubmission(game_id=game.id, home_score=home_score, away_score=away_score, submitted_by_user_id=current_user.id, submitted_at=_score_now(), submission_source_community_id=community_id, community_admin_notes=payload.community_admin_notes)
     db.add(submission)
     db.flush()
-    submissions = db.query(ScoreSubmission).filter(ScoreSubmission.game_id == game.id).all()
+    previous_submissions = db.query(ScoreSubmission).filter(ScoreSubmission.game_id == game.id, ScoreSubmission.id != submission.id).all()
     active_score.home_score = home_score
     active_score.away_score = away_score
     active_score.submitted_by_user_id = current_user.id
+    active_score.submitted_by_community_id = community_id
     active_score.submitted_at = submission.submitted_at
     active_score.community_admin_notes = payload.community_admin_notes
     active_score.approved_by_user_id = None
     active_score.approved_at = None
-    active_score.score_status = SCORE_STATUS_FLAGGED if _has_outcome_conflict(submissions) else SCORE_STATUS_SUBMITTED
-    db.commit()
-    db.refresh(active_score)
-    return {'message': 'Score submitted for League Admin approval.', 'score': _score_fields(active_score, game), 'submission_id': str(submission.id)}
+    active_score.is_published = False
+    active_score.published_by_user_id = None
+    active_score.published_at = None
+    active_score.last_updated_by_user_id = current_user.id
+    active_score.last_updated_at = submission.submitted_at
+    if _different_score_submission_exists(previous_submissions, home_score, away_score, community_id):
+        active_score.score_status = SCORE_STATUS_CONFLICT
+        active_score.score_conflict = True
+        action = 'CONFLICT_DETECTED'
+    elif _same_score_submission_exists(previous_submissions, home_score, away_score, community_id):
+        active_score.score_status = SCORE_STATUS_SUBMITTED
+        active_score.confirmed_by_opponent = True
+        action = 'CONFIRMED_BY_OPPONENT'
+    else:
+        active_score.score_status = SCORE_STATUS_SUBMITTED
+        action = 'SUBMITTED' if before.get('score_status') == SCORE_STATUS_MISSING else 'UPDATED'
+    _record_score_history(db, game.id, action, before, active_score, current_user, payload.community_admin_notes, community_id)
+    db.commit(); db.refresh(active_score)
+    return {'message': 'Score submitted for Scheduling Administrator approval.', 'score': _score_fields(active_score, game), 'submission_id': str(submission.id)}
 
 
-@router.get('/admin/scores', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
-def admin_scores(week_id: uuid.UUID | None = None, division_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, host_location_id: uuid.UUID | None = None, status: str | None = None, date: date | None = None, db: Session = Depends(get_db)):
-    rows = _score_rows(db, {
-        'week_id': week_id,
-        'division_id': division_id,
-        'organization_id': organization_id,
-        'host_location_id': host_location_id,
-        'date': date,
-    }, organization_filter_any_team=True)
-    rows = _apply_score_filters(rows, status)
+@router.post('/scores/{game_id}/flag', dependencies=[Depends(require_roles(ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
+def flag_community_score(game_id: uuid.UUID, payload: ScoreApprovePayload | None = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    game = _ensure_scheduled_game(db, game_id)
+    role_name = normalize_role_name(current_user.role.name)
+    community_id = _ensure_community_can_score(game, current_user) if role_name == ROLE_COMMUNITY_ADMIN else current_user.organization_id
+    active_score = _get_or_create_game_score(db, game)
+    before = _score_snapshot(active_score)
+    active_score.score_status = SCORE_STATUS_FLAGGED
+    active_score.flagged = True
+    active_score.flag_reason = (getattr(payload, 'reason', None) or getattr(payload, 'league_admin_notes', None)) if payload else None
+    active_score.flagged_by_user_id = current_user.id
+    active_score.flagged_by_community_id = community_id
+    active_score.flagged_at = _score_now()
+    _mark_last_updated(active_score, current_user)
+    _record_score_history(db, game.id, 'FLAGGED', before, active_score, current_user, active_score.flag_reason, community_id)
+    db.commit(); db.refresh(active_score)
+    return {'score': _score_fields(active_score, game)}
+
+
+@router.get('/scores', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
+@router.get('/admin/scores', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
+def admin_scores(week_id: uuid.UUID | None = None, division_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, host_location_id: uuid.UUID | None = None, status: str | None = None, date: date | None = None, published: str | None = None, missing: bool = False, flagged: bool = False, conflicts: bool = False, db: Session = Depends(get_db)):
+    rows = _score_rows(db, {'week_id': week_id, 'division_id': division_id, 'organization_id': organization_id, 'host_location_id': host_location_id, 'date': date}, organization_filter_any_team=True)
+    rows = _apply_score_filters(rows, status, published, missing, flagged, conflicts)
     return {'items': [_score_game_dict(row, db=db) for row in rows], 'total': len(rows)}
 
 
-@router.put('/admin/games/{game_id}/score', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+@router.patch('/scores/{game_id}', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
+@router.put('/admin/games/{game_id}/score', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
 def admin_upsert_score(game_id: uuid.UUID, payload: ScorePayload, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     home_score, away_score = _validate_score_numbers(payload.home_score, payload.away_score)
     game = _ensure_scheduled_game(db, game_id)
     active_score = _get_or_create_game_score(db, game)
+    before = _score_snapshot(active_score)
+    was_published = bool(active_score.is_published)
     active_score.home_score = home_score
     active_score.away_score = away_score
-    active_score.score_status = SCORE_STATUS_SUBMITTED
     active_score.submitted_by_user_id = current_user.id
-    active_score.submitted_at = datetime.utcnow()
-    active_score.approved_by_user_id = None
-    active_score.approved_at = None
+    active_score.submitted_by_community_id = current_user.organization_id
+    active_score.submitted_at = _score_now()
     active_score.league_admin_notes = payload.league_admin_notes
     if payload.community_admin_notes is not None:
         active_score.community_admin_notes = payload.community_admin_notes
-    db.commit()
-    db.refresh(active_score)
+    active_score.score_conflict = False
+    active_score.flagged = False
+    if was_published:
+        active_score.is_published = False
+        active_score.unpublished_by_user_id = current_user.id
+        active_score.unpublished_at = _score_now()
+        active_score.unpublished_reason = 'Score corrected after publication.'
+        active_score.score_status = SCORE_STATUS_CORRECTION_PENDING
+    else:
+        active_score.score_status = SCORE_STATUS_SUBMITTED
+        active_score.approved_by_user_id = None
+        active_score.approved_at = None
+    _mark_last_updated(active_score, current_user)
+    _record_score_history(db, game.id, 'CORRECTED' if was_published else 'UPDATED', before, active_score, current_user, payload.league_admin_notes)
+    db.commit(); db.refresh(active_score)
     return {'score': _score_fields(active_score, game)}
 
 
-@router.post('/admin/games/{game_id}/score/approve', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+def _approve_score_common(db: Session, game: Game, score: GameScore, current_user: User, notes: str | None = None) -> None:
+    if score.home_score is None or score.away_score is None:
+        raise HTTPException(400, 'No complete score is available to approve.')
+    score.score_status = SCORE_STATUS_APPROVED
+    score.approved_by_user_id = current_user.id
+    score.approved_at = _score_now()
+    score.score_conflict = False
+    score.flagged = False
+    if notes is not None:
+        score.league_admin_notes = notes
+    _mark_last_updated(score, current_user)
+
+
+def _publish_score_common(score: GameScore, current_user: User) -> None:
+    if score.home_score is None or score.away_score is None:
+        raise HTTPException(400, 'No complete score is available to publish.')
+    score.is_published = True
+    score.score_status = SCORE_STATUS_PUBLISHED
+    score.published_by_user_id = current_user.id
+    score.published_at = _score_now()
+    score.unpublished_at = None
+    score.unpublished_by_user_id = None
+    score.unpublished_reason = None
+    _mark_last_updated(score, current_user)
+
+
+@router.post('/scores/{game_id}/approve', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
+@router.post('/admin/games/{game_id}/score/approve', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
 def admin_approve_score(game_id: uuid.UUID, payload: ScoreApprovePayload | None = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     game = _ensure_scheduled_game(db, game_id)
     active_score = db.query(GameScore).filter(GameScore.game_id == game.id).first()
-    if not active_score or active_score.home_score is None or active_score.away_score is None:
+    if not active_score:
         raise HTTPException(400, 'No score is available to approve.')
-    active_score.score_status = SCORE_STATUS_APPROVED
-    active_score.approved_by_user_id = current_user.id
-    active_score.approved_at = datetime.utcnow()
-    if payload and payload.league_admin_notes is not None:
-        active_score.league_admin_notes = payload.league_admin_notes
-    db.commit()
-    db.refresh(active_score)
+    before = _score_snapshot(active_score)
+    _approve_score_common(db, game, active_score, current_user, payload.league_admin_notes if payload else None)
+    _record_score_history(db, game.id, 'APPROVED', before, active_score, current_user, payload.league_admin_notes if payload else None)
+    db.commit(); db.refresh(active_score)
     return {'score': _score_fields(active_score, game)}
 
 
-@router.get('/admin/scores/missing', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
-def admin_missing_scores(db: Session = Depends(get_db)):
-    rows = [row for row in _score_rows(db) if _game_has_started(row[0]) and _effective_score_status(row[0], getattr(row[0], 'score', None)) != SCORE_STATUS_APPROVED]
+@router.post('/scores/{game_id}/publish', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
+def admin_publish_score(game_id: uuid.UUID, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    game = _ensure_scheduled_game(db, game_id)
+    active_score = db.query(GameScore).filter(GameScore.game_id == game.id).first()
+    if not active_score or active_score.score_status not in {SCORE_STATUS_APPROVED, SCORE_STATUS_PUBLISHED}:
+        raise HTTPException(400, 'Score must be approved before publishing.')
+    before = _score_snapshot(active_score)
+    _publish_score_common(active_score, current_user)
+    _record_score_history(db, game.id, 'PUBLISHED', before, active_score, current_user)
+    db.commit(); db.refresh(active_score)
+    return {'score': _score_fields(active_score, game)}
+
+
+@router.post('/scores/{game_id}/approve-and-publish', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
+def admin_approve_and_publish_score(game_id: uuid.UUID, payload: ScoreApprovePayload | None = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    game = _ensure_scheduled_game(db, game_id)
+    active_score = db.query(GameScore).filter(GameScore.game_id == game.id).first()
+    if not active_score:
+        raise HTTPException(400, 'No score is available to approve and publish.')
+    before = _score_snapshot(active_score)
+    _approve_score_common(db, game, active_score, current_user, payload.league_admin_notes if payload else None)
+    _publish_score_common(active_score, current_user)
+    _record_score_history(db, game.id, 'PUBLISHED', before, active_score, current_user, payload.league_admin_notes if payload else None)
+    db.commit(); db.refresh(active_score)
+    return {'score': _score_fields(active_score, game)}
+
+
+@router.post('/scores/{game_id}/unpublish', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
+def admin_unpublish_score(game_id: uuid.UUID, payload: ScoreApprovePayload | None = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    game = _ensure_scheduled_game(db, game_id)
+    active_score = db.query(GameScore).filter(GameScore.game_id == game.id).first()
+    if not active_score or not active_score.is_published:
+        raise HTTPException(400, 'Score is not published.')
+    before = _score_snapshot(active_score)
+    active_score.is_published = False
+    active_score.score_status = SCORE_STATUS_UNPUBLISHED
+    active_score.unpublished_by_user_id = current_user.id
+    active_score.unpublished_at = _score_now()
+    active_score.unpublished_reason = (payload.reason if payload and getattr(payload, 'reason', None) is not None else (payload.league_admin_notes if payload else None))
+    _mark_last_updated(active_score, current_user)
+    _record_score_history(db, game.id, 'UNPUBLISHED', before, active_score, current_user, active_score.unpublished_reason)
+    db.commit(); db.refresh(active_score)
+    return {'score': _score_fields(active_score, game)}
+
+
+@router.post('/scores/{game_id}/clear', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
+def admin_clear_score(game_id: uuid.UUID, payload: ScoreApprovePayload | None = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    game = _ensure_scheduled_game(db, game_id)
+    active_score = _get_or_create_game_score(db, game)
+    before = _score_snapshot(active_score)
+    active_score.home_score = None; active_score.away_score = None; active_score.score_status = SCORE_STATUS_MISSING; active_score.is_published = False
+    active_score.approved_by_user_id = None; active_score.approved_at = None; active_score.published_by_user_id = None; active_score.published_at = None
+    active_score.score_conflict = False; active_score.confirmed_by_opponent = False; active_score.flagged = False
+    _mark_last_updated(active_score, current_user)
+    _record_score_history(db, game.id, 'CLEARED', before, active_score, current_user, payload.reason if payload and getattr(payload, 'reason', None) is not None else None)
+    db.commit(); db.refresh(active_score)
+    return {'score': _score_fields(active_score, game)}
+
+
+@router.post('/scores/{game_id}/resolve-conflict', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
+def admin_resolve_conflict(game_id: uuid.UUID, payload: ScorePayload, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    home_score, away_score = _validate_score_numbers(payload.home_score, payload.away_score)
+    game = _ensure_scheduled_game(db, game_id)
+    active_score = _get_or_create_game_score(db, game)
+    before = _score_snapshot(active_score)
+    active_score.home_score = home_score; active_score.away_score = away_score; active_score.score_conflict = False; active_score.flagged = False
+    active_score.score_status = SCORE_STATUS_APPROVED
+    active_score.approved_by_user_id = current_user.id; active_score.approved_at = _score_now()
+    if payload.league_admin_notes is not None: active_score.league_admin_notes = payload.league_admin_notes
+    _mark_last_updated(active_score, current_user)
+    _record_score_history(db, game.id, 'RESOLVED_CONFLICT', before, active_score, current_user, payload.league_admin_notes)
+    db.commit(); db.refresh(active_score)
+    return {'score': _score_fields(active_score, game)}
+
+
+@router.post('/admin/scores/{game_id}/flag', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
+def admin_flag_score(game_id: uuid.UUID, payload: ScoreApprovePayload | None = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    game = _ensure_scheduled_game(db, game_id)
+    active_score = _get_or_create_game_score(db, game)
+    before = _score_snapshot(active_score)
+    active_score.score_status = SCORE_STATUS_FLAGGED
+    active_score.flagged = True
+    active_score.flag_reason = payload.reason if payload and getattr(payload, 'reason', None) is not None else (payload.league_admin_notes if payload else None)
+    active_score.flagged_by_user_id = current_user.id
+    active_score.flagged_at = _score_now()
+    _mark_last_updated(active_score, current_user)
+    _record_score_history(db, game.id, 'FLAGGED', before, active_score, current_user, active_score.flag_reason)
+    db.commit(); db.refresh(active_score)
+    return {'score': _score_fields(active_score, game)}
+
+
+@router.get('/admin/scores/missing', dependencies=[Depends(require_roles(ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
+def admin_missing_scores(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    rows = [row for row in _score_rows(db, {'organization_id': current_user.organization_id} if normalize_role_name(current_user.role.name) == ROLE_COMMUNITY_ADMIN else None, organization_filter_any_team=True) if _game_has_started(row[0]) and (_effective_score_status(row[0], getattr(row[0], 'score', None)) == SCORE_STATUS_MISSING or getattr(getattr(row[0], 'score', None), 'home_score', None) is None or getattr(getattr(row[0], 'score', None), 'away_score', None) is None)]
     return {'items': [_score_game_dict(row, db=db) for row in rows], 'total': len(rows)}
 
 
-@router.get('/admin/scores/flagged', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
-def admin_flagged_scores(db: Session = Depends(get_db)):
-    rows = [row for row in _score_rows(db) if _effective_score_status(row[0], getattr(row[0], 'score', None)) == SCORE_STATUS_FLAGGED]
+@router.get('/admin/scores/flagged', dependencies=[Depends(require_roles(ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
+def admin_flagged_scores(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    scope = {'organization_id': current_user.organization_id} if normalize_role_name(current_user.role.name) == ROLE_COMMUNITY_ADMIN else None
+    rows = [row for row in _score_rows(db, scope, organization_filter_any_team=True) if _effective_score_status(row[0], getattr(row[0], 'score', None)) in SCORE_REVIEW_STATUSES or bool(getattr(getattr(row[0], 'score', None), 'flagged', False))]
     return {'items': [_score_game_dict(row, include_history=True, db=db) for row in rows], 'total': len(rows)}
 
 
-@router.get('/admin/games/{game_id}/score-history', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+@router.get('/scores/{game_id}/history', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
+@router.get('/admin/games/{game_id}/score-history', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
 def admin_score_history(game_id: uuid.UUID, db: Session = Depends(get_db)):
     game = _ensure_scheduled_game(db, game_id)
-    submissions = db.query(ScoreSubmission).filter(ScoreSubmission.game_id == game.id).order_by(ScoreSubmission.submitted_at, ScoreSubmission.created_at).all()
-    return {'items': [_score_submission_dict(item) for item in submissions], 'total': len(submissions)}
-
+    history = db.query(ScoreHistory).filter(ScoreHistory.game_id == game.id).order_by(ScoreHistory.created_at, ScoreHistory.id).all()
+    return {'items': [_score_history_dict(item) for item in history], 'total': len(history)}
 
 
 

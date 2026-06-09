@@ -758,6 +758,7 @@ class ScorePayload(BaseModel):
 
 class ScoreApprovePayload(BaseModel):
     league_admin_notes: str | None = None
+    reason: str | None = None
 
 
 class PublicGameRead(BaseModel):

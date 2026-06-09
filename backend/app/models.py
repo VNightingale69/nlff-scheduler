@@ -374,6 +374,7 @@ class Game(Base, TimestampMixin):
     manual_updated_by = relationship('User', foreign_keys=[manual_updated_by_user_id])
     score = relationship('GameScore', back_populates='game', cascade='all, delete-orphan', uselist=False)
     score_submissions = relationship('ScoreSubmission', back_populates='game', cascade='all, delete-orphan')
+    score_history = relationship('ScoreHistory', back_populates='game', cascade='all, delete-orphan')
     change_logs = relationship('ScheduleChangeLog', back_populates='game', cascade='all, delete-orphan')
 
 
@@ -405,21 +406,45 @@ class GameScore(Base, TimestampMixin):
     game_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('games.id', ondelete='CASCADE'), nullable=False, unique=True)
     home_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
     away_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    score_status: Mapped[str] = mapped_column(String(30), nullable=False, default='SCHEDULED')
+    score_status: Mapped[str] = mapped_column(String(30), nullable=False, default='MISSING')
     submitted_by_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('users.id'), nullable=True)
+    submitted_by_community_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('organizations.id'), nullable=True)
     submitted_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     approved_by_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('users.id'), nullable=True)
     approved_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    is_published: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    published_by_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('users.id'), nullable=True)
+    published_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    unpublished_by_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('users.id'), nullable=True)
+    unpublished_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    unpublished_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    score_conflict: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    confirmed_by_opponent: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    flagged: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    flag_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    flagged_by_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('users.id'), nullable=True)
+    flagged_by_community_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('organizations.id'), nullable=True)
+    flagged_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_updated_by_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('users.id'), nullable=True)
+    last_updated_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     league_admin_notes: Mapped[str | None] = mapped_column(Text)
     community_admin_notes: Mapped[str | None] = mapped_column(Text)
 
     game = relationship('Game', back_populates='score')
     submitted_by = relationship('User', foreign_keys=[submitted_by_user_id])
+    submitted_by_community = relationship('Organization', foreign_keys=[submitted_by_community_id])
     approved_by = relationship('User', foreign_keys=[approved_by_user_id])
+    published_by = relationship('User', foreign_keys=[published_by_user_id])
+    unpublished_by = relationship('User', foreign_keys=[unpublished_by_user_id])
+    flagged_by = relationship('User', foreign_keys=[flagged_by_user_id])
+    flagged_by_community = relationship('Organization', foreign_keys=[flagged_by_community_id])
+    last_updated_by = relationship('User', foreign_keys=[last_updated_by_user_id])
 
     __table_args__ = (
         Index('ix_game_scores_game_id', 'game_id'),
         Index('ix_game_scores_status', 'score_status'),
+        Index('ix_game_scores_published', 'is_published'),
+        Index('ix_game_scores_conflict', 'score_conflict'),
     )
 
 
@@ -441,4 +466,34 @@ class ScoreSubmission(Base, TimestampMixin):
     __table_args__ = (
         Index('ix_score_submissions_game_id', 'game_id'),
         Index('ix_score_submissions_source_community', 'submission_source_community_id'),
+    )
+
+
+class ScoreHistory(Base):
+    __tablename__ = 'score_history'
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    game_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('games.id', ondelete='CASCADE'), nullable=False)
+    action: Mapped[str] = mapped_column(String(50), nullable=False)
+    previous_home_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    previous_away_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    new_home_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    new_away_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    previous_status: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    new_status: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    previous_is_published: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    new_is_published: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    actor_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('users.id'), nullable=True)
+    actor_role: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    actor_community_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('organizations.id'), nullable=True)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    game = relationship('Game', back_populates='score_history')
+    actor = relationship('User', foreign_keys=[actor_user_id])
+    actor_community = relationship('Organization', foreign_keys=[actor_community_id])
+
+    __table_args__ = (
+        Index('ix_score_history_game_id', 'game_id'),
+        Index('ix_score_history_action', 'action'),
+        Index('ix_score_history_created_at', 'created_at'),
     )
