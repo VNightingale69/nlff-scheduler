@@ -323,5 +323,60 @@ class TurfCompactionOptimizerTest(unittest.TestCase):
         self.assertIn('No measurable turf improvement found.', diagnostics['summary']['no_safe_moves_message'])
         self.assertEqual(diagnostics['summary']['metrics_calculated_from_preview_state'], 'Yes')
 
+    def test_valid_empty_block_reshuffle_without_turf_improvement_is_rejected(self):
+        source_slot = self._slot('Medium Field 1', time(11, 0))
+        empty_target = self._slot('Medium Field 1', time(12, 0))
+        source_game = self._game(10, 11, source_slot)
+        self.db.commit()
+
+        diagnostics = run_post_schedule_repair_pass(self.db, self.season.id)
+
+        self.db.refresh(source_game)
+        self.assertEqual(source_game.kickoff_time, time(11, 0))
+        self.assertEqual(source_game.field_instance_id, source_slot.field_instance_id)
+        self.assertEqual(empty_target.assigned_game_id, None)
+        self.assertEqual(diagnostics['summary']['accepted_optimization_moves'], 0)
+        self.assertEqual(diagnostics['summary']['measurable_improvements_found'], 'No')
+        self.assertEqual(diagnostics['summary']['stop_reason'], 'no measurable turf improvement found')
+        self.assertIn('Rejected: valid move but no measurable turf improvement.', diagnostics['summary']['rejected_moves_by_reason'])
+        rejected = next(change for change in diagnostics['rejected_changes'] if change['reason'] == 'Rejected: valid move but no measurable turf improvement.')
+        self.assertEqual(rejected['turf_metric_before_value']['total_turf_active_time_blocks'], rejected['turf_metric_after_value']['total_turf_active_time_blocks'])
+        self.assertEqual(rejected['turf_metric_before_value']['total_turf_single_game_blocks'], rejected['turf_metric_after_value']['total_turf_single_game_blocks'])
+
+    def test_field_reassignment_same_time_without_turf_improvement_is_rejected(self):
+        source_slot = self._slot('Small Field 1', time(9, 0))
+        empty_same_block_slot = self._slot('Small Field 2', time(9, 0))
+        source_game = self._game(0, 1, source_slot)
+        self.db.commit()
+
+        diagnostics = run_post_schedule_repair_pass(self.db, self.season.id)
+
+        self.db.refresh(source_game)
+        self.assertEqual(source_game.field_instance_id, source_slot.field_instance_id)
+        self.assertEqual(empty_same_block_slot.assigned_game_id, None)
+        self.assertEqual(diagnostics['summary']['accepted_optimization_moves'], 0)
+        self.assertEqual(diagnostics['summary']['total_turf_active_time_blocks_before'], diagnostics['summary']['total_turf_active_time_blocks_after'])
+        self.assertIn('Rejected: valid move but no measurable turf improvement.', diagnostics['summary']['rejected_moves_by_reason'])
+
+    def test_accepted_changes_include_required_metric_impact_fields(self):
+        target_booked = self._slot('Small Field 1', time(9, 0))
+        self._slot('Small Field 2', time(9, 0))
+        source_slot = self._slot('Small Field 1', time(11, 0))
+        self._game(0, 1, target_booked)
+        self._game(2, 3, source_slot)
+        self.db.commit()
+
+        diagnostics = run_post_schedule_repair_pass(self.db, self.season.id)
+
+        accepted_change = diagnostics['accepted_changes'][0]
+        self.assertEqual(diagnostics['summary']['accepted_optimization_moves'], 1)
+        self.assertEqual(diagnostics['summary']['candidates_accepted'], 1)
+        self.assertTrue(accepted_change['metric_impact'])
+        self.assertTrue(accepted_change['metric_improved'])
+        self.assertGreater(accepted_change['score_delta'], 0)
+        self.assertIn('accepted_reason', accepted_change)
+        self.assertIn('turf_metric_before_value', accepted_change)
+        self.assertIn('turf_metric_after_value', accepted_change)
+
 if __name__ == '__main__':
     unittest.main()
