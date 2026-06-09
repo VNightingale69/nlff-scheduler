@@ -25106,7 +25106,15 @@ def _effective_score_status(game: Game, score: GameScore | None = None) -> str:
 
 
 
-def _score_outcome(home_score: int, away_score: int) -> str:
+FORFEIT_WIN_SCORE = 1
+SCORE_INPUT_VALIDATION_MESSAGE = 'Scores must be non-negative whole numbers, or F for a forfeiting team.'
+
+
+def _score_outcome(home_score: int, away_score: int, home_forfeit: bool = False, away_forfeit: bool = False) -> str:
+    if home_forfeit:
+        return 'AWAY_WIN'
+    if away_forfeit:
+        return 'HOME_WIN'
     if home_score > away_score:
         return 'HOME_WIN'
     if away_score > home_score:
@@ -25114,14 +25122,42 @@ def _score_outcome(home_score: int, away_score: int) -> str:
     return 'TIE'
 
 
+def _normalize_score_input(home_score: object, away_score: object) -> tuple[int, int, bool, bool, str | None]:
+    def parse(value: object) -> tuple[int | None, bool, bool]:
+        if value is None or isinstance(value, bool):
+            raise HTTPException(422, SCORE_INPUT_VALIDATION_MESSAGE)
+        text = str(value).strip() if isinstance(value, str) else str(value)
+        if text == '':
+            return 0, False, True
+        if text.lower() == 'f':
+            return None, True, False
+        if not text.isdigit():
+            raise HTTPException(422, SCORE_INPUT_VALIDATION_MESSAGE)
+        return int(text), False, False
+
+    home_value, home_forfeit, home_was_blank = parse(home_score)
+    away_value, away_forfeit, away_was_blank = parse(away_score)
+    if home_forfeit and away_forfeit:
+        raise HTTPException(422, SCORE_INPUT_VALIDATION_MESSAGE)
+    if home_forfeit:
+        home_value = 0
+        if away_was_blank:
+            away_value = FORFEIT_WIN_SCORE
+    if away_forfeit:
+        away_value = 0
+        if home_was_blank:
+            home_value = FORFEIT_WIN_SCORE
+    note = None
+    if home_forfeit or away_forfeit:
+        note = f"Submitted forfeit: Home {str(home_score).strip() if home_score is not None else ''}, Away {str(away_score).strip() if away_score is not None else ''}; normalized to Home {'F' if home_forfeit else home_value}, Away {'F' if away_forfeit else away_value}."
+    elif home_was_blank or away_was_blank:
+        note = f"Submitted score: {str(home_score).strip() if home_score is not None else ''}–{str(away_score).strip() if away_score is not None else ''}; normalized to {home_value}–{away_value}."
+    return int(home_value or 0), int(away_value or 0), home_forfeit, away_forfeit, note
+
+
 def _validate_score_numbers(home_score: object, away_score: object) -> tuple[int, int]:
-    if home_score is None or away_score is None:
-        raise HTTPException(422, 'Both home_score and away_score are required.')
-    if isinstance(home_score, bool) or isinstance(away_score, bool) or not isinstance(home_score, int) or not isinstance(away_score, int):
-        raise HTTPException(422, 'Scores must be whole numbers.')
-    if home_score < 0 or away_score < 0:
-        raise HTTPException(422, 'Scores cannot be negative.')
-    return home_score, away_score
+    normalized_home, normalized_away, _home_forfeit, _away_forfeit, _note = _normalize_score_input(home_score, away_score)
+    return normalized_home, normalized_away
 
 
 def _ensure_scheduled_game(db: Session, game_id: uuid.UUID) -> Game:
@@ -25152,12 +25188,12 @@ def _get_or_create_game_score(db: Session, game: Game) -> GameScore:
     return score
 
 
-def _same_score_submission_exists(submissions: list[ScoreSubmission], home_score: int, away_score: int, community_id: uuid.UUID | None) -> bool:
-    return any(s.submission_source_community_id != community_id and s.home_score == home_score and s.away_score == away_score for s in submissions)
+def _same_score_submission_exists(submissions: list[ScoreSubmission], home_score: int, away_score: int, community_id: uuid.UUID | None, home_forfeit: bool = False, away_forfeit: bool = False) -> bool:
+    return any(s.submission_source_community_id != community_id and s.home_score == home_score and s.away_score == away_score and bool(getattr(s, 'home_forfeit', False)) == home_forfeit and bool(getattr(s, 'away_forfeit', False)) == away_forfeit for s in submissions)
 
 
-def _different_score_submission_exists(submissions: list[ScoreSubmission], home_score: int, away_score: int, community_id: uuid.UUID | None) -> bool:
-    return any(s.submission_source_community_id != community_id and (s.home_score != home_score or s.away_score != away_score) for s in submissions)
+def _different_score_submission_exists(submissions: list[ScoreSubmission], home_score: int, away_score: int, community_id: uuid.UUID | None, home_forfeit: bool = False, away_forfeit: bool = False) -> bool:
+    return any(s.submission_source_community_id != community_id and (s.home_score != home_score or s.away_score != away_score or bool(getattr(s, 'home_forfeit', False)) != home_forfeit or bool(getattr(s, 'away_forfeit', False)) != away_forfeit) for s in submissions)
 
 
 def _score_user_dict(user: User | None) -> dict | None:
@@ -25172,6 +25208,8 @@ def _score_snapshot(score: GameScore | None) -> dict:
         'away_score': score.away_score if score else None,
         'score_status': score.score_status if score else SCORE_STATUS_MISSING,
         'is_published': bool(score.is_published) if score else False,
+        'home_forfeit': bool(getattr(score, 'home_forfeit', False)) if score else False,
+        'away_forfeit': bool(getattr(score, 'away_forfeit', False)) if score else False,
     }
 
 
@@ -25199,9 +25237,11 @@ def _score_submission_dict(submission: ScoreSubmission) -> dict:
     return {
         'id': str(submission.id),
         'game_id': str(submission.game_id),
-        'home_score': submission.home_score,
-        'away_score': submission.away_score,
-        'outcome': _score_outcome(submission.home_score, submission.away_score),
+        'home_score': 'F' if bool(getattr(submission, 'home_forfeit', False)) else submission.home_score,
+        'away_score': 'F' if bool(getattr(submission, 'away_forfeit', False)) else submission.away_score,
+        'home_forfeit': bool(getattr(submission, 'home_forfeit', False)),
+        'away_forfeit': bool(getattr(submission, 'away_forfeit', False)),
+        'outcome': _score_outcome(submission.home_score, submission.away_score, bool(getattr(submission, 'home_forfeit', False)), bool(getattr(submission, 'away_forfeit', False))),
         'submitted_by_user_id': str(submission.submitted_by_user_id),
         'submitted_by': _score_user_dict(getattr(submission, 'submitted_by', None)),
         'submitted_at': submission.submitted_at.isoformat() if submission.submitted_at else None,
@@ -25233,14 +25273,18 @@ def _score_fields(score: GameScore | None, game: Game | None = None, public: boo
     status_value = (score.score_status if score and score.score_status else SCORE_STATUS_MISSING)
     if public:
         if score and score.is_published:
-            return {'public_score_status': SCORE_STATUS_PUBLISHED, 'home_score': score.home_score, 'away_score': score.away_score}
-        return {'public_score_status': SCORE_STATUS_MISSING, 'home_score': None, 'away_score': None}
+            return {'public_score_status': SCORE_STATUS_PUBLISHED, 'home_score': 'F' if bool(getattr(score, 'home_forfeit', False)) else score.home_score, 'away_score': 'F' if bool(getattr(score, 'away_forfeit', False)) else score.away_score, 'home_forfeit': bool(getattr(score, 'home_forfeit', False)), 'away_forfeit': bool(getattr(score, 'away_forfeit', False))}
+        return {'public_score_status': SCORE_STATUS_MISSING, 'home_score': None, 'away_score': None, 'home_forfeit': False, 'away_forfeit': False}
     return {
         'score_status': status_value,
         'published_status': 'Published' if score and score.is_published else 'Unpublished',
         'is_published': bool(score.is_published) if score else False,
-        'home_score': score.home_score if score else None,
-        'away_score': score.away_score if score else None,
+        'home_score': 'F' if score and bool(getattr(score, 'home_forfeit', False)) else (score.home_score if score else None),
+        'away_score': 'F' if score and bool(getattr(score, 'away_forfeit', False)) else (score.away_score if score else None),
+        'home_score_value': score.home_score if score else None,
+        'away_score_value': score.away_score if score else None,
+        'home_forfeit': bool(getattr(score, 'home_forfeit', False)) if score else False,
+        'away_forfeit': bool(getattr(score, 'away_forfeit', False)) if score else False,
         'submitted_by_user_id': str(score.submitted_by_user_id) if score and score.submitted_by_user_id else None,
         'submitted_by_community_id': str(score.submitted_by_community_id) if score and score.submitted_by_community_id else None,
         'submitted_by': _score_user_dict(getattr(score, 'submitted_by', None)) if score else None,
@@ -25339,7 +25383,7 @@ def community_scores(week_id: uuid.UUID | None = None, division_id: uuid.UUID | 
 @router.patch('/scores/{game_id}/submit', dependencies=[Depends(require_roles(ROLE_COMMUNITY_ADMIN))])
 @router.post('/community/games/{game_id}/score', dependencies=[Depends(require_roles(ROLE_COMMUNITY_ADMIN))])
 def submit_community_score(game_id: uuid.UUID, payload: ScorePayload, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    home_score, away_score = _validate_score_numbers(payload.home_score, payload.away_score)
+    home_score, away_score, home_forfeit, away_forfeit, normalization_note = _normalize_score_input(payload.home_score, payload.away_score)
     game = _ensure_scheduled_game(db, game_id)
     community_id = _ensure_community_can_score(game, current_user)
     active_score = _get_or_create_game_score(db, game)
@@ -25348,12 +25392,14 @@ def submit_community_score(game_id: uuid.UUID, payload: ScorePayload, current_us
     if active_score.score_status in {SCORE_STATUS_CONFLICT, SCORE_STATUS_CORRECTION_PENDING}:
         raise HTTPException(400, 'Scores under administrator review cannot be changed by community admins; flag an issue instead.')
     before = _score_snapshot(active_score)
-    submission = ScoreSubmission(game_id=game.id, home_score=home_score, away_score=away_score, submitted_by_user_id=current_user.id, submitted_at=_score_now(), submission_source_community_id=community_id, community_admin_notes=payload.community_admin_notes)
+    submission = ScoreSubmission(game_id=game.id, home_score=home_score, away_score=away_score, home_forfeit=home_forfeit, away_forfeit=away_forfeit, submitted_by_user_id=current_user.id, submitted_at=_score_now(), submission_source_community_id=community_id, community_admin_notes=payload.community_admin_notes)
     db.add(submission)
     db.flush()
     previous_submissions = db.query(ScoreSubmission).filter(ScoreSubmission.game_id == game.id, ScoreSubmission.id != submission.id).all()
     active_score.home_score = home_score
     active_score.away_score = away_score
+    active_score.home_forfeit = home_forfeit
+    active_score.away_forfeit = away_forfeit
     active_score.submitted_by_user_id = current_user.id
     active_score.submitted_by_community_id = community_id
     active_score.submitted_at = submission.submitted_at
@@ -25365,18 +25411,19 @@ def submit_community_score(game_id: uuid.UUID, payload: ScorePayload, current_us
     active_score.published_at = None
     active_score.last_updated_by_user_id = current_user.id
     active_score.last_updated_at = submission.submitted_at
-    if _different_score_submission_exists(previous_submissions, home_score, away_score, community_id):
+    if _different_score_submission_exists(previous_submissions, home_score, away_score, community_id, home_forfeit, away_forfeit):
         active_score.score_status = SCORE_STATUS_CONFLICT
         active_score.score_conflict = True
         action = 'CONFLICT_DETECTED'
-    elif _same_score_submission_exists(previous_submissions, home_score, away_score, community_id):
+    elif _same_score_submission_exists(previous_submissions, home_score, away_score, community_id, home_forfeit, away_forfeit):
         active_score.score_status = SCORE_STATUS_SUBMITTED
         active_score.confirmed_by_opponent = True
         action = 'CONFIRMED_BY_OPPONENT'
     else:
         active_score.score_status = SCORE_STATUS_SUBMITTED
         action = 'SUBMITTED' if before.get('score_status') == SCORE_STATUS_MISSING else 'UPDATED'
-    _record_score_history(db, game.id, action, before, active_score, current_user, payload.community_admin_notes, community_id)
+    history_note = '; '.join(part for part in [payload.community_admin_notes, normalization_note] if part)
+    _record_score_history(db, game.id, action, before, active_score, current_user, history_note or None, community_id)
     db.commit(); db.refresh(active_score)
     return {'message': 'Score submitted for Scheduling Administrator approval.', 'score': _score_fields(active_score, game), 'submission_id': str(submission.id)}
 
@@ -25411,13 +25458,15 @@ def admin_scores(week_id: uuid.UUID | None = None, division_id: uuid.UUID | None
 @router.patch('/scores/{game_id}', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
 @router.put('/admin/games/{game_id}/score', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
 def admin_upsert_score(game_id: uuid.UUID, payload: ScorePayload, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    home_score, away_score = _validate_score_numbers(payload.home_score, payload.away_score)
+    home_score, away_score, home_forfeit, away_forfeit, normalization_note = _normalize_score_input(payload.home_score, payload.away_score)
     game = _ensure_scheduled_game(db, game_id)
     active_score = _get_or_create_game_score(db, game)
     before = _score_snapshot(active_score)
     was_published = bool(active_score.is_published)
     active_score.home_score = home_score
     active_score.away_score = away_score
+    active_score.home_forfeit = home_forfeit
+    active_score.away_forfeit = away_forfeit
     active_score.submitted_by_user_id = current_user.id
     active_score.submitted_by_community_id = current_user.organization_id
     active_score.submitted_at = _score_now()
@@ -25437,7 +25486,8 @@ def admin_upsert_score(game_id: uuid.UUID, payload: ScorePayload, current_user: 
         active_score.approved_by_user_id = None
         active_score.approved_at = None
     _mark_last_updated(active_score, current_user)
-    _record_score_history(db, game.id, 'CORRECTED' if was_published else 'UPDATED', before, active_score, current_user, payload.league_admin_notes)
+    history_note = '; '.join(part for part in [payload.league_admin_notes, normalization_note] if part)
+    _record_score_history(db, game.id, 'CORRECTED' if was_published else 'UPDATED', before, active_score, current_user, history_note or None)
     db.commit(); db.refresh(active_score)
     return {'score': _score_fields(active_score, game)}
 
@@ -25532,7 +25582,7 @@ def admin_clear_score(game_id: uuid.UUID, payload: ScoreApprovePayload | None = 
     game = _ensure_scheduled_game(db, game_id)
     active_score = _get_or_create_game_score(db, game)
     before = _score_snapshot(active_score)
-    active_score.home_score = None; active_score.away_score = None; active_score.score_status = SCORE_STATUS_MISSING; active_score.is_published = False
+    active_score.home_score = None; active_score.away_score = None; active_score.home_forfeit = False; active_score.away_forfeit = False; active_score.score_status = SCORE_STATUS_MISSING; active_score.is_published = False
     active_score.approved_by_user_id = None; active_score.approved_at = None; active_score.published_by_user_id = None; active_score.published_at = None
     active_score.score_conflict = False; active_score.confirmed_by_opponent = False; active_score.flagged = False
     _mark_last_updated(active_score, current_user)
@@ -25543,16 +25593,17 @@ def admin_clear_score(game_id: uuid.UUID, payload: ScoreApprovePayload | None = 
 
 @router.post('/scores/{game_id}/resolve-conflict', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
 def admin_resolve_conflict(game_id: uuid.UUID, payload: ScorePayload, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    home_score, away_score = _validate_score_numbers(payload.home_score, payload.away_score)
+    home_score, away_score, home_forfeit, away_forfeit, normalization_note = _normalize_score_input(payload.home_score, payload.away_score)
     game = _ensure_scheduled_game(db, game_id)
     active_score = _get_or_create_game_score(db, game)
     before = _score_snapshot(active_score)
-    active_score.home_score = home_score; active_score.away_score = away_score; active_score.score_conflict = False; active_score.flagged = False
+    active_score.home_score = home_score; active_score.away_score = away_score; active_score.home_forfeit = home_forfeit; active_score.away_forfeit = away_forfeit; active_score.score_conflict = False; active_score.flagged = False
     active_score.score_status = SCORE_STATUS_APPROVED
     active_score.approved_by_user_id = current_user.id; active_score.approved_at = _score_now()
     if payload.league_admin_notes is not None: active_score.league_admin_notes = payload.league_admin_notes
     _mark_last_updated(active_score, current_user)
-    _record_score_history(db, game.id, 'RESOLVED_CONFLICT', before, active_score, current_user, payload.league_admin_notes)
+    history_note = '; '.join(part for part in [payload.league_admin_notes, normalization_note] if part)
+    _record_score_history(db, game.id, 'RESOLVED_CONFLICT', before, active_score, current_user, history_note or None)
     db.commit(); db.refresh(active_score)
     return {'score': _score_fields(active_score, game)}
 
@@ -25571,6 +25622,16 @@ def admin_flag_score(game_id: uuid.UUID, payload: ScoreApprovePayload | None = N
     _record_score_history(db, game.id, 'FLAGGED', before, active_score, current_user, active_score.flag_reason)
     db.commit(); db.refresh(active_score)
     return {'score': _score_fields(active_score, game)}
+
+
+@router.get('/scores/missing-summary', dependencies=[Depends(require_roles(ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
+def score_missing_summary(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    role_name = normalize_role_name(current_user.role.name)
+    scope = {'organization_id': current_user.organization_id} if role_name == ROLE_COMMUNITY_ADMIN else None
+    rows = [row for row in _score_rows(db, scope, organization_filter_any_team=True) if _game_has_started(row[0]) and (_effective_score_status(row[0], getattr(row[0], 'score', None)) == SCORE_STATUS_MISSING or getattr(getattr(row[0], 'score', None), 'home_score', None) is None or getattr(getattr(row[0], 'score', None), 'away_score', None) is None)]
+    link_target = '/admin/score-entry' if role_name == ROLE_COMMUNITY_ADMIN else '/admin/scores/missing'
+    preview = [_score_game_dict(row, db=db) for row in rows[:5]]
+    return {'missing_count': len(rows), 'missing_games': preview, 'link_target': link_target}
 
 
 @router.get('/admin/scores/missing', dependencies=[Depends(require_roles(ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
