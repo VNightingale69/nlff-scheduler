@@ -63,6 +63,7 @@ export default function ScheduleManagementPage() {
   const [qualityLoading, setQualityLoading] = useState(true);
   const [qualityError, setQualityError] = useState('');
   const [error, setError] = useState('');
+  const [publicationMessage, setPublicationMessage] = useState('');
   const [publishDiagnostics, setPublishDiagnostics] = useState<any | null>(null);
   const [publicationLoading, setPublicationLoading] = useState(false);
 
@@ -132,9 +133,11 @@ export default function ScheduleManagementPage() {
     if (!seasonId || !canControlSchedulePublication) return;
     setPublicationLoading(true);
     setError('');
+    setPublicationMessage('');
     try {
       const result = await apiFetch(`/seasons/${seasonId}/${action}-schedule`, { method: 'POST' }, token);
       setPublishDiagnostics({ ...(publishDiagnostics || {}), ...(result as any) });
+      setPublicationMessage(String((result as any)?.message || (action === 'unpublish' ? 'Schedule unpublished.' : 'Schedule published.')));
       await load();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : `Unable to ${action} schedule.`);
@@ -277,7 +280,8 @@ export default function ScheduleManagementPage() {
     <div className='space-y-4'>
       <h1 className='text-2xl font-bold'>Schedule Management</h1>
 
-      {error ? <div className='rounded border border-red-300 bg-red-50 p-2 text-red-700'>{error}</div> : null}
+      {error ? <div className='whitespace-pre-line rounded border border-red-300 bg-red-50 p-2 text-red-700'>{error}</div> : null}
+      {publicationMessage ? <div className='rounded border border-emerald-300 bg-emerald-50 p-2 text-emerald-800'>{publicationMessage}</div> : null}
 
       {publishDiagnostics ? <div className='rounded border bg-slate-50 p-3 text-sm'>
         <div className='flex flex-wrap items-start justify-between gap-3'>

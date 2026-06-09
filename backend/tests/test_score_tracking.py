@@ -1,6 +1,7 @@
 import unittest
+from unittest.mock import patch
 import uuid
-from datetime import date, time
+from datetime import date, datetime, time, timedelta, timezone
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -148,6 +149,81 @@ class ScoreTrackingTest(unittest.TestCase):
         for path in ['approve', 'publish', 'unpublish', 'clear', 'resolve-conflict']:
             response = self.client.post(f'/api/scores/{self.game.id}/{path}', headers=self._token(self.home_user.id), json={'home_score': 1, 'away_score': 0})
             self.assertEqual(response.status_code, 403, f'{path}: {response.text}')
+
+
+    def test_publish_unpublish_and_republish_schedule_hash_lifecycle(self):
+        publish = self.client.post(f'/api/seasons/{self.season.id}/publish-schedule', headers=self._token(self.scheduling_user.id))
+        self.assertEqual(publish.status_code, 200, publish.text)
+        self.db.expire_all()
+        season = self.db.query(Season).filter(Season.id == self.season.id).one()
+        self.assertIsNotNone(season.last_published_schedule_hash)
+        self.assertEqual(season.last_published_game_count, 2)
+        first_hash = season.last_published_schedule_hash
+
+        before_game_ids = {game.id for game in self.db.query(Game).filter(Game.season_id == self.season.id).all()}
+        unpublish = self.client.post(f'/api/seasons/{self.season.id}/unpublish-schedule', headers=self._token(self.scheduling_user.id))
+        self.assertEqual(unpublish.status_code, 200, unpublish.text)
+        self.db.expire_all()
+        season = self.db.query(Season).filter(Season.id == self.season.id).one()
+        self.assertEqual(season.last_published_schedule_hash, first_hash)
+        self.assertEqual({game.id for game in self.db.query(Game).filter(Game.season_id == self.season.id).all()}, before_game_ids)
+
+        with patch('app.routes.api.build_publish_schedule_quality_report', side_effect=AssertionError('unchanged republish should not validate')):
+            republish = self.client.post(f'/api/seasons/{self.season.id}/publish-schedule', headers=self._token(self.scheduling_user.id))
+        self.assertEqual(republish.status_code, 200, republish.text)
+        self.assertTrue(republish.json()['republish_without_validation'])
+        self.assertEqual(republish.json()['message'], 'Schedule republished. No schedule changes were detected since it was last published.')
+
+    def test_already_unpublished_without_hash_republishes_if_games_unchanged_since_unpublish(self):
+        self.season.schedule_status = 'unpublished'
+        self.season.last_published_schedule_hash = None
+        self.season.last_published_game_count = None
+        self.season.schedule_unpublished_at = datetime.now(timezone.utc) + timedelta(days=1)
+        self.db.commit()
+
+        with patch('app.routes.api.build_publish_schedule_quality_report', side_effect=AssertionError('fallback unchanged republish should not validate')):
+            republish = self.client.post(f'/api/seasons/{self.season.id}/publish-schedule', headers=self._token(self.scheduling_user.id))
+        self.assertEqual(republish.status_code, 200, republish.text)
+        self.assertTrue(republish.json()['republish_without_validation'])
+        self.assertEqual(republish.json()['message'], 'Schedule republished. No schedule changes were detected since it was unpublished. Future publish checks will use the stored schedule snapshot.')
+        self.db.expire_all()
+        season = self.db.query(Season).filter(Season.id == self.season.id).one()
+        self.assertIsNotNone(season.last_published_schedule_hash)
+        self.assertEqual(season.last_published_game_count, 2)
+
+    def test_changed_republish_runs_validation_and_returns_summary(self):
+        self.season.schedule_status = 'unpublished'
+        self.season.last_published_schedule_hash = None
+        self.season.schedule_unpublished_at = datetime.now(timezone.utc) - timedelta(days=1)
+        self.db.commit()
+        validation = {
+            'final_validation_status': 'VALIDATION_FAILED',
+            'hard_errors': [{
+                'code': 'DOUBLEHEADER_NOT_BACK_TO_BACK',
+                'count': 1,
+                'details': [{
+                    'failure_code': 'DOUBLEHEADER_NOT_BACK_TO_BACK',
+                    'team_name': 'Westosha Girls 3-5 Maroon',
+                    'game_date': '2026-08-23',
+                    'kickoff_time': '09:00',
+                    'host_location_name': 'Westosha Stadium',
+                    'field_name': 'Turf A',
+                }],
+            }],
+            'warnings': [],
+            'overall_health': 'Blocked',
+            'generated_slot_integrity_diagnostics': {},
+        }
+        with patch('app.routes.api.build_publish_schedule_quality_report', return_value=validation) as validator:
+            republish = self.client.post(f'/api/seasons/{self.season.id}/publish-schedule', headers=self._token(self.scheduling_user.id))
+        self.assertEqual(republish.status_code, 400, republish.text)
+        validator.assert_called_once()
+        detail = republish.json()['detail']
+        self.assertEqual(detail['error'], 'publish_validation_failed')
+        self.assertEqual(detail['message'], 'Schedule changed since last publication and failed validation. Fix blocking issues before publishing.')
+        self.assertIn('validation_summary', detail)
+        self.assertNotIn('hard_errors', detail)
+        self.assertEqual(detail['validation_summary']['issues'][0]['issue_type'], 'DOUBLEHEADER_NOT_BACK_TO_BACK')
 
     def test_schedule_publication_permissions_and_score_preservation(self):
         publish_status = self.client.post(f'/api/seasons/{self.season.id}/publish-schedule', headers=self._token(self.scheduling_user.id))

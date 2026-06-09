@@ -199,7 +199,18 @@ class Season(Base, TimestampMixin):
     start_date: Mapped[Date] = mapped_column(Date, nullable=False)
     end_date: Mapped[Date] = mapped_column(Date, nullable=False)
     schedule_status: Mapped[str] = mapped_column(String(20), nullable=False, default='saved')
+    schedule_published_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    schedule_published_by_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('users.id'), nullable=True)
+    schedule_unpublished_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    schedule_unpublished_by_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('users.id'), nullable=True)
+    schedule_unpublished_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_published_schedule_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_published_game_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_published_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    schedule_modified_after_publish: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    schedule_published_by = relationship('User', foreign_keys=[schedule_published_by_user_id])
+    schedule_unpublished_by = relationship('User', foreign_keys=[schedule_unpublished_by_user_id])
 
 class Week(Base, TimestampMixin):
     __tablename__ = 'weeks'
