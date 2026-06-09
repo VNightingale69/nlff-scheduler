@@ -23961,29 +23961,74 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
             return 'game IDs preserved'
         return None
 
+    TURF_ACCEPTANCE_METRIC_NAMES = (
+        'total_turf_active_time_blocks',
+        'total_turf_single_game_blocks',
+        'total_turf_two_game_blocks',
+        'latest_turf_start_time',
+        'late_large_game_count_at_3pm_or_4pm',
+    )
+    VALID_NO_TURF_IMPROVEMENT_REASON = 'Rejected: valid move but no measurable turf improvement.'
+
     def _score_delta(before: dict[str, object], after: dict[str, object], *, hard_violation: bool = False) -> tuple[int, list[str]]:
         score = -1000 if hard_violation else 0
         improved: list[str] = []
-        if int(after['total_turf_single_game_blocks']) < int(before['total_turf_single_game_blocks']):
+        before_active = int(before['total_turf_active_time_blocks'])
+        after_active = int(after['total_turf_active_time_blocks'])
+        before_single = int(before['total_turf_single_game_blocks'])
+        after_single = int(after['total_turf_single_game_blocks'])
+        before_two = int(before['total_turf_two_game_blocks'])
+        after_two = int(after['total_turf_two_game_blocks'])
+        before_late_large = int(before.get('late_large_game_count_at_3pm_or_4pm') or 0)
+        after_late_large = int(after.get('late_large_game_count_at_3pm_or_4pm') or 0)
+        if after_single < before_single:
             score += 100
             improved.append('single-game turf block eliminated')
-        if int(after['total_turf_two_game_blocks']) > int(before['total_turf_two_game_blocks']):
+        elif after_single > before_single:
+            score -= 100
+        if after_two > before_two:
             score += 75
             improved.append('two-game turf block created')
+        elif after_two < before_two:
+            score -= 75
         before_latest = before.get('latest_turf_start_minutes')
         after_latest = after.get('latest_turf_start_minutes')
-        if after_latest is not None and before_latest is not None and int(after_latest) < int(before_latest):
-            score += 50
-            improved.append('latest turf start time improved')
-        if int(after['total_turf_active_time_blocks']) < int(before['total_turf_active_time_blocks']):
+        if after_latest is not None and before_latest is not None:
+            if int(after_latest) < int(before_latest):
+                score += 50
+                improved.append('latest turf start time improved')
+            elif int(after_latest) > int(before_latest):
+                score -= 50
+        if after_active < before_active:
             score += 25
             improved.append('active turf block count decreased')
-        if int(after.get('late_large_game_count_at_3pm_or_4pm') or 0) < int(before.get('late_large_game_count_at_3pm_or_4pm') or 0):
+        elif after_active > before_active:
+            score -= 25
+        if after_late_large < before_late_large:
             score += 60
             improved.append('late Large game count decreased at 3:00 PM or 4:00 PM')
-        if int(after['total_turf_single_game_blocks']) > int(before['total_turf_single_game_blocks']):
-            score -= 100
+        elif after_late_large > before_late_large:
+            score -= 60
         return score, improved
+
+    def _metric_values(metrics: dict[str, object]) -> dict[str, object]:
+        return {name: metrics.get(name) for name in TURF_ACCEPTANCE_METRIC_NAMES}
+
+    def _metric_impact(before: dict[str, object], after: dict[str, object]) -> list[dict[str, object]]:
+        return [
+            {'metric': name, 'before': before.get(name), 'after': after.get(name)}
+            for name in TURF_ACCEPTANCE_METRIC_NAMES
+            if before.get(name) != after.get(name)
+        ]
+
+    def _first_acceptance_reason(improvements: list[str]) -> str:
+        if not improvements:
+            return VALID_NO_TURF_IMPROVEMENT_REASON
+        reason = improvements[0]
+        return reason[0].upper() + reason[1:]
+
+    def _final_turf_metrics_unchanged(before: dict[str, object], after: dict[str, object]) -> bool:
+        return all(before.get(name) == after.get(name) for name in TURF_ACCEPTANCE_METRIC_NAMES)
 
     def _game_detail(game: Game, slot: GameSlot | None) -> dict[str, object]:
         host = host_cache.get(slot.host_location_id) if slot and slot.host_location_id else None
@@ -24361,21 +24406,26 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
                         reject_reason = 'hard-rule metric worsened'
                     elif score <= 0 or not improvements:
                         reject_reason = 'latest turf start did not improve'
+                    preview_new_slots = {game.id: slots_by_game_id.get(game.id) for game in [large_game, *displaced]}
+                    for restore_game in reversed([large_game, *displaced]):
+                        old_slot = old_slots.get(restore_game.id)
+                        new_slot = preview_new_slots.get(restore_game.id)
+                        if old_slot and new_slot:
+                            _restore_game_slot(restore_game, old_slot, new_slot)
+                    db.flush()
                     if reject_reason:
-                        for game in reversed([large_game, *displaced]):
-                            old_slot = old_slots.get(game.id)
-                            new_slot = slots_by_game_id.get(game.id)
-                            if old_slot and new_slot:
-                                _restore_game_slot(game, old_slot, new_slot)
-                        db.flush()
                         if reject_reason in {'latest turf start did not improve', 'would worsen turf score'}:
-                            reject_reason = 'Rejected: no measurable turf improvement.'
-                        _reject(reject_reason, {**candidate, 'score_change': score, 'turf_metric_improved': improvements})
+                            reject_reason = VALID_NO_TURF_IMPROVEMENT_REASON
+                        _reject(reject_reason, {**candidate, 'score_change': score, 'score_delta': score, 'turf_metric_improved': improvements, 'metric_impact': _metric_impact(before_turf, after_turf), 'turf_metric_before_value': _metric_values(before_turf), 'turf_metric_after_value': _metric_values(after_turf)})
                         _record_large_bottleneck_decision((host_id, slot_date), f'Rejected conversion: {reject_reason}.', rejected_reason=reject_reason)
                         _add_timing(candidate_type_timings, 'large_field_bottleneck_conversion', candidate_type_started)
                         continue
-                    for game in [large_game, *displaced]:
-                        rollback_stack.append((game, old_slots[game.id], slots_by_game_id[game.id]))
+                    _set_game_slot(large_game, large_slot)
+                    for bundle_game in displaced:
+                        _set_game_slot(bundle_game, small_assignments[bundle_game.id])
+                    db.flush()
+                    for bundle_game in [large_game, *displaced]:
+                        rollback_stack.append((bundle_game, old_slots[bundle_game.id], slots_by_game_id[bundle_game.id]))
                     accepted_changes.append({
                         **candidate,
                         'candidate_type': 'large_field_bottleneck_conversion',
@@ -24385,8 +24435,12 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
                         'new_date_time_location_field': candidate['new_large'],
                         'displaced_small_new_slots': {str(game.id): _game_detail(game, small_assignments[game.id]) for game in displaced},
                         'turf_metric_improved': improvements,
-                        'turf_metric_before_value': {name: before_turf.get(name) for name in ('total_turf_active_time_blocks', 'total_turf_single_game_blocks', 'total_turf_two_game_blocks', 'latest_turf_start_time', 'late_large_game_count_at_3pm_or_4pm')},
-                        'turf_metric_after_value': {name: after_turf.get(name) for name in ('total_turf_active_time_blocks', 'total_turf_single_game_blocks', 'total_turf_two_game_blocks', 'latest_turf_start_time', 'late_large_game_count_at_3pm_or_4pm')},
+                        'metric_improved': improvements,
+                        'metric_impact': _metric_impact(before_turf, after_turf),
+                        'accepted_reason': _first_acceptance_reason(improvements),
+                        'reason': _first_acceptance_reason(improvements),
+                        'turf_metric_before_value': _metric_values(before_turf),
+                        'turf_metric_after_value': _metric_values(after_turf),
                         'score_change': score,
                         'score_delta': score,
                         'before_turf_metrics': before_turf,
@@ -24427,19 +24481,22 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
 
             same_date_targets: list[tuple[int, int, tuple[uuid.UUID, date, time]]] = []
             fallback_targets: list[tuple[int, int, tuple[uuid.UUID, date, time]]] = []
-            for target_key, target_games in blocks.items():
-                if target_key == source_key:
-                    continue
+            empty_turf_target_keys = {
+                key for key in (_block_key_for_slot(slot) for slot in all_turf_slots)
+                if key and key not in blocks and key[0] == source_key[0] and key[1] == source_key[1]
+            }
+            for target_key in set(blocks.keys()) | empty_turf_target_keys:
+                target_games = blocks.get(target_key, [])
                 target_count = len(target_games)
-                if target_count < 1:
-                    continue
                 target_minutes = _minutes(target_key[2])
                 source_minutes = _minutes(source_key[2])
-                # Prefer earlier same-date one-game blocks, then other same-date blocks with capacity.
-                priority = 0 if target_count == 1 and target_minutes <= source_minutes else 1
+                # Prefer earlier occupied one-game blocks, then other occupied blocks with capacity.
+                # Empty turf blocks are valid reshuffle targets, but they are intentionally
+                # evaluated last and can only be accepted if cloned-preview turf metrics improve.
+                priority = 5 if target_key == source_key else 4 if target_count == 0 else 0 if target_count == 1 and target_minutes <= source_minutes else 1
                 if target_key[1] == source_key[1]:
                     same_date_targets.append((priority, target_minutes, target_key))
-                elif game.week_id and all(tg.week_id == game.week_id for tg in target_games) and target_minutes <= source_minutes:
+                elif target_games and game.week_id and all(tg.week_id == game.week_id for tg in target_games) and target_minutes <= source_minutes:
                     fallback_targets.append((2 if target_count == 1 else 3, target_minutes, target_key))
             ordered_targets = sorted(same_date_targets) + sorted(fallback_targets)
             if not ordered_targets:
@@ -24451,7 +24508,7 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
             for _priority, _target_minutes, target_key in ordered_targets:
                 if evaluated_for_single >= max_candidates_per_single or candidates_evaluated >= max_candidates_evaluated or _runtime_exceeded():
                     break
-                open_slots = _open_slots_for_block(target_key, game)
+                open_slots = [slot for slot in _open_slots_for_block(target_key, game) if not source_slot or slot.id != source_slot.id]
                 if not open_slots:
                     _reject('no compatible turf block', {'game_id': str(game.id), 'target_block': [str(target_key[0]), _fmt_date(target_key[1]), _fmt_time(target_key[2])]})
                     continue
@@ -24493,13 +24550,15 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
                 elif hard_worsened:
                     reject_reason = 'would create missing weekly game' if hard_worsened in {'teams_missing_weekly_games', 'teams_below_expected_season_game_count'} else 'hard-rule metric worsened'
                 elif score <= 0 or not improvements:
-                    reject_reason = 'Rejected: no measurable turf improvement.'
+                    reject_reason = VALID_NO_TURF_IMPROVEMENT_REASON
+                _restore_game_slot(game, source_slot, target_slot)
+                db.flush()
                 if reject_reason:
-                    _restore_game_slot(game, source_slot, target_slot)
-                    db.flush()
-                    _reject(reject_reason, {**candidate, 'score_change': score, 'turf_metric_improved': improvements})
+                    _reject(reject_reason, {**candidate, 'score_change': score, 'score_delta': score, 'turf_metric_improved': improvements, 'metric_impact': _metric_impact(before_turf, after_turf), 'turf_metric_before_value': _metric_values(before_turf), 'turf_metric_after_value': _metric_values(after_turf)})
                     _add_timing(candidate_type_timings, 'atomic_single_game_move', candidate_type_started)
                     continue
+                _set_game_slot(game, target_slot)
+                db.flush()
                 accepted_changes.append({
                     **candidate,
                     'candidate_type': 'atomic_single_game_move',
@@ -24508,8 +24567,12 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
                     'old_date_time_location_field': candidate['old'],
                     'new_date_time_location_field': candidate['new'],
                     'turf_metric_improved': improvements,
-                    'turf_metric_before_value': {name: before_turf.get(name) for name in ('total_turf_active_time_blocks', 'total_turf_single_game_blocks', 'total_turf_two_game_blocks', 'latest_turf_start_time', 'late_large_game_count_at_3pm_or_4pm')},
-                    'turf_metric_after_value': {name: after_turf.get(name) for name in ('total_turf_active_time_blocks', 'total_turf_single_game_blocks', 'total_turf_two_game_blocks', 'latest_turf_start_time', 'late_large_game_count_at_3pm_or_4pm')},
+                    'metric_improved': improvements,
+                    'metric_impact': _metric_impact(before_turf, after_turf),
+                    'accepted_reason': _first_acceptance_reason(improvements),
+                    'reason': _first_acceptance_reason(improvements),
+                    'turf_metric_before_value': _metric_values(before_turf),
+                    'turf_metric_after_value': _metric_values(after_turf),
                     'score_change': score,
                     'score_delta': score,
                     'before_turf_metrics': before_turf,
@@ -24565,6 +24628,21 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
         final_turf_score_delta, final_turf_improvements = _score_delta(before_turf_metrics, after_turf_metrics)
         stop_reason = 'no measurable turf improvement found' if stop_reason == 'completed' else stop_reason
     measurable_improvements_found = final_turf_score_delta > 0 and bool(final_turf_improvements)
+    final_turf_metrics_unchanged = _final_turf_metrics_unchanged(before_turf_metrics, after_turf_metrics)
+    if final_turf_metrics_unchanged:
+        if accepted_changes:
+            rollback_triggered = True
+            no_op_accepted_moves_rejected_or_rolled_back = len(accepted_changes)
+            warnings.append('Optimization evaluated candidates, but no accepted change improved turf utilization.')
+            for game, old_slot, new_slot in reversed(rollback_stack):
+                _restore_game_slot(game, old_slot, new_slot)
+            db.flush()
+            accepted_changes = []
+            after_turf_metrics = _turf_metrics()
+            final_turf_score_delta, final_turf_improvements = _score_delta(before_turf_metrics, after_turf_metrics)
+            measurable_improvements_found = False
+        no_op_diagnostic_message = 'Optimization evaluated candidates, but no accepted change improved turf utilization.'
+        stop_reason = 'no measurable turf improvement found'
     if not measurable_improvements_found and not no_op_diagnostic_message:
         no_op_diagnostic_message = 'No measurable turf improvement found.'
     current_block_host_dates = {key[:2] for key in _blocks()}
@@ -24642,6 +24720,13 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
         'validation_runtime_seconds': {key: round(value, 3) for key, value in validation_timings.items()},
         'metrics_calculated_from_preview_state': 'Yes',
         'no_op_diagnostic_message': no_op_diagnostic_message,
+        'measurable_improvement_found': 'Yes' if measurable_improvements_found else 'No',
+        'candidate_blocks_evaluated': len(candidate_blocks_evaluated),
+        'candidates_generated': candidates_evaluated,
+        'candidates_evaluated': candidates_evaluated,
+        'candidates_accepted': len(accepted_changes),
+        'candidates_rejected': total_rejected,
+        'rejection_reasons_logged': sum(rejected_by_reason.values()),
         'optimization_candidates_generated': candidates_evaluated,
         'optimization_candidates_evaluated': candidates_evaluated,
         'optimization_candidate_generation_limit': max_candidates_evaluated,
@@ -24650,7 +24735,7 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
         'optimization_runtime_limit_seconds': max_runtime_seconds,
         'optimization_runtime_seconds': round(_elapsed_seconds(), 3),
         'optimization_accepted_move_limit': max_accepted_moves,
-        'guard_limit_reached': stop_reason != 'completed' and stop_reason != 'no safe turf compaction moves available',
+        'guard_limit_reached': stop_reason not in {'completed', 'no safe turf compaction moves available', 'no measurable turf improvement found'},
         'guard_stop_reason': stop_reason,
         'stop_reason': stop_reason,
         'candidate_count': candidates_evaluated,

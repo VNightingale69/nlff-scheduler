@@ -587,7 +587,7 @@ export default function ManualScheduleBuilderPage() {
       const noChange = summary.no_candidates_message || summary.no_safe_moves_message ? ` ${summary.no_candidates_message || summary.no_safe_moves_message}` : '';
       const candidatesEvaluated = Number(summary.optimization_candidates_evaluated ?? 0);
       const acceptedMoves = Number(summary.accepted_optimization_moves || 0);
-      const completionMessage = `Turf optimization preview completed. Candidates evaluated: ${candidatesEvaluated}, accepted moves: ${acceptedMoves}, rejected moves: ${Number(summary.rejected_optimization_moves || 0)}, runtime: ${summary.optimization_runtime_seconds ?? '—'}s, stop reason: ${summary.stop_reason || summary.guard_stop_reason || 'completed'}.${partial}${noChange}`;
+      const completionMessage = `Turf optimization preview completed. Candidates evaluated: ${candidatesEvaluated}, accepted moves: ${acceptedMoves}, candidates rejected: ${Number(summary.candidates_rejected ?? summary.rejected_optimization_moves ?? 0)}, runtime: ${summary.optimization_runtime_seconds ?? '—'}s, stop reason: ${summary.stop_reason || summary.guard_stop_reason || 'completed'}.${partial}${noChange}`;
       if (!candidatesEvaluated || !acceptedMoves) {
         setError(completionMessage);
       } else {
@@ -985,9 +985,11 @@ export default function ManualScheduleBuilderPage() {
             <div>Turf games: <span className='font-semibold'>{optimizerDiagnostics.summary?.turf_game_count ?? 0}</span></div>
             <div>Single-game blocks found: <span className='font-semibold'>{optimizerDiagnostics.summary?.turf_single_game_blocks_found ?? 0}</span></div>
             <div>Candidate blocks evaluated: <span className='font-semibold'>{optimizerDiagnostics.summary?.candidate_blocks_evaluated ?? 0}</span></div>
-            <div>Candidates evaluated: <span className='font-semibold'>{optimizerDiagnostics.summary?.optimization_candidates_evaluated ?? 0}</span></div>
-            <div>Accepted optimization moves: <span className='font-semibold'>{optimizerDiagnostics.summary?.accepted_optimization_moves ?? 0}</span></div>
-            <div>Rejected optimization moves: <span className='font-semibold'>{optimizerDiagnostics.summary?.rejected_optimization_moves ?? 0}</span></div>
+            <div>Candidates generated: <span className='font-semibold'>{optimizerDiagnostics.summary?.candidates_generated ?? optimizerDiagnostics.summary?.optimization_candidates_generated ?? 0}</span></div>
+            <div>Candidates evaluated: <span className='font-semibold'>{optimizerDiagnostics.summary?.candidates_evaluated ?? optimizerDiagnostics.summary?.optimization_candidates_evaluated ?? 0}</span></div>
+            <div>Candidates accepted: <span className='font-semibold'>{optimizerDiagnostics.summary?.candidates_accepted ?? optimizerDiagnostics.summary?.accepted_optimization_moves ?? 0}</span></div>
+            <div>Candidates rejected: <span className='font-semibold'>{optimizerDiagnostics.summary?.candidates_rejected ?? optimizerDiagnostics.summary?.rejected_optimization_moves ?? 0}</span></div>
+            <div>Rejection reasons logged: <span className='font-semibold'>{optimizerDiagnostics.summary?.rejection_reasons_logged ?? 0}</span></div>
             <div>Runtime: <span className='font-semibold'>{optimizerDiagnostics.summary?.optimization_runtime_seconds ?? '—'}s</span></div>
             <div>Stop reason: <span className='font-semibold'>{optimizerDiagnostics.summary?.stop_reason || optimizerDiagnostics.summary?.guard_stop_reason || 'completed'}</span></div>
             <div>Manual edits locked: <span className='font-semibold'>{optimizerDiagnostics.summary?.manual_edits_locked ? 'Yes' : 'No'}</span></div>
@@ -1001,8 +1003,8 @@ export default function ManualScheduleBuilderPage() {
             </tbody></table>
           </div>
           {optimizerDiagnostics.proposed_changes?.length ? <details className='mt-3'><summary className='cursor-pointer text-blue-700 underline'>View accepted moves</summary><pre className='mt-2 max-h-64 overflow-auto rounded bg-slate-900 p-2 text-xs text-slate-50'>{safeStringify(optimizerDiagnostics.proposed_changes, 8000)}</pre></details> : null}
-          {optimizerDiagnostics.rejected_changes?.length ? <details className='mt-3'><summary className='cursor-pointer text-blue-700 underline'>View rejected moves</summary><pre className='mt-2 max-h-64 overflow-auto rounded bg-slate-900 p-2 text-xs text-slate-50'>{safeStringify(optimizerDiagnostics.rejected_changes, 8000)}</pre></details> : null}
-          {optimizerDiagnostics.rejected_move_reasons && Object.keys(optimizerDiagnostics.rejected_move_reasons).length ? <details className='mt-3'><summary className='cursor-pointer text-blue-700 underline'>View rejected move reasons</summary><pre className='mt-2 max-h-64 overflow-auto rounded bg-slate-900 p-2 text-xs text-slate-50'>{safeStringify(optimizerDiagnostics.rejected_move_reasons, 8000)}</pre></details> : null}
+          {optimizerDiagnostics.rejected_changes?.length ? <details className='mt-3'><summary className='cursor-pointer text-blue-700 underline'>View rejected candidates</summary><pre className='mt-2 max-h-64 overflow-auto rounded bg-slate-900 p-2 text-xs text-slate-50'>{safeStringify(optimizerDiagnostics.rejected_changes, 8000)}</pre></details> : null}
+          {optimizerDiagnostics.rejected_move_reasons && Object.keys(optimizerDiagnostics.rejected_move_reasons).length ? <details className='mt-3'><summary className='cursor-pointer text-blue-700 underline'>View rejection reasons logged</summary><pre className='mt-2 max-h-64 overflow-auto rounded bg-slate-900 p-2 text-xs text-slate-50'>{safeStringify(optimizerDiagnostics.rejected_move_reasons, 8000)}</pre></details> : null}
           <details className='mt-3'><summary className='cursor-pointer text-blue-700 underline'>View Optimization Summary Diagnostics</summary><pre className='mt-2 max-h-80 overflow-auto rounded bg-slate-900 p-2 text-xs text-slate-50'>{safeStringify(optimizerDiagnostics, 12000)}</pre></details>
         </div> : null}
         <div className='mb-3 rounded border bg-slate-50 p-3'>
