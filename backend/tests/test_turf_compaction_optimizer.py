@@ -80,6 +80,44 @@ class TurfCompactionOptimizerTest(unittest.TestCase):
         self.db.add(slot)
         return slot
 
+
+    def _add_turf_host(self, name='Additional Turf Stadium', surface_type='TURF_STADIUM'):
+        host = HostLocation(id=uuid.uuid4(), organization_id=self.org.id, name=name, surface_type=surface_type, max_small_fields=3, max_total_fields=3, is_active=True)
+        self.db.add(host)
+        fields = {}
+        for label, field_type in (
+            ('Small Field 1', 'SMALL'),
+            ('Small Field 2', 'SMALL'),
+            ('Small Field 3', 'SMALL'),
+            ('Medium Field 1', 'MEDIUM'),
+            ('Medium Field 2', 'MEDIUM'),
+            ('Large Field 1', 'LARGE'),
+        ):
+            field = FieldInstance(id=uuid.uuid4(), host_location_id=host.id, hosting_availability_id=uuid.uuid4(), instance_date=date(2026, 8, 9), field_name=label, field_type=field_type, is_active=True)
+            fields[label] = field
+            self.db.add(field)
+        self.db.flush()
+        return host, fields
+
+    def _slot_for(self, host, fields, label, start, assigned_game_id=None):
+        end = time(start.hour + 1, start.minute)
+        field = fields[label]
+        slot = GameSlot(
+            id=uuid.uuid4(),
+            field_instance_id=field.id,
+            host_location_id=host.id,
+            season_id=self.season.id,
+            week_id=self.week.id,
+            slot_date=date(2026, 8, 9),
+            start_time=start,
+            end_time=end,
+            field_type=field.field_type,
+            status='BOOKED' if assigned_game_id else 'OPEN',
+            assigned_game_id=assigned_game_id,
+        )
+        self.db.add(slot)
+        return slot
+
     def _game(self, home_idx, away_idx, slot, *, manual=False):
         game = Game(
             id=uuid.uuid4(),
@@ -140,7 +178,7 @@ class TurfCompactionOptimizerTest(unittest.TestCase):
         self.assertEqual(diagnostics['summary']['accepted_optimization_moves'], 0)
         self.assertEqual(diagnostics['summary']['measurable_improvements_found'], 'No')
         self.assertIn('team-time conflict', diagnostics['summary']['rejected_moves_by_reason'])
-        self.assertIn('No measurable turf improvement found.', diagnostics['summary']['no_safe_moves_message'])
+        self.assertIn('No measurable turf stadium improvement found', diagnostics['summary']['no_safe_moves_message'])
 
     def test_manual_edited_games_are_locked_unless_included(self):
         target_booked = self._slot('Small Field 1', time(9, 0))
@@ -320,7 +358,7 @@ class TurfCompactionOptimizerTest(unittest.TestCase):
 
         self.assertEqual(diagnostics['summary']['accepted_optimization_moves'], 0)
         self.assertEqual(diagnostics['summary']['measurable_improvements_found'], 'No')
-        self.assertIn('No measurable turf improvement found.', diagnostics['summary']['no_safe_moves_message'])
+        self.assertIn('No measurable turf stadium improvement found', diagnostics['summary']['no_safe_moves_message'])
         self.assertEqual(diagnostics['summary']['metrics_calculated_from_preview_state'], 'Yes')
 
     def test_valid_empty_block_reshuffle_without_turf_improvement_is_rejected(self):
@@ -337,9 +375,9 @@ class TurfCompactionOptimizerTest(unittest.TestCase):
         self.assertEqual(empty_target.assigned_game_id, None)
         self.assertEqual(diagnostics['summary']['accepted_optimization_moves'], 0)
         self.assertEqual(diagnostics['summary']['measurable_improvements_found'], 'No')
-        self.assertEqual(diagnostics['summary']['stop_reason'], 'no measurable turf improvement found')
-        self.assertIn('Rejected: valid move but no measurable turf improvement.', diagnostics['summary']['rejected_moves_by_reason'])
-        rejected = next(change for change in diagnostics['rejected_changes'] if change['reason'] == 'Rejected: valid move but no measurable turf improvement.')
+        self.assertEqual(diagnostics['summary']['stop_reason'], 'No measurable turf stadium improvement found.')
+        self.assertIn('Rejected: valid candidate but no measurable turf stadium improvement.', diagnostics['summary']['rejected_moves_by_reason'])
+        rejected = next(change for change in diagnostics['rejected_changes'] if change['reason'] == 'Rejected: valid candidate but no measurable turf stadium improvement.')
         self.assertEqual(rejected['turf_metric_before_value']['total_turf_active_time_blocks'], rejected['turf_metric_after_value']['total_turf_active_time_blocks'])
         self.assertEqual(rejected['turf_metric_before_value']['total_turf_single_game_blocks'], rejected['turf_metric_after_value']['total_turf_single_game_blocks'])
 
@@ -356,7 +394,7 @@ class TurfCompactionOptimizerTest(unittest.TestCase):
         self.assertEqual(empty_same_block_slot.assigned_game_id, None)
         self.assertEqual(diagnostics['summary']['accepted_optimization_moves'], 0)
         self.assertEqual(diagnostics['summary']['total_turf_active_time_blocks_before'], diagnostics['summary']['total_turf_active_time_blocks_after'])
-        self.assertIn('Rejected: valid move but no measurable turf improvement.', diagnostics['summary']['rejected_moves_by_reason'])
+        self.assertIn('Rejected: valid candidate but no measurable turf stadium improvement.', diagnostics['summary']['rejected_moves_by_reason'])
 
     def test_accepted_changes_include_required_metric_impact_fields(self):
         target_booked = self._slot('Small Field 1', time(9, 0))
@@ -377,6 +415,88 @@ class TurfCompactionOptimizerTest(unittest.TestCase):
         self.assertIn('accepted_reason', accepted_change)
         self.assertIn('turf_metric_before_value', accepted_change)
         self.assertIn('turf_metric_after_value', accepted_change)
+
+    def test_per_stadium_diagnostics_include_three_or_more_configured_turf_stadiums(self):
+        host_two, fields_two = self._add_turf_host('Second Turf Stadium')
+        host_three, fields_three = self._add_turf_host('Future Turf Stadium', surface_type='ARTIFICIAL_TURF_STADIUM')
+        self._game(0, 1, self._slot('Small Field 1', time(9, 0)))
+        self._game(2, 3, self._slot_for(host_two, fields_two, 'Small Field 1', time(10, 0)))
+        self._game(4, 5, self._slot_for(host_three, fields_three, 'Small Field 1', time(11, 0)))
+        self.db.commit()
+
+        diagnostics = run_post_schedule_repair_pass(self.db, self.season.id)
+
+        per_stadium = diagnostics['summary']['per_stadium_turf_metrics']
+        self.assertEqual(diagnostics['summary']['turf_stadium_count'], 3)
+        self.assertEqual({row['host_location_name'] for row in per_stadium}, {'Host Turf Stadium', 'Second Turf Stadium', 'Future Turf Stadium'})
+        self.assertTrue(all('late_large_game_count_at_3pm_or_4pm_before' in row for row in per_stadium))
+        self.assertEqual(diagnostics['summary']['accepted_optimization_moves'], 0)
+        self.assertEqual(diagnostics['summary']['stop_reason'], 'No measurable turf stadium improvement found.')
+
+    def test_one_configured_turf_stadium_is_supported(self):
+        self._game(0, 1, self._slot('Small Field 1', time(9, 0)))
+        self.db.commit()
+
+        diagnostics = run_post_schedule_repair_pass(self.db, self.season.id)
+
+        self.assertEqual(diagnostics['summary']['turf_stadium_count'], 1)
+        self.assertEqual(len(diagnostics['summary']['per_stadium_turf_metrics']), 1)
+        self.assertEqual(diagnostics['summary']['per_stadium_turf_metrics'][0]['host_location_name'], 'Host Turf Stadium')
+
+    def test_two_configured_turf_stadiums_are_supported(self):
+        host_two, fields_two = self._add_turf_host('Second Turf Stadium')
+        self._game(0, 1, self._slot('Small Field 1', time(9, 0)))
+        self._game(2, 3, self._slot_for(host_two, fields_two, 'Small Field 1', time(10, 0)))
+        self.db.commit()
+
+        diagnostics = run_post_schedule_repair_pass(self.db, self.season.id)
+
+        self.assertEqual(diagnostics['summary']['turf_stadium_count'], 2)
+        self.assertEqual({row['host_location_name'] for row in diagnostics['summary']['per_stadium_turf_metrics']}, {'Host Turf Stadium', 'Second Turf Stadium'})
+
+    def test_turf_labels_are_standard_and_grass_labels_are_not_normalized(self):
+        grass = HostLocation(id=uuid.uuid4(), organization_id=self.org.id, name='Grass Park', surface_type='GRASS_FIELD', is_active=True)
+        grass_field = FieldInstance(id=uuid.uuid4(), host_location_id=grass.id, hosting_availability_id=uuid.uuid4(), instance_date=date(2026, 8, 9), field_name='North Diamond', field_type='SMALL', is_active=True)
+        self.db.add_all([grass, grass_field])
+        self._game(0, 1, self._slot('Small Field 1', time(9, 0)))
+        self.db.commit()
+
+        diagnostics = run_post_schedule_repair_pass(self.db, self.season.id)
+
+        self.assertEqual(diagnostics['summary']['turf_stadium_count'], 1)
+        self.assertEqual(grass_field.field_name, 'North Diamond')
+        turf_labels = {field.field_name for field in self.fields.values()}
+        self.assertLessEqual(turf_labels, {'Small Field 1', 'Small Field 2', 'Small Field 3', 'Medium Field 1', 'Medium Field 2', 'Large Field 1'})
+
+    def test_rejection_reasons_logged_are_distinct_from_rejected_candidate_records(self):
+        source_slot = self._slot('Medium Field 1', time(11, 0))
+        self._slot('Medium Field 1', time(12, 0))
+        self._game(10, 11, source_slot)
+        self.db.commit()
+
+        diagnostics = run_post_schedule_repair_pass(self.db, self.season.id)
+
+        self.assertIn('candidates_rejected', diagnostics['summary'])
+        self.assertIn('rejection_reasons_logged', diagnostics['summary'])
+        self.assertLessEqual(diagnostics['summary']['candidates_rejected'], diagnostics['summary']['rejection_reasons_logged'])
+
+    def test_large_field_bottleneck_bundle_counts_only_completed_bundle(self):
+        early_small_slots = [self._slot(f'Small Field {idx}', time(9, 0)) for idx in (1, 2, 3)]
+        later_small_slots = [self._slot(f'Small Field {idx}', time(10, 0)) for idx in (1, 2, 3)]
+        self._slot('Large Field 1', time(9, 0))
+        late_large_slot = self._slot('Large Field 1', time(16, 0))
+        for idx, slot in enumerate(early_small_slots):
+            self._game(idx * 2, idx * 2 + 1, slot)
+        self._game(6, 7, later_small_slots[0])
+        self._game(20, 21, late_large_slot)
+        self.db.commit()
+
+        diagnostics = run_post_schedule_repair_pass(self.db, self.season.id)
+
+        accepted = diagnostics['accepted_changes']
+        self.assertEqual(len([change for change in accepted if change['candidate_type'] == 'large_field_bottleneck_conversion']), 1)
+        self.assertFalse(any(change.get('atomic_or_bundled') == 'intermediate' for change in accepted))
+        self.assertEqual(diagnostics['summary']['candidates_accepted'], 1)
 
 if __name__ == '__main__':
     unittest.main()
