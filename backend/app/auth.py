@@ -18,6 +18,10 @@ LEGACY_ROLE_LEAGUE_ADMIN = 'league_admin'
 LEGACY_ROLE_COMMUNITY_SCHEDULER = 'community_scheduler'
 ROLE_COMMUNITY_SCHEDULER = ROLE_COMMUNITY_ADMIN
 
+SCHEDULE_MANAGEMENT_ROLES = {ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN}
+SCORE_MANAGEMENT_ROLES = {ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN}
+SCORE_APPROVAL_ROLES = SCORE_MANAGEMENT_ROLES
+
 _ROLE_ALIASES = {
     'ADMIN': ROLE_LEAGUE_ADMIN,
     'Admin': ROLE_LEAGUE_ADMIN,
@@ -30,6 +34,7 @@ _ROLE_ALIASES = {
     'SCHEDULING_ADMINISTRATOR': ROLE_SCHEDULING_ADMIN,
     'Scheduling Administrator': ROLE_SCHEDULING_ADMIN,
     'scheduling_administrator': ROLE_SCHEDULING_ADMIN,
+    'scheduling_admin': ROLE_SCHEDULING_ADMIN,
 }
 
 
@@ -63,6 +68,62 @@ def require_roles(*allowed_roles: str):
 
 def is_league_admin(current_user: User) -> bool:
     return normalize_role_name(current_user.role.name) == ROLE_LEAGUE_ADMIN
+
+
+def is_scheduling_admin(current_user: User) -> bool:
+    return normalize_role_name(current_user.role.name) == ROLE_SCHEDULING_ADMIN
+
+
+def can_manage_schedule(current_user: User | None) -> bool:
+    if not current_user or not getattr(current_user, 'role', None):
+        return False
+    return normalize_role_name(current_user.role.name) in SCHEDULE_MANAGEMENT_ROLES
+
+
+def can_modify_schedule(current_user: User | None) -> bool:
+    return can_manage_schedule(current_user)
+
+
+def can_auto_schedule(current_user: User | None) -> bool:
+    return can_manage_schedule(current_user)
+
+
+def can_manage_scores(current_user: User | None) -> bool:
+    if not current_user or not getattr(current_user, 'role', None):
+        return False
+    return normalize_role_name(current_user.role.name) in SCORE_MANAGEMENT_ROLES
+
+
+def can_approve_publish_scores(current_user: User | None) -> bool:
+    if not current_user or not getattr(current_user, 'role', None):
+        return False
+    return normalize_role_name(current_user.role.name) in SCORE_APPROVAL_ROLES
+
+
+def can_submit_community_scores(current_user: User | None, game) -> bool:
+    if not current_user or not getattr(current_user, 'role', None):
+        return False
+    if normalize_role_name(current_user.role.name) != ROLE_COMMUNITY_ADMIN or not current_user.organization_id:
+        return False
+    organization_id = current_user.organization_id
+    home_team = getattr(game, 'home_team', None)
+    away_team = getattr(game, 'away_team', None)
+    return bool(
+        (home_team and getattr(home_team, 'organization_id', None) == organization_id)
+        or (away_team and getattr(away_team, 'organization_id', None) == organization_id)
+    )
+
+
+def require_schedule_admin(current_user: User = Depends(get_current_user)) -> User:
+    if not can_manage_schedule(current_user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Insufficient role')
+    return current_user
+
+
+def require_score_admin(current_user: User = Depends(get_current_user)) -> User:
+    if not can_manage_scores(current_user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Insufficient role')
+    return current_user
 
 
 def is_community_admin(current_user: User) -> bool:

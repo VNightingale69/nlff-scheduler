@@ -17,7 +17,7 @@ from sqlalchemy.exc import IntegrityError, ProgrammingError, SQLAlchemyError
 from sqlalchemy.orm import Session, aliased
 
 from app.config import ADMIN_SEED_EMAIL, ENABLE_TURF_OPTIMIZATION, RULEBOOK_MAX_SIZE_BYTES, RULEBOOK_UPLOAD_DIR
-from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN, enforce_organization_scope, get_current_user, is_community_admin, is_league_admin, normalize_role_name, require_roles
+from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN, can_manage_schedule, enforce_organization_scope, get_current_user, is_community_admin, is_league_admin, normalize_role_name, require_roles, require_schedule_admin
 from app.database import get_db
 from app.models import Division, Field, FieldConfigurationOption, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostPlanSelection, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Rulebook, ScheduleChangeLog, ScoreHistory, ScoreSubmission, Season, Team, TurfWave, User, Week
 from app.schemas import (
@@ -14710,7 +14710,7 @@ def manual_schedule_builder_recommendations(payload: dict, db: Session = Depends
         'all_available_weekly_matchups_scheduled': all_available_weekly_matchups_scheduled,
         'no_eligible_team_matchups': no_eligible_matchups,
     }
-@router.post('/manual-schedule-builder/assign', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+@router.post('/manual-schedule-builder/assign', dependencies=[Depends(require_schedule_admin)])
 def assign_generated_slot(payload: dict, db: Session = Depends(get_db)):
     season_id = payload.get('season_id')
     week_id = payload.get('week_id')
@@ -14817,7 +14817,7 @@ def assign_generated_slot(payload: dict, db: Session = Depends(get_db)):
     }
 
 
-@router.delete('/manual-schedule-builder/scheduled-games', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+@router.delete('/manual-schedule-builder/scheduled-games', dependencies=[Depends(require_schedule_admin)])
 def clear_manual_schedule_builder_scheduled_games(
     season_id: uuid.UUID = Query(...),
     db: Session = Depends(get_db),
@@ -14878,7 +14878,7 @@ def extract_selected_host_ids(proposals):
     return sorted(ids)
 
 
-@router.post('/manual-schedule-builder/auto-fill-preview', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+@router.post('/manual-schedule-builder/auto-fill-preview', dependencies=[Depends(require_schedule_admin)])
 def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     regular_season_host_limit = 2
     sorted_slots: list[GameSlot] = []
@@ -19181,7 +19181,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
     }
 
 
-@router.post('/manual-schedule-builder/auto-fill-apply', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+@router.post('/manual-schedule-builder/auto-fill-apply', dependencies=[Depends(require_schedule_admin)])
 def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
     season_id = payload.get('season_id')
     week_id = payload.get('week_id')
@@ -20522,7 +20522,7 @@ def _auto_schedule_division_order(db: Session | None = None) -> list[tuple[str, 
     return []
 
 @router.post('/manual-schedule-builder/auto-schedule-season')
-def auto_schedule_entire_season(payload: dict, current_user: User = Depends(require_roles(ROLE_LEAGUE_ADMIN)), db: Session = Depends(get_db)):
+def auto_schedule_entire_season(payload: dict, current_user: User = Depends(require_schedule_admin), db: Session = Depends(get_db)):
     auto_schedule_started_perf = perf_counter()
     auto_schedule_started_at = datetime.utcnow()
     auto_schedule_run_id = uuid.uuid4()
@@ -22997,7 +22997,7 @@ def keep_first_pass_schedule(payload: dict, _current_user: User = Depends(requir
     }
 
 
-@router.post('/manual-schedule-builder/repair/same-community-home-fields', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+@router.post('/manual-schedule-builder/repair/same-community-home-fields', dependencies=[Depends(require_schedule_admin)])
 def run_same_community_home_field_repair(payload: dict, db: Session = Depends(get_db)):
     season_id = payload.get('season_id')
     if not season_id:
@@ -26013,7 +26013,7 @@ def _build_turf_stadium_utilization_diagnostics(db: Session, season_id: uuid.UUI
 
 
 
-@router.get('/schedule-management/publish-diagnostics', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+@router.get('/schedule-management/publish-diagnostics', dependencies=[Depends(require_schedule_admin)])
 def schedule_publish_diagnostics(season_id: uuid.UUID | None = None, db: Session = Depends(get_db)):
     if season_id:
         season = db.query(Season).filter(Season.id == season_id).first()
@@ -26057,7 +26057,7 @@ def schedule_publish_diagnostics(season_id: uuid.UUID | None = None, db: Session
         'scheduled_game_missing_field_type_count': sum(1 for row in (integrity.get('remaining_invalid_scheduled_games') or []) if row.get('missing_field_type')),
     }
 
-@router.get('/schedule-management/quality-report', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+@router.get('/schedule-management/quality-report', dependencies=[Depends(require_schedule_admin)])
 def schedule_quality_report(season_id: uuid.UUID | None = None, division_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, db: Session = Depends(get_db)):
     try:
         if season_id:
@@ -26225,7 +26225,7 @@ def schedule_quality_report(season_id: uuid.UUID | None = None, division_id: uui
             'details': str(exc),
         }
 
-@router.get('/schedule-management/games', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+@router.get('/schedule-management/games', dependencies=[Depends(require_schedule_admin)])
 def schedule_management_games(season_id: uuid.UUID | None = None, date: date | None = None, division_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, host_location_id: uuid.UUID | None = None, field_type: str | None = None, field_id: uuid.UUID | None = None, week_id: uuid.UUID | None = None, team_id: uuid.UUID | None = None, status_code: str | None = None, db: Session = Depends(get_db)):
     season = _get_schedule_scope_season(db, season_id)
     filters = _scheduled_games_filters(season.id if season else season_id, date=date, division_id=division_id, organization_id=organization_id, host_location_id=host_location_id, field_type=field_type, field_id=field_id, week_id=week_id, team_id=team_id, status_code=status_code)
@@ -26300,13 +26300,7 @@ def schedule_management_conflicts(db: Session = Depends(get_db)):
 
 
 def require_scheduling_admin_only(current_user: User = Depends(get_current_user)) -> User:
-    raw_role_name = str(getattr(getattr(current_user, 'role', None), 'name', '') or '')
-    role_name = normalize_role_name(raw_role_name)
-    if role_name not in {ROLE_LEAGUE_ADMIN, ROLE_COMMUNITY_ADMIN, ROLE_SCHEDULING_ADMIN}:
-        role_name = normalize_role_name(raw_role_name.upper())
-    # Development and seeded top-level administrators (including admin@example.com)
-    # are treated as Scheduling Administrators for manual schedule override tools.
-    if role_name not in {ROLE_SCHEDULING_ADMIN, ROLE_LEAGUE_ADMIN}:
+    if not can_manage_schedule(current_user):
         raise HTTPException(status_code=403, detail='Scheduling Administrator role required')
     return current_user
 
@@ -26804,7 +26798,7 @@ def manual_edit_history(game_id: uuid.UUID, db: Session = Depends(get_db)):
     rows = db.query(ScheduleChangeLog).filter(ScheduleChangeLog.game_id == game_id).order_by(ScheduleChangeLog.changed_at.desc()).all()
     return [_schedule_change_log_read(row) for row in rows]
 
-@router.patch('/schedule-management/games/{game_id}/move', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+@router.patch('/schedule-management/games/{game_id}/move', dependencies=[Depends(require_schedule_admin)])
 def move_game_schedule(game_id: uuid.UUID, payload: dict, db: Session = Depends(get_db)):
     game = db.query(Game).filter(Game.id == game_id).first()
     if not game: raise HTTPException(404, 'Game not found')
@@ -26841,7 +26835,7 @@ def move_game_schedule(game_id: uuid.UUID, payload: dict, db: Session = Depends(
     db.commit()
     return {'ok': True, 'doubleheader_validation': final_doubleheader}
 
-@router.patch('/schedule-management/games/{game_id}/unschedule', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+@router.patch('/schedule-management/games/{game_id}/unschedule', dependencies=[Depends(require_schedule_admin)])
 def unschedule_game(game_id: uuid.UUID, db: Session = Depends(get_db)):
     game = db.query(Game).filter(Game.id == game_id).first()
     if not game: raise HTTPException(404, 'Game not found')
@@ -26872,7 +26866,7 @@ def unschedule_game(game_id: uuid.UUID, db: Session = Depends(get_db)):
     return {'ok': True}
 
 
-@router.post('/schedule-management/cleanup-unscheduled-games', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+@router.post('/schedule-management/cleanup-unscheduled-games', dependencies=[Depends(require_schedule_admin)])
 def cleanup_unscheduled_games(db: Session = Depends(get_db)):
     unscheduled_status_ids = db.query(GameStatus.id).filter(GameStatus.code == 'UNSCHEDULED').subquery()
     unscheduled_game_ids = [row[0] for row in db.query(Game.id).filter(Game.game_status_id.in_(unscheduled_status_ids)).all()]
@@ -26939,7 +26933,7 @@ def _schedule_export_row_values(g, slot, fi, host, home, away, div, status, db: 
     return values
 
 
-@router.get('/schedule-management/export.csv', dependencies=[Depends(get_current_user)])
+@router.get('/schedule-management/export.csv', dependencies=[Depends(require_schedule_admin)])
 def export_schedule_management_csv(date: date | None = None, division_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, host_location_id: uuid.UUID | None = None, field_type: str | None = None, field_id: uuid.UUID | None = None, team_id: uuid.UUID | None = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     active_season = db.query(Season).filter(Season.is_active.is_(True)).order_by(Season.start_date.desc()).first()
     validation_season_id = active_season.id if active_season else None
@@ -26947,7 +26941,7 @@ def export_schedule_management_csv(date: date | None = None, division_id: uuid.U
     rows = get_saved_scheduled_game_rows_for_export(db, validation_season_id, export_filters) if validation_season_id else get_saved_scheduled_game_rows_for_export(db, None, export_filters)
     out = io.StringIO()
     w = csv.writer(out)
-    include_admin_columns = is_league_admin(current_user)
+    include_admin_columns = can_manage_schedule(current_user)
     headers = ['Date', 'Time', 'Normalized Division Key', 'Home Team', 'Away Team', 'Host Location', 'Field', 'Field Type', 'Status']
     if include_admin_columns:
         headers.extend(['Edited', 'Last Updated', 'Admin Notes'])
@@ -27038,7 +27032,7 @@ def _raise_if_invalid_scheduled_game_payload(db: Session, payload: GameCreate, *
     if failures:
         raise HTTPException(status_code=400, detail={'error': 'GENERATED_SLOT_INTEGRITY_FAILURE', 'failure_reasons': list(dict.fromkeys(failures))})
 
-@router.post('/games', response_model=GameSaveResponse, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+@router.post('/games', response_model=GameSaveResponse, dependencies=[Depends(require_schedule_admin)])
 def create_game(payload:GameCreate, db:Session=Depends(get_db)):
     validation=validate_game(db,payload); status=db.query(GameStatus).filter(GameStatus.id==payload.game_status_id).first()
     _raise_if_invalid_scheduled_game_payload(db, payload)
@@ -27053,7 +27047,7 @@ def create_game(payload:GameCreate, db:Session=Depends(get_db)):
     db.commit(); db.refresh(obj)
     return GameSaveResponse(game=_to_game_read(obj, db=db), validation=validation)
 
-@router.put('/games/{game_id}', response_model=GameSaveResponse, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+@router.put('/games/{game_id}', response_model=GameSaveResponse, dependencies=[Depends(require_schedule_admin)])
 def update_game(game_id:uuid.UUID,payload:GameCreate, db:Session=Depends(get_db)):
     obj=db.query(Game).filter(Game.id==game_id).first()
     if not obj: raise HTTPException(404,'Game not found')
@@ -27073,12 +27067,12 @@ def update_game(game_id:uuid.UUID,payload:GameCreate, db:Session=Depends(get_db)
     return GameSaveResponse(game=_to_game_read(obj, db=db), validation=validation)
 
 
-@router.patch('/games/{game_id}', response_model=GameSaveResponse, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+@router.patch('/games/{game_id}', response_model=GameSaveResponse, dependencies=[Depends(require_schedule_admin)])
 def patch_game(game_id: uuid.UUID, payload: GameCreate, db: Session = Depends(get_db)):
     return update_game(game_id, payload, db)
 
 
-@router.delete('/games/{game_id}', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+@router.delete('/games/{game_id}', dependencies=[Depends(require_schedule_admin)])
 def delete_game(game_id: uuid.UUID, db: Session = Depends(get_db)):
     obj = db.query(Game).filter(Game.id == game_id).first()
     if not obj:

@@ -2,7 +2,7 @@
 import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
-import { type AuthUser, clearTokens, getAuthUser } from '@/lib/auth';
+import { type AuthUser, clearTokens, getAuthUser, normalizeRoleName } from '@/lib/auth';
 import { ENTITIES } from '@/config/entities';
 import { APP_NAME, APP_SUBTITLE } from '@/config/branding';
 
@@ -15,7 +15,7 @@ export default function DashboardShell({ children }: { children: React.ReactNode
     setUser(getAuthUser());
   }, []);
 
-  const role = user?.role_name;
+  const role = normalizeRoleName(user?.role_name) as AuthUser['role_name'];
   const navOrder = role === 'COMMUNITY_ADMIN'
     ? ['organizations', 'teams', 'host-locations', 'fields', 'hosting-availability', 'games', 'score-entry', 'rulebook']
     : [

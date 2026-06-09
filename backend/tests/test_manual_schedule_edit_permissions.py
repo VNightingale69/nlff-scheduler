@@ -94,6 +94,85 @@ class ManualScheduleEditPermissionsTest(unittest.TestCase):
         payload.update(overrides)
         return payload
 
+
+    def _open_slot(self, start=time(10, 0), end=time(11, 0)):
+        slot = GameSlot(
+            id=uuid.uuid4(),
+            field_instance_id=self.field.id,
+            host_location_id=self.host.id,
+            season_id=self.season.id,
+            week_id=self.week.id,
+            slot_date=date(2026, 8, 9),
+            start_time=start,
+            end_time=end,
+            field_type='SMALL',
+            status='OPEN',
+        )
+        self.db.add(slot)
+        self.db.commit()
+        return slot
+
+    def test_scheduling_admin_can_load_manual_builder_and_view_all_scheduled_games(self):
+        options = self.client.get('/api/manual-schedule-builder/options', headers=self._token(self.scheduling_user.id))
+        self.assertEqual(options.status_code, 200, options.text)
+
+        response = self.client.get('/api/schedule-management/games', headers=self._token(self.scheduling_user.id))
+        self.assertEqual(response.status_code, 200, response.text)
+        item_ids = {item['id'] for item in response.json()['items']}
+        self.assertIn(str(self.game.id), item_ids)
+
+    def test_scheduling_admin_can_save_assignment_move_unschedule_and_export(self):
+        assignment_slot = self._open_slot(time(10, 0), time(11, 0))
+        assignment = self.client.post(
+            '/api/manual-schedule-builder/assign',
+            headers=self._token(self.scheduling_user.id),
+            json={
+                'season_id': str(self.season.id),
+                'week_id': str(self.week.id),
+                'division_id': str(self.division.id),
+                'home_team_id': str(self.home_team.id),
+                'away_team_id': str(self.other_team.id),
+                'generated_slot_id': str(assignment_slot.id),
+            },
+        )
+        self.assertEqual(assignment.status_code, 200, assignment.text)
+        created_game_id = assignment.json()['game']['id']
+
+        move_slot = self._open_slot(time(11, 0), time(12, 0))
+        move = self.client.patch(
+            f'/api/schedule-management/games/{created_game_id}/move',
+            headers=self._token(self.scheduling_user.id),
+            json={'generated_slot_id': str(move_slot.id)},
+        )
+        self.assertEqual(move.status_code, 200, move.text)
+
+        export = self.client.get('/api/schedule-management/export.csv', headers=self._token(self.scheduling_user.id))
+        self.assertEqual(export.status_code, 200, export.text)
+        self.assertIn('Admin Notes', export.text)
+
+        unschedule = self.client.patch(f'/api/schedule-management/games/{created_game_id}/unschedule', headers=self._token(self.scheduling_user.id))
+        self.assertEqual(unschedule.status_code, 200, unschedule.text)
+
+    def test_scheduling_admin_can_clear_all_scheduled_games_and_community_admin_cannot(self):
+        community_clear = self.client.delete(f'/api/manual-schedule-builder/scheduled-games?season_id={self.season.id}', headers=self._token(self.community_user.id))
+        self.assertEqual(community_clear.status_code, 403)
+
+        clear = self.client.delete(f'/api/manual-schedule-builder/scheduled-games?season_id={self.season.id}', headers=self._token(self.scheduling_user.id))
+        self.assertEqual(clear.status_code, 200, clear.text)
+        self.assertGreaterEqual(clear.json()['deleted_count'], 1)
+
+    def test_community_and_public_users_cannot_access_schedule_admin_routes(self):
+        protected_requests = [
+            lambda headers: self.client.get('/api/schedule-management/games', headers=headers),
+            lambda headers: self.client.post('/api/manual-schedule-builder/auto-fill-preview', headers=headers, json={'season_id': str(self.season.id), 'week_id': str(self.week.id), 'division_id': str(self.division.id)}),
+            lambda headers: self.client.get('/api/schedule-management/export.csv', headers=headers),
+        ]
+        for request in protected_requests:
+            community_response = request(self._token(self.community_user.id))
+            self.assertEqual(community_response.status_code, 403, community_response.text)
+            public_response = request({})
+            self.assertEqual(public_response.status_code, 403, public_response.text)
+
     def test_community_admin_direct_edit_api_is_forbidden_and_data_unchanged(self):
         response = self.client.patch(
             f'/api/schedule-management/games/{self.game.id}/manual-edit',
