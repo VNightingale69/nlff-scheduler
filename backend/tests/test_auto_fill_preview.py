@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import Base
 from app.models import Division, FieldInstance, Game, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostPlanSelection, HostingAvailability, Organization, Season, Team, TurfWave, Week
-from app.routes.api import _build_host_location_vs_home_team_verification, _build_revised_scheduling_hierarchy_diagnostics, _build_turf_stadium_utilization_diagnostics, _classify_host_for_date, _regenerate_generated_slots, _diagnostic_active_teams_expected_to_play, _diagnostic_expected_games_for_team_count, _diagnostic_field_size_diff, _host_availability_matrix_response, _run_turf_wave_compaction_pass, _renumber_turf_waves_for_host_date, auto_fill_apply, auto_fill_preview, auto_schedule_entire_season, generate_suggested_host_plan, run_post_schedule_repair_pass
+from app.routes.api import _build_host_location_vs_home_team_verification, _build_revised_scheduling_hierarchy_diagnostics, _build_turf_stadium_utilization_diagnostics, _classify_host_for_date, _normalize_field_size, _regenerate_generated_slots, _diagnostic_active_teams_expected_to_play, _diagnostic_expected_games_for_team_count, _diagnostic_field_size_diff, _host_availability_matrix_response, _run_turf_wave_compaction_pass, _renumber_turf_waves_for_host_date, auto_fill_apply, auto_fill_preview, auto_schedule_entire_season, generate_suggested_host_plan, run_post_schedule_repair_pass
 
 
 class AutoFillPreviewTest(unittest.TestCase):
@@ -148,6 +148,83 @@ class AutoFillPreviewTest(unittest.TestCase):
         self.assertNotIn('10 game(s) could not fit in 8 valid start block(s)', str(result))
         self.assertNotIn('available hosting window prevents earlier placement', str(result))
 
+    def test_turf_repacker_field_size_normalization_accepts_database_values(self):
+        cases = {
+            'small': 'SMALL',
+            'Small': 'SMALL',
+            'SMALL': 'SMALL',
+            'Small Field': 'SMALL',
+            'small_field': 'SMALL',
+            'medium': 'MEDIUM',
+            'Medium': 'MEDIUM',
+            'MEDIUM': 'MEDIUM',
+            'Medium Field': 'MEDIUM',
+            'medium_field': 'MEDIUM',
+            'large': 'LARGE',
+            'Large': 'LARGE',
+            'LARGE': 'LARGE',
+            'Large Field': 'LARGE',
+            'large_field': 'LARGE',
+        }
+        for raw, expected in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(expected, _normalize_field_size(raw))
+
+    def test_turf_repacker_places_johnsburg_counts_in_six_blocks(self):
+        current_times = [
+            (time(9, 0), 'Small Field 1'),
+            (time(10, 0), 'Small Field 1'),
+            (time(11, 0), 'Small Field 1'),
+            (time(12, 0), 'Small Field 1'),
+            (time(13, 0), 'Small Field 1'),
+            (time(14, 0), 'Medium Field 1'),
+            (time(15, 0), 'Medium Field 1'),
+            (time(16, 0), 'Medium Field 1'),
+            (time(13, 0), 'Large Field 1'),
+            (time(14, 0), 'Large Field 1'),
+            (time(15, 0), 'Large Field 1'),
+            (time(16, 0), 'Large Field 1'),
+        ]
+        games = self._add_turf_repack_fixture({'SMALL': 5, 'MEDIUM': 3, 'LARGE': 4}, current_times)
+
+        result = run_post_schedule_repair_pass(self.db, self.season.id)
+        self.db.expire_all()
+        repacked = [self.db.get(Game, game.id) for game in games]
+        diag = result['summary']['per_stadium_date_diagnostics'][0]
+
+        self.assertEqual(1, result['summary']['repacked_dates_accepted'])
+        self.assertEqual({'SMALL': 5, 'MEDIUM': 3, 'LARGE': 4}, diag['games_required_by_field_size'])
+        self.assertEqual({'SMALL': 5, 'MEDIUM': 3, 'LARGE': 4}, diag['games_successfully_placed_by_field_size'])
+        self.assertEqual({'SMALL': 0, 'MEDIUM': 0, 'LARGE': 0}, diag['games_not_placed_by_field_size'])
+        self.assertEqual(6, len(diag['attempted_layout_sequence']))
+        self.assertEqual({time(9, 0), time(10, 0), time(11, 0), time(12, 0), time(13, 0), time(14, 0)}, {game.kickoff_time for game in repacked})
+        self.assertTrue(all(attempt['success'] or attempt['failure_reason'].startswith('no remaining') for attempt in diag['placement_attempts']))
+        for game in repacked:
+            field = self.db.get(FieldInstance, game.field_instance_id)
+            size = _normalize_field_size(game.division.required_field_layout_type)
+            self.assertEqual(size.title(), field.field_name.split(' Field ')[0])
+            self.assertNotEqual('Large Field 2', field.field_name)
+
+    def test_turf_repacker_uses_cleaned_generated_turf_field_instance_labels(self):
+        current_times = [
+            (time(9, 0), 'Small Field 1'),
+            (time(10, 0), 'Small Field 1'),
+            (time(11, 0), 'Large Field 1'),
+        ]
+        games = self._add_turf_repack_fixture({'SMALL': 2, 'LARGE': 1}, current_times)
+        for field in self.db.query(FieldInstance).filter(FieldInstance.host_location_id == self.host.id).all():
+            if field.field_name in {'Small Field 1', 'Small Field 2', 'Small Field 3', 'Medium Field 1', 'Medium Field 2', 'Large Field 1'}:
+                field.field_name = f'Wave 1 ONE_SMALL_ONE_LARGE {field.field_name}'
+        self.db.commit()
+
+        result = run_post_schedule_repair_pass(self.db, self.season.id)
+        diag = result['summary']['per_stadium_date_diagnostics'][0]
+
+        self.assertEqual(1, result['summary']['repacked_dates_accepted'])
+        self.assertEqual({'SMALL': 2, 'MEDIUM': 0, 'LARGE': 1}, diag['games_successfully_placed_by_field_size'])
+        self.assertGreater(len(diag['placement_attempts']), 0)
+        self.assertNotIn('cumulative compatible layout capacity was insufficient', str(result))
+
     def test_turf_repacker_rejects_with_specific_hosting_window_diagnostics_when_layout_cannot_fit(self):
         current_times = [
             (time(9, 0), 'Large Field 1'),
@@ -161,8 +238,8 @@ class AutoFillPreviewTest(unittest.TestCase):
 
         self.assertEqual(0, result['summary']['repacked_dates_accepted'])
         self.assertEqual(['09:00:00'], diag['valid_start_times_generated'])
-        self.assertTrue(diag['proposed_layout_exceeded_hosting_window'])
-        self.assertIn('compact layout exceeded configured hosting window', diag['exact_compact_layout_rejection_reason'])
+        self.assertFalse(diag['proposed_layout_exceeded_hosting_window'])
+        self.assertIn('rejected: start blocks exhausted after placing 1 of 3 games', diag['exact_compact_layout_rejection_reason'])
         self.assertNotEqual('available hosting window prevents earlier placement', diag['rejection_no_op_reason'])
 
     def test_turf_repacker_does_not_reject_twelve_games_against_eight_blocks_by_game_count(self):
