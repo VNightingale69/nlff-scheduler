@@ -595,7 +595,7 @@ export default function ManualScheduleBuilderPage() {
         setSuccess(completionMessage);
       }
     } catch (e: unknown) {
-      setError(isAbortError(e) ? 'Optimization is taking longer than expected. Check backend logs or try again.' : `Schedule optimization failed: ${extractError(e)}`);
+      setError(isAbortError(e) ? 'Optimization is taking longer than expected. Check backend logs or try again.' : `Turf stadium/date repacking failed: ${extractError(e)}`);
     } finally {
       clearTimeout(timeoutId);
       setOptimizerLoading(false);
@@ -958,7 +958,7 @@ export default function ManualScheduleBuilderPage() {
             <div className='mt-1 inline-flex rounded-full border border-slate-300 bg-slate-50 px-3 py-1 text-xs font-semibold text-slate-700'>{scheduleStateLabel}</div>
           </div>
           {canRunScheduleOptimization ? <div className='flex flex-wrap items-center gap-2' aria-label='Scheduling Administrator optimization controls'>
-            {!optimizerDiagnostics && games.length > 0 ? <button className='rounded border border-emerald-700 bg-emerald-700 px-3 py-2 text-sm text-white disabled:cursor-not-allowed disabled:border-slate-300 disabled:bg-slate-300' disabled={!seasonId || optimizerLoading || hasPendingBulkEdits} onClick={runOptimizationPreview}>{optimizerLoading ? 'Running turf optimization…' : 'Optimize Schedule'}</button> : null}
+            {!optimizerDiagnostics && games.length > 0 ? <button className='rounded border border-emerald-700 bg-emerald-700 px-3 py-2 text-sm text-white disabled:cursor-not-allowed disabled:border-slate-300 disabled:bg-slate-300' disabled={!seasonId || optimizerLoading || hasPendingBulkEdits} onClick={runOptimizationPreview}>{optimizerLoading ? 'Running turf repacker…' : 'Optimize Schedule'}</button> : null}
             {optimizerDiagnostics ? <button className='rounded border border-blue-700 bg-blue-700 px-3 py-2 text-sm text-white disabled:cursor-not-allowed disabled:border-slate-300 disabled:bg-slate-300' disabled={optimizerApplyLoading || optimizerLoading || optimizationNoMeasurableTurfImprovement} title={optimizationNoMeasurableTurfImprovement ? 'No measurable turf stadium improvement found; keep the saved first-pass schedule.' : undefined} onClick={applyOptimizationPreview}>{optimizerApplyLoading ? 'Applying...' : 'Apply Optimized Schedule'}</button> : null}
             {optimizerDiagnostics ? <button className='rounded border px-3 py-2 text-sm disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400' disabled={optimizerApplyLoading || optimizerLoading} onClick={keepFirstPassSchedule}>Keep First-Pass Schedule</button> : null}
             {optimizerDiagnostics ? <button className='rounded border px-3 py-2 text-sm' onClick={() => setShowOptimizationSummary((current) => !current)}>View Optimization Summary</button> : null}

@@ -190,7 +190,7 @@ class TurfCompactionOptimizerTest(unittest.TestCase):
 
         locked = run_post_schedule_repair_pass(self.db, self.season.id, include_manual_edits=False)
         self.assertEqual(locked['summary']['accepted_optimization_moves'], 0)
-        self.assertIn('game locked by manual edit', locked['summary']['rejected_moves_by_reason'])
+        self.assertIn('locked manual edits prevent compaction', locked['summary']['rejected_moves_by_reason'])
         self.db.rollback()
 
         included = run_post_schedule_repair_pass(self.db, self.season.id, include_manual_edits=True)
@@ -307,8 +307,8 @@ class TurfCompactionOptimizerTest(unittest.TestCase):
         self.assertEqual(diagnostics['summary']['accepted_optimization_moves'], 0)
         self.assertEqual(diagnostics['summary']['measurable_improvements_found'], 'No')
         self.assertEqual(diagnostics['summary']['stop_reason'], 'No measurable turf stadium improvement found.')
-        self.assertIn('Rejected: valid candidate but no measurable turf stadium improvement.', diagnostics['summary']['rejected_moves_by_reason'])
-        rejected = next(change for change in diagnostics['rejected_changes'] if change['reason'] == 'Rejected: valid candidate but no measurable turf stadium improvement.')
+        self.assertIn('compact layout generated but did not improve latest start', diagnostics['summary']['rejected_moves_by_reason'])
+        rejected = next(change for change in diagnostics['rejected_changes'] if change['reason'] == 'compact layout generated but did not improve latest start')
         self.assertEqual(rejected['turf_metric_before_value']['active_blocks'], rejected['turf_metric_after_value']['active_blocks'])
         self.assertEqual(rejected['turf_metric_before_value']['single_game_blocks'], rejected['turf_metric_after_value']['single_game_blocks'])
 
@@ -325,7 +325,7 @@ class TurfCompactionOptimizerTest(unittest.TestCase):
         self.assertEqual(empty_same_block_slot.assigned_game_id, None)
         self.assertEqual(diagnostics['summary']['accepted_optimization_moves'], 0)
         self.assertEqual(diagnostics['summary']['total_turf_active_time_blocks_before'], diagnostics['summary']['total_turf_active_time_blocks_after'])
-        self.assertIn('Rejected: valid candidate but no measurable turf stadium improvement.', diagnostics['summary']['rejected_moves_by_reason'])
+        self.assertIn('compact layout generated but did not improve latest start', diagnostics['summary']['rejected_moves_by_reason'])
 
     def test_accepted_changes_include_required_metric_impact_fields(self):
         target_booked = self._slot('Small Field 1', time(9, 0))
@@ -473,7 +473,13 @@ class TurfCompactionOptimizerTest(unittest.TestCase):
         self.assertEqual(diagnostics['summary']['latest_turf_start_time_after'], '13:00:00')
         date_diag = diagnostics['summary']['per_stadium_date_diagnostics'][0]
         self.assertEqual((date_diag['small_count'], date_diag['medium_count'], date_diag['large_count']), (4, 3, 3))
+        self.assertTrue(date_diag['large_field_bottleneck_detected'])
+        self.assertTrue(date_diag['small_large_pairings_attempted'])
+        self.assertTrue(date_diag['compact_target_layout_generated'])
         self.assertEqual(date_diag['target_layout_attempted'][:5], ['ONE_SMALL_ONE_LARGE', 'ONE_SMALL_ONE_LARGE', 'ONE_SMALL_ONE_LARGE', 'TWO_SMALL_ONE_MEDIUM', 'TWO_MEDIUM'])
+        self.assertTrue(date_diag['current_first_pass_layout'])
+        self.assertTrue(date_diag['proposed_compact_target_layout'])
+        self.assertIsNone(date_diag['rejection_no_op_reason'])
         by_time = {}
         for game in games:
             self.db.refresh(game)

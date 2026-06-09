@@ -23930,14 +23930,73 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
                 latest = game.kickoff_time
             if _field_size_for_game(game) == FIELD_SIZE_LARGE and _minutes(game.kickoff_time) >= 15 * 60:
                 late_large += 1
+        active_blocks = sum(1 for values in blocks.values() if values)
+        single_game_blocks = sum(1 for values in blocks.values() if len(values) == 1)
+        two_game_blocks = sum(1 for values in blocks.values() if len(values) == 2)
+        compaction_score = (
+            (_minutes(latest) if latest else 0)
+            + active_blocks * 20
+            + single_game_blocks * 10
+            - two_game_blocks * 5
+            + late_large * 30
+        )
         return {
             'latest_start': _fmt_time(latest),
             'latest_start_minutes': _minutes(latest),
-            'active_blocks': sum(1 for values in blocks.values() if values),
-            'single_game_blocks': sum(1 for values in blocks.values() if len(values) == 1),
-            'two_game_blocks': sum(1 for values in blocks.values() if len(values) == 2),
+            'active_blocks': active_blocks,
+            'single_game_blocks': single_game_blocks,
+            'two_game_blocks': two_game_blocks,
             'late_large_count': late_large,
+            'full_day_turf_compaction_score': compaction_score,
         }
+
+    def _layout_rows_for_current_games(games: list[Game]) -> list[dict[str, object]]:
+        by_start: dict[time, list[dict[str, object]]] = {}
+        for game in games:
+            if not game.kickoff_time:
+                continue
+            slot = game_slot.get(game.id)
+            label = _slot_label(slot)
+            if not label and game.field_instance_id:
+                label = _field_label(db.get(FieldInstance, game.field_instance_id))
+            by_start.setdefault(game.kickoff_time, []).append({
+                'game_id': str(game.id),
+                'field': label,
+                'field_size': _field_size_for_game(game),
+                'home_team_id': str(game.home_team_id),
+                'away_team_id': str(game.away_team_id),
+            })
+        return [
+            {'time': _fmt_time(start), 'field_assignments': sorted(rows, key=lambda row: (str(row.get('field') or ''), str(row.get('game_id') or '')))}
+            for start, rows in sorted(by_start.items(), key=lambda item: _minutes(item[0]))
+        ]
+
+    def _layout_rows_for_assignments(group_games: list[Game], assignments: list[dict[str, object]] | None) -> list[dict[str, object]]:
+        if assignments is None:
+            return []
+        assignment_by_game_id = {row['game'].id: row for row in assignments}
+        by_start: dict[time, list[dict[str, object]]] = {}
+        for game in group_games:
+            row = assignment_by_game_id.get(game.id)
+            if row:
+                start = row['start_time']
+                label = row['field_label']
+            else:
+                start = game.kickoff_time
+                label = _slot_label(game_slot.get(game.id))
+            if not start:
+                continue
+            by_start.setdefault(start, []).append({
+                'game_id': str(game.id),
+                'field': label,
+                'field_size': _field_size_for_game(game),
+                'home_team_id': str(game.home_team_id),
+                'away_team_id': str(game.away_team_id),
+            })
+        return [
+            {'time': _fmt_time(start), 'field_assignments': sorted(rows, key=lambda row: (str(row.get('field') or ''), str(row.get('game_id') or '')))}
+            for start, rows in sorted(by_start.items(), key=lambda item: _minutes(item[0]))
+        ]
 
     def _score_delta(before: dict[str, object], after: dict[str, object]) -> tuple[int, list[str]]:
         score = 0
@@ -23965,6 +24024,10 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
         if late_large_delta > 0:
             score += 125 * late_large_delta
             improvements.append('late Large-field game count decreased')
+        compaction_delta = int(before.get('full_day_turf_compaction_score') or 0) - int(after.get('full_day_turf_compaction_score') or 0)
+        if compaction_delta > 0 and not improvements:
+            score += compaction_delta
+            improvements.append('full-day turf compaction score improved')
         return score, improvements
 
     before_turf_metrics = _metrics_for_games(_games_for_metrics())
@@ -24076,8 +24139,14 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
     def _validate_assignments(host_id: uuid.UUID, game_date: date, group_games: list[Game], assignments: list[dict[str, object]]) -> str | None:
         group_ids = {game.id for game in group_games}
         assignment_by_game = {row['game'].id: row for row in assignments}
+        assigned_or_locked_ids = set(assignment_by_game) | {
+            game.id for game in group_games
+            if bool(getattr(game, 'is_manual_edit', False) or getattr(game, 'manual_edit_locked', False)) and not include_manual_edits
+        }
+        if assigned_or_locked_ids != group_ids:
+            return 'same game set was not preserved'
         labels_at_time: set[tuple[time, str]] = set()
-        teams_at_time: dict[tuple[uuid.UUID, time], uuid.UUID] = {}
+        teams_at_time: dict[tuple[uuid.UUID, date | None, time], uuid.UUID] = {}
         # Include locked group games and all non-group games as immovable blockers.
         for game in scheduled_games:
             if game.id in assignment_by_game:
@@ -24095,8 +24164,14 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
                 continue
             if game.id in group_ids:
                 snap = original_game_snapshots.get(game.id) or {}
-                if snap.get('host_location_id') != host_id or snap.get('game_date') != game_date:
-                    return 'movement outside the same turf stadium/date set'
+                if snap.get('host_location_id') != host_id:
+                    return 'cross-location movement'
+                if snap.get('game_date') != game_date:
+                    return 'cross-date movement'
+                if snap.get('home_team_id') != game.home_team_id or snap.get('away_team_id') != game.away_team_id:
+                    return 'changed matchup or home/away assignment'
+                if snap.get('week_id') != game.week_id:
+                    return 'missing weekly game'
             if check_host_id == host_id and check_date == game_date:
                 if label not in STANDARD_TURF_FIELD_SLOT_SET:
                     return 'invalid turf field label'
@@ -24107,7 +24182,7 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
                     return 'duplicate exact field-slot conflict'
                 labels_at_time.add(key)
             for team_id in (game.home_team_id, game.away_team_id):
-                tkey = (team_id, start)
+                tkey = (team_id, check_date, start)
                 existing = teams_at_time.get(tkey)
                 if existing and existing != game.id:
                     return 'team-time conflict'
@@ -24199,19 +24274,30 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
         accepted = False
         changes: list[dict[str, object]] = []
         layouts_attempted: list[str] = []
+        proposed_layout_rows: list[dict[str, object]] = []
+        compact_target_layout_generated = False
+        large_field_bottleneck_detected = counts.get(FIELD_SIZE_LARGE, 0) > 0
+        small_large_pairings_attempted = False
+        current_layout_rows = _layout_rows_for_current_games(group_games)
         if not group_games:
             reason = 'no turf games found'
         elif len(group_games) <= 1:
             reason = 'only one turf game on the date'
         else:
             starts = _available_start_times(host_id, game_date, [game_slot.get(game.id) for game in group_games])
-            assignments, layouts_attempted, build_reason = _build_assignments(host_id, group_games, starts)
+            if not starts:
+                assignments, layouts_attempted, build_reason = None, [], 'no available earlier start times'
+            else:
+                assignments, layouts_attempted, build_reason = _build_assignments(host_id, group_games, starts)
+            small_large_pairings_attempted = 'ONE_SMALL_ONE_LARGE' in layouts_attempted
+            compact_target_layout_generated = assignments is not None
+            proposed_layout_rows = _layout_rows_for_assignments(group_games, assignments)
             if assignments is None:
-                reason = build_reason
+                reason = build_reason or 'compact target layout was not generated'
             else:
                 validation_reason = _validate_assignments(host_id, game_date, group_games, assignments)
                 if validation_reason:
-                    reason = validation_reason
+                    reason = f'compact layout generated but failed validation: {validation_reason}'
                 else:
                     # Temporarily apply in-memory for date scoring; no DB flush needed.
                     previous = {game.id: (game.kickoff_time, game.field_instance_id) for game in group_games}
@@ -24226,13 +24312,17 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
                         game.field_instance_id = old_field
                     if score <= 0 or not improvements:
                         if not include_manual_edits and any(bool(getattr(g, 'is_manual_edit', False) or getattr(g, 'manual_edit_locked', False)) for g in group_games):
-                            reason = 'game locked by manual edit'
+                            reason = 'locked manual edits prevent compaction'
+                        elif int(before_date.get('latest_start_minutes') or 0) <= int(after_date.get('latest_start_minutes') or 0):
+                            reason = 'compact layout generated but did not improve latest start'
+                        elif int(before_date.get('active_blocks') or 0) <= int(after_date.get('active_blocks') or 0):
+                            reason = 'compact layout generated but did not reduce active blocks'
                         else:
-                            reason = 'Rejected: valid candidate but no measurable turf stadium improvement.'
+                            reason = 'compact layout generated but did not improve any accepted turf metric'
                     else:
                         changes = _apply_assignments(assignments)
                         accepted = bool(changes)
-                        reason = 'accepted deterministic same-stadium/date turf repack' if accepted else 'Rejected: valid candidate but no measurable turf stadium improvement.'
+                        reason = 'accepted deterministic same-stadium/date turf repack' if accepted else 'compact layout generated but did not improve any accepted turf metric'
                         if accepted:
                             accepted_changes.append({
                                 'turf_stadium_name': host.name,
@@ -24248,6 +24338,9 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
                                 'turf_metric_after_value': after_date,
                                 'changes': changes,
                                 'target_layout_attempted': layouts_attempted,
+                                'proposed_compact_target_layout': proposed_layout_rows,
+                                'large_field_bottleneck_detected': large_field_bottleneck_detected,
+                                'small_large_pairings_attempted': small_large_pairings_attempted,
                             })
         after_date = _date_metrics(group_games)
         if not accepted:
@@ -24261,6 +24354,11 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
                 'turf_metric_before_value': before_date,
                 'turf_metric_after_value': after_date,
                 'target_layout_attempted': layouts_attempted,
+                'current_first_pass_layout': current_layout_rows,
+                'proposed_compact_target_layout': proposed_layout_rows,
+                'compact_target_layout_generated': compact_target_layout_generated,
+                'large_field_bottleneck_detected': large_field_bottleneck_detected,
+                'small_large_pairings_attempted': small_large_pairings_attempted,
             })
         date_diagnostics.append({
             'turf_stadium_name': host.name if host else None,
@@ -24280,6 +24378,23 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
             'original_late_large_count': before_date.get('late_large_count'),
             'repacked_late_large_count': after_date.get('late_large_count'),
             'target_layout_attempted': layouts_attempted,
+            'current_first_pass_layout': current_layout_rows,
+            'current_layout': current_layout_rows,
+            'proposed_compact_target_layout': proposed_layout_rows,
+            'proposed_compact_layout': proposed_layout_rows,
+            'compact_target_layout_generated': compact_target_layout_generated,
+            'large_field_bottleneck_detected': large_field_bottleneck_detected,
+            'small_large_pairings_attempted': small_large_pairings_attempted,
+            'first_pass_latest_start': before_date.get('latest_start'),
+            'proposed_latest_start': after_date.get('latest_start'),
+            'first_pass_active_blocks': before_date.get('active_blocks'),
+            'proposed_active_blocks': after_date.get('active_blocks'),
+            'first_pass_single_game_blocks': before_date.get('single_game_blocks'),
+            'proposed_single_game_blocks': after_date.get('single_game_blocks'),
+            'first_pass_two_game_blocks': before_date.get('two_game_blocks'),
+            'proposed_two_game_blocks': after_date.get('two_game_blocks'),
+            'late_large_count_before': before_date.get('late_large_count'),
+            'late_large_count_after': after_date.get('late_large_count'),
             'accepted': accepted,
             'rejection_no_op_reason': None if accepted else (reason or NO_IMPROVEMENT_DATE_MESSAGE),
         })
