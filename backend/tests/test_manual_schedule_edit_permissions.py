@@ -440,6 +440,15 @@ class ManualScheduleEditPermissionsTest(unittest.TestCase):
 
 
 class ManualOptimizationWorkflowPermissionsTest(ManualScheduleEditPermissionsTest):
+    def setUp(self):
+        super().setUp()
+        self._turf_optimization_flag = patch('app.routes.api.ENABLE_TURF_OPTIMIZATION', True)
+        self._turf_optimization_flag.start()
+
+    def tearDown(self):
+        self._turf_optimization_flag.stop()
+        super().tearDown()
+
     def _optimization_payload(self, **overrides):
         payload = {
             'season_id': str(self.season.id),
@@ -464,6 +473,22 @@ class ManualOptimizationWorkflowPermissionsTest(ManualScheduleEditPermissionsTes
         )
         self.assertEqual(response.status_code, 200, response.text)
         self.assertIn('POST', response.headers.get('access-control-allow-methods', ''))
+
+    def test_optimization_endpoints_return_disabled_when_feature_flag_is_off(self):
+        self._turf_optimization_flag.stop()
+        endpoints = [
+            '/api/manual-schedule-builder/optimize-schedule',
+            '/api/manual-schedule-builder/optimize-schedule/apply',
+            '/api/manual-schedule-builder/optimize-schedule/keep-first-pass',
+        ]
+        try:
+            for endpoint in endpoints:
+                with self.subTest(endpoint=endpoint):
+                    response = self.client.post(endpoint, headers=self._token(self.scheduling_user.id), json=self._optimization_payload())
+                    self.assertEqual(response.status_code, 410, response.text)
+                    self.assertEqual(response.json()['detail'], 'Turf optimization is currently disabled.')
+        finally:
+            self._turf_optimization_flag.start()
 
     def test_optimize_endpoint_responds_within_configured_time_limit(self):
         self.host.surface_type = 'TURF_STADIUM'
