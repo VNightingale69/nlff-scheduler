@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { API_URL, ApiError, apiFetch } from '@/lib/api';
-import { getToken } from '@/lib/auth';
+import { canPublishSchedule, getAuthUser, getToken } from '@/lib/auth';
 import { getDivisionLabel } from '@/lib/divisionLabel';
 import { formatDisplayDate, formatDisplayTime } from '@/lib/displayFormat';
 
@@ -36,6 +36,8 @@ const formatFailureDetail = (detail: any): string => {
 
 export default function ScheduleManagementPage() {
   const token = getToken();
+  const authUser = getAuthUser();
+  const canControlSchedulePublication = canPublishSchedule(authUser);
   const searchParams = useSearchParams();
   const [tab, setTab] = useState<TabKey>('By Date');
   const [options, setOptions] = useState<any>({
@@ -62,6 +64,7 @@ export default function ScheduleManagementPage() {
   const [qualityError, setQualityError] = useState('');
   const [error, setError] = useState('');
   const [publishDiagnostics, setPublishDiagnostics] = useState<any | null>(null);
+  const [publicationLoading, setPublicationLoading] = useState(false);
 
   const qs = useMemo(
     () =>
@@ -122,6 +125,23 @@ export default function ScheduleManagementPage() {
       setError(e instanceof ApiError ? e.message : 'Unable to load schedule management data.');
     });
   }, [qs]);
+
+
+  const updateSchedulePublication = async (action: 'publish' | 'unpublish') => {
+    const seasonId = publishDiagnostics?.season_id;
+    if (!seasonId || !canControlSchedulePublication) return;
+    setPublicationLoading(true);
+    setError('');
+    try {
+      const result = await apiFetch(`/seasons/${seasonId}/${action}-schedule`, { method: 'POST' }, token);
+      setPublishDiagnostics({ ...(publishDiagnostics || {}), ...(result as any) });
+      await load();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : `Unable to ${action} schedule.`);
+    } finally {
+      setPublicationLoading(false);
+    }
+  };
 
   const exportCsv = async () => {
     try {
@@ -260,7 +280,19 @@ export default function ScheduleManagementPage() {
       {error ? <div className='rounded border border-red-300 bg-red-50 p-2 text-red-700'>{error}</div> : null}
 
       {publishDiagnostics ? <div className='rounded border bg-slate-50 p-3 text-sm'>
-        <div className='font-semibold'>Season: {publishDiagnostics.season_name}</div>
+        <div className='flex flex-wrap items-start justify-between gap-3'>
+          <div>
+            <div className='font-semibold'>Season: {publishDiagnostics.season_name}</div>
+            <div className='mt-1'>Schedule Publication Status: <span className='font-semibold'>{publishDiagnostics.schedule_published ? 'Published' : 'Unpublished'}</span></div>
+          </div>
+          {canControlSchedulePublication ? <div className='flex flex-wrap gap-2'>
+            {publishDiagnostics.schedule_published ? (
+              <button className='rounded bg-amber-700 px-3 py-2 text-white disabled:cursor-not-allowed disabled:bg-slate-300' disabled={publicationLoading} onClick={() => updateSchedulePublication('unpublish')}>Unpublish Schedule</button>
+            ) : (
+              <button className='rounded bg-emerald-700 px-3 py-2 text-white disabled:cursor-not-allowed disabled:bg-slate-300' disabled={publicationLoading} onClick={() => updateSchedulePublication('publish')}>Publish Schedule</button>
+            )}
+          </div> : null}
+        </div>
         <div className='mt-2 grid grid-cols-2 gap-2 md:grid-cols-3'>
           <div>Saved Scheduled Games: <span className='font-semibold'>{publishDiagnostics.saved_games ?? publishDiagnostics.total_scheduled_games ?? 0}</span></div>
           <div>Authoritative Source: <span className='font-semibold'>Saved scheduled games</span></div>
