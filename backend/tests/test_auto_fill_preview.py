@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import Base
 from app.models import Division, FieldInstance, Game, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostPlanSelection, HostingAvailability, Organization, Season, Team, TurfWave, Week
-from app.routes.api import _build_host_location_vs_home_team_verification, _build_revised_scheduling_hierarchy_diagnostics, _build_turf_stadium_utilization_diagnostics, _classify_host_for_date, _regenerate_generated_slots, _diagnostic_active_teams_expected_to_play, _diagnostic_expected_games_for_team_count, _diagnostic_field_size_diff, _host_availability_matrix_response, _run_turf_wave_compaction_pass, _renumber_turf_waves_for_host_date, auto_fill_apply, auto_fill_preview, auto_schedule_entire_season, generate_suggested_host_plan
+from app.routes.api import _build_host_location_vs_home_team_verification, _build_revised_scheduling_hierarchy_diagnostics, _build_turf_stadium_utilization_diagnostics, _classify_host_for_date, _regenerate_generated_slots, _diagnostic_active_teams_expected_to_play, _diagnostic_expected_games_for_team_count, _diagnostic_field_size_diff, _host_availability_matrix_response, _run_turf_wave_compaction_pass, _renumber_turf_waves_for_host_date, auto_fill_apply, auto_fill_preview, auto_schedule_entire_season, generate_suggested_host_plan, run_post_schedule_repair_pass
 
 
 class AutoFillPreviewTest(unittest.TestCase):
@@ -42,6 +42,120 @@ class AutoFillPreviewTest(unittest.TestCase):
             kickoff_time=time(10, 0),
         ))
         self.db.commit()
+
+    def _add_turf_repack_fixture(self, counts_by_size, current_times, *, availability_end=time(17, 0)):
+        self.host.surface_type = 'TURF_STADIUM'
+        self.host.host_role = 'TURF_STADIUM'
+        self.fi.field_name = 'Legacy Grass Small'
+        availability_id = uuid.uuid4()
+        self.db.add(HostingAvailability(
+            id=availability_id,
+            season_id=self.season.id,
+            week_id=self.week2.id,
+            organization_id=self.org_w.id,
+            host_location_id=self.host.id,
+            available_date=self.week2.start_date,
+            primary_game_date=self.week2.start_date,
+            start_time=time(9, 0),
+            end_time=availability_end,
+            active=True,
+            is_available=True,
+        ))
+        field_defs = [
+            ('Small Field 1', 'SMALL'),
+            ('Small Field 2', 'SMALL'),
+            ('Small Field 3', 'SMALL'),
+            ('Medium Field 1', 'MEDIUM'),
+            ('Medium Field 2', 'MEDIUM'),
+            ('Large Field 1', 'LARGE'),
+        ]
+        fields = {}
+        for label, size in field_defs:
+            field = FieldInstance(id=uuid.uuid4(), host_location_id=self.host.id, hosting_availability_id=availability_id, instance_date=self.week2.start_date, field_name=label, field_type=size, is_active=True)
+            fields[label] = field
+            self.db.add(field)
+        divisions = {
+            'SMALL': self.division,
+            'MEDIUM': Division(id=uuid.uuid4(), name='Medium Division', required_field_layout_type='MEDIUM', is_active=True),
+            'LARGE': Division(id=uuid.uuid4(), name='Large Division', required_field_layout_type='LARGE', is_active=True),
+        }
+        self.db.add_all([divisions['MEDIUM'], divisions['LARGE']])
+        games = []
+        teams = []
+        game_index = 0
+        for size, count in counts_by_size.items():
+            for _ in range(count):
+                home = Team(id=uuid.uuid4(), organization_id=self.org_w.id, division_id=divisions[size].id, name=f'{size} Home {game_index}', is_active=True)
+                away = Team(id=uuid.uuid4(), organization_id=self.org_a.id, division_id=divisions[size].id, name=f'{size} Away {game_index}', is_active=True)
+                teams.extend([home, away])
+                start, label = current_times[game_index]
+                game = Game(id=uuid.uuid4(), season_id=self.season.id, week_id=self.week2.id, home_team_id=home.id, away_team_id=away.id, game_status_id=self.status.id, game_date=self.week2.start_date, kickoff_time=start, host_location_id=self.host.id, field_instance_id=fields[label].id)
+                slot = GameSlot(id=uuid.uuid4(), field_instance_id=fields[label].id, host_location_id=self.host.id, season_id=self.season.id, week_id=self.week2.id, slot_date=self.week2.start_date, start_time=start, end_time=time(start.hour + 1, 0), field_type=size, status='BOOKED', assigned_game_id=game.id)
+                games.append(game)
+                self.db.add(slot)
+                game_index += 1
+        self.db.add_all(teams + games)
+        self.db.commit()
+        return games
+
+    def test_turf_repacker_rebuilds_same_game_set_into_occupied_earlier_slots(self):
+        current_times = [
+            (time(9, 0), 'Small Field 1'),
+            (time(10, 0), 'Small Field 1'),
+            (time(11, 0), 'Small Field 1'),
+            (time(12, 0), 'Small Field 1'),
+            (time(13, 0), 'Medium Field 1'),
+            (time(14, 0), 'Medium Field 1'),
+            (time(15, 0), 'Medium Field 1'),
+            (time(16, 0), 'Large Field 1'),
+            (time(15, 0), 'Large Field 1'),
+            (time(14, 0), 'Large Field 1'),
+        ]
+        games = self._add_turf_repack_fixture({'SMALL': 4, 'MEDIUM': 3, 'LARGE': 3}, current_times)
+        original = {game.id: (game.home_team_id, game.away_team_id, game.game_date, game.host_location_id) for game in games}
+
+        result = run_post_schedule_repair_pass(self.db, self.season.id)
+        self.db.expire_all()
+        repacked = [self.db.get(Game, game.id) for game in games]
+
+        self.assertEqual(1, result['summary']['repacked_dates_accepted'])
+        self.assertEqual({time(9, 0), time(10, 0), time(11, 0), time(12, 0), time(13, 0)}, {game.kickoff_time for game in repacked})
+        self.assertEqual(time(13, 0), max(game.kickoff_time for game in repacked))
+        self.assertEqual(set(original), {game.id for game in repacked})
+        seen_teams_at_time = set()
+        seen_fields_at_time = set()
+        for game in repacked:
+            self.assertEqual(original[game.id], (game.home_team_id, game.away_team_id, game.game_date, game.host_location_id))
+            slot = self.db.query(GameSlot).filter(GameSlot.assigned_game_id == game.id).one()
+            field = self.db.get(FieldInstance, slot.field_instance_id)
+            self.assertNotIn((game.kickoff_time, field.field_name), seen_fields_at_time)
+            seen_fields_at_time.add((game.kickoff_time, field.field_name))
+            for team_id in (game.home_team_id, game.away_team_id):
+                self.assertNotIn((team_id, game.kickoff_time), seen_teams_at_time)
+                seen_teams_at_time.add((team_id, game.kickoff_time))
+        diag = result['summary']['per_stadium_date_diagnostics'][0]
+        self.assertEqual('09:00:00', diag['configured_hosting_window_start'])
+        self.assertEqual('16:00:00', diag['current_first_pass_start_times_used'][-1])
+        self.assertEqual(['09:00:00', '10:00:00', '11:00:00', '12:00:00', '13:00:00'], diag['proposed_compact_start_times_used'])
+        self.assertIn('ONE_SMALL_ONE_LARGE', diag['target_layout_attempted'])
+        self.assertNotIn('available hosting window prevents earlier placement', str(result))
+
+    def test_turf_repacker_rejects_with_specific_hosting_window_diagnostics_when_layout_cannot_fit(self):
+        current_times = [
+            (time(9, 0), 'Large Field 1'),
+            (time(10, 0), 'Large Field 1'),
+            (time(11, 0), 'Large Field 1'),
+        ]
+        self._add_turf_repack_fixture({'LARGE': 3}, current_times, availability_end=time(10, 0))
+
+        result = run_post_schedule_repair_pass(self.db, self.season.id)
+        diag = result['summary']['per_stadium_date_diagnostics'][0]
+
+        self.assertEqual(0, result['summary']['repacked_dates_accepted'])
+        self.assertEqual(['09:00:00'], diag['valid_start_times_generated'])
+        self.assertTrue(diag['proposed_layout_exceeded_hosting_window'])
+        self.assertIn('compact layout exceeded configured hosting window', diag['exact_compact_layout_rejection_reason'])
+        self.assertNotEqual('available hosting window prevents earlier placement', diag['rejection_no_op_reason'])
 
 
     def test_turf_stadium_role_outprioritizes_owned_grass_in_global_diagnostics(self):

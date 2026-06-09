@@ -24032,27 +24032,57 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
 
     before_turf_metrics = _metrics_for_games(_games_for_metrics())
 
-    def _available_start_times(host_id: uuid.UUID, game_date: date, group_slots: list[GameSlot | None]) -> list[time]:
+    def _hosting_window_diagnostics(host_id: uuid.UUID, game_date: date, group_slots: list[GameSlot | None], current_games: list[Game] | None = None) -> dict[str, object]:
         availability_rows = db.query(HostingAvailability).filter(
             HostingAvailability.host_location_id == host_id,
             HostingAvailability.available_date == game_date,
             or_(HostingAvailability.season_id == season_id, HostingAvailability.season_id.is_(None)),
             HostingAvailability.active.is_(True),
             HostingAvailability.is_available.is_(True),
-        ).order_by(HostingAvailability.start_time).all()
-        if availability_rows:
-            start_min = min(_minutes(row.start_time) for row in availability_rows if row.start_time)
-            end_min = max(_minutes(row.end_time) for row in availability_rows if row.end_time)
-        else:
+        ).order_by(HostingAvailability.start_time, HostingAvailability.end_time).all()
+        windows: list[tuple[int, int]] = []
+        source = 'configured_hosting_availability'
+        for row in availability_rows:
+            if not row.start_time or not row.end_time:
+                continue
+            start_min = _minutes(row.start_time)
+            end_min = _minutes(row.end_time)
+            if end_min <= start_min:
+                continue
+            windows.append((start_min, end_min))
+        if not windows:
+            source = 'existing_group_slots_fallback'
             starts = [_minutes(slot.start_time) for slot in group_slots if slot and slot.start_time]
             ends = [_minutes(slot.end_time) for slot in group_slots if slot and slot.end_time]
-            if not starts:
-                return []
-            start_min = min(starts)
-            end_min = max(ends or [max(starts) + 60])
-        if end_min <= start_min:
-            end_min = start_min + 60
-        return [_time_from_minutes(value) for value in range(start_min, end_min, 60) if value + 60 <= end_min]
+            if starts:
+                start_min = min(starts)
+                end_min = max(ends or [max(starts) + 60])
+                if end_min <= start_min:
+                    end_min = start_min + 60
+                windows.append((start_min, end_min))
+        valid_minutes: list[int] = []
+        for start_min, end_min in windows:
+            valid_minutes.extend(value for value in range(start_min, end_min, 60) if value + 60 <= end_min)
+        valid_minutes = sorted(set(valid_minutes))
+        current_starts = sorted({_minutes(game.kickoff_time) for game in (current_games or []) if game.kickoff_time})
+        return {
+            'hosting_window_source': source,
+            'configured_hosting_window_start': _fmt_time(_time_from_minutes(min(start for start, _ in windows))) if windows else None,
+            'configured_hosting_window_end': _fmt_time(_time_from_minutes(max(end for _, end in windows))) if windows else None,
+            'configured_hosting_windows': [
+                {'start': _fmt_time(_time_from_minutes(start)), 'end': _fmt_time(_time_from_minutes(end))}
+                for start, end in windows
+            ],
+            'valid_start_times_generated': [_fmt_time(_time_from_minutes(value)) for value in valid_minutes],
+            'valid_start_times_count': len(valid_minutes),
+            'earliest_valid_start_time': _fmt_time(_time_from_minutes(valid_minutes[0])) if valid_minutes else None,
+            'latest_valid_start_time': _fmt_time(_time_from_minutes(valid_minutes[-1])) if valid_minutes else None,
+            'current_first_pass_start_times_used': [_fmt_time(_time_from_minutes(value)) for value in current_starts],
+            'valid_start_time_values': [_time_from_minutes(value) for value in valid_minutes],
+        }
+
+    def _available_start_times(host_id: uuid.UUID, game_date: date, group_slots: list[GameSlot | None]) -> list[time]:
+        return list(_hosting_window_diagnostics(host_id, game_date, group_slots).get('valid_start_time_values') or [])
 
     def _layout_labels(layout: str, remaining: dict[str, int]) -> list[tuple[str, str]]:
         if layout == 'ONE_SMALL_ONE_LARGE':
@@ -24132,7 +24162,12 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
                 # No requested component fit in this block; move to next time.
                 break
         if sum(remaining.values()) > 0:
-            reason = 'locked manual edits prevent compaction' if locked else 'available hosting window prevents earlier placement'
+            if locked:
+                reason = 'locked manual edits prevent earlier repacking; compact layout could not place all unlocked games around locked games'
+            elif not start_times:
+                reason = 'configured hosting availability has no valid one-hour start blocks'
+            else:
+                reason = f'compact layout exceeded configured hosting window; {sum(remaining.values())} game(s) could not fit in {len(start_times)} valid start block(s)'
             return None, layouts_attempted, reason
         return assignments, layouts_attempted, 'OK'
 
@@ -24276,6 +24311,10 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
         layouts_attempted: list[str] = []
         proposed_layout_rows: list[dict[str, object]] = []
         compact_target_layout_generated = False
+        hosting_diagnostics: dict[str, object] = {}
+        locked_games_blocked_earlier_placement = False
+        proposed_layout_exceeded_hosting_window = False
+        exact_rejection_reason = ''
         large_field_bottleneck_detected = counts.get(FIELD_SIZE_LARGE, 0) > 0
         small_large_pairings_attempted = False
         current_layout_rows = _layout_rows_for_current_games(group_games)
@@ -24284,14 +24323,19 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
         elif len(group_games) <= 1:
             reason = 'only one turf game on the date'
         else:
-            starts = _available_start_times(host_id, game_date, [game_slot.get(game.id) for game in group_games])
+            hosting_diagnostics = _hosting_window_diagnostics(host_id, game_date, [game_slot.get(game.id) for game in group_games], group_games)
+            starts = list(hosting_diagnostics.get('valid_start_time_values') or [])
             if not starts:
-                assignments, layouts_attempted, build_reason = None, [], 'no available earlier start times'
+                assignments, layouts_attempted, build_reason = None, [], 'configured hosting availability has no valid one-hour start blocks'
             else:
                 assignments, layouts_attempted, build_reason = _build_assignments(host_id, group_games, starts)
             small_large_pairings_attempted = 'ONE_SMALL_ONE_LARGE' in layouts_attempted
             compact_target_layout_generated = assignments is not None
             proposed_layout_rows = _layout_rows_for_assignments(group_games, assignments)
+            proposed_start_times = sorted({str(row.get('time')) for row in proposed_layout_rows if row.get('time')})
+            hosting_diagnostics['proposed_compact_start_times_used'] = proposed_start_times
+            proposed_layout_exceeded_hosting_window = bool(assignments is None and 'hosting window' in str(build_reason or '').lower())
+            locked_games_blocked_earlier_placement = bool(assignments is None and 'locked manual' in str(build_reason or '').lower())
             if assignments is None:
                 reason = build_reason or 'compact target layout was not generated'
             else:
@@ -24312,7 +24356,8 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
                         game.field_instance_id = old_field
                     if score <= 0 or not improvements:
                         if not include_manual_edits and any(bool(getattr(g, 'is_manual_edit', False) or getattr(g, 'manual_edit_locked', False)) for g in group_games):
-                            reason = 'locked manual edits prevent compaction'
+                            reason = 'locked manual edits prevent measurable compaction'
+                            locked_games_blocked_earlier_placement = True
                         elif int(before_date.get('latest_start_minutes') or 0) <= int(after_date.get('latest_start_minutes') or 0):
                             reason = 'compact layout generated but did not improve latest start'
                         elif int(before_date.get('active_blocks') or 0) <= int(after_date.get('active_blocks') or 0):
@@ -24343,6 +24388,13 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
                                 'small_large_pairings_attempted': small_large_pairings_attempted,
                             })
         after_date = _date_metrics(group_games)
+        exact_rejection_reason = '' if accepted else (reason or NO_IMPROVEMENT_DATE_MESSAGE)
+        if hosting_diagnostics:
+            hosting_diagnostics.pop('valid_start_time_values', None)
+            hosting_diagnostics.setdefault('proposed_compact_start_times_used', [_fmt_time(_time_from_minutes(value)) for value in sorted({_minutes(game.kickoff_time) for game in group_games if game.kickoff_time})] if accepted else [])
+            hosting_diagnostics['locked_games_blocked_earlier_placement'] = locked_games_blocked_earlier_placement
+            hosting_diagnostics['proposed_layout_exceeded_hosting_window'] = proposed_layout_exceeded_hosting_window
+            hosting_diagnostics['exact_compact_layout_rejection_reason'] = exact_rejection_reason or None
         if not accepted:
             rejected_by_reason[reason or NO_IMPROVEMENT_DATE_MESSAGE] = rejected_by_reason.get(reason or NO_IMPROVEMENT_DATE_MESSAGE, 0) + 1
             rejected_changes.append({
@@ -24359,6 +24411,8 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
                 'compact_target_layout_generated': compact_target_layout_generated,
                 'large_field_bottleneck_detected': large_field_bottleneck_detected,
                 'small_large_pairings_attempted': small_large_pairings_attempted,
+                'hosting_window_diagnostics': hosting_diagnostics,
+                **hosting_diagnostics,
             })
         date_diagnostics.append({
             'turf_stadium_name': host.name if host else None,
@@ -24397,6 +24451,8 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
             'late_large_count_after': after_date.get('late_large_count'),
             'accepted': accepted,
             'rejection_no_op_reason': None if accepted else (reason or NO_IMPROVEMENT_DATE_MESSAGE),
+            'hosting_window_diagnostics': hosting_diagnostics,
+            **hosting_diagnostics,
         })
 
     after_turf_metrics = _metrics_for_games(_games_for_metrics())
