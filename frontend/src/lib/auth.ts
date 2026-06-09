@@ -9,6 +9,33 @@ export interface AuthUser {
   organization_id: string | null;
 }
 
+
+export function normalizeRoleName(roleName: unknown): UserRole | string {
+  const normalized = String(roleName || '')
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  if (normalized === 'ADMIN') return 'LEAGUE_ADMIN';
+  if (normalized === 'SCHEDULING_ADMINISTRATOR') return 'SCHEDULING_ADMIN';
+  if (normalized === 'COMMUNITY_SCHEDULER') return 'COMMUNITY_ADMIN';
+  return normalized;
+}
+
+export function canManageSchedule(user: AuthUser | null | undefined): boolean {
+  const role = normalizeRoleName(user?.role_name);
+  return role === 'LEAGUE_ADMIN' || role === 'SCHEDULING_ADMIN';
+}
+
+export function canManageScores(user: AuthUser | null | undefined): boolean {
+  const role = normalizeRoleName(user?.role_name);
+  return role === 'LEAGUE_ADMIN' || role === 'SCHEDULING_ADMIN';
+}
+
+export function canSubmitCommunityScores(user: AuthUser | null | undefined): boolean {
+  return normalizeRoleName(user?.role_name) === 'COMMUNITY_ADMIN';
+}
+
 const ACCESS_TOKEN_KEY = 'access_token';
 const REFRESH_TOKEN_KEY = 'refresh_token';
 const AUTH_USER_KEY = 'auth_user';
@@ -20,7 +47,10 @@ export const getAuthUser = (): AuthUser | null => {
   if (typeof window === 'undefined') return null;
   const raw = localStorage.getItem(AUTH_USER_KEY);
   if (!raw) return null;
-  try { return JSON.parse(raw) as AuthUser; } catch { return null; }
+  try {
+    const user = JSON.parse(raw) as AuthUser;
+    return { ...user, role_name: normalizeRoleName(user.role_name) as UserRole };
+  } catch { return null; }
 };
 
 export const setTokens = (accessToken: string, refreshToken: string, user?: AuthUser) => {
@@ -30,7 +60,7 @@ export const setTokens = (accessToken: string, refreshToken: string, user?: Auth
     localStorage.setItem(AUTH_USER_KEY, JSON.stringify({
       ...user,
       email: user.email,
-      role_name: user.role_name,
+      role_name: normalizeRoleName(user.role_name) as UserRole,
       organization_id: user.organization_id ?? null,
     }));
   }

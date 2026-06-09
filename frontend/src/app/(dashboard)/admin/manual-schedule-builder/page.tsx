@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { ApiError, apiFetch } from '@/lib/api';
-import { getAuthUser, getToken } from '@/lib/auth';
+import { canManageSchedule, getAuthUser, getToken } from '@/lib/auth';
 import { getDivisionLabel } from '@/lib/divisionLabel';
 import { formatDisplayDate, formatDisplayDateTime, formatDisplayTime } from '@/lib/displayFormat';
 
@@ -33,24 +33,6 @@ function uniqueByValue<T extends { value: string }>(items: T[]): T[] {
     seen.add(item.value);
     return true;
   });
-}
-
-function normalizeRoleForUi(roleName: unknown): string {
-  return String(roleName || '')
-    .trim()
-    .toUpperCase()
-    .replace(/[^A-Z0-9]+/g, '_')
-    .replace(/^_+|_+$/g, '');
-}
-
-function isSchedulingAdministratorRole(roleName: unknown): boolean {
-  const normalized = normalizeRoleForUi(roleName);
-  return normalized === 'SCHEDULING_ADMIN' || normalized === 'SCHEDULING_ADMINISTRATOR';
-}
-
-function hasSchedulingAdministratorPermission(roleName: unknown): boolean {
-  const normalized = normalizeRoleForUi(roleName);
-  return normalized === 'ADMIN' || normalized === 'LEAGUE_ADMIN' || isSchedulingAdministratorRole(normalized);
 }
 
 function gameDateValue(game: any): string {
@@ -290,9 +272,8 @@ function summarizeAutoScheduleDiagnostics(value: any): AutoScheduleDiagnosticsSu
 export default function ManualScheduleBuilderPage() {
   const token = getToken();
   const authUser = getAuthUser();
-  const normalizedRoleName = normalizeRoleForUi(authUser?.role_name);
-  const canManageGeneratedGames = hasSchedulingAdministratorPermission(normalizedRoleName);
-  const canBulkInlineEditScheduledGames = hasSchedulingAdministratorPermission(normalizedRoleName);
+  const canManageGeneratedGames = canManageSchedule(authUser);
+  const canBulkInlineEditScheduledGames = canManageSchedule(authUser);
   const searchParams = useSearchParams();
   const [options, setOptions] = useState<any>({ divisions: [], teams: [], host_locations: [], field_instances: [], seasons: [], weeks: [], organizations: [], game_statuses: [] });
   const [seasonId, setSeasonId] = useState(searchParams.get('season_id') || '');
@@ -697,7 +678,7 @@ export default function ManualScheduleBuilderPage() {
           <h2 className='text-lg font-semibold'>Auto-Schedule Assistant</h2>
           <button
             className='rounded bg-indigo-700 px-3 py-2 text-white disabled:cursor-not-allowed disabled:bg-slate-300'
-            disabled={!seasonId || !weekId || !divisionId || autoFillLoading}
+            disabled={!canManageGeneratedGames || !seasonId || !weekId || !divisionId || autoFillLoading}
             onClick={async () => {
               setError('');
               setSuccess('');
@@ -743,7 +724,8 @@ export default function ManualScheduleBuilderPage() {
             </table>
           </div>
           <div className='flex gap-2'>
-            <button className='rounded bg-emerald-700 px-3 py-2 text-white' onClick={async () => {
+            <button className='rounded bg-emerald-700 px-3 py-2 text-white disabled:cursor-not-allowed disabled:bg-slate-300' disabled={!canManageGeneratedGames} onClick={async () => {
+              if (!canManageGeneratedGames) return;
               setError('');
               setSuccess('');
               try {
@@ -788,8 +770,9 @@ export default function ManualScheduleBuilderPage() {
         <p className='mt-1 text-sm text-red-700'>Use this only when you need to reset generated schedules for the selected season.</p>
         <button
           className='mt-3 mr-2 rounded border border-indigo-700 bg-indigo-700 px-3 py-2 text-white disabled:cursor-not-allowed disabled:bg-slate-300 disabled:border-slate-300'
-          disabled={!seasonId}
+          disabled={!canManageGeneratedGames || !seasonId}
           onClick={() => {
+            if (!canManageGeneratedGames) return;
             setError('');
             setSuccess('');
             setClearExistingBeforeAutoSchedule(false);
@@ -800,8 +783,9 @@ export default function ManualScheduleBuilderPage() {
         </button>
         <button
           className='mt-3 rounded border border-red-600 bg-red-600 px-3 py-2 text-white disabled:cursor-not-allowed disabled:bg-slate-300 disabled:border-slate-300'
-          disabled={!seasonId}
+          disabled={!canManageGeneratedGames || !seasonId}
           onClick={() => {
+            if (!canManageGeneratedGames) return;
             setError('');
             setSuccess('');
             setClearScheduleInput('');
