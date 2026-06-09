@@ -656,11 +656,12 @@ export default function ManualScheduleBuilderPage() {
   const isDirtyCell = (pendingEdit: any, fieldName: string) => JSON.stringify(editableGameSnapshot(pendingEdit)[fieldName]) !== JSON.stringify(pendingEdit.__original?.[fieldName]);
   const dirtyCellClass = (pendingEdit: any, fieldName: string) => isDirtyCell(pendingEdit, fieldName) ? ' bg-amber-50 ring-1 ring-inset ring-amber-300' : '';
   const getTeamsForDivision = (divisionIdValue: string) => options.teams.filter((t: any) => t.division_id === divisionIdValue && t.is_active);
-  const hostSurfaceType = (hostId: string) => String((options.host_locations || []).find((host: any) => String(host.id) === hostId)?.surface_type || '').toUpperCase();
+  const hostSurfaceType = (hostId: string) => String((options.host_locations || []).find((host: any) => String(host.id) === hostId)?.surface_type || '').toUpperCase().replace(/[\s-]+/g, '_');
+  const hostSurfaceIsTurfStadium = (surface: string) => surface === 'TURF_STADIUM' || surface === 'STADIUM_SITE' || (surface.startsWith('TURF') && surface.includes('STADIUM')) || (surface.startsWith('ARTIFICIAL_TURF') && surface.includes('STADIUM'));
   const getFieldOptionsForPendingEdit = (pendingEdit: any) => {
     const byDisplayLabel = new Map<string, any>();
     const selectedHostId = String(pendingEdit?.host_location_id || '');
-    const selectedHostIsTurf = hostSurfaceType(selectedHostId) === 'TURF_STADIUM';
+    const selectedHostIsTurf = hostSurfaceIsTurfStadium(hostSurfaceType(selectedHostId));
     const addSlot = (slot: any, preferCurrent = false) => {
       const id = String(slot.field_instance_id || slot.field_id || '');
       const label = explicitFieldSlotLabel(slot);
@@ -775,6 +776,10 @@ export default function ManualScheduleBuilderPage() {
     }
   };
 
+
+  const optimizerSummary = optimizerDiagnostics?.summary || {};
+  const optimizationHasMeasurableTurfImprovement = String(optimizerSummary.measurable_improvement_found ?? optimizerSummary.measurable_improvements_found ?? '').toLowerCase() === 'yes' && Number(optimizerSummary.candidates_accepted ?? optimizerSummary.accepted_optimization_moves ?? 0) > 0;
+  const optimizationNoMeasurableTurfImprovement = Boolean(optimizerDiagnostics) && !optimizationHasMeasurableTurfImprovement;
 
   return (
     <div className='space-y-4'>
@@ -953,7 +958,7 @@ export default function ManualScheduleBuilderPage() {
           </div>
           {canRunScheduleOptimization ? <div className='flex flex-wrap items-center gap-2' aria-label='Scheduling Administrator optimization controls'>
             {!optimizerDiagnostics && games.length > 0 ? <button className='rounded border border-emerald-700 bg-emerald-700 px-3 py-2 text-sm text-white disabled:cursor-not-allowed disabled:border-slate-300 disabled:bg-slate-300' disabled={!seasonId || optimizerLoading || hasPendingBulkEdits} onClick={runOptimizationPreview}>{optimizerLoading ? 'Running turf optimization…' : 'Optimize Schedule'}</button> : null}
-            {optimizerDiagnostics ? <button className='rounded border border-blue-700 bg-blue-700 px-3 py-2 text-sm text-white disabled:cursor-not-allowed disabled:border-slate-300 disabled:bg-slate-300' disabled={optimizerApplyLoading || optimizerLoading} onClick={applyOptimizationPreview}>{optimizerApplyLoading ? 'Applying...' : 'Apply Optimized Schedule'}</button> : null}
+            {optimizerDiagnostics ? <button className='rounded border border-blue-700 bg-blue-700 px-3 py-2 text-sm text-white disabled:cursor-not-allowed disabled:border-slate-300 disabled:bg-slate-300' disabled={optimizerApplyLoading || optimizerLoading || optimizationNoMeasurableTurfImprovement} title={optimizationNoMeasurableTurfImprovement ? 'No measurable turf stadium improvement found; keep the saved first-pass schedule.' : undefined} onClick={applyOptimizationPreview}>{optimizerApplyLoading ? 'Applying...' : 'Apply Optimized Schedule'}</button> : null}
             {optimizerDiagnostics ? <button className='rounded border px-3 py-2 text-sm disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400' disabled={optimizerApplyLoading || optimizerLoading} onClick={keepFirstPassSchedule}>Keep First-Pass Schedule</button> : null}
             {optimizerDiagnostics ? <button className='rounded border px-3 py-2 text-sm' onClick={() => setShowOptimizationSummary((current) => !current)}>View Optimization Summary</button> : null}
           </div> : null}
@@ -996,12 +1001,29 @@ export default function ManualScheduleBuilderPage() {
           </div>
           {optimizerDiagnostics.summary?.partial_diagnostics_message ? <div className='mt-2 rounded border border-amber-200 bg-amber-50 p-2 text-amber-900'>{optimizerDiagnostics.summary.partial_diagnostics_message}</div> : null}
           {optimizerDiagnostics.summary?.no_candidates_message ? <div className='mt-2 rounded border border-amber-200 bg-amber-50 p-2 text-amber-900'>No turf optimization candidates were generated.{optimizerDiagnostics.summary?.no_candidate_reasons?.length ? ` ${optimizerDiagnostics.summary.no_candidate_reasons.join(' ')}` : ''}</div> : null}
+          {optimizationNoMeasurableTurfImprovement ? <div className='mt-2 rounded border border-amber-300 bg-amber-50 p-2 text-amber-900'>No measurable turf stadium improvement found. Apply Optimized Schedule is disabled because the preview is not meaningfully optimized.</div> : null}
           {optimizerDiagnostics.summary?.no_safe_moves_message ? <div className='mt-2 rounded border border-slate-200 bg-slate-50 p-2 text-slate-900'>{optimizerDiagnostics.summary.no_safe_moves_message}</div> : null}
           <div className='mt-3 overflow-auto rounded border'>
             <table className='min-w-full text-sm'><thead><tr className='bg-slate-50 text-left'><th className='p-2'>Metric</th><th className='p-2'>First-Pass Schedule</th><th className='p-2'>Optimized Preview</th></tr></thead><tbody>
               {(optimizerDiagnostics.metric_comparison || []).map((metric: any) => <tr key={metric.key} className='border-t'><td className='p-2'>{metric.label}</td><td className='p-2'>{String(metric.before ?? '—')}</td><td className='p-2'>{String(metric.after ?? '—')}</td></tr>)}
             </tbody></table>
           </div>
+          {optimizerDiagnostics.summary?.per_stadium_turf_metrics?.length ? <div className='mt-3 overflow-auto rounded border'>
+            <table className='min-w-full text-sm'><thead><tr className='bg-slate-50 text-left'>{['Turf Stadium', 'Turf Games', 'Active Blocks', 'Single Blocks', 'Two-Game Blocks', 'Latest Start', 'Late Large', 'Accepted', 'Rejected', 'Top Rejection Reasons'].map((heading) => <th key={heading} className='p-2'>{heading}</th>)}</tr></thead><tbody>
+              {optimizerDiagnostics.summary.per_stadium_turf_metrics.map((row: any) => <tr key={row.host_location_id || row.host_location_name} className='border-t'>
+                <td className='p-2'>{row.host_location_name || row.host_location_id}</td>
+                <td className='p-2'>{row.turf_games_found ?? 0}</td>
+                <td className='p-2'>{String(row.turf_active_time_blocks_before ?? '—')} → {String(row.turf_active_time_blocks_after ?? '—')}</td>
+                <td className='p-2'>{String(row.turf_single_game_blocks_before ?? '—')} → {String(row.turf_single_game_blocks_after ?? '—')}</td>
+                <td className='p-2'>{String(row.turf_two_game_blocks_before ?? '—')} → {String(row.turf_two_game_blocks_after ?? '—')}</td>
+                <td className='p-2'>{String(row.latest_turf_start_time_before ?? '—')} → {String(row.latest_turf_start_time_after ?? '—')}</td>
+                <td className='p-2'>{String(row.late_large_game_count_at_3pm_or_4pm_before ?? 0)} → {String(row.late_large_game_count_at_3pm_or_4pm_after ?? 0)}</td>
+                <td className='p-2'>{row.candidates_accepted ?? 0}</td>
+                <td className='p-2'>{row.candidates_rejected ?? 0}</td>
+                <td className='p-2'>{row.top_rejection_reasons ? Object.keys(row.top_rejection_reasons).slice(0, 3).join(', ') : '—'}</td>
+              </tr>)}
+            </tbody></table>
+          </div> : null}
           {optimizerDiagnostics.proposed_changes?.length ? <details className='mt-3'><summary className='cursor-pointer text-blue-700 underline'>View accepted moves</summary><pre className='mt-2 max-h-64 overflow-auto rounded bg-slate-900 p-2 text-xs text-slate-50'>{safeStringify(optimizerDiagnostics.proposed_changes, 8000)}</pre></details> : null}
           {optimizerDiagnostics.rejected_changes?.length ? <details className='mt-3'><summary className='cursor-pointer text-blue-700 underline'>View rejected candidates</summary><pre className='mt-2 max-h-64 overflow-auto rounded bg-slate-900 p-2 text-xs text-slate-50'>{safeStringify(optimizerDiagnostics.rejected_changes, 8000)}</pre></details> : null}
           {optimizerDiagnostics.rejected_move_reasons && Object.keys(optimizerDiagnostics.rejected_move_reasons).length ? <details className='mt-3'><summary className='cursor-pointer text-blue-700 underline'>View rejection reasons logged</summary><pre className='mt-2 max-h-64 overflow-auto rounded bg-slate-900 p-2 text-xs text-slate-50'>{safeStringify(optimizerDiagnostics.rejected_move_reasons, 8000)}</pre></details> : null}
