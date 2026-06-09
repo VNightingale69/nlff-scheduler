@@ -47,11 +47,11 @@ def _normalize_field_size(value: str | None) -> str | None:
     normalized = str(value or '').strip().upper().replace('-', '_').replace(' ', '_')
     if not normalized:
         return None
-    if normalized in {'SMALL', 'THIRTY_YARD_WIDTH', '30', '30_YARD', '30_YARDS'} or 'THIRTY' in normalized:
+    if normalized in {'SMALL', 'SMALL_FIELD', 'THIRTY_YARD_WIDTH', '30', '30_YARD', '30_YARDS'} or 'SMALL' in normalized or 'THIRTY' in normalized:
         return 'SMALL'
-    if normalized in {'MEDIUM', 'FORTY_YARD_WIDTH', '40', '40_YARD', '40_YARDS'} or 'MEDIUM' in normalized or '40' in normalized:
+    if normalized in {'MEDIUM', 'MEDIUM_FIELD', 'FORTY_YARD_WIDTH', '40', '40_YARD', '40_YARDS'} or 'MEDIUM' in normalized or '40' in normalized:
         return 'MEDIUM'
-    if normalized in {'LARGE', 'FIFTY_THREE_YARD_WIDTH', '53', '53_YARD', '53_YARDS', 'FULL'} or 'FIFTY_THREE' in normalized or '53' in normalized or 'LARGE' in normalized:
+    if normalized in {'LARGE', 'LARGE_FIELD', 'FIFTY_THREE_YARD_WIDTH', '53', '53_YARD', '53_YARDS', 'FULL'} or 'FIFTY_THREE' in normalized or '53' in normalized or 'LARGE' in normalized:
         return 'LARGE'
     return normalized if normalized in {'SMALL', 'MEDIUM', 'LARGE'} else None
 

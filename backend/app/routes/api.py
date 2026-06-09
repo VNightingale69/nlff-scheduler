@@ -4320,11 +4320,11 @@ def _normalize_field_size(value: str | None) -> str | None:
     normalized = str(value or '').strip().upper().replace('-', '_').replace(' ', '_')
     if not normalized:
         return None
-    if normalized in {FIELD_SIZE_SMALL, 'THIRTY_YARD_WIDTH', '30', '30_YARD', '30_YARDS'} or 'THIRTY' in normalized:
+    if normalized in {FIELD_SIZE_SMALL, 'SMALL_FIELD', 'THIRTY_YARD_WIDTH', '30', '30_YARD', '30_YARDS'} or 'SMALL' in normalized or 'THIRTY' in normalized:
         return FIELD_SIZE_SMALL
-    if normalized in {FIELD_SIZE_MEDIUM, 'FORTY_YARD_WIDTH', '40', '40_YARD', '40_YARDS'} or 'MEDIUM' in normalized or '40' in normalized:
+    if normalized in {FIELD_SIZE_MEDIUM, 'MEDIUM_FIELD', 'FORTY_YARD_WIDTH', '40', '40_YARD', '40_YARDS'} or 'MEDIUM' in normalized or '40' in normalized:
         return FIELD_SIZE_MEDIUM
-    if normalized in {FIELD_SIZE_LARGE, 'FIFTY_THREE_YARD_WIDTH', '53', '53_YARD', '53_YARDS', 'FULL'} or 'FIFTY_THREE' in normalized or '53' in normalized or 'LARGE' in normalized:
+    if normalized in {FIELD_SIZE_LARGE, 'LARGE_FIELD', 'FIFTY_THREE_YARD_WIDTH', '53', '53_YARD', '53_YARDS', 'FULL'} or 'FIFTY_THREE' in normalized or '53' in normalized or 'LARGE' in normalized:
         return FIELD_SIZE_LARGE
     return normalized if normalized in FIELD_SIZE_ORDER else None
 
@@ -23808,6 +23808,23 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
     def _fmt_time(value: time | None) -> str | None:
         return value.isoformat() if value else None
 
+    def _raw_required_field_size_for_game(game: Game) -> str | None:
+        division = getattr(game, 'division', None)
+        if not division:
+            home_team = getattr(game, 'home_team', None)
+            division = getattr(home_team, 'division', None) if home_team else None
+        if not division:
+            away_team = getattr(game, 'away_team', None)
+            division = getattr(away_team, 'division', None) if away_team else None
+        return str(getattr(division, 'required_field_layout_type', '') or '').strip() or None
+
+    def _normalized_required_field_size_for_repack(game: Game) -> tuple[str | None, str | None, str | None]:
+        original = _raw_required_field_size_for_game(game) or _game_required_field_type(game)
+        normalized = _normalize_field_size(original)
+        if normalized not in FIELD_SIZE_ORDER:
+            return original, None, 'Unable to normalize required field size.'
+        return original, normalized, None
+
     def _field_size_for_game(game: Game) -> str:
         return _normalize_field_size(_game_required_field_type(game)) or FIELD_SIZE_SMALL
 
@@ -23839,8 +23856,19 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
     field_instances = db.query(FieldInstance).filter(FieldInstance.host_location_id.in_(turf_host_ids) if turf_host_ids else FieldInstance.host_location_id.is_(None)).all()
     field_by_host_label: dict[tuple[uuid.UUID, str], FieldInstance] = {}
     for field in field_instances:
-        if field.host_location_id in turf_host_ids and field.field_name in STANDARD_TURF_FIELD_SLOT_SET:
-            field_by_host_label[(field.host_location_id, field.field_name)] = field
+        if field.host_location_id not in turf_host_ids:
+            continue
+        raw_label = str(field.field_name or '').strip()
+        cleaned_label = _standard_turf_field_slot_display_label(raw_label, field.field_type)
+        # Prefer exact public labels, but also allow generated/internal turf-wave
+        # labels to back the standard slots used by the deterministic repacker.
+        # This keeps schedule/export labels public while making the compact
+        # placement loop independent of legacy FieldInstance names.
+        for label in (raw_label, cleaned_label):
+            if label in STANDARD_TURF_FIELD_SLOT_SET:
+                field_by_host_label.setdefault((field.host_location_id, label), field)
+        if raw_label in STANDARD_TURF_FIELD_SLOT_SET:
+            field_by_host_label[(field.host_location_id, raw_label)] = field
 
     all_slots = db.query(GameSlot).filter(
         or_(GameSlot.season_id == season_id, GameSlot.week_id.in_(db.query(Week.id).filter(Week.season_id == season_id)))
@@ -24137,36 +24165,92 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
         return None
 
     def _build_assignments(host_id: uuid.UUID, group_games: list[Game], start_times: list[time]) -> tuple[list[dict[str, object]] | None, list[str], str, dict[str, object]]:
+        def _game_diag(game: Game, size: str | None = None) -> dict[str, object]:
+            slot = game_slot.get(game.id)
+            original_size, normalized_size, normalization_error = _normalized_required_field_size_for_repack(game)
+            return {
+                'game_id': str(game.id),
+                'division': getattr(getattr(game, 'division', None), 'name', None) or getattr(getattr(getattr(game, 'home_team', None), 'division', None), 'name', None),
+                'required_field_size': original_size,
+                'original_field_size_value': original_size,
+                'normalized_field_size_value': size or normalized_size,
+                'field_size_normalization_error': normalization_error,
+                'current_time': _fmt_time(game.kickoff_time),
+                'current_field': _slot_label(slot) or (_field_label(getattr(game, 'field_instance', None)) if getattr(game, 'field_instance_id', None) else None),
+                'locked_manual_status': bool(getattr(game, 'is_manual_edit', False) or getattr(game, 'manual_edit_locked', False)),
+                'home_team': getattr(getattr(game, 'home_team', None), 'name', None),
+                'away_team': getattr(getattr(game, 'away_team', None), 'name', None),
+            }
+
+        normalized_by_game: dict[uuid.UUID, str] = {}
+        normalization_rows: list[dict[str, object]] = []
+        normalization_failures: list[dict[str, object]] = []
+        for game in group_games:
+            original_size, normalized_size, normalization_error = _normalized_required_field_size_for_repack(game)
+            row = {
+                'game_id': str(game.id),
+                'original_field_size_value': original_size,
+                'normalized_field_size_value': normalized_size,
+                'expected_values': list(FIELD_SIZE_ORDER),
+                'error': normalization_error,
+            }
+            normalization_rows.append(row)
+            if normalization_error or normalized_size not in FIELD_SIZE_ORDER:
+                normalization_failures.append({**_game_diag(game), 'failure_reason': 'Unable to normalize required field size.'})
+            else:
+                normalized_by_game[game.id] = normalized_size
+
+        def _counts_for(games: list[Game]) -> dict[str, int]:
+            counts = _empty_size_counts()
+            for game in games:
+                size = normalized_by_game.get(game.id)
+                if size in counts:
+                    counts[size] += 1
+            return counts
+
         locked = [game for game in group_games if bool(getattr(game, 'is_manual_edit', False) or getattr(game, 'manual_edit_locked', False)) and not include_manual_edits]
         movable = [game for game in group_games if game not in locked]
-        occupied: dict[tuple[time, str], Game] = {}
-        locked_by_start: dict[time, list[Game]] = {}
-        demand_counts = _size_counts_for_games(group_games)
-        locked_counts = _size_counts_for_games(locked)
-        movable_counts = _size_counts_for_games(movable)
+        demand_counts = _counts_for(group_games)
+        locked_counts = _counts_for(locked)
+        movable_counts = _counts_for(movable)
         cumulative_capacity = _empty_size_counts()
         successfully_placed = dict(locked_counts)
         attempted_blocks: list[dict[str, object]] = []
+        placement_attempts: list[dict[str, object]] = []
+        base_diagnostics = {
+            'valid_start_blocks_available': len(start_times),
+            'games_loaded_for_repack': [_game_diag(game, normalized_by_game.get(game.id)) for game in group_games],
+            'field_size_normalization': normalization_rows,
+            'games_required_by_field_size': demand_counts,
+            'games_successfully_placed_by_field_size': successfully_placed,
+            'games_not_placed_by_field_size': _subtract_counts(demand_counts, successfully_placed),
+            'cumulative_layout_capacity_by_field_size': cumulative_capacity,
+            'attempted_layout_sequence': attempted_blocks,
+            'placement_attempts': placement_attempts,
+            'unplaced_games': normalization_failures,
+            'field_size_capacity_shortfall': demand_counts,
+        }
+        if normalization_failures:
+            base_diagnostics['games_not_placed_by_field_size'] = demand_counts
+            return None, ['field-size normalization failed'], 'rejected: game field size could not be normalized - Unable to normalize required field size.', base_diagnostics
 
+        occupied: dict[tuple[time, str], Game] = {}
+        locked_by_start: dict[time, list[Game]] = {}
         for game in locked:
             label = _slot_label(game_slot.get(game.id))
             if not game.kickoff_time or label not in STANDARD_TURF_FIELD_SLOT_SET:
-                diagnostics = {
-                    'games_required_by_field_size': demand_counts,
-                    'games_successfully_placed_by_field_size': successfully_placed,
-                    'games_not_placed_by_field_size': _subtract_counts(demand_counts, successfully_placed),
-                    'cumulative_layout_capacity_by_field_size': cumulative_capacity,
-                    'attempted_layout_sequence': attempted_blocks,
-                    'unplaced_games': [{'game_id': str(game.id), 'field_size': _field_size_for_game(game)} for game in movable],
+                diagnostics = dict(base_diagnostics)
+                diagnostics.update({
+                    'unplaced_games': [{'game_id': str(game.id), 'field_size': normalized_by_game.get(game.id), 'failure_reason': 'locked manual edit has invalid turf field label'} for game in movable],
                     'field_size_capacity_shortfall': demand_counts,
-                }
-                return None, ['locked manual edit has invalid turf field label'], 'INVALID_LOCKED_GAME', diagnostics
+                })
+                return None, ['locked manual edit has invalid turf field label'], 'rejected: locked manual edit blocked placement', diagnostics
             occupied[(game.kickoff_time, label)] = game
             locked_by_start.setdefault(game.kickoff_time, []).append(game)
 
         pools: dict[str, list[Game]] = {FIELD_SIZE_SMALL: [], FIELD_SIZE_MEDIUM: [], FIELD_SIZE_LARGE: []}
         for game in sorted(movable, key=lambda g: (_minutes(g.kickoff_time), str(g.id))):
-            pools.setdefault(_field_size_for_game(game), []).append(game)
+            pools[normalized_by_game[game.id]].append(game)
         remaining = dict(movable_counts)
         assignments: list[dict[str, object]] = []
         layouts_attempted: list[str] = []
@@ -24191,19 +24275,36 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
                 field_assignments.append({
                     'game_id': str(locked_game.id),
                     'field': locked_label,
-                    'field_size': _field_size_for_game(locked_game),
+                    'field_size': normalized_by_game.get(locked_game.id),
                     'home_team_id': str(locked_game.home_team_id),
                     'away_team_id': str(locked_game.away_team_id),
+                    'home_team': getattr(getattr(locked_game, 'home_team', None), 'name', None),
+                    'away_team': getattr(getattr(locked_game, 'away_team', None), 'name', None),
                     'locked': True,
                 })
 
             for label, size in layout_parts:
-                if remaining.get(size, 0) <= 0:
+                candidate_game = pools[size][0] if pools.get(size) else None
+                attempt = {
+                    'game_id': str(candidate_game.id) if candidate_game else None,
+                    'required_size': size,
+                    'attempted_block_time': _fmt_time(start),
+                    'attempted_field_slot': label,
+                    'success': False,
+                    'failure_reason': None,
+                }
+                if remaining.get(size, 0) <= 0 or candidate_game is None:
+                    attempt['failure_reason'] = f'no remaining {size} game for compatible slot'
+                    placement_attempts.append(attempt)
                     continue
                 if (start, label) in occupied:
+                    attempt['failure_reason'] = 'field slot already occupied by locked/manual game'
+                    placement_attempts.append(attempt)
                     continue
                 field = field_by_host_label.get((host_id, label))
                 if not field:
+                    attempt['failure_reason'] = f'no usable FieldInstance found for {label}'
+                    placement_attempts.append(attempt)
                     continue
                 game = pools[size].pop(0)
                 remaining[size] -= 1
@@ -24212,12 +24313,16 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
                 occupied[(start, label)] = game
                 assignment = {'game': game, 'start_time': start, 'field_label': label, 'field': field, 'layout': layout}
                 assignments.append(assignment)
+                attempt['success'] = True
+                placement_attempts.append(attempt)
                 field_assignments.append({
                     'game_id': str(game.id),
                     'field': label,
                     'field_size': size,
                     'home_team_id': str(game.home_team_id),
                     'away_team_id': str(game.away_team_id),
+                    'home_team': getattr(getattr(game, 'home_team', None), 'name', None),
+                    'away_team': getattr(getattr(game, 'away_team', None), 'name', None),
                 })
 
             unused_capacity = dict(capacity)
@@ -24228,14 +24333,21 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
                 unused_capacity[size] = max(unused_capacity[size] - placed_this_block[size], 0)
             attempted_blocks.append({
                 'time': _fmt_time(start),
+                'start_time': _fmt_time(start),
                 'selected_layout': layout,
+                'internal_layout_name': layout,
+                'available_field_slots': [{'field': label, 'field_size': size} for label, size in layout_parts],
+                'compatible_field_size_capacity': capacity,
                 'field_assignments': sorted(field_assignments, key=lambda row: (str(row.get('field') or ''), str(row.get('game_id') or ''))),
+                'assigned_game_ids': [row['game_id'] for row in field_assignments if row.get('game_id')],
+                'assigned_teams': [f"{row.get('home_team') or row.get('home_team_id')} vs {row.get('away_team') or row.get('away_team_id')}" for row in field_assignments if row.get('game_id')],
+                'assigned_field_labels': [row.get('field') for row in field_assignments if row.get('field')],
                 'unused_capacity': unused_capacity,
                 'layout_capacity': capacity,
             })
 
         unplaced_games = [
-            {'game_id': str(game.id), 'field_size': size, 'home_team_id': str(game.home_team_id), 'away_team_id': str(game.away_team_id)}
+            {**_game_diag(game, size), 'field_size': size, 'failure_reason': f'no compatible {size} field slot remained before start blocks were exhausted'}
             for size in FIELD_SIZE_ORDER
             for game in pools.get(size, [])
         ]
@@ -24243,32 +24355,54 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
         capacity_shortfall = _subtract_counts(demand_counts, cumulative_capacity)
         diagnostics = {
             'valid_start_blocks_available': len(start_times),
+            'games_loaded_for_repack': [_game_diag(game, normalized_by_game.get(game.id)) for game in group_games],
+            'field_size_normalization': normalization_rows,
             'games_required_by_field_size': demand_counts,
             'games_successfully_placed_by_field_size': successfully_placed,
             'games_not_placed_by_field_size': not_placed,
             'cumulative_layout_capacity_by_field_size': cumulative_capacity,
             'attempted_layout_sequence': attempted_blocks,
+            'placement_attempts': placement_attempts,
             'unplaced_games': unplaced_games,
             'field_size_capacity_shortfall': capacity_shortfall,
             'compact_capacity_summary': f"{sum(demand_counts.values())} games required: {_format_size_counts(demand_counts)}. {len(start_times)} start blocks available. Proposed compact plan used {len(attempted_blocks)} start blocks and placed {sum(successfully_placed.values())} games.",
+            'final_placement_result': {
+                'placed_small_count': successfully_placed.get(FIELD_SIZE_SMALL, 0),
+                'placed_medium_count': successfully_placed.get(FIELD_SIZE_MEDIUM, 0),
+                'placed_large_count': successfully_placed.get(FIELD_SIZE_LARGE, 0),
+                'unplaced_small_count': not_placed.get(FIELD_SIZE_SMALL, 0),
+                'unplaced_medium_count': not_placed.get(FIELD_SIZE_MEDIUM, 0),
+                'unplaced_large_count': not_placed.get(FIELD_SIZE_LARGE, 0),
+            },
         }
         if sum(remaining.values()) > 0:
+            placed_total = sum(successfully_placed.values())
+            total = sum(demand_counts.values())
             if locked:
-                reason = 'locked manual edits prevent earlier repacking; compact layout could not place all unlocked games around locked games'
+                reason = 'rejected: locked manual edit blocked placement'
             elif not start_times:
-                reason = 'configured hosting availability has no valid one-hour start blocks'
+                reason = 'rejected: configured hosting availability has no valid one-hour start blocks'
             else:
-                reason = (
-                    'compact layout exceeded configured hosting window; cumulative compatible layout capacity was insufficient. '
-                    f"Required {_format_size_counts(demand_counts)}; placed {_format_size_counts(successfully_placed)}; "
-                    f"unplaced {_format_size_counts(not_placed)} across {len(start_times)} valid start block(s)."
-                )
+                zero_context = ''
+                if placed_total == 0:
+                    failures = sorted({str(attempt.get('failure_reason')) for attempt in placement_attempts if attempt.get('failure_reason')})
+                    zero_context = f" Placement failures: {'; '.join(failures) or 'no placement attempts were generated'}."
+                reason = f'rejected: start blocks exhausted after placing {placed_total} of {total} games; shortage {_format_size_counts(not_placed)}.{zero_context}'
             return None, layouts_attempted, reason, diagnostics
         return assignments, layouts_attempted, 'OK', diagnostics
 
     def _validate_assignments(host_id: uuid.UUID, game_date: date, group_games: list[Game], assignments: list[dict[str, object]]) -> str | None:
         group_ids = {game.id for game in group_games}
         assignment_by_game = {row['game'].id: row for row in assignments}
+        for row in assignments:
+            expected_size = _normalize_field_size(_game_required_field_type(row['game']))
+            actual_size = _normalize_field_size(getattr(row.get('field'), 'field_type', None))
+            if expected_size not in FIELD_SIZE_ORDER:
+                return 'game field size could not be normalized'
+            if actual_size != expected_size:
+                return 'invalid field-size assignment'
+            if row.get('field_label') == 'Large Field 2':
+                return 'Large Field 2 on a single turf stadium surface'
         assigned_or_locked_ids = set(assignment_by_game) | {
             game.id for game in group_games
             if bool(getattr(game, 'is_manual_edit', False) or getattr(game, 'manual_edit_locked', False)) and not include_manual_edits
