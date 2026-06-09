@@ -24084,7 +24084,16 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
     def _available_start_times(host_id: uuid.UUID, game_date: date, group_slots: list[GameSlot | None]) -> list[time]:
         return list(_hosting_window_diagnostics(host_id, game_date, group_slots).get('valid_start_time_values') or [])
 
-    def _layout_labels(layout: str, remaining: dict[str, int]) -> list[tuple[str, str]]:
+    def _empty_size_counts() -> dict[str, int]:
+        return {FIELD_SIZE_SMALL: 0, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_LARGE: 0}
+
+    def _size_counts_for_games(games: list[Game]) -> dict[str, int]:
+        counts = _empty_size_counts()
+        for game in games:
+            counts[_field_size_for_game(game)] = counts.get(_field_size_for_game(game), 0) + 1
+        return counts
+
+    def _layout_labels(layout: str) -> list[tuple[str, str]]:
         if layout == 'ONE_SMALL_ONE_LARGE':
             return [('Large Field 1', FIELD_SIZE_LARGE), ('Small Field 1', FIELD_SIZE_SMALL)]
         if layout == 'ONE_LARGE':
@@ -24092,8 +24101,20 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
         if layout == 'TWO_MEDIUM':
             return [('Medium Field 1', FIELD_SIZE_MEDIUM), ('Medium Field 2', FIELD_SIZE_MEDIUM)]
         if layout == 'TWO_SMALL_ONE_MEDIUM':
-            return [('Medium Field 1', FIELD_SIZE_MEDIUM), ('Small Field 1', FIELD_SIZE_SMALL), ('Small Field 2', FIELD_SIZE_SMALL)]
+            return [('Small Field 1', FIELD_SIZE_SMALL), ('Small Field 2', FIELD_SIZE_SMALL), ('Medium Field 1', FIELD_SIZE_MEDIUM)]
         return [('Small Field 1', FIELD_SIZE_SMALL), ('Small Field 2', FIELD_SIZE_SMALL), ('Small Field 3', FIELD_SIZE_SMALL)]
+
+    def _layout_capacity_counts(layout: str) -> dict[str, int]:
+        counts = _empty_size_counts()
+        for _label, size in _layout_labels(layout):
+            counts[size] += 1
+        return counts
+
+    def _subtract_counts(left: dict[str, int], right: dict[str, int]) -> dict[str, int]:
+        return {size: max(int(left.get(size, 0) or 0) - int(right.get(size, 0) or 0), 0) for size in FIELD_SIZE_ORDER}
+
+    def _format_size_counts(counts: dict[str, int]) -> str:
+        return f"{int(counts.get(FIELD_SIZE_SMALL, 0) or 0)} Small, {int(counts.get(FIELD_SIZE_MEDIUM, 0) or 0)} Medium, {int(counts.get(FIELD_SIZE_LARGE, 0) or 0)} Large"
 
     def _choose_layout(remaining: dict[str, int]) -> str | None:
         small = int(remaining.get(FIELD_SIZE_SMALL) or 0)
@@ -24115,61 +24136,135 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
             return 'TWO_MEDIUM'
         return None
 
-    def _build_assignments(host_id: uuid.UUID, group_games: list[Game], start_times: list[time]) -> tuple[list[dict[str, object]] | None, list[str], str]:
+    def _build_assignments(host_id: uuid.UUID, group_games: list[Game], start_times: list[time]) -> tuple[list[dict[str, object]] | None, list[str], str, dict[str, object]]:
         locked = [game for game in group_games if bool(getattr(game, 'is_manual_edit', False) or getattr(game, 'manual_edit_locked', False)) and not include_manual_edits]
         movable = [game for game in group_games if game not in locked]
         occupied: dict[tuple[time, str], Game] = {}
-        blocked_times: dict[time, list[Game]] = {}
+        locked_by_start: dict[time, list[Game]] = {}
+        demand_counts = _size_counts_for_games(group_games)
+        locked_counts = _size_counts_for_games(locked)
+        movable_counts = _size_counts_for_games(movable)
+        cumulative_capacity = _empty_size_counts()
+        successfully_placed = dict(locked_counts)
+        attempted_blocks: list[dict[str, object]] = []
+
         for game in locked:
             label = _slot_label(game_slot.get(game.id))
             if not game.kickoff_time or label not in STANDARD_TURF_FIELD_SLOT_SET:
-                return None, ['locked manual edit has invalid turf field label'], 'INVALID_LOCKED_GAME'
+                diagnostics = {
+                    'games_required_by_field_size': demand_counts,
+                    'games_successfully_placed_by_field_size': successfully_placed,
+                    'games_not_placed_by_field_size': _subtract_counts(demand_counts, successfully_placed),
+                    'cumulative_layout_capacity_by_field_size': cumulative_capacity,
+                    'attempted_layout_sequence': attempted_blocks,
+                    'unplaced_games': [{'game_id': str(game.id), 'field_size': _field_size_for_game(game)} for game in movable],
+                    'field_size_capacity_shortfall': demand_counts,
+                }
+                return None, ['locked manual edit has invalid turf field label'], 'INVALID_LOCKED_GAME', diagnostics
             occupied[(game.kickoff_time, label)] = game
-            blocked_times.setdefault(game.kickoff_time, []).append(game)
+            locked_by_start.setdefault(game.kickoff_time, []).append(game)
+
         pools: dict[str, list[Game]] = {FIELD_SIZE_SMALL: [], FIELD_SIZE_MEDIUM: [], FIELD_SIZE_LARGE: []}
         for game in sorted(movable, key=lambda g: (_minutes(g.kickoff_time), str(g.id))):
             pools.setdefault(_field_size_for_game(game), []).append(game)
-        remaining = {size: len(pools.get(size, [])) for size in (FIELD_SIZE_SMALL, FIELD_SIZE_MEDIUM, FIELD_SIZE_LARGE)}
+        remaining = dict(movable_counts)
         assignments: list[dict[str, object]] = []
         layouts_attempted: list[str] = []
+
         for start in start_times:
             if sum(remaining.values()) <= 0:
                 break
-            guard = 0
-            while sum(remaining.values()) > 0 and guard < 3:
-                guard += 1
-                layout = _choose_layout(remaining)
-                if not layout:
-                    break
-                layout_added = False
-                layout_parts = _layout_labels(layout, remaining)
-                for label, size in layout_parts:
-                    if remaining.get(size, 0) <= 0:
-                        continue
-                    if (start, label) in occupied:
-                        continue
-                    field = field_by_host_label.get((host_id, label))
-                    if not field:
-                        continue
-                    game = pools[size].pop(0)
-                    remaining[size] -= 1
-                    occupied[(start, label)] = game
-                    assignments.append({'game': game, 'start_time': start, 'field_label': label, 'field': field, 'layout': layout})
-                    layout_added = True
-                if layout_added:
-                    layouts_attempted.append(layout)
-                    break
-                # No requested component fit in this block; move to next time.
+            layout = _choose_layout(remaining)
+            if not layout:
                 break
+            layout_parts = _layout_labels(layout)
+            capacity = _layout_capacity_counts(layout)
+            for size in FIELD_SIZE_ORDER:
+                cumulative_capacity[size] += capacity[size]
+            layouts_attempted.append(layout)
+            placed_this_block = _empty_size_counts()
+            field_assignments: list[dict[str, object]] = []
+            locked_games = locked_by_start.get(start, [])
+            locked_labels = {_slot_label(game_slot.get(game.id)) for game in locked_games}
+            for locked_game in locked_games:
+                locked_label = _slot_label(game_slot.get(locked_game.id))
+                field_assignments.append({
+                    'game_id': str(locked_game.id),
+                    'field': locked_label,
+                    'field_size': _field_size_for_game(locked_game),
+                    'home_team_id': str(locked_game.home_team_id),
+                    'away_team_id': str(locked_game.away_team_id),
+                    'locked': True,
+                })
+
+            for label, size in layout_parts:
+                if remaining.get(size, 0) <= 0:
+                    continue
+                if (start, label) in occupied:
+                    continue
+                field = field_by_host_label.get((host_id, label))
+                if not field:
+                    continue
+                game = pools[size].pop(0)
+                remaining[size] -= 1
+                successfully_placed[size] += 1
+                placed_this_block[size] += 1
+                occupied[(start, label)] = game
+                assignment = {'game': game, 'start_time': start, 'field_label': label, 'field': field, 'layout': layout}
+                assignments.append(assignment)
+                field_assignments.append({
+                    'game_id': str(game.id),
+                    'field': label,
+                    'field_size': size,
+                    'home_team_id': str(game.home_team_id),
+                    'away_team_id': str(game.away_team_id),
+                })
+
+            unused_capacity = dict(capacity)
+            for label, size in layout_parts:
+                if label in locked_labels:
+                    unused_capacity[size] = max(unused_capacity[size] - 1, 0)
+            for size in FIELD_SIZE_ORDER:
+                unused_capacity[size] = max(unused_capacity[size] - placed_this_block[size], 0)
+            attempted_blocks.append({
+                'time': _fmt_time(start),
+                'selected_layout': layout,
+                'field_assignments': sorted(field_assignments, key=lambda row: (str(row.get('field') or ''), str(row.get('game_id') or ''))),
+                'unused_capacity': unused_capacity,
+                'layout_capacity': capacity,
+            })
+
+        unplaced_games = [
+            {'game_id': str(game.id), 'field_size': size, 'home_team_id': str(game.home_team_id), 'away_team_id': str(game.away_team_id)}
+            for size in FIELD_SIZE_ORDER
+            for game in pools.get(size, [])
+        ]
+        not_placed = _subtract_counts(demand_counts, successfully_placed)
+        capacity_shortfall = _subtract_counts(demand_counts, cumulative_capacity)
+        diagnostics = {
+            'valid_start_blocks_available': len(start_times),
+            'games_required_by_field_size': demand_counts,
+            'games_successfully_placed_by_field_size': successfully_placed,
+            'games_not_placed_by_field_size': not_placed,
+            'cumulative_layout_capacity_by_field_size': cumulative_capacity,
+            'attempted_layout_sequence': attempted_blocks,
+            'unplaced_games': unplaced_games,
+            'field_size_capacity_shortfall': capacity_shortfall,
+            'compact_capacity_summary': f"{sum(demand_counts.values())} games required: {_format_size_counts(demand_counts)}. {len(start_times)} start blocks available. Proposed compact plan used {len(attempted_blocks)} start blocks and placed {sum(successfully_placed.values())} games.",
+        }
         if sum(remaining.values()) > 0:
             if locked:
                 reason = 'locked manual edits prevent earlier repacking; compact layout could not place all unlocked games around locked games'
             elif not start_times:
                 reason = 'configured hosting availability has no valid one-hour start blocks'
             else:
-                reason = f'compact layout exceeded configured hosting window; {sum(remaining.values())} game(s) could not fit in {len(start_times)} valid start block(s)'
-            return None, layouts_attempted, reason
-        return assignments, layouts_attempted, 'OK'
+                reason = (
+                    'compact layout exceeded configured hosting window; cumulative compatible layout capacity was insufficient. '
+                    f"Required {_format_size_counts(demand_counts)}; placed {_format_size_counts(successfully_placed)}; "
+                    f"unplaced {_format_size_counts(not_placed)} across {len(start_times)} valid start block(s)."
+                )
+            return None, layouts_attempted, reason, diagnostics
+        return assignments, layouts_attempted, 'OK', diagnostics
 
     def _validate_assignments(host_id: uuid.UUID, game_date: date, group_games: list[Game], assignments: list[dict[str, object]]) -> str | None:
         group_ids = {game.id for game in group_games}
@@ -24326,12 +24421,22 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
             hosting_diagnostics = _hosting_window_diagnostics(host_id, game_date, [game_slot.get(game.id) for game in group_games], group_games)
             starts = list(hosting_diagnostics.get('valid_start_time_values') or [])
             if not starts:
-                assignments, layouts_attempted, build_reason = None, [], 'configured hosting availability has no valid one-hour start blocks'
+                assignments, layouts_attempted, build_reason, build_diagnostics = None, [], 'configured hosting availability has no valid one-hour start blocks', {
+                    'valid_start_blocks_available': 0,
+                    'games_required_by_field_size': counts,
+                    'games_successfully_placed_by_field_size': {FIELD_SIZE_SMALL: 0, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_LARGE: 0},
+                    'games_not_placed_by_field_size': counts,
+                    'cumulative_layout_capacity_by_field_size': {FIELD_SIZE_SMALL: 0, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_LARGE: 0},
+                    'attempted_layout_sequence': [],
+                    'unplaced_games': [{'game_id': str(game.id), 'field_size': _field_size_for_game(game)} for game in group_games],
+                    'field_size_capacity_shortfall': counts,
+                }
             else:
-                assignments, layouts_attempted, build_reason = _build_assignments(host_id, group_games, starts)
+                assignments, layouts_attempted, build_reason, build_diagnostics = _build_assignments(host_id, group_games, starts)
+            hosting_diagnostics.update(build_diagnostics)
             small_large_pairings_attempted = 'ONE_SMALL_ONE_LARGE' in layouts_attempted
             compact_target_layout_generated = assignments is not None
-            proposed_layout_rows = _layout_rows_for_assignments(group_games, assignments)
+            proposed_layout_rows = list(build_diagnostics.get('attempted_layout_sequence') or []) or _layout_rows_for_assignments(group_games, assignments)
             proposed_start_times = sorted({str(row.get('time')) for row in proposed_layout_rows if row.get('time')})
             hosting_diagnostics['proposed_compact_start_times_used'] = proposed_start_times
             proposed_layout_exceeded_hosting_window = bool(assignments is None and 'hosting window' in str(build_reason or '').lower())
