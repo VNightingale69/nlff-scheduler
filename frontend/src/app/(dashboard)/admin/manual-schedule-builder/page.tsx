@@ -48,27 +48,9 @@ function isSchedulingAdministratorRole(roleName: unknown): boolean {
   return normalized === 'SCHEDULING_ADMIN' || normalized === 'SCHEDULING_ADMINISTRATOR';
 }
 
-function hasSchedulingAdministratorOptimizationAccess(roleName: unknown, email: unknown): boolean {
-  // Local/dev seed admin@example.com is the top-level admin account used as the
-  // Scheduling Administrator in developer screenshots and seeded environments.
-  return isSchedulingAdministratorRole(roleName) || String(email || '').trim().toLowerCase() === 'admin@example.com';
-}
-
 function hasSchedulingAdministratorPermission(roleName: unknown): boolean {
   const normalized = normalizeRoleForUi(roleName);
   return normalized === 'ADMIN' || normalized === 'LEAGUE_ADMIN' || isSchedulingAdministratorRole(normalized);
-}
-
-const OPTIMIZATION_REQUEST_TIMEOUT_MS = Number(process.env.NEXT_PUBLIC_SCHEDULE_OPTIMIZATION_TIMEOUT_MS || 35000);
-
-function createOptimizationAbortController(): { controller: AbortController; timeoutId: ReturnType<typeof setTimeout> } {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), OPTIMIZATION_REQUEST_TIMEOUT_MS);
-  return { controller, timeoutId };
-}
-
-function isAbortError(value: unknown): boolean {
-  return value instanceof DOMException && value.name === 'AbortError';
 }
 
 function gameDateValue(game: any): string {
@@ -169,7 +151,6 @@ type AutoScheduleDiagnosticsSummary = {
   skippedAttemptsByReason: Record<string, unknown>;
   failedValidationReasons: Record<string, unknown>;
   trueHomeHost: Record<string, unknown>;
-  turfWave: Record<string, unknown>;
   pullForward: Record<string, unknown>;
   rejectionReasons: Record<string, unknown>;
   preview: string;
@@ -241,7 +222,6 @@ function summarizeAutoScheduleDiagnostics(value: any): AutoScheduleDiagnosticsSu
   const finalValidation = value?.final_validation || diagnostics?.final_validation || {};
   const hostVerification = value?.host_location_vs_home_team_verification || diagnostics?.host_location_vs_home_team_verification || {};
   const trueHomeHost = value?.true_home_host_diagnostics || diagnostics?.true_home_host_diagnostics || hostVerification;
-  const turfWave = value?.turf_wave_compaction || diagnostics?.turf_wave_compaction || {};
   const pullForward = value?.pull_forward_diagnostics || diagnostics?.pull_forward_diagnostics || value?.pull_forward || diagnostics?.pull_forward || {};
   const skippedAttemptsByReason = compactRecord(value?.skipped_attempts_by_reason || diagnostics?.skipped_attempts_by_reason || {});
   const failedValidationReasons = compactRecord(value?.failed_validation_reasons || diagnostics?.failed_validation_reasons || {});
@@ -287,13 +267,6 @@ function summarizeAutoScheduleDiagnostics(value: any): AutoScheduleDiagnosticsSu
       true_home_host_rule_passed: trueHomeHostRuleLabel(trueHomeHost?.true_home_host_rule_passed ?? trueHomeHost?.hard_rule_passed ?? trueHomeHost?.true_home_host_hard_rule_passed),
       host_owner_is_away_team: trueHomeHost?.host_owner_is_away_team ?? itemCount(trueHomeHost?.host_owner_is_away_games),
     },
-    turfWave: {
-      full_waves: turfWave?.full_waves ?? turfWave?.full_wave_count ?? turfWave?.wave_counts?.full ?? 0,
-      partial_waves: turfWave?.partial_waves ?? turfWave?.partial_wave_count ?? turfWave?.wave_counts?.partial ?? 0,
-      empty_waves: turfWave?.empty_waves ?? turfWave?.empty_wave_count ?? turfWave?.wave_counts?.empty ?? 0,
-      rejected_moves: itemCount(turfWave?.rejected_moves),
-      younger_division_late_penalty_candidates: itemCount(turfWave?.younger_division_late_penalty_candidates),
-    },
     pullForward: {
       candidates_considered: itemCount(pullForward?.candidates ?? pullForward?.candidate_games),
       candidates_accepted: toNumber(pullForward?.candidates_accepted ?? pullForward?.accepted_count),
@@ -320,7 +293,6 @@ export default function ManualScheduleBuilderPage() {
   const normalizedRoleName = normalizeRoleForUi(authUser?.role_name);
   const canManageGeneratedGames = hasSchedulingAdministratorPermission(normalizedRoleName);
   const canBulkInlineEditScheduledGames = hasSchedulingAdministratorPermission(normalizedRoleName);
-  const canRunScheduleOptimization = hasSchedulingAdministratorOptimizationAccess(normalizedRoleName, authUser?.email);
   const searchParams = useSearchParams();
   const [options, setOptions] = useState<any>({ divisions: [], teams: [], host_locations: [], field_instances: [], seasons: [], weeks: [], organizations: [], game_statuses: [] });
   const [seasonId, setSeasonId] = useState(searchParams.get('season_id') || '');
@@ -354,18 +326,27 @@ export default function ManualScheduleBuilderPage() {
   const [autoScheduleDryRun, setAutoScheduleDryRun] = useState(true);
   const [autoScheduleSeasonLoading, setAutoScheduleSeasonLoading] = useState(false);
   const [autoScheduleDiagnostics, setAutoScheduleDiagnostics] = useState<AutoScheduleDiagnosticsSummary | null>(null);
-  const [includeManualEditedGames, setIncludeManualEditedGames] = useState(false);
-  const [optimizerLoading, setOptimizerLoading] = useState(false);
-  const [optimizerApplyLoading, setOptimizerApplyLoading] = useState(false);
-  const [optimizerDiagnostics, setOptimizerDiagnostics] = useState<any | null>(null);
-  const [showOptimizationSummary, setShowOptimizationSummary] = useState(false);
-  const [scheduleStateLabel, setScheduleStateLabel] = useState('First-Pass Schedule');
   const [scheduledGamesFilters, setScheduledGamesFilters] = useState<ScheduledGamesFilters>(emptyScheduledGamesFilters);
   const [isBulkEditMode, setIsBulkEditMode] = useState(false);
 
   useEffect(() => () => {
     if (autoScheduleDiagnostics?.downloadUrl) URL.revokeObjectURL(autoScheduleDiagnostics.downloadUrl);
   }, [autoScheduleDiagnostics?.downloadUrl]);
+
+  useEffect(() => {
+    [
+      'optimizationPreview',
+      'optimization-preview',
+      'turfOptimizationState',
+      'turf-optimization-state',
+      'scheduleStateLabel',
+      'scheduleViewMode',
+      'manualScheduleBuilderScheduleMode',
+    ].forEach((key) => {
+      window.localStorage.removeItem(key);
+      window.sessionStorage.removeItem(key);
+    });
+  }, []);
 
   const division = useMemo(() => options.divisions.find((d: any) => d.id === divisionId), [options, divisionId]);
   const divisionTeams = useMemo(() => options.teams.filter((t: any) => t.division_id === divisionId && t.is_active), [options, divisionId]);
@@ -557,92 +538,6 @@ export default function ManualScheduleBuilderPage() {
   const pendingChangesLabel = `${pendingChangedCellCount} unsaved ${pendingChangedCellCount === 1 ? 'change' : 'changes'} across ${dirtyPendingEdits.length} ${dirtyPendingEdits.length === 1 ? 'game' : 'games'}`;
   const confirmDiscardBulkEdits = () => !hasPendingBulkEdits || window.confirm('Discard all unsaved schedule edits?');
 
-  const hasManualEditedGames = useMemo(() => games.some((game: any) => Boolean(game.is_manual_edit)), [games]);
-  const optimizationPayload = () => ({
-    season_id: seasonId,
-    include_manual_edits: includeManualEditedGames,
-  });
-  const runOptimizationPreview = async () => {
-    if (!seasonId || optimizerLoading) return;
-    if (hasPendingBulkEdits) {
-      setError('Save or discard unsaved manual edits before running optimization.');
-      return;
-    }
-    if (hasManualEditedGames && !includeManualEditedGames && !window.confirm('This schedule contains manual edits. Running optimization may move unlocked games. Continue?')) return;
-    setError('');
-    setSuccess('');
-    setOptimizerLoading(true);
-    const { controller, timeoutId } = createOptimizationAbortController();
-    try {
-      const res: any = await apiFetch('/manual-schedule-builder/optimize-schedule', {
-        method: 'POST',
-        body: JSON.stringify(optimizationPayload()),
-        signal: controller.signal,
-      }, token);
-      setOptimizerDiagnostics(res);
-      setShowOptimizationSummary(true);
-      setScheduleStateLabel('Optimization Preview');
-      const summary = res.summary || {};
-      const partial = summary.partial_diagnostics_message ? ` ${summary.partial_diagnostics_message}` : '';
-      const noChange = summary.no_candidates_message || summary.no_safe_moves_message ? ` ${summary.no_candidates_message || summary.no_safe_moves_message}` : '';
-      const repacksEvaluated = Number(summary.turf_stadium_date_repacks_evaluated ?? summary.optimization_candidates_evaluated ?? 0);
-      const acceptedRepacks = Number(summary.repacked_dates_accepted ?? summary.accepted_optimization_moves ?? 0);
-      const rejectedRepacks = Number(summary.repacked_dates_rejected_no_op ?? summary.candidates_rejected ?? summary.rejected_optimization_moves ?? 0);
-      const completionMessage = `Turf stadium/date repacking preview completed. Repacks evaluated: ${repacksEvaluated}, accepted: ${acceptedRepacks}, rejected/no-op: ${rejectedRepacks}, runtime: ${summary.optimization_runtime_seconds ?? '—'}s, stop reason: ${summary.stop_reason || summary.guard_stop_reason || 'completed'}.${partial}${noChange}`;
-      if (!repacksEvaluated || !acceptedRepacks) {
-        setError(completionMessage);
-      } else {
-        setSuccess(completionMessage);
-      }
-    } catch (e: unknown) {
-      setError(isAbortError(e) ? 'Optimization is taking longer than expected. Check backend logs or try again.' : `Turf stadium/date repacking failed: ${extractError(e)}`);
-    } finally {
-      clearTimeout(timeoutId);
-      setOptimizerLoading(false);
-    }
-  };
-  const applyOptimizationPreview = async () => {
-    if (!seasonId || optimizerApplyLoading) return;
-    setError('');
-    setSuccess('');
-    setOptimizerApplyLoading(true);
-    try {
-      const res: any = await apiFetch('/manual-schedule-builder/optimize-schedule/apply', {
-        method: 'POST',
-        body: JSON.stringify(optimizationPayload()),
-      }, token);
-      setOptimizerDiagnostics(res);
-      setShowOptimizationSummary(true);
-      setScheduleStateLabel('Optimized Schedule Applied');
-      await load();
-      await loadRecommendations();
-      const summary = res.summary || {};
-      setSuccess(`Turf stadium/date repacks applied. Repacks evaluated: ${Number(summary.turf_stadium_date_repacks_evaluated ?? summary.optimization_candidates_generated ?? summary.candidate_count ?? 0)}, accepted: ${Number(summary.repacked_dates_accepted ?? summary.accepted_optimization_moves ?? 0)}, rejected/no-op: ${Number(summary.repacked_dates_rejected_no_op ?? summary.rejected_optimization_moves ?? 0)}.`);
-    } catch (e: unknown) {
-      setError(`Apply optimized schedule failed: ${extractError(e)}`);
-    } finally {
-      setOptimizerApplyLoading(false);
-    }
-  };
-  const keepFirstPassSchedule = async () => {
-    setError('');
-    setSuccess('');
-    try {
-      if (seasonId) {
-        await apiFetch('/manual-schedule-builder/optimize-schedule/keep-first-pass', {
-          method: 'POST',
-          body: JSON.stringify({ season_id: seasonId }),
-        }, token);
-      }
-      setOptimizerDiagnostics(null);
-      setShowOptimizationSummary(false);
-      setScheduleStateLabel(hasManualEditedGames ? 'Manually Edited Schedule' : 'First-Pass Schedule');
-      setSuccess('Kept the saved first-pass schedule. Optimization preview discarded.');
-    } catch (e: unknown) {
-      setError(`Keep first-pass schedule failed: ${extractError(e)}`);
-    }
-  };
-
   useEffect(() => {
     if (!hasPendingBulkEdits) return;
     const handler = (event: BeforeUnloadEvent) => {
@@ -758,9 +653,6 @@ export default function ManualScheduleBuilderPage() {
       (res.games || []).forEach(applyScheduledGameUpdate);
       setPendingGameEdits({});
       setIsBulkEditMode(false);
-      setScheduleStateLabel('Manually Edited Schedule');
-      setOptimizerDiagnostics(null);
-      setShowOptimizationSummary(false);
       await load(); await loadRecommendations(); setManualScheduleBannerFromValidation(overrideWarnings ? 'Schedule changes saved with warning override.' : 'Schedule changes saved.', await loadFinalScheduleValidation());
     } catch (e: unknown) {
       if (e instanceof ApiError && e.status === 400) {
@@ -777,10 +669,6 @@ export default function ManualScheduleBuilderPage() {
     }
   };
 
-
-  const optimizerSummary = optimizerDiagnostics?.summary || {};
-  const optimizationHasMeasurableTurfImprovement = String(optimizerSummary.measurable_improvement_found ?? optimizerSummary.measurable_improvements_found ?? '').toLowerCase() === 'yes' && Number(optimizerSummary.candidates_accepted ?? optimizerSummary.accepted_optimization_moves ?? 0) > 0;
-  const optimizationNoMeasurableTurfImprovement = Boolean(optimizerDiagnostics) && !optimizationHasMeasurableTurfImprovement;
 
   return (
     <div className='space-y-4'>
@@ -955,81 +843,8 @@ export default function ManualScheduleBuilderPage() {
         <div className='mb-3 flex flex-wrap items-center justify-between gap-3'>
           <div>
             <h2 className='text-lg font-semibold'>Scheduled Games</h2>
-            <div className='mt-1 inline-flex rounded-full border border-slate-300 bg-slate-50 px-3 py-1 text-xs font-semibold text-slate-700'>{scheduleStateLabel}</div>
           </div>
-          {canRunScheduleOptimization ? <div className='flex flex-wrap items-center gap-2' aria-label='Scheduling Administrator optimization controls'>
-            {!optimizerDiagnostics && games.length > 0 ? <button className='rounded border border-emerald-700 bg-emerald-700 px-3 py-2 text-sm text-white disabled:cursor-not-allowed disabled:border-slate-300 disabled:bg-slate-300' disabled={!seasonId || optimizerLoading || hasPendingBulkEdits} onClick={runOptimizationPreview}>{optimizerLoading ? 'Running turf repacker…' : 'Optimize Schedule'}</button> : null}
-            {optimizerDiagnostics ? <button className='rounded border border-blue-700 bg-blue-700 px-3 py-2 text-sm text-white disabled:cursor-not-allowed disabled:border-slate-300 disabled:bg-slate-300' disabled={optimizerApplyLoading || optimizerLoading || optimizationNoMeasurableTurfImprovement} title={optimizationNoMeasurableTurfImprovement ? 'No measurable turf stadium improvement found; keep the saved first-pass schedule.' : undefined} onClick={applyOptimizationPreview}>{optimizerApplyLoading ? 'Applying...' : 'Apply Optimized Schedule'}</button> : null}
-            {optimizerDiagnostics ? <button className='rounded border px-3 py-2 text-sm disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400' disabled={optimizerApplyLoading || optimizerLoading} onClick={keepFirstPassSchedule}>Keep First-Pass Schedule</button> : null}
-            {optimizerDiagnostics ? <button className='rounded border px-3 py-2 text-sm' onClick={() => setShowOptimizationSummary((current) => !current)}>View Optimization Summary</button> : null}
-          </div> : null}
         </div>
-        {canRunScheduleOptimization ? <div className='mb-3 rounded border border-emerald-100 bg-emerald-50 p-3 text-sm text-emerald-950'>
-          <div className='font-semibold'>Scheduling Administrator Turf Optimization Workflow</div>
-          <p className='mt-1'>Generate Schedule saves the first-pass schedule only. Use Optimize Schedule after review to create a temporary turf-stadium utilization preview across all configured turf stadiums and regular-season dates; normal exports continue to use the saved authoritative schedule until Apply Optimized Schedule is selected.</p>
-          <p className='mt-1 text-xs text-emerald-900'>This pass is limited to turf stadium utilization. It preserves hard schedule rules and does not broadly repair grass/park placement, opponent pairing, host equity, doubleheaders, or season balance.</p>
-          <div className='mt-2 grid gap-2 md:grid-cols-2'>
-            <label className='flex items-center gap-2 md:col-span-2'><input type='checkbox' checked={includeManualEditedGames} onChange={(e) => setIncludeManualEditedGames(e.target.checked)} />Include manually edited games <span className='text-xs text-emerald-800'>(default unchecked; manual edits stay locked)</span></label>
-          </div>
-          {hasPendingBulkEdits ? <p className='mt-2 text-amber-700'>Save or discard unsaved edits before running optimization.</p> : null}
-        </div> : null}
-        {canRunScheduleOptimization && optimizerDiagnostics && showOptimizationSummary ? <div className='mb-3 rounded border bg-white p-3 text-sm text-slate-800'>
-          <div className='flex flex-wrap items-center justify-between gap-2'>
-            <div className='font-semibold'>Turf Stadium Repacking Summary</div>
-            <button className='rounded border px-2 py-1 text-xs' onClick={() => {
-              const blob = new Blob([JSON.stringify(optimizerDiagnostics, null, 2)], { type: 'application/json' });
-              const url = URL.createObjectURL(blob);
-              const a = document.createElement('a');
-              a.href = url;
-              a.download = 'optimization-comparison.json';
-              a.click();
-              URL.revokeObjectURL(url);
-            }}>Export Optimization Comparison</button>
-          </div>
-          <div className='mt-2 grid gap-2 md:grid-cols-4'>
-            <div>Turf stadiums: <span className='font-semibold'>{optimizerDiagnostics.summary?.turf_stadium_count ?? 0}</span></div>
-            <div>Turf games: <span className='font-semibold'>{optimizerDiagnostics.summary?.turf_game_count ?? 0}</span></div>
-            <div>Single-game blocks before: <span className='font-semibold'>{optimizerDiagnostics.summary?.total_turf_single_game_blocks_before ?? 0}</span></div>
-            <div>Repacks evaluated: <span className='font-semibold'>{optimizerDiagnostics.summary?.turf_stadium_date_repacks_evaluated ?? 0}</span></div>
-            <div>Repacked dates accepted: <span className='font-semibold'>{optimizerDiagnostics.summary?.repacked_dates_accepted ?? optimizerDiagnostics.summary?.accepted_optimization_moves ?? 0}</span></div>
-            <div>Repacked dates rejected/no-op: <span className='font-semibold'>{optimizerDiagnostics.summary?.repacked_dates_rejected_no_op ?? optimizerDiagnostics.summary?.rejected_optimization_moves ?? 0}</span></div>
-            <div>Latest turf start: <span className='font-semibold'>{String(optimizerDiagnostics.summary?.latest_turf_start_time_before ?? '—')} → {String(optimizerDiagnostics.summary?.latest_turf_start_time_after ?? '—')}</span></div>
-            <div>Two-game blocks: <span className='font-semibold'>{String(optimizerDiagnostics.summary?.total_turf_two_game_blocks_before ?? '—')} → {String(optimizerDiagnostics.summary?.total_turf_two_game_blocks_after ?? '—')}</span></div>
-            <div>Rejection/no-op reasons logged: <span className='font-semibold'>{optimizerDiagnostics.summary?.rejection_no_op_reasons_logged ?? optimizerDiagnostics.summary?.rejection_reasons_logged ?? 0}</span></div>
-            <div>Runtime: <span className='font-semibold'>{optimizerDiagnostics.summary?.optimization_runtime_seconds ?? '—'}s</span></div>
-            <div>Stop reason: <span className='font-semibold'>{optimizerDiagnostics.summary?.stop_reason || optimizerDiagnostics.summary?.guard_stop_reason || 'completed'}</span></div>
-            <div>Manual edits locked: <span className='font-semibold'>{optimizerDiagnostics.summary?.manual_edits_locked ? 'Yes' : 'No'}</span></div>
-          </div>
-          {optimizerDiagnostics.summary?.partial_diagnostics_message ? <div className='mt-2 rounded border border-amber-200 bg-amber-50 p-2 text-amber-900'>{optimizerDiagnostics.summary.partial_diagnostics_message}</div> : null}
-          {optimizerDiagnostics.summary?.no_candidates_message ? <div className='mt-2 rounded border border-amber-200 bg-amber-50 p-2 text-amber-900'>No turf stadium/date repacks were evaluated.{optimizerDiagnostics.summary?.no_candidate_reasons?.length ? ` ${optimizerDiagnostics.summary.no_candidate_reasons.join(' ')}` : ''}</div> : null}
-          {optimizationNoMeasurableTurfImprovement ? <div className='mt-2 rounded border border-amber-300 bg-amber-50 p-2 text-amber-900'>No measurable turf stadium improvement found. Apply Optimized Schedule is disabled because the preview is not meaningfully optimized.</div> : null}
-          {optimizerDiagnostics.summary?.no_safe_moves_message ? <div className='mt-2 rounded border border-slate-200 bg-slate-50 p-2 text-slate-900'>{optimizerDiagnostics.summary.no_safe_moves_message}</div> : null}
-          <div className='mt-3 overflow-auto rounded border'>
-            <table className='min-w-full text-sm'><thead><tr className='bg-slate-50 text-left'><th className='p-2'>Metric</th><th className='p-2'>First-Pass Schedule</th><th className='p-2'>Optimized Preview</th></tr></thead><tbody>
-              {(optimizerDiagnostics.metric_comparison || []).map((metric: any) => <tr key={metric.key} className='border-t'><td className='p-2'>{metric.label}</td><td className='p-2'>{String(metric.before ?? '—')}</td><td className='p-2'>{String(metric.after ?? '—')}</td></tr>)}
-            </tbody></table>
-          </div>
-          {optimizerDiagnostics.summary?.per_stadium_turf_metrics?.length ? <div className='mt-3 overflow-auto rounded border'>
-            <table className='min-w-full text-sm'><thead><tr className='bg-slate-50 text-left'>{['Turf Stadium', 'Turf Games', 'Active Blocks', 'Single Blocks', 'Two-Game Blocks', 'Latest Start', 'Late Large', 'Accepted Dates', 'Rejected/No-op Dates', 'Top No-op Reason'].map((heading) => <th key={heading} className='p-2'>{heading}</th>)}</tr></thead><tbody>
-              {optimizerDiagnostics.summary.per_stadium_turf_metrics.map((row: any) => <tr key={row.host_location_id || row.host_location_name} className='border-t'>
-                <td className='p-2'>{row.host_location_name || row.host_location_id}</td>
-                <td className='p-2'>{row.turf_games ?? row.turf_games_found ?? 0}</td>
-                <td className='p-2'>{String(row.active_blocks_before ?? row.turf_active_time_blocks_before ?? '—')} → {String(row.active_blocks_after ?? row.turf_active_time_blocks_after ?? '—')}</td>
-                <td className='p-2'>{String(row.single_game_blocks_before ?? row.turf_single_game_blocks_before ?? '—')} → {String(row.single_game_blocks_after ?? row.turf_single_game_blocks_after ?? '—')}</td>
-                <td className='p-2'>{String(row.two_game_blocks_before ?? row.turf_two_game_blocks_before ?? '—')} → {String(row.two_game_blocks_after ?? row.turf_two_game_blocks_after ?? '—')}</td>
-                <td className='p-2'>{String(row.latest_start_before ?? row.latest_turf_start_time_before ?? '—')} → {String(row.latest_start_after ?? row.latest_turf_start_time_after ?? '—')}</td>
-                <td className='p-2'>{String(row.late_large_game_count_at_3pm_or_4pm_before ?? 0)} → {String(row.late_large_game_count_at_3pm_or_4pm_after ?? 0)}</td>
-                <td className='p-2'>{row.accepted_repacked_dates ?? row.candidates_accepted ?? 0}</td>
-                <td className='p-2'>{row.rejected_no_op_dates ?? row.candidates_rejected ?? 0}</td>
-                <td className='p-2'>{row.top_no_op_reason ?? (row.top_rejection_reasons ? Object.keys(row.top_rejection_reasons).slice(0, 3).join(', ') : '—')}</td>
-              </tr>)}
-            </tbody></table>
-          </div> : null}
-          {optimizerDiagnostics.proposed_changes?.length ? <details className='mt-3'><summary className='cursor-pointer text-blue-700 underline'>View accepted repacks</summary><pre className='mt-2 max-h-64 overflow-auto rounded bg-slate-900 p-2 text-xs text-slate-50'>{safeStringify(optimizerDiagnostics.proposed_changes, 8000)}</pre></details> : null}
-          {optimizerDiagnostics.rejected_changes?.length ? <details className='mt-3'><summary className='cursor-pointer text-blue-700 underline'>View rejected/no-op repacks</summary><pre className='mt-2 max-h-64 overflow-auto rounded bg-slate-900 p-2 text-xs text-slate-50'>{safeStringify(optimizerDiagnostics.rejected_changes, 8000)}</pre></details> : null}
-          {optimizerDiagnostics.rejected_move_reasons && Object.keys(optimizerDiagnostics.rejected_move_reasons).length ? <details className='mt-3'><summary className='cursor-pointer text-blue-700 underline'>View rejection/no-op reasons logged</summary><pre className='mt-2 max-h-64 overflow-auto rounded bg-slate-900 p-2 text-xs text-slate-50'>{safeStringify(optimizerDiagnostics.rejected_move_reasons, 8000)}</pre></details> : null}
-          <details className='mt-3'><summary className='cursor-pointer text-blue-700 underline'>View Optimization Summary Diagnostics</summary><pre className='mt-2 max-h-80 overflow-auto rounded bg-slate-900 p-2 text-xs text-slate-50'>{safeStringify(optimizerDiagnostics, 12000)}</pre></details>
-        </div> : null}
         <div className='mb-3 rounded border bg-slate-50 p-3'>
           <div className='grid gap-2 sm:grid-cols-2 lg:grid-cols-6'>
             <label className='flex flex-col gap-1 text-xs font-semibold text-slate-700'>Date
@@ -1241,10 +1056,6 @@ export default function ManualScheduleBuilderPage() {
                   await load();
                   await loadRecommendations();
                   setAutoScheduleDiagnostics(summarizeAutoScheduleDiagnostics(res));
-                  if (!res.dry_run) {
-                    setScheduleStateLabel('First-Pass Schedule');
-                    setOptimizerDiagnostics(null);
-                  }
                   const finalValidation = res.final_validation || res.auto_schedule_diagnostics?.final_validation || {};
                   const finalStatus = String(finalValidation.final_validation_status || res.final_validation_status || res.status || '').toUpperCase();
                   const rootCauses = (res.root_cause_categories || res.auto_schedule_diagnostics?.root_cause_categories || []).join(', ');
@@ -1316,12 +1127,6 @@ export default function ManualScheduleBuilderPage() {
               <h3 className='font-semibold'>True Home-Host Diagnostics</h3>
               <dl className='mt-2 grid grid-cols-2 gap-2'>
                 {Object.entries(autoScheduleDiagnostics.trueHomeHost).map(([label, count]) => <div key={label}><dt className='text-slate-600'>{label.replaceAll('_', ' ')}</dt><dd className='font-semibold'>{String(count)}</dd></div>)}
-              </dl>
-            </div>
-            <div className='rounded border border-slate-200 bg-white p-3'>
-              <h3 className='font-semibold'>Turf Wave Diagnostics</h3>
-              <dl className='mt-2 grid grid-cols-2 gap-2'>
-                {Object.entries(autoScheduleDiagnostics.turfWave).map(([label, count]) => <div key={label}><dt className='text-slate-600'>{label.replaceAll('_', ' ')}</dt><dd className='font-semibold'>{String(count)}</dd></div>)}
               </dl>
             </div>
             <div className='rounded border border-slate-200 bg-white p-3'>

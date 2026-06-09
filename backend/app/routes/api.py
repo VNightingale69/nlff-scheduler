@@ -16,7 +16,7 @@ from sqlalchemy import String, and_, delete, func, inspect as sa_inspect, or_, s
 from sqlalchemy.exc import IntegrityError, ProgrammingError, SQLAlchemyError
 from sqlalchemy.orm import Session, aliased
 
-from app.config import ADMIN_SEED_EMAIL, RULEBOOK_MAX_SIZE_BYTES, RULEBOOK_UPLOAD_DIR
+from app.config import ADMIN_SEED_EMAIL, ENABLE_TURF_OPTIMIZATION, RULEBOOK_MAX_SIZE_BYTES, RULEBOOK_UPLOAD_DIR
 from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN, enforce_organization_scope, get_current_user, is_community_admin, is_league_admin, normalize_role_name, require_roles
 from app.database import get_db
 from app.models import Division, Field, FieldConfigurationOption, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostPlanSelection, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Rulebook, ScheduleChangeLog, ScoreSubmission, Season, Team, TurfWave, User, Week
@@ -22104,20 +22104,30 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
     optional_optimization_skip_reason = '; '.join(optional_optimization_skip_reasons) if optional_optimization_skipped else None
     auto_schedule_diagnostics['optional_optimization_skipped'] = optional_optimization_skipped
     auto_schedule_diagnostics['optional_optimization_skip_reason'] = optional_optimization_skip_reason
-    # Post-generation optimization is intentionally manual-only.  The season auto-scheduler
-    # creates and saves the first-pass schedule, then stops so the Scheduling Administrator
-    # can review the baseline before requesting an optimization preview.
+    # Post-generation turf optimization is suspended by default.  The season
+    # auto-scheduler creates and saves the authoritative schedule, then stops so
+    # administrators can review and manually adjust games without optimizer state.
     optional_optimization_skipped = True
-    optional_optimization_skip_reason = 'manual_optimization_required'
+    optional_optimization_skip_reason = 'turf_optimization_disabled' if not ENABLE_TURF_OPTIMIZATION else 'manual_optimization_required'
     auto_schedule_diagnostics['optional_optimization_skipped'] = True
     auto_schedule_diagnostics['optional_optimization_skip_reason'] = optional_optimization_skip_reason
     pull_forward_phase = _start_phase('manual-only turf compaction skipped')
-    turf_wave_compaction = _run_turf_wave_compaction_pass(
-        db,
-        season_id,
-        enabled=False,
-        runtime_limits=runtime_limits,
-    )
+    if ENABLE_TURF_OPTIMIZATION:
+        turf_wave_compaction = _run_turf_wave_compaction_pass(
+            db,
+            season_id,
+            enabled=False,
+            runtime_limits=runtime_limits,
+        )
+    else:
+        turf_wave_compaction = {
+            'feature_disabled': True,
+            'message': TURF_OPTIMIZATION_DISABLED_MESSAGE,
+            'candidate_moves_evaluated': 0,
+            'accepted_moves_count': 0,
+            'rejected_moves_count': 0,
+            'rejected_moves_by_reason': {},
+        }
     pull_forward_phase['_rejection_reasons_override'] = dict(turf_wave_compaction.get('rejected_moves_by_reason') or {})
     _finish_phase(
         pull_forward_phase,
@@ -22805,7 +22815,16 @@ def _has_schedule_optimization_admin_access(current_user: User) -> bool:
     return role_name == ROLE_LEAGUE_ADMIN and current_user.email.strip().lower() == ADMIN_SEED_EMAIL.strip().lower()
 
 
-def require_schedule_optimization_admin(current_user: User = Depends(get_current_user)) -> User:
+TURF_OPTIMIZATION_DISABLED_MESSAGE = 'Turf optimization is currently disabled.'
+
+
+def require_turf_optimization_enabled(_current_user: User = Depends(get_current_user)) -> User:
+    if not ENABLE_TURF_OPTIMIZATION:
+        raise HTTPException(status_code=410, detail=TURF_OPTIMIZATION_DISABLED_MESSAGE)
+    return _current_user
+
+
+def require_schedule_optimization_admin(current_user: User = Depends(require_turf_optimization_enabled)) -> User:
     if not _has_schedule_optimization_admin_access(current_user):
         raise HTTPException(status_code=403, detail='Scheduling Administrator role required')
     return current_user
@@ -22840,6 +22859,8 @@ def _optimization_preview_game_rows(db: Session, season_id: uuid.UUID | str) -> 
 
 
 def _run_manual_optimization_workflow(payload: dict, db: Session, *, apply: bool, current_user: User | None = None) -> dict[str, object]:
+    if not ENABLE_TURF_OPTIMIZATION:
+        raise HTTPException(status_code=410, detail=TURF_OPTIMIZATION_DISABLED_MESSAGE)
     workflow_start = perf_counter()
     endpoint_name = 'manual_schedule_builder.apply_optimized_schedule' if apply else 'manual_schedule_builder.optimize_schedule'
     season_id = payload.get('season_id')
