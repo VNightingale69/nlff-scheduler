@@ -17,7 +17,7 @@ from sqlalchemy.exc import IntegrityError, ProgrammingError, SQLAlchemyError
 from sqlalchemy.orm import Session, aliased
 
 from app.config import ADMIN_SEED_EMAIL, ENABLE_TURF_OPTIMIZATION, RULEBOOK_MAX_SIZE_BYTES, RULEBOOK_UPLOAD_DIR
-from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN, can_manage_schedule, enforce_organization_scope, get_current_user, is_community_admin, is_league_admin, normalize_role_name, require_roles, require_schedule_admin
+from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN, can_manage_schedule, enforce_organization_scope, get_current_user, is_community_admin, is_league_admin, normalize_role_name, require_roles, require_schedule_admin, require_schedule_publisher
 from app.database import get_db
 from app.models import Division, Field, FieldConfigurationOption, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostPlanSelection, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Rulebook, ScheduleChangeLog, ScoreHistory, ScoreSubmission, Season, Team, TurfWave, User, Week
 from app.schemas import (
@@ -14338,7 +14338,31 @@ def _run_turf_wave_compaction_pass(db: Session, season_id: uuid.UUID, *, enabled
     return diagnostics
 
 
-@router.post('/seasons/{season_id}/publish-schedule', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+SCHEDULE_PUBLIC_STATUS = 'published'
+SCHEDULE_UNPUBLISHED_STATUS = 'unpublished'
+SCHEDULE_LEGACY_PUBLISHED_STATUSES = {'saved'}
+
+
+def _schedule_publication_status(season: Season | None) -> dict:
+    status_value = str(getattr(season, 'schedule_status', '') or '').strip().lower() if season else ''
+    is_published = bool(season) and (status_value == SCHEDULE_PUBLIC_STATUS or status_value in SCHEDULE_LEGACY_PUBLISHED_STATUSES)
+    return {
+        'season_id': str(season.id) if season else None,
+        'season_name': season.name if season else None,
+        'schedule_status': status_value or None,
+        'schedule_publication_status': SCHEDULE_PUBLIC_STATUS if is_published else SCHEDULE_UNPUBLISHED_STATUS,
+        'schedule_published': is_published,
+    }
+
+
+@router.get('/seasons/{season_id}/schedule-publication-status', dependencies=[Depends(require_schedule_publisher)])
+def get_schedule_publication_status(season_id: uuid.UUID, db: Session = Depends(get_db)):
+    season = db.query(Season).filter(Season.id == season_id).first()
+    if not season: raise HTTPException(404, 'Season not found')
+    return _schedule_publication_status(season)
+
+
+@router.post('/seasons/{season_id}/publish-schedule', dependencies=[Depends(require_schedule_publisher)])
 def publish_schedule(season_id: uuid.UUID, db: Session = Depends(get_db)):
     season = db.query(Season).filter(Season.id == season_id).first()
     if not season: raise HTTPException(404, 'Season not found')
@@ -14351,16 +14375,18 @@ def publish_schedule(season_id: uuid.UUID, db: Session = Depends(get_db)):
         or validation['hard_errors']
     ):
         raise HTTPException(status_code=400, detail={'error': 'publish_validation_failed', **validation, 'generated_slot_integrity_diagnostics': integrity})
-    season.schedule_status = 'saved'
+    season.schedule_status = SCHEDULE_PUBLIC_STATUS
     db.commit()
-    return {'ok': True, 'season_id': str(season_id), 'schedule_status': season.schedule_status, 'warnings': validation['warnings'], 'overall_health': validation['overall_health'], 'generated_slot_integrity_diagnostics': integrity}
+    return {'ok': True, **_schedule_publication_status(season), 'warnings': validation['warnings'], 'overall_health': validation['overall_health'], 'generated_slot_integrity_diagnostics': integrity}
 
 
-@router.post('/seasons/{season_id}/unpublish-schedule', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+@router.post('/seasons/{season_id}/unpublish-schedule', dependencies=[Depends(require_schedule_publisher)])
 def unpublish_schedule(season_id: uuid.UUID, db: Session = Depends(get_db)):
     season = db.query(Season).filter(Season.id == season_id).first()
     if not season: raise HTTPException(404, 'Season not found')
-    raise HTTPException(status_code=410, detail='Draft schedule state is disabled; saved scheduled games are authoritative.')
+    season.schedule_status = SCHEDULE_UNPUBLISHED_STATUS
+    db.commit()
+    return {'ok': True, **_schedule_publication_status(season)}
 
 @router.post('/weeks', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def create_week(payload: dict, db: Session = Depends(get_db)):
@@ -23038,6 +23064,15 @@ def list_public_games(season_id: uuid.UUID | None = None, host_location_id: uuid
             message='No saved schedule is currently available.',
         )
 
+    if not _season_schedule_is_published(season):
+        return PagedResponse(
+            items=[],
+            total=0,
+            page=page,
+            page_size=page_size,
+            message='The schedule is not currently published.',
+        )
+
     rows = [
         row for row in get_scheduled_games_for_season(db, season.id, filters, organization_filter_any_team=True)
         if row[6] and row[6].is_active
@@ -23070,8 +23105,8 @@ def public_schedule_debug(season_id: uuid.UUID | None = None, host_location_id: 
         status_code=status_code,
     )
     admin_rows = get_scheduled_games_for_season(db, season.id if season else None, base_filters) if season else []
-    public_before_filters = admin_rows if season else []
-    public_after_filters = get_scheduled_games_for_season(db, season.id, active_filters, organization_filter_any_team=True) if season else []
+    public_before_filters = admin_rows if season and _season_schedule_is_published(season) else []
+    public_after_filters = get_scheduled_games_for_season(db, season.id, active_filters, organization_filter_any_team=True) if season and _season_schedule_is_published(season) else []
     return {
         'season_status': season.schedule_status if season else None,
         'admin_schedule_management_count': len(admin_rows),
@@ -23088,7 +23123,7 @@ def list_public_schedule_filters(season_id: uuid.UUID | None = None, db: Session
     rows = [
         row for row in get_scheduled_games_for_season(db, season.id, _scheduled_games_filters(season.id))
         if row[6] and row[6].is_active
-    ] if season else []
+    ] if season and _season_schedule_is_published(season) else []
 
     if rows:
         host_locations_by_id = {host.id: host for _, _, _, host, _, _, _, _, _ in rows if host}
@@ -24983,9 +25018,7 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
     }
 
 def _season_schedule_is_published(season: Season | None) -> bool:
-    # Draft/published season flags are no longer authoritative for normal schedule display.
-    # Any active scoped season with persisted scheduled games can be shown.
-    return season is not None
+    return bool(_schedule_publication_status(season)['schedule_published'])
 
 
 def _get_schedule_scope_season(db: Session, season_id: uuid.UUID | None = None) -> Season | None:
@@ -26043,6 +26076,7 @@ def schedule_publish_diagnostics(season_id: uuid.UUID | None = None, db: Session
         'archived_games': archived,
         'final_validation_status': final_validation.get('final_validation_status'),
         'schedule_quality_status': final_validation.get('schedule_quality_status'),
+        **_schedule_publication_status(season),
         'publish_eligibility_source': 'PUBLISH_ELIGIBILITY_FROM_FINAL_VALIDATION',
         'publish_block_reason': ('Schedule validation could not be fully audited.' if final_validation.get('diagnostics_reporting_failure_count') else ('Actual scheduling-rule failures require review.' if final_validation.get('hard_rule_failure_count') else None)),
         'hard_rule_failure_count': final_validation.get('hard_rule_failure_count') or final_validation.get('final_validation_failure_count'),

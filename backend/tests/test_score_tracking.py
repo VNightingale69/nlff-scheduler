@@ -10,7 +10,7 @@ from sqlalchemy.pool import StaticPool
 from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN
 from app.database import Base, get_db
 from app.main import app
-from app.models import Division, Game, GameScore, GameStatus, Organization, Role, ScoreHistory, ScoreSubmission, Season, Team, User, Week
+from app.models import Division, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, Organization, Role, ScoreHistory, ScoreSubmission, Season, Team, User, Week
 from app.security import create_access_token, hash_password
 
 
@@ -28,20 +28,25 @@ class ScoreTrackingTest(unittest.TestCase):
         self.away_org = Organization(id=uuid.uuid4(), name='Lake County', is_active=True)
         self.other_org = Organization(id=uuid.uuid4(), name='Other', is_active=True)
         self.division = Division(id=uuid.uuid4(), name='K-1', division_group='COED', sort_order=1, required_field_layout_type='SMALL', is_active=True)
+        self.host = HostLocation(id=uuid.uuid4(), organization_id=self.home_org.id, name='Westosha Park', surface_type='GRASS_FIELD', is_active=True)
         self.season = Season(id=uuid.uuid4(), name='Fall 2026', start_date=date(2026, 8, 1), end_date=date(2026, 11, 1), is_active=True, schedule_status='published')
         self.week = Week(id=uuid.uuid4(), season_id=self.season.id, week_number=1, label='Week 1', start_date=date(2026, 5, 1), end_date=date(2026, 5, 7), primary_game_date=date(2026, 5, 2), status='REGULAR_SEASON')
         self.status = GameStatus(id=uuid.uuid4(), code='published', label='Published', is_active=True)
         self.home_team = Team(id=uuid.uuid4(), organization_id=self.home_org.id, division_id=self.division.id, name='Westosha 1', is_active=True)
         self.away_team = Team(id=uuid.uuid4(), organization_id=self.away_org.id, division_id=self.division.id, name='Lake 1', is_active=True)
+        self.field = FieldInstance(id=uuid.uuid4(), host_location_id=self.host.id, hosting_availability_id=uuid.uuid4(), instance_date=date(2026, 5, 2), field_name='Small Field 1', field_type='SMALL', is_active=True)
+        self.other_field = FieldInstance(id=uuid.uuid4(), host_location_id=self.host.id, hosting_availability_id=uuid.uuid4(), instance_date=date(2026, 5, 2), field_name='Small Field 2', field_type='SMALL', is_active=True)
         self.other_team = Team(id=uuid.uuid4(), organization_id=self.other_org.id, division_id=self.division.id, name='Other 1', is_active=True)
-        self.game = Game(id=uuid.uuid4(), season_id=self.season.id, week_id=self.week.id, home_team_id=self.home_team.id, away_team_id=self.away_team.id, game_status_id=self.status.id, game_date=date(2026, 5, 2), kickoff_time=time(9, 0))
-        self.other_game = Game(id=uuid.uuid4(), season_id=self.season.id, week_id=self.week.id, home_team_id=self.other_team.id, away_team_id=self.away_team.id, game_status_id=self.status.id, game_date=date(2026, 5, 2), kickoff_time=time(10, 0))
+        self.game = Game(id=uuid.uuid4(), season_id=self.season.id, week_id=self.week.id, home_team_id=self.home_team.id, away_team_id=self.away_team.id, host_location_id=self.host.id, field_instance_id=self.field.id, game_status_id=self.status.id, game_date=date(2026, 5, 2), kickoff_time=time(9, 0))
+        self.other_game = Game(id=uuid.uuid4(), season_id=self.season.id, week_id=self.week.id, home_team_id=self.other_team.id, away_team_id=self.away_team.id, host_location_id=self.host.id, field_instance_id=self.other_field.id, game_status_id=self.status.id, game_date=date(2026, 5, 2), kickoff_time=time(10, 0))
+        self.slot = GameSlot(id=uuid.uuid4(), field_instance_id=self.field.id, host_location_id=self.host.id, season_id=self.season.id, week_id=self.week.id, slot_date=date(2026, 5, 2), start_time=time(9, 0), end_time=time(10, 0), field_type='SMALL', status='ASSIGNED', assigned_game_id=self.game.id)
+        self.other_slot = GameSlot(id=uuid.uuid4(), field_instance_id=self.other_field.id, host_location_id=self.host.id, season_id=self.season.id, week_id=self.week.id, slot_date=date(2026, 5, 2), start_time=time(10, 0), end_time=time(11, 0), field_type='SMALL', status='ASSIGNED', assigned_game_id=self.other_game.id)
         self.league_user = User(id=uuid.uuid4(), email='league@example.com', full_name='League Admin', password_hash=hash_password('Password123!'), role_id=self.league_role.id, organization_id=None, is_active=True)
         self.scheduling_user = User(id=uuid.uuid4(), email='scheduling@example.com', full_name='Scheduling Admin', password_hash=hash_password('Password123!'), role_id=self.scheduling_role.id, organization_id=None, is_active=True)
         self.home_user = User(id=uuid.uuid4(), email='home@example.com', full_name='Home Admin', password_hash=hash_password('Password123!'), role_id=self.community_role.id, organization_id=self.home_org.id, is_active=True)
         self.away_user = User(id=uuid.uuid4(), email='away@example.com', full_name='Away Admin', password_hash=hash_password('Password123!'), role_id=self.community_role.id, organization_id=self.away_org.id, is_active=True)
         self.other_user = User(id=uuid.uuid4(), email='other@example.com', full_name='Other Admin', password_hash=hash_password('Password123!'), role_id=self.community_role.id, organization_id=self.other_org.id, is_active=True)
-        self.db.add_all([self.league_role, self.scheduling_role, self.community_role, self.home_org, self.away_org, self.other_org, self.division, self.season, self.week, self.status, self.home_team, self.away_team, self.other_team, self.game, self.other_game, self.league_user, self.scheduling_user, self.home_user, self.away_user, self.other_user])
+        self.db.add_all([self.league_role, self.scheduling_role, self.community_role, self.home_org, self.away_org, self.other_org, self.division, self.host, self.season, self.week, self.status, self.home_team, self.away_team, self.field, self.other_field, self.other_team, self.game, self.other_game, self.slot, self.other_slot, self.league_user, self.scheduling_user, self.home_user, self.away_user, self.other_user])
         self.db.commit()
 
         def override_get_db():
@@ -143,6 +148,93 @@ class ScoreTrackingTest(unittest.TestCase):
         for path in ['approve', 'publish', 'unpublish', 'clear', 'resolve-conflict']:
             response = self.client.post(f'/api/scores/{self.game.id}/{path}', headers=self._token(self.home_user.id), json={'home_score': 1, 'away_score': 0})
             self.assertEqual(response.status_code, 403, f'{path}: {response.text}')
+
+    def test_schedule_publication_permissions_and_score_preservation(self):
+        publish_status = self.client.post(f'/api/seasons/{self.season.id}/publish-schedule', headers=self._token(self.scheduling_user.id))
+        self.assertEqual(publish_status.status_code, 200, publish_status.text)
+        self.assertTrue(publish_status.json()['schedule_published'])
+
+        community_publish = self.client.post(f'/api/seasons/{self.season.id}/publish-schedule', headers=self._token(self.home_user.id))
+        self.assertEqual(community_publish.status_code, 403, community_publish.text)
+
+        self._submit(self.home_user, home=24, away=18)
+        approve_publish = self.client.post(f'/api/scores/{self.game.id}/approve-and-publish', headers=self._token(self.scheduling_user.id), json={})
+        self.assertEqual(approve_publish.status_code, 200, approve_publish.text)
+
+        before_score = self.db.query(GameScore).filter(GameScore.game_id == self.game.id).one()
+        before_score_id = before_score.id
+        before_game_id = before_score.game_id
+        before_history_count = self.db.query(ScoreHistory).filter(ScoreHistory.game_id == self.game.id).count()
+        before_game_count = self.db.query(Game).filter(Game.season_id == self.season.id).count()
+
+        public_before = self.client.get('/api/public/schedule?page_size=100')
+        self.assertEqual(public_before.status_code, 200, public_before.text)
+        before_item = next(item for item in public_before.json()['items'] if item['id'] == str(self.game.id))
+        self.assertEqual(before_item['home_score'], 24)
+        self.assertEqual(before_item['away_score'], 18)
+
+        unpublish = self.client.post(f'/api/seasons/{self.season.id}/unpublish-schedule', headers=self._token(self.scheduling_user.id))
+        self.assertEqual(unpublish.status_code, 200, unpublish.text)
+        self.assertFalse(unpublish.json()['schedule_published'])
+
+        community_unpublish = self.client.post(f'/api/seasons/{self.season.id}/unpublish-schedule', headers=self._token(self.home_user.id))
+        self.assertEqual(community_unpublish.status_code, 403, community_unpublish.text)
+
+        public_hidden = self.client.get('/api/public/schedule?page_size=100')
+        self.assertEqual(public_hidden.status_code, 200, public_hidden.text)
+        self.assertEqual(public_hidden.json()['items'], [])
+        self.assertEqual(public_hidden.json()['total'], 0)
+
+        self.db.expire_all()
+        after_unpublish_score = self.db.query(GameScore).filter(GameScore.game_id == self.game.id).one()
+        self.assertEqual(after_unpublish_score.id, before_score_id)
+        self.assertEqual(after_unpublish_score.game_id, before_game_id)
+        self.assertEqual(after_unpublish_score.home_score, 24)
+        self.assertEqual(after_unpublish_score.away_score, 18)
+        self.assertEqual(after_unpublish_score.score_status, 'PUBLISHED')
+        self.assertTrue(after_unpublish_score.is_published)
+        self.assertEqual(self.db.query(ScoreHistory).filter(ScoreHistory.game_id == self.game.id).count(), before_history_count)
+        self.assertEqual(self.db.query(Game).filter(Game.season_id == self.season.id).count(), before_game_count)
+
+        republish = self.client.post(f'/api/seasons/{self.season.id}/publish-schedule', headers=self._token(self.scheduling_user.id))
+        self.assertEqual(republish.status_code, 200, republish.text)
+        self.assertTrue(republish.json()['schedule_published'])
+
+        self.db.expire_all()
+        after_republish_score = self.db.query(GameScore).filter(GameScore.game_id == self.game.id).one()
+        self.assertEqual(after_republish_score.id, before_score_id)
+        self.assertEqual(after_republish_score.game_id, before_game_id)
+        self.assertTrue(after_republish_score.is_published)
+        self.assertEqual(self.db.query(ScoreHistory).filter(ScoreHistory.game_id == self.game.id).count(), before_history_count)
+        self.assertEqual(self.db.query(Game).filter(Game.season_id == self.season.id).count(), before_game_count)
+
+        public_after = self.client.get('/api/public/schedule?page_size=100')
+        self.assertEqual(public_after.status_code, 200, public_after.text)
+        after_item = next(item for item in public_after.json()['items'] if item['id'] == str(self.game.id))
+        self.assertEqual(after_item['home_score'], 24)
+        self.assertEqual(after_item['away_score'], 18)
+        self.assertEqual(after_item['public_score_status'], 'PUBLISHED')
+
+    def test_schedule_republish_keeps_submitted_unpublished_scores_hidden(self):
+        submit = self._submit(self.home_user, home=8, away=6)
+        self.assertEqual(submit.status_code, 200, submit.text)
+
+        unpublish = self.client.post(f'/api/seasons/{self.season.id}/unpublish-schedule', headers=self._token(self.scheduling_user.id))
+        self.assertEqual(unpublish.status_code, 200, unpublish.text)
+        republish = self.client.post(f'/api/seasons/{self.season.id}/publish-schedule', headers=self._token(self.scheduling_user.id))
+        self.assertEqual(republish.status_code, 200, republish.text)
+
+        self.db.expire_all()
+        score = self.db.query(GameScore).filter(GameScore.game_id == self.game.id).one()
+        self.assertEqual(score.score_status, 'SUBMITTED')
+        self.assertFalse(score.is_published)
+
+        public_after = self.client.get('/api/public/schedule?page_size=100')
+        self.assertEqual(public_after.status_code, 200, public_after.text)
+        item = next(item for item in public_after.json()['items'] if item['id'] == str(self.game.id))
+        self.assertIsNone(item['home_score'])
+        self.assertIsNone(item['away_score'])
+        self.assertEqual(item['public_score_status'], 'MISSING')
 
     def test_scheduling_administrator_can_edit_approve_publish_and_unpublish(self):
         edit = self.client.patch(f'/api/scores/{self.game.id}', headers=self._token(self.scheduling_user.id), json={'home_score': 21, 'away_score': 12, 'league_admin_notes': 'inline correction'})

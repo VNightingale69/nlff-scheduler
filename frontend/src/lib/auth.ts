@@ -27,6 +27,18 @@ export function canManageSchedule(user: AuthUser | null | undefined): boolean {
   return role === 'LEAGUE_ADMIN' || role === 'SCHEDULING_ADMIN';
 }
 
+export function canPublishSchedule(user: AuthUser | null | undefined): boolean {
+  return canManageSchedule(user);
+}
+
+export function canUnpublishSchedule(user: AuthUser | null | undefined): boolean {
+  return canPublishSchedule(user);
+}
+
+export function canModifySchedule(user: AuthUser | null | undefined): boolean {
+  return canManageSchedule(user);
+}
+
 export function canManageScores(user: AuthUser | null | undefined): boolean {
   const role = normalizeRoleName(user?.role_name);
   return role === 'LEAGUE_ADMIN' || role === 'SCHEDULING_ADMIN';

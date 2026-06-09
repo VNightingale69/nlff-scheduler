@@ -80,6 +80,14 @@ def can_manage_schedule(current_user: User | None) -> bool:
     return normalize_role_name(current_user.role.name) in SCHEDULE_MANAGEMENT_ROLES
 
 
+def can_publish_schedule(current_user: User | None) -> bool:
+    return can_manage_schedule(current_user)
+
+
+def can_unpublish_schedule(current_user: User | None) -> bool:
+    return can_publish_schedule(current_user)
+
+
 def can_modify_schedule(current_user: User | None) -> bool:
     return can_manage_schedule(current_user)
 
@@ -116,6 +124,12 @@ def can_submit_community_scores(current_user: User | None, game) -> bool:
 
 def require_schedule_admin(current_user: User = Depends(get_current_user)) -> User:
     if not can_manage_schedule(current_user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Insufficient role')
+    return current_user
+
+
+def require_schedule_publisher(current_user: User = Depends(get_current_user)) -> User:
+    if not can_publish_schedule(current_user):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Insufficient role')
     return current_user
 
