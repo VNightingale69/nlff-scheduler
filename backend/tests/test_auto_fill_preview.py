@@ -1,14 +1,16 @@
 import unittest
+from unittest.mock import patch
 import uuid
 from datetime import date, time, timedelta
 from types import SimpleNamespace
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
+from fastapi import HTTPException
 
 from app.database import Base
 from app.models import Division, FieldInstance, Game, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostPlanSelection, HostingAvailability, Organization, Season, Team, TurfWave, Week
-from app.routes.api import _build_host_location_vs_home_team_verification, _build_revised_scheduling_hierarchy_diagnostics, _build_turf_stadium_utilization_diagnostics, _classify_host_for_date, _normalize_field_size, _regenerate_generated_slots, _diagnostic_active_teams_expected_to_play, _diagnostic_expected_games_for_team_count, _diagnostic_field_size_diff, _host_availability_matrix_response, _run_turf_wave_compaction_pass, _renumber_turf_waves_for_host_date, auto_fill_apply, auto_fill_preview, auto_schedule_entire_season, generate_suggested_host_plan, run_post_schedule_repair_pass
+from app.routes.api import TURF_SLOT_SAFE_FAILURE_MESSAGE, TurfSlotCreationError, _build_host_location_vs_home_team_verification, _build_revised_scheduling_hierarchy_diagnostics, _build_turf_stadium_utilization_diagnostics, _classify_host_for_date, _normalize_field_size, _regenerate_generated_slots, _diagnostic_active_teams_expected_to_play, _diagnostic_expected_games_for_team_count, _diagnostic_field_size_diff, _host_availability_matrix_response, _run_manual_optimization_workflow, _run_turf_wave_compaction_pass, _renumber_turf_waves_for_host_date, auto_fill_apply, auto_fill_preview, auto_schedule_entire_season, generate_suggested_host_plan, get_or_create_game_slot, run_post_schedule_repair_pass
 
 
 class AutoFillPreviewTest(unittest.TestCase):
@@ -224,6 +226,142 @@ class AutoFillPreviewTest(unittest.TestCase):
         self.assertEqual({'SMALL': 2, 'MEDIUM': 0, 'LARGE': 1}, diag['games_successfully_placed_by_field_size'])
         self.assertGreater(len(diag['placement_attempts']), 0)
         self.assertNotIn('cumulative compatible layout capacity was insufficient', str(result))
+
+    def _turf_field(self, label):
+        return self.db.query(FieldInstance).filter(
+            FieldInstance.host_location_id == self.host.id,
+            FieldInstance.field_name == label,
+        ).one()
+
+    def _add_open_turf_slot(self, label, start):
+        field = self._turf_field(label)
+        slot = GameSlot(
+            id=uuid.uuid4(),
+            field_instance_id=field.id,
+            host_location_id=self.host.id,
+            season_id=self.season.id,
+            week_id=self.week2.id,
+            slot_date=self.week2.start_date,
+            start_time=start,
+            end_time=time(start.hour + 1, 0),
+            field_type=field.field_type,
+            status='OPEN',
+        )
+        self.db.add(slot)
+        return slot
+
+    def test_get_or_create_game_slot_reuses_existing_turf_slot(self):
+        self._add_turf_repack_fixture({'SMALL': 1, 'LARGE': 1}, [(time(10, 0), 'Small Field 1'), (time(11, 0), 'Large Field 1')])
+        existing = self._add_open_turf_slot('Small Field 1', time(9, 0))
+        self.db.commit()
+
+        slot = get_or_create_game_slot(
+            self.db,
+            field_instance_id=existing.field_instance_id,
+            host_location_id=self.host.id,
+            season_id=self.season.id,
+            week_id=self.week2.id,
+            slot_date=self.week2.start_date,
+            start_time=time(9, 0),
+            end_time=time(10, 0),
+            field_type='SMALL',
+        )
+
+        self.assertEqual(existing.id, slot.id)
+        self.assertEqual(1, self.db.query(GameSlot).filter(
+            GameSlot.field_instance_id == existing.field_instance_id,
+            GameSlot.start_time == time(9, 0),
+            GameSlot.end_time == time(10, 0),
+        ).count())
+
+    def test_turf_repacker_reuses_existing_9am_slot_without_inserting_duplicate(self):
+        games = self._add_turf_repack_fixture(
+            {'SMALL': 2, 'LARGE': 1},
+            [(time(11, 0), 'Small Field 1'), (time(12, 0), 'Small Field 1'), (time(13, 0), 'Large Field 1')],
+        )
+        target_slots = [
+            self._add_open_turf_slot('Small Field 1', time(9, 0)),
+            self._add_open_turf_slot('Large Field 1', time(9, 0)),
+            self._add_open_turf_slot('Small Field 1', time(10, 0)),
+        ]
+        self.db.commit()
+        slot_count_before = self.db.query(GameSlot).count()
+        target_slot_ids = {slot.id for slot in target_slots}
+
+        result = run_post_schedule_repair_pass(self.db, self.season.id)
+        self.db.expire_all()
+        assigned_slots = {self.db.query(GameSlot).filter(GameSlot.assigned_game_id == game.id).one().id for game in games}
+
+        self.assertEqual(1, result['summary']['repacked_dates_accepted'])
+        self.assertEqual(slot_count_before, self.db.query(GameSlot).count())
+        self.assertTrue(target_slot_ids.issubset(assigned_slots))
+        for slot in target_slots:
+            self.assertEqual(1, self.db.query(GameSlot).filter(
+                GameSlot.field_instance_id == slot.field_instance_id,
+                GameSlot.start_time == slot.start_time,
+                GameSlot.end_time == slot.end_time,
+            ).count())
+
+    def test_optimization_preview_rolls_back_transient_slot_creation(self):
+        games = self._add_turf_repack_fixture(
+            {'SMALL': 1, 'LARGE': 1},
+            [(time(10, 0), 'Small Field 1'), (time(11, 0), 'Large Field 1')],
+        )
+        original_times = {game.id: game.kickoff_time for game in games}
+        slot_count_before = self.db.query(GameSlot).count()
+
+        response = _run_manual_optimization_workflow({'season_id': str(self.season.id)}, self.db, apply=False)
+        self.db.expire_all()
+
+        self.assertTrue(response['preview'])
+        self.assertFalse(response['applied'])
+        self.assertEqual(slot_count_before, self.db.query(GameSlot).count())
+        self.assertEqual(original_times, {game.id: self.db.get(Game, game.id).kickoff_time for game in games})
+
+    def test_apply_optimized_schedule_persists_assignments_through_safe_slots(self):
+        games = self._add_turf_repack_fixture(
+            {'SMALL': 1, 'LARGE': 1},
+            [(time(10, 0), 'Small Field 1'), (time(11, 0), 'Large Field 1')],
+        )
+
+        response = _run_manual_optimization_workflow({'season_id': str(self.season.id)}, self.db, apply=True)
+        self.db.expire_all()
+
+        self.assertTrue(response['applied'])
+        self.assertEqual({time(9, 0)}, {self.db.get(Game, game.id).kickoff_time for game in games})
+        for game in games:
+            slot = self.db.query(GameSlot).filter(GameSlot.assigned_game_id == game.id).one()
+            self.assertEqual(self.db.get(Game, game.id).kickoff_time, slot.start_time)
+
+    def test_turf_repacker_does_not_create_slots_for_unused_layout_capacity(self):
+        self._add_turf_repack_fixture(
+            {'SMALL': 1, 'MEDIUM': 1},
+            [(time(10, 0), 'Small Field 1'), (time(11, 0), 'Medium Field 1')],
+        )
+
+        result = run_post_schedule_repair_pass(self.db, self.season.id)
+        small_field_2 = self._turf_field('Small Field 2')
+
+        self.assertEqual(1, result['summary']['repacked_dates_accepted'])
+        self.assertIsNone(self.db.query(GameSlot).filter(
+            GameSlot.field_instance_id == small_field_2.id,
+            GameSlot.slot_date == self.week2.start_date,
+            GameSlot.start_time == time(9, 0),
+            GameSlot.end_time == time(10, 0),
+        ).first())
+
+    def test_optimization_converts_slot_creation_failure_to_safe_diagnostic(self):
+        self._add_turf_repack_fixture(
+            {'SMALL': 1, 'LARGE': 1},
+            [(time(10, 0), 'Small Field 1'), (time(11, 0), 'Large Field 1')],
+        )
+
+        with patch('app.routes.api.get_or_create_game_slot', side_effect=TurfSlotCreationError(diagnostics={'reason': 'test conflict'})):
+            with self.assertRaises(HTTPException) as exc:
+                _run_manual_optimization_workflow({'season_id': str(self.season.id)}, self.db, apply=False)
+
+        self.assertEqual(500, exc.exception.status_code)
+        self.assertEqual(TURF_SLOT_SAFE_FAILURE_MESSAGE, exc.exception.detail)
 
     def test_turf_repacker_rejects_with_specific_hosting_window_diagnostics_when_layout_cannot_fit(self):
         current_times = [

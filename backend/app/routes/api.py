@@ -22569,6 +22569,133 @@ def _optimization_exact_slot_for_game(db: Session, game: Game) -> GameSlot | Non
     return db.query(GameSlot).filter(GameSlot.assigned_game_id == game.id).first()
 
 
+TURF_SLOT_SAFE_FAILURE_MESSAGE = 'Turf repacking failed because a generated slot could not be reused or created safely. See backend logs for details.'
+
+
+class TurfSlotCreationError(RuntimeError):
+    """Raised when turf repacking cannot safely reuse or create a target slot."""
+
+    def __init__(self, message: str = TURF_SLOT_SAFE_FAILURE_MESSAGE, *, diagnostics: dict[str, object] | None = None):
+        super().__init__(message)
+        self.diagnostics = diagnostics or {}
+
+
+def get_or_create_game_slot(
+    db: Session,
+    *,
+    field_instance_id: uuid.UUID,
+    host_location_id: uuid.UUID,
+    season_id: uuid.UUID | None,
+    week_id: uuid.UUID | None,
+    slot_date: date,
+    start_time: time,
+    end_time: time,
+    field_type: str,
+) -> GameSlot:
+    """Reuse an exact game slot, or safely create one without duplicating unique keys."""
+    existing = db.query(GameSlot).filter(
+        GameSlot.field_instance_id == field_instance_id,
+        GameSlot.slot_date == slot_date,
+        GameSlot.start_time == start_time,
+        GameSlot.end_time == end_time,
+    ).first()
+    if existing:
+        return existing
+
+    field = db.get(FieldInstance, field_instance_id)
+    host = db.get(HostLocation, host_location_id)
+    diagnostics = {
+        'field_instance_id': str(field_instance_id),
+        'host_location_id': str(host_location_id),
+        'season_id': str(season_id) if season_id else None,
+        'week_id': str(week_id) if week_id else None,
+        'slot_date': slot_date.isoformat() if slot_date else None,
+        'start_time': start_time.isoformat() if start_time else None,
+        'end_time': end_time.isoformat() if end_time else None,
+        'field_type': field_type,
+    }
+    if not field or field.host_location_id != host_location_id:
+        logger.error('turf_slot_get_or_create_invalid_field_relationship diagnostics=%s', diagnostics)
+        raise TurfSlotCreationError(diagnostics={**diagnostics, 'reason': 'invalid field/location relationship'})
+    if not host or not _is_turf_stadium_host(host):
+        logger.error('turf_slot_get_or_create_invalid_host diagnostics=%s', diagnostics)
+        raise TurfSlotCreationError(diagnostics={**diagnostics, 'reason': 'field does not belong to a turf stadium'})
+    normalized_requested = _normalize_field_size(field_type)
+    normalized_field = _normalize_field_size(field.field_type)
+    if normalized_requested not in FIELD_SIZE_ORDER or normalized_field != normalized_requested:
+        logger.error('turf_slot_get_or_create_invalid_field_size diagnostics=%s actual_field_type=%s', diagnostics, field.field_type if field else None)
+        raise TurfSlotCreationError(diagnostics={**diagnostics, 'reason': 'invalid field-size assignment'})
+
+    availability_filters = [
+        HostingAvailability.host_location_id == host_location_id,
+        HostingAvailability.available_date == slot_date,
+        HostingAvailability.start_time <= start_time,
+        HostingAvailability.end_time >= end_time,
+        HostingAvailability.active.is_(True),
+        HostingAvailability.is_available.is_(True),
+    ]
+    if season_id:
+        availability_filters.append(HostingAvailability.season_id == season_id)
+    if week_id:
+        availability_filters.append(HostingAvailability.week_id == week_id)
+    availability = db.query(HostingAvailability.id).filter(*availability_filters).first()
+    if not availability:
+        logger.error('turf_slot_get_or_create_outside_hosting_availability diagnostics=%s', diagnostics)
+        raise TurfSlotCreationError(diagnostics={**diagnostics, 'reason': 'slot outside configured hosting availability'})
+
+    unique_conflict = db.query(GameSlot).filter(
+        GameSlot.field_instance_id == field_instance_id,
+        GameSlot.start_time == start_time,
+        GameSlot.end_time == end_time,
+    ).first()
+    if unique_conflict:
+        if unique_conflict.slot_date == slot_date:
+            return unique_conflict
+        logger.error(
+            'turf_slot_get_or_create_unique_key_reserved_by_different_date diagnostics=%s existing_slot_id=%s existing_slot_date=%s',
+            diagnostics,
+            unique_conflict.id,
+            unique_conflict.slot_date,
+        )
+        raise TurfSlotCreationError(diagnostics={**diagnostics, 'reason': 'unique slot key exists for a different date', 'existing_slot_id': str(unique_conflict.id)})
+
+    target_slot = GameSlot(
+        id=uuid.uuid4(),
+        field_instance_id=field_instance_id,
+        host_location_id=host_location_id,
+        season_id=season_id,
+        week_id=week_id,
+        slot_date=slot_date,
+        start_time=start_time,
+        end_time=end_time,
+        field_type=normalized_field,
+        status='OPEN',
+    )
+    savepoint = db.begin_nested()
+    try:
+        db.add(target_slot)
+        db.flush()
+        savepoint.commit()
+        return target_slot
+    except IntegrityError as exc:
+        savepoint.rollback()
+        existing_after_conflict = db.query(GameSlot).filter(
+            GameSlot.field_instance_id == field_instance_id,
+            GameSlot.slot_date == slot_date,
+            GameSlot.start_time == start_time,
+            GameSlot.end_time == end_time,
+        ).first()
+        if existing_after_conflict:
+            logger.info(
+                'turf_slot_get_or_create_reused_after_integrity_conflict slot_id=%s diagnostics=%s',
+                existing_after_conflict.id,
+                diagnostics,
+            )
+            return existing_after_conflict
+        logger.exception('turf_slot_get_or_create_integrity_failure diagnostics=%s', diagnostics)
+        raise TurfSlotCreationError(diagnostics={**diagnostics, 'reason': 'integrity conflict while creating slot'}) from exc
+
+
 def _optimization_sync_game_to_slot(game: Game, slot: GameSlot | None) -> None:
     if not slot:
         return
@@ -22757,11 +22884,16 @@ def _run_manual_optimization_workflow(payload: dict, db: Session, *, apply: bool
             db.flush()
         after_metrics = _build_optimization_workflow_metrics(db, season_id)
         optimized_preview_games = _optimization_preview_game_rows(db, season_id)
+    except TurfSlotCreationError as exc:
+        db.rollback()
+        elapsed = perf_counter() - workflow_start
+        logger.exception('manual_schedule_optimization_end status=slot_error endpoint=%s season_id=%s elapsed_seconds=%.3f diagnostics=%s', endpoint_name, season_id, elapsed, getattr(exc, 'diagnostics', {}))
+        raise HTTPException(status_code=500, detail=TURF_SLOT_SAFE_FAILURE_MESSAGE) from exc
     except Exception as exc:
         db.rollback()
         elapsed = perf_counter() - workflow_start
         logger.exception('manual_schedule_optimization_end status=error endpoint=%s season_id=%s elapsed_seconds=%.3f', endpoint_name, season_id, elapsed)
-        raise HTTPException(status_code=500, detail=f'Optimization failed unexpectedly: {exc}') from exc
+        raise HTTPException(status_code=500, detail='Optimization failed unexpectedly. See backend logs for details.') from exc
 
     proposed_changes = list((diagnostics.get('proposed_changes') or []))
     rejected_changes = list((diagnostics.get('rejected_changes') or []))
@@ -24479,26 +24611,17 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
             new_field: FieldInstance = row['field']
             new_label: str = row['field_label']
             new_end = _add_hour(new_start) or new_start
-            target_slot = db.query(GameSlot).filter(
-                GameSlot.field_instance_id == new_field.id,
-                GameSlot.slot_date == game.game_date,
-                GameSlot.start_time == new_start,
-            ).first()
-            if not target_slot:
-                target_slot = GameSlot(
-                    id=uuid.uuid4(),
-                    field_instance_id=new_field.id,
-                    host_location_id=game.host_location_id,
-                    season_id=game.season_id,
-                    week_id=game.week_id,
-                    slot_date=game.game_date,
-                    start_time=new_start,
-                    end_time=new_end,
-                    field_type=new_field.field_type,
-                    status='OPEN',
-                )
-                db.add(target_slot)
-                db.flush()
+            target_slot = get_or_create_game_slot(
+                db,
+                field_instance_id=new_field.id,
+                host_location_id=game.host_location_id,
+                season_id=game.season_id,
+                week_id=game.week_id,
+                slot_date=game.game_date,
+                start_time=new_start,
+                end_time=new_end,
+                field_type=new_field.field_type,
+            )
             target_slot.assigned_game_id = game.id
             target_slot.status = 'BOOKED'
             target_slot.host_location_id = game.host_location_id
