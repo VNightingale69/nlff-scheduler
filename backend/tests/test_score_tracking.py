@@ -69,6 +69,134 @@ class ScoreTrackingTest(unittest.TestCase):
     def _token(self, user_id):
         return {'Authorization': f'Bearer {create_access_token(str(user_id))}'}
 
+
+    def test_login_missing_score_reminder_scoped_to_community(self):
+        login = self.client.post('/api/auth/login', json={'email': 'home@example.com', 'password': 'Password123!'})
+        self.assertEqual(login.status_code, 200, login.text)
+        reminder = login.json().get('missing_score_reminder')
+        self.assertIsNotNone(reminder)
+        self.assertEqual(reminder['count'], 1)
+        self.assertEqual(reminder['link'], '/admin/score-entry')
+        recent_ids = {item['game_id'] for item in reminder['recent_games']}
+        self.assertIn(str(self.game.id), recent_ids)
+        self.assertNotIn(str(self.other_game.id), recent_ids)
+
+        self.client.post(f'/api/community/games/{self.game.id}/score', headers=self._token(self.home_user.id), json={'home_score': 20, 'away_score': 12})
+        login = self.client.post('/api/auth/login', json={'email': 'home@example.com', 'password': 'Password123!'})
+        self.assertEqual(login.status_code, 200, login.text)
+        self.assertIsNone(login.json().get('missing_score_reminder'))
+
+    def test_blank_scores_normalize_only_on_active_submit(self):
+        response = self.client.post(
+            f'/api/community/games/{self.game.id}/score',
+            headers=self._token(self.home_user.id),
+            json={'home_score': '', 'away_score': 14},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.db.expire_all()
+        score = self.db.query(GameScore).filter(GameScore.game_id == self.game.id).one()
+        self.assertEqual(score.home_score, 0)
+        self.assertEqual(score.away_score, 14)
+        self.assertFalse(score.home_forfeit)
+        history = self.db.query(ScoreSubmission).filter(ScoreSubmission.game_id == self.game.id).one()
+        self.assertIn('Home blank', history.normalization_note)
+        self.assertEqual(history.normalized_home_score_display, '0')
+
+        self.assertIsNone(self.db.query(GameScore).filter(GameScore.game_id == self.other_game.id).first())
+
+    def test_blank_away_score_normalizes_on_active_submit(self):
+        response = self.client.post(
+            f'/api/community/games/{self.game.id}/score',
+            headers=self._token(self.home_user.id),
+            json={'home_score': 21, 'away_score': ''},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.db.expire_all()
+        score = self.db.query(GameScore).filter(GameScore.game_id == self.game.id).one()
+        self.assertEqual(score.home_score, 21)
+        self.assertEqual(score.away_score, 0)
+
+    def test_score_validation_rejects_non_whole_number_values(self):
+        for home_score in (-1, '1.5', 'W', '7F', '$'):
+            response = self.client.post(
+                f'/api/community/games/{self.game.id}/score',
+                headers=self._token(self.home_user.id),
+                json={'home_score': home_score, 'away_score': 12},
+            )
+            self.assertEqual(response.status_code, 422, response.text)
+            self.assertIn('Scores must be non-negative whole numbers, or F for a forfeiting team.', response.text)
+
+    def test_forfeit_inputs_normalize_and_set_winner(self):
+        response = self.client.post(
+            f'/api/community/games/{self.game.id}/score',
+            headers=self._token(self.home_user.id),
+            json={'home_score': 'f', 'away_score': ''},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.db.expire_all()
+        score = self.db.query(GameScore).filter(GameScore.game_id == self.game.id).one()
+        self.assertTrue(score.home_forfeit)
+        self.assertFalse(score.away_forfeit)
+        self.assertEqual(score.home_score, 0)
+        self.assertEqual(score.away_score, 1)
+        self.assertEqual(score.winner_team_id, self.away_team.id)
+        self.assertEqual(response.json()['score']['score_display_home'], 'F')
+        self.assertEqual(response.json()['score']['score_display_away'], '1')
+
+        response = self.client.put(
+            f'/api/admin/games/{self.other_game.id}/score',
+            headers=self._token(self.league_user.id),
+            json={'home_score': '', 'away_score': 'F'},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.db.expire_all()
+        score = self.db.query(GameScore).filter(GameScore.game_id == self.other_game.id).one()
+        self.assertEqual(score.home_score, 1)
+        self.assertTrue(score.away_forfeit)
+        self.assertEqual(score.winner_team_id, self.other_team.id)
+
+    def test_forfeit_rejects_both_teams_and_non_numeric_opponent(self):
+        both = self.client.post(f'/api/community/games/{self.game.id}/score', headers=self._token(self.home_user.id), json={'home_score': 'F', 'away_score': 'F'})
+        self.assertEqual(both.status_code, 422)
+        opponent = self.client.post(f'/api/community/games/{self.game.id}/score', headers=self._token(self.home_user.id), json={'home_score': 'F', 'away_score': 'Win'})
+        self.assertEqual(opponent.status_code, 422)
+
+    def test_admin_can_publish_public_forfeit_and_hide_unpublished(self):
+        self.client.put(f'/api/admin/games/{self.game.id}/score', headers=self._token(self.league_user.id), json={'home_score': 'F', 'away_score': 0})
+        pending = self.client.get('/api/public/schedule?page_size=100')
+        item = next(item for item in pending.json()['items'] if item['id'] == str(self.game.id))
+        self.assertIsNone(item['score_display_home'])
+        self.assertIsNone(item['score_display_away'])
+
+        approve = self.client.post(f'/api/admin/games/{self.game.id}/score/approve', headers=self._token(self.league_user.id), json={})
+        self.assertEqual(approve.status_code, 200, approve.text)
+        public = self.client.get('/api/public/schedule?page_size=100')
+        item = next(item for item in public.json()['items'] if item['id'] == str(self.game.id))
+        self.assertEqual(item['score_display_home'], 'F')
+        self.assertEqual(item['score_display_away'], '0')
+        self.assertTrue(item['home_forfeit'])
+
+        unpublish = self.client.post(f'/api/admin/games/{self.game.id}/score/unpublish', headers=self._token(self.league_user.id), json={})
+        self.assertEqual(unpublish.status_code, 200, unpublish.text)
+        hidden = self.client.get('/api/public/schedule?page_size=100')
+        item = next(item for item in hidden.json()['items'] if item['id'] == str(self.game.id))
+        self.assertIsNone(item['score_display_home'])
+        self.assertIsNone(item['score_display_away'])
+
+    def test_history_records_raw_normalized_forfeit_values(self):
+        self.client.post(f'/api/community/games/{self.game.id}/score', headers=self._token(self.home_user.id), json={'home_score': 'F', 'away_score': ''})
+        history = self.client.get(f'/api/admin/games/{self.game.id}/score-history', headers=self._token(self.league_user.id))
+        self.assertEqual(history.status_code, 200, history.text)
+        item = history.json()['items'][0]
+        self.assertEqual(item['submitted_home_score_raw'], 'F')
+        self.assertEqual(item['submitted_away_score_raw'], '')
+        self.assertEqual(item['normalized_home_score_display'], 'F')
+        self.assertEqual(item['normalized_away_score_display'], '1')
+        self.assertTrue(item['home_forfeit'])
+        self.assertEqual(item['actor_role'], ROLE_COMMUNITY_ADMIN)
+        self.assertEqual(item['previous_status'], 'SCORE_PENDING')
+        self.assertEqual(item['new_status'], 'SUBMITTED')
+
     def test_community_admin_can_submit_for_eligible_scheduled_game(self):
         response = self.client.post(
             f'/api/community/games/{self.game.id}/score',
@@ -157,8 +285,8 @@ class ScoreTrackingTest(unittest.TestCase):
 
         negative = self.client.post(f'/api/community/games/{self.game.id}/score', headers=self._token(self.home_user.id), json={'home_score': -1, 'away_score': 12})
         self.assertEqual(negative.status_code, 422)
-        partial = self.client.post(f'/api/community/games/{self.game.id}/score', headers=self._token(self.home_user.id), json={'home_score': 1})
-        self.assertEqual(partial.status_code, 422)
+        decimal = self.client.post(f'/api/community/games/{self.game.id}/score', headers=self._token(self.home_user.id), json={'home_score': 1, 'away_score': '1.5'})
+        self.assertEqual(decimal.status_code, 422)
         nonexistent = self.client.post(f'/api/community/games/{uuid.uuid4()}/score', headers=self._token(self.home_user.id), json={'home_score': 1, 'away_score': 0})
         self.assertEqual(nonexistent.status_code, 404)
 

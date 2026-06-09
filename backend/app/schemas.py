@@ -62,6 +62,7 @@ class TokenResponse(BaseModel):
     refresh_token: str
     token_type: str = 'bearer'
     user: TokenUser | None = None
+    missing_score_reminder: dict | None = None
 
 
 
@@ -750,8 +751,8 @@ class GameValidationResponse(BaseModel):
 
 
 class ScorePayload(BaseModel):
-    home_score: int
-    away_score: int
+    home_score: object | None = None
+    away_score: object | None = None
     community_admin_notes: str | None = None
     league_admin_notes: str | None = None
 
@@ -791,6 +792,11 @@ class PublicGameRead(BaseModel):
     public_score_status: str | None = None
     home_score: int | None = None
     away_score: int | None = None
+    home_forfeit: bool = False
+    away_forfeit: bool = False
+    winner_team_id: uuid.UUID | None = None
+    score_display_home: str | None = None
+    score_display_away: str | None = None
     public_notes: str | None = None
 
 

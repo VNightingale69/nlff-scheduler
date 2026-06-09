@@ -48,6 +48,7 @@ export default function Login() {
       email: responseUser.email || data?.email || email,
       role_name: responseUser.role_name || data?.role_name,
       organization_id: responseUser.organization_id ?? data?.organization_id ?? null,
+      missing_score_reminder: data?.missing_score_reminder ?? responseUser.missing_score_reminder ?? null,
     };
   };
 

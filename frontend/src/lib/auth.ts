@@ -2,11 +2,20 @@
 
 export type UserRole = 'ADMIN' | 'LEAGUE_ADMIN' | 'SCHEDULING_ADMIN' | 'COMMUNITY_ADMIN';
 
+export interface MissingScoreReminder {
+  count: number;
+  message: string;
+  link: string;
+  action_label: string;
+  recent_games?: Array<{ game_id: string; game_date: string; kickoff_time: string; away_team_name: string; home_team_name: string }>;
+}
+
 export interface AuthUser {
   email: string;
   full_name?: string;
   role_name?: UserRole;
   organization_id: string | null;
+  missing_score_reminder?: MissingScoreReminder | null;
 }
 
 const ACCESS_TOKEN_KEY = 'access_token';
@@ -32,6 +41,7 @@ export const setTokens = (accessToken: string, refreshToken: string, user?: Auth
       email: user.email,
       role_name: user.role_name,
       organization_id: user.organization_id ?? null,
+      missing_score_reminder: user.missing_score_reminder ?? null,
     }));
   }
 };
