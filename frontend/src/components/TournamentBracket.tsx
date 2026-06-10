@@ -1,5 +1,6 @@
 'use client';
 
+import CommunityLogo, { logoSource } from '@/components/CommunityLogo';
 import { formatDisplayDate, formatDisplayTime } from '@/lib/displayFormat';
 
 export type TournamentBracketGame = {
@@ -11,6 +12,8 @@ export type TournamentBracketGame = {
   team_2_placeholder: string;
   team_1_name?: string | null;
   team_2_name?: string | null;
+  team_1_logo_url?: string | null;
+  team_2_logo_url?: string | null;
   team_1_seed?: number | null;
   team_2_seed?: number | null;
   team_1_auto_advanced?: boolean;
@@ -93,7 +96,7 @@ const SVG_NS = 'http://www.w3.org/2000/svg';
 const BRACKET_CANVAS = {
   roundWidth: 300,
   roundGap: 64,
-  gameHeight: 226,
+  gameHeight: 220,
   gameGap: 34,
   margin: 32,
   headerHeight: 92,
@@ -135,6 +138,10 @@ function teamName(game: TournamentBracketGame, slot: 1 | 2) {
   return slot === 1 ? game.team_1_name || game.team_1_placeholder : game.team_2_name || game.team_2_placeholder;
 }
 
+function teamLogoUrl(game: TournamentBracketGame, slot: 1 | 2) {
+  return slot === 1 ? game.team_1_logo_url : game.team_2_logo_url;
+}
+
 function isWinningSlot(game: TournamentBracketGame, slot: 1 | 2) {
   const teamId = slot === 1 ? game.team_1_id : game.team_2_id;
   return Boolean(game.winner_team_id && teamId && game.winner_team_id === teamId);
@@ -150,9 +157,12 @@ function TeamRow({ game, slot }: { game: TournamentBracketGame; slot: 1 | 2 }) {
   return (
     <div className={`min-h-[38px] rounded-lg border px-2.5 py-1.5 ${isWinner ? 'border-emerald-500 bg-emerald-50 font-semibold' : 'border-slate-200 bg-white'}`}>
       <div className='flex items-start justify-between gap-2'>
-        <div className='min-w-0'>
-          <div className='text-[9px] leading-3 text-slate-500'>{seed ? `Seed ${seed}` : autoAdvanced ? 'BYE' : 'Seed TBD'}</div>
-          <div className='break-words text-xs leading-4 text-slate-900'>{name || 'TBD'}</div>
+        <div className='flex min-w-0 items-center gap-2'>
+          <CommunityLogo src={teamLogoUrl(game, slot)} name={name} size={28} />
+          <div className='min-w-0'>
+            <div className='text-[9px] leading-3 text-slate-500'>{seed ? `Seed ${seed}` : autoAdvanced ? 'BYE' : 'Seed TBD'}</div>
+            <div className='truncate text-xs leading-4 text-slate-900'>{name || 'TBD'}</div>
+          </div>
         </div>
         <div className='flex min-w-[56px] flex-col items-end'>
           {isWinner && <div className='text-[9px] font-bold leading-3 text-emerald-700'>Winner</div>}
@@ -328,8 +338,15 @@ function buildBracketSvg(title: string, division: ExportDivision, publicView: bo
         const score = slot === 1 ? game.home_score : game.away_score;
         const autoAdvanced = slot === 1 ? game.team_1_auto_advanced : game.team_2_auto_advanced;
         body += `<rect x="${gameX + 12}" y="${rowY}" width="${layout.roundWidth - 24}" height="${layout.teamRowHeight}" rx="${layout.teamRowRadius}" fill="${winner ? '#ecfdf5' : '#ffffff'}" stroke="${winner ? '#10b981' : '#e2e8f0'}"/>`;
-        body += svgText(gameX + 22, rowY + 14, seed ? `Seed ${seed}` : autoAdvanced ? 'BYE' : 'Seed TBD', { size: 9, fill: '#64748b' });
-        body += svgText(gameX + 22, rowY + 30, splitText(name, 28)[0] || 'TBD', { size: 12, weight: winner ? '700' : '500' });
+        const logo = logoSource(teamLogoUrl(game, slot));
+        if (logo) {
+          body += `<image href="${escapeXml(logo)}" x="${gameX + 20}" y="${rowY + 6}" width="28" height="28" preserveAspectRatio="xMidYMid meet"/>`;
+        } else {
+          body += `<circle cx="${gameX + 34}" cy="${rowY + 20}" r="14" fill="#f1f5f9" stroke="#cbd5e1"/>`;
+          body += svgText(gameX + 34, rowY + 24, (name || 'C').split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]).join('').toUpperCase(), { size: 9, weight: '700', fill: '#475569', anchor: 'middle' });
+        }
+        body += svgText(gameX + 56, rowY + 14, seed ? `Seed ${seed}` : autoAdvanced ? 'BYE' : 'Seed TBD', { size: 9, fill: '#64748b' });
+        body += svgText(gameX + 56, rowY + 30, splitText(name, 24)[0] || 'TBD', { size: 12, weight: winner ? '700' : '500' });
         if (winner) body += svgText(gameX + layout.roundWidth - 54, rowY + 14, 'Winner', { size: 9, weight: '700', fill: '#047857' });
         body += svgText(gameX + layout.roundWidth - 22, rowY + 30, score == null ? '—' : String(score), { size: 13, weight: '700', anchor: 'end' });
       });
@@ -389,8 +406,8 @@ function SharedBracketRenderer({ title, division, publicView, outputLabel }: { t
               return (
                 <article
                   key={game.id}
-                  className={`absolute z-10 overflow-visible rounded-xl border-2 p-3 pb-4 shadow-sm ${statusClass(game, publicView)}`}
-                  style={{ left: position.x, top: position.y, width: layout.roundWidth, minHeight: position.height, backgroundColor: visual.fill, borderColor: visual.stroke }}
+                  className={`absolute z-10 rounded-xl border-2 p-3 shadow-sm ${statusClass(game, publicView)}`}
+                  style={{ left: position.x, top: position.y, width: layout.roundWidth, minHeight: layout.gameHeight, backgroundColor: visual.fill, borderColor: visual.stroke }}
                 >
                   <div className='mb-3 flex items-start justify-between gap-2'>
                     <div className='min-w-0'>
@@ -436,6 +453,7 @@ function loadImage(src: string) {
     const image = new Image();
     image.onload = () => resolve(image);
     image.onerror = reject;
+    image.crossOrigin = 'anonymous';
     image.src = src;
   });
 }

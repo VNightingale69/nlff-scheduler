@@ -17,7 +17,7 @@ from sqlalchemy import String, and_, delete, func, inspect as sa_inspect, or_, s
 from sqlalchemy.exc import IntegrityError, ProgrammingError, SQLAlchemyError
 from sqlalchemy.orm import Session, aliased
 
-from app.config import ADMIN_SEED_EMAIL, ENABLE_SCHEDULE_QUALITY_REPORT, ENABLE_TURF_OPTIMIZATION, RULEBOOK_MAX_SIZE_BYTES, RULEBOOK_UPLOAD_DIR
+from app.config import ADMIN_SEED_EMAIL, COMMUNITY_LOGO_MAX_SIZE_BYTES, COMMUNITY_LOGO_UPLOAD_DIR, ENABLE_SCHEDULE_QUALITY_REPORT, ENABLE_TURF_OPTIMIZATION, RULEBOOK_MAX_SIZE_BYTES, RULEBOOK_UPLOAD_DIR
 from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN, can_manage_schedule, enforce_organization_scope, get_current_user, get_optional_current_user, is_community_admin, is_league_admin, is_scheduling_admin, normalize_role_name, require_roles, require_schedule_admin, require_schedule_publisher
 from app.database import get_db
 from app.models import Division, Field, FieldConfigurationOption, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostPlanSelection, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Rulebook, ScheduleChangeLog, ScoreHistory, ScoreSubmission, Season, Team, Tournament, TournamentDivision, TournamentGame, TournamentTeam, TurfWave, User, Week
@@ -40,6 +40,8 @@ logger = logging.getLogger(__name__)
 HOST_PLAN_SELECTION_ADMIN_EMAIL = 'admin@example.com'
 HOST_PLAN_SELECTION_PERMISSION_MESSAGE = 'Only admin@example.com can modify host plan selections.'
 RULEBOOK_ALLOWED_CONTENT_TYPE = 'application/pdf'
+COMMUNITY_LOGO_ALLOWED_CONTENT_TYPE = 'image/png'
+COMMUNITY_LOGO_MIN_DIMENSION_PIXELS = 500
 RULEBOOK_STORAGE_WARNING = (
     'TODO: Configure RULEBOOK_UPLOAD_DIR to use a Railway volume or replace local rulebook storage '
     'with S3-compatible storage, Supabase Storage, or Cloudinary before relying on uploads in production.'
@@ -3954,6 +3956,53 @@ def _validate_rulebook_upload(file: UploadFile) -> str:
     return original_filename[:255]
 
 
+def _community_logo_storage_dir() -> Path:
+    upload_dir = Path(COMMUNITY_LOGO_UPLOAD_DIR)
+    if not upload_dir.is_absolute():
+        upload_dir = Path.cwd() / upload_dir
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    return upload_dir
+
+
+def _community_logo_public_url(org_id: uuid.UUID, stored_filename: str) -> str:
+    return f'/api/public/organizations/{org_id}/logo/{stored_filename}'
+
+
+def _png_dimensions(content: bytes) -> tuple[int, int] | None:
+    # PNG signature followed by IHDR length/type, then big-endian width and height.
+    if len(content) < 33 or not content.startswith(b'\x89PNG\r\n\x1a\n') or content[12:16] != b'IHDR':
+        return None
+    return int.from_bytes(content[16:20], 'big'), int.from_bytes(content[20:24], 'big')
+
+
+def _validate_community_logo_upload(file: UploadFile, content: bytes) -> tuple[int, int]:
+    original_filename = Path(file.filename or 'community-logo.png').name or 'community-logo.png'
+    if not original_filename.lower().endswith('.png') or file.content_type != COMMUNITY_LOGO_ALLOWED_CONTENT_TYPE:
+        raise HTTPException(status_code=400, detail='Only PNG logo files are accepted.')
+    if len(content) > COMMUNITY_LOGO_MAX_SIZE_BYTES:
+        raise HTTPException(status_code=413, detail='Logo file must be 2 MB or smaller.')
+    dimensions = _png_dimensions(content)
+    if not dimensions:
+        raise HTTPException(status_code=400, detail='Only PNG logo files are accepted.')
+    width, height = dimensions
+    if width < COMMUNITY_LOGO_MIN_DIMENSION_PIXELS or height < COMMUNITY_LOGO_MIN_DIMENSION_PIXELS:
+        raise HTTPException(status_code=400, detail='Logo image must be at least 500 × 500 pixels.')
+    if min(width, height) / max(width, height) < 0.75:
+        raise HTTPException(status_code=400, detail='Please upload a square or near-square PNG logo.')
+    return width, height
+
+
+def _clear_organization_logo_fields(org: Organization) -> None:
+    org.logo_url = None
+    org.logo_filename = None
+    org.logo_content_type = None
+    org.logo_file_size = None
+    org.logo_width = None
+    org.logo_height = None
+    org.logo_uploaded_at = None
+    org.logo_uploaded_by_user_id = None
+
+
 def _enforce_host_plan_selection_admin(current_user: User) -> None:
     if (current_user.email or '').strip().lower() != HOST_PLAN_SELECTION_ADMIN_EMAIL:
         raise HTTPException(status_code=403, detail=HOST_PLAN_SELECTION_PERMISSION_MESSAGE)
@@ -6987,6 +7036,74 @@ def update_organization(org_id: uuid.UUID, payload: OrganizationCreate, current_
         data.pop('is_active', None)
     for k, v in data.items(): setattr(o, k, v)
     db.commit(); db.refresh(o); return o
+
+@router.post('/organizations/{org_id}/logo', response_model=OrganizationRead, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN, ROLE_COMMUNITY_ADMIN))])
+def upload_organization_logo(org_id: uuid.UUID, file: UploadFile = File(...), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    org = db.query(Organization).filter(Organization.id == org_id).first()
+    if not org:
+        raise HTTPException(status_code=404, detail='Organization not found')
+    enforce_organization_scope(org.id, current_user)
+    content = file.file.read(COMMUNITY_LOGO_MAX_SIZE_BYTES + 1)
+    width, height = _validate_community_logo_upload(file, content)
+    storage_dir = _community_logo_storage_dir()
+    old_filename = org.logo_filename
+    stored_filename = f'{org.id}-{uuid.uuid4()}.png'
+    destination = storage_dir / stored_filename
+    try:
+        destination.write_bytes(content)
+        org.logo_url = _community_logo_public_url(org.id, stored_filename)
+        org.logo_filename = stored_filename
+        org.logo_content_type = COMMUNITY_LOGO_ALLOWED_CONTENT_TYPE
+        org.logo_file_size = len(content)
+        org.logo_width = width
+        org.logo_height = height
+        org.logo_uploaded_at = datetime.now(timezone.utc)
+        org.logo_uploaded_by_user_id = current_user.id
+        db.commit()
+        db.refresh(org)
+        if old_filename and old_filename != stored_filename:
+            (storage_dir / old_filename).unlink(missing_ok=True)
+        logger.info('community_logo_uploaded organization_id=%s user_id=%s filename=%s', org.id, current_user.id, stored_filename)
+        return org
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        destination.unlink(missing_ok=True)
+        raise
+    finally:
+        file.file.close()
+
+
+@router.delete('/organizations/{org_id}/logo', response_model=OrganizationRead, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN, ROLE_COMMUNITY_ADMIN))])
+def remove_organization_logo(org_id: uuid.UUID, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    org = db.query(Organization).filter(Organization.id == org_id).first()
+    if not org:
+        raise HTTPException(status_code=404, detail='Organization not found')
+    enforce_organization_scope(org.id, current_user)
+    old_filename = org.logo_filename
+    storage_dir = _community_logo_storage_dir()
+    _clear_organization_logo_fields(org)
+    db.commit()
+    db.refresh(org)
+    if old_filename:
+        (storage_dir / old_filename).unlink(missing_ok=True)
+    logger.info('community_logo_removed organization_id=%s user_id=%s', org.id, current_user.id)
+    return org
+
+
+@router.get('/public/organizations/{org_id}/logo/{filename}')
+def view_public_organization_logo(org_id: uuid.UUID, filename: str, db: Session = Depends(get_db)):
+    safe_filename = Path(filename).name
+    org = db.query(Organization).filter(Organization.id == org_id, Organization.logo_filename == safe_filename).first()
+    if not org or not org.logo_filename:
+        raise HTTPException(status_code=404, detail='Community logo not found')
+    file_path = _community_logo_storage_dir() / safe_filename
+    if not file_path.exists() or not file_path.is_file():
+        raise HTTPException(status_code=404, detail='Community logo file is not available')
+    return FileResponse(path=file_path, media_type=COMMUNITY_LOGO_ALLOWED_CONTENT_TYPE, filename=org.logo_filename, content_disposition_type='inline')
+
 
 @router.get('/organizations/{org_id}/delete-check', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def get_organization_delete_check(org_id: uuid.UUID, db: Session = Depends(get_db)):
@@ -26485,6 +26602,8 @@ def _tournament_game_dict(game: TournamentGame, include_unpublished: bool = True
         'round_name': game.round_name, 'game_number': game.game_number,
         'team_1_id': str(game.team_1_id) if game.team_1_id else None, 'team_2_id': str(game.team_2_id) if game.team_2_id else None,
         'team_1_name': game.team_1.name if game.team_1 else None, 'team_2_name': game.team_2.name if game.team_2 else None,
+        'team_1_logo_url': getattr(getattr(game.team_1, 'organization', None), 'logo_url', None) if game.team_1 else None,
+        'team_2_logo_url': getattr(getattr(game.team_2, 'organization', None), 'logo_url', None) if game.team_2 else None,
         'team_1_seed': game.team_1_seed, 'team_2_seed': game.team_2_seed,
         'team_1_placeholder': _team_label(game.team_1, game.team_1_seed, game.team_1_source_game_id, source_game_numbers),
         'team_2_placeholder': _team_label(game.team_2, game.team_2_seed, game.team_2_source_game_id, source_game_numbers),
@@ -26948,8 +27067,10 @@ def _public_game_read_from_schedule_row(row, db: Session | None = None, current_
         date_type=_week_date_type(g.week),
         home_team_id=home.id,
         home_team_name=home.name,
+        home_team_logo_url=getattr(getattr(home, 'organization', None), 'logo_url', None),
         away_team_id=away.id,
         away_team_name=away.name,
+        away_team_logo_url=getattr(getattr(away, 'organization', None), 'logo_url', None),
         home_team_coach_name=getattr(home, 'coach_name', None),
         home_team_coach_email=(getattr(home, 'coach_email', None) if coach_contacts_visible else None),
         away_team_coach_name=getattr(away, 'coach_name', None),

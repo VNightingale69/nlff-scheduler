@@ -85,7 +85,14 @@ class OrganizationCreate(BaseModel):
     is_active: bool = True
 
 class OrganizationRead(BaseSchema, OrganizationCreate):
-    pass
+    logo_url: str | None = None
+    logo_filename: str | None = None
+    logo_content_type: str | None = None
+    logo_file_size: int | None = None
+    logo_width: int | None = None
+    logo_height: int | None = None
+    logo_uploaded_at: datetime | None = None
+    logo_uploaded_by_user_id: uuid.UUID | None = None
 
 class DivisionCreate(BaseModel):
     name: str
@@ -843,8 +850,10 @@ class PublicGameRead(BaseModel):
     date_type: str | None = None
     home_team_id: uuid.UUID
     home_team_name: str
+    home_team_logo_url: str | None = None
     away_team_id: uuid.UUID
     away_team_name: str
+    away_team_logo_url: str | None = None
     home_team_coach_name: str | None = None
     home_team_coach_email: EmailStr | None = None
     away_team_coach_name: str | None = None

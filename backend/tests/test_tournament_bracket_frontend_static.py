@@ -20,7 +20,8 @@ def test_visual_bracket_keeps_export_proportions_on_screen():
     source = BRACKET_COMPONENT.read_text()
     assert 'roundWidth: 300' in source
     assert 'roundGap: 64' in source
-    assert 'gameHeight: 190' in source
+    assert 'gameHeight: 220' in source
+    assert 'minHeight: layout.gameHeight' in source
     assert 'gameGap: 34' in source
     assert 'style={{ width: layout.width, height: layout.height, minWidth: layout.width }}' in source
     assert 'overflow-x-auto overflow-y-auto' in source

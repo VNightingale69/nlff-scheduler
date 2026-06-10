@@ -26,6 +26,8 @@ CORS_ORIGINS = [origin.strip() for origin in os.getenv('CORS_ORIGINS', 'http://l
 
 RULEBOOK_UPLOAD_DIR = os.getenv('RULEBOOK_UPLOAD_DIR', 'uploads/rulebooks')
 RULEBOOK_MAX_SIZE_BYTES = int(os.getenv('RULEBOOK_MAX_SIZE_BYTES', str(25 * 1024 * 1024)))
+COMMUNITY_LOGO_UPLOAD_DIR = os.getenv('COMMUNITY_LOGO_UPLOAD_DIR', 'uploads/community-logos')
+COMMUNITY_LOGO_MAX_SIZE_BYTES = int(os.getenv('COMMUNITY_LOGO_MAX_SIZE_BYTES', str(2 * 1024 * 1024)))
 
 ENABLE_TURF_OPTIMIZATION = os.getenv('ENABLE_TURF_OPTIMIZATION', 'false').strip().lower() in {'1', 'true', 'yes', 'on'}
 
