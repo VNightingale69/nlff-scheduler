@@ -33,6 +33,7 @@ export default function DashboardShell({ children }: { children: React.ReactNode
       'manual-schedule-builder',
       'schedule-management',
       'standings',
+      'tournaments',
       'scores',
       'scores/flagged',
       'scores/missing',
