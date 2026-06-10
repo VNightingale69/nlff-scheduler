@@ -44,8 +44,10 @@ export type TournamentBracketRound = {
 
 export type TournamentBracketDivision = {
   id: string;
-  division_name: string;
-  division_group: string;
+  division_name?: string | null;
+  division_group?: string | null;
+  display_name?: string | null;
+  name?: string | null;
   rounds?: TournamentBracketRound[];
   games?: TournamentBracketGame[];
 };
@@ -93,6 +95,42 @@ const statusLabels: Record<string, string> = {
 };
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
+type BracketHeaderData = {
+  tournamentName: string;
+  divisionLabel: string;
+  outputLabel?: string;
+};
+
+function bracketDivisionLabel(division: Pick<TournamentBracketDivision, 'display_name' | 'division_group' | 'division_name' | 'name'>) {
+  const displayName = (division.display_name || '').trim();
+  if (displayName) return displayName;
+
+  const group = (division.division_group || '').trim();
+  const name = (division.division_name || division.name || '').trim();
+  const label = [group, name].filter(Boolean).join(' ').trim();
+  return label || 'Division TBD';
+}
+
+function bracketHeaderData(title: string, division: TournamentBracketDivision, outputLabel?: string): BracketHeaderData {
+  return {
+    tournamentName: (title || '').trim() || 'Tournament Bracket',
+    divisionLabel: bracketDivisionLabel(division),
+    outputLabel,
+  };
+}
+
+function BracketHeader({ header }: { header: BracketHeaderData }) {
+  return (
+    <>
+      <div className='absolute left-8 top-[26px]' data-testid='bracket-canvas-header'>
+        <h4 className='text-[22px] font-bold leading-7 text-slate-900'>{header.tournamentName}</h4>
+        <p className='mt-0.5 text-base font-bold text-slate-700'>{header.divisionLabel}</p>
+      </div>
+      {header.outputLabel && <div className='absolute right-8 top-[50px] text-[11px] text-slate-500'>{header.outputLabel}</div>}
+    </>
+  );
+}
+
 const BRACKET_CANVAS = {
   roundWidth: 300,
   roundGap: 64,
@@ -307,11 +345,12 @@ function svgText(x: number, y: number, text: string, options: { size?: number; w
 function buildBracketSvg(title: string, division: ExportDivision, publicView: boolean) {
   const rounds = division.rounds;
   const layout = buildBracketLayout(rounds);
-  let body = `<svg xmlns="${SVG_NS}" width="${layout.width}" height="${layout.height}" viewBox="0 0 ${layout.width} ${layout.height}" role="img" aria-label="${escapeXml(`${title} ${division.division_group} ${division.division_name} bracket`)}">`;
+  const header = bracketHeaderData(title, division, publicView ? 'Published bracket export' : 'Administrator bracket export');
+  let body = `<svg xmlns="${SVG_NS}" width="${layout.width}" height="${layout.height}" viewBox="0 0 ${layout.width} ${layout.height}" role="img" aria-label="${escapeXml(`${header.tournamentName} ${header.divisionLabel} bracket`)}">`;
   body += '<rect width="100%" height="100%" fill="#f8fafc"/>';
-  body += svgText(layout.margin, 34, title, { size: 22, weight: '700' });
-  body += svgText(layout.margin, 60, `${division.division_group} ${division.division_name}`, { size: 16, weight: '700', fill: '#334155' });
-  body += svgText(layout.width - layout.margin, 60, publicView ? 'Published bracket export' : 'Administrator bracket export', { size: 11, fill: '#64748b', anchor: 'end' });
+  body += svgText(layout.margin, 34, header.tournamentName, { size: 22, weight: '700' });
+  body += svgText(layout.margin, 60, header.divisionLabel, { size: 16, weight: '700', fill: '#334155' });
+  if (header.outputLabel) body += svgText(layout.width - layout.margin, 60, header.outputLabel, { size: 11, fill: '#64748b', anchor: 'end' });
 
   bracketConnectors(rounds, layout).forEach((connector) => {
     body += `<path d="${connector.d}" fill="none" stroke="${layout.connectorStroke}" stroke-width="${layout.connectorWidth}"/>`;
@@ -368,20 +407,17 @@ function buildBracketSvg(title: string, division: ExportDivision, publicView: bo
 function SharedBracketRenderer({ title, division, publicView, outputLabel }: { title: string; division: ExportDivision; publicView: boolean; outputLabel: string }) {
   const rounds = division.rounds;
   const layout = buildBracketLayout(rounds);
+  const header = bracketHeaderData(title, division, outputLabel);
 
   return (
     <div
       className='relative shrink-0 overflow-visible rounded-2xl bg-slate-50 text-slate-900 shadow-inner ring-1 ring-slate-200'
       style={{ width: layout.width, height: layout.height, minWidth: layout.width }}
       role='img'
-      aria-label={`${title} ${division.division_group} ${division.division_name} bracket`}
+      aria-label={`${header.tournamentName} ${header.divisionLabel} bracket`}
       data-shared-bracket-renderer='true'
     >
-      <div className='absolute left-8 top-[26px]'>
-        <h4 className='text-[22px] font-bold leading-7 text-slate-900'>{title}</h4>
-        <p className='mt-0.5 text-base font-bold text-slate-700'>{division.division_group} {division.division_name}</p>
-      </div>
-      <div className='absolute right-8 top-[50px] text-[11px] text-slate-500'>{outputLabel}</div>
+      <BracketHeader header={header} />
 
       <svg className='pointer-events-none absolute inset-0 z-0' width={layout.width} height={layout.height} viewBox={`0 0 ${layout.width} ${layout.height}`} aria-hidden='true'>
         {bracketConnectors(rounds, layout).map((connector) => (
@@ -406,8 +442,8 @@ function SharedBracketRenderer({ title, division, publicView, outputLabel }: { t
               return (
                 <article
                   key={game.id}
-                  className={`absolute z-10 rounded-xl border-2 p-3 shadow-sm ${statusClass(game, publicView)}`}
-                  style={{ left: position.x, top: position.y, width: layout.roundWidth, minHeight: layout.gameHeight, backgroundColor: visual.fill, borderColor: visual.stroke }}
+                  className={`absolute z-10 overflow-visible rounded-xl border-2 p-3 pb-4 shadow-sm ${statusClass(game, publicView)}`}
+                  style={{ left: position.x, top: position.y, width: layout.roundWidth, minHeight: position.height, backgroundColor: visual.fill, borderColor: visual.stroke }}
                 >
                   <div className='mb-3 flex items-start justify-between gap-2'>
                     <div className='min-w-0'>
@@ -506,7 +542,8 @@ function pdfFromJpegDataUrl(jpegDataUrl: string, width: number, height: number) 
 }
 
 function DownloadControls({ title, division, publicView }: { title: string; division: ExportDivision; publicView: boolean }) {
-  const filenameBase = sanitizeFilename(`${title}-${division.division_group}-${division.division_name}-bracket`);
+  const divisionLabel = bracketDivisionLabel(division);
+  const filenameBase = sanitizeFilename(`${title}-${divisionLabel}-bracket`);
   const svg = () => buildBracketSvg(title, division, publicView);
   const downloadSvg = () => downloadBlob(new Blob([svg()], { type: 'image/svg+xml;charset=utf-8' }), `${filenameBase}.svg`);
   const downloadPng = async () => {
@@ -521,7 +558,7 @@ function DownloadControls({ title, division, publicView }: { title: string; divi
 
   return (
     <div className='flex flex-wrap items-center gap-2 text-sm print:hidden'>
-      <span className='text-xs font-medium uppercase tracking-wide text-slate-500'>Download {division.division_group} {division.division_name}</span>
+      <span className='text-xs font-medium uppercase tracking-wide text-slate-500'>Download {divisionLabel}</span>
       <button className='rounded border px-3 py-1 hover:bg-slate-50' onClick={downloadPdf}>Download PDF</button>
       <button className='rounded border px-3 py-1 hover:bg-slate-50' onClick={downloadPng}>Download PNG</button>
       <button className='rounded border px-3 py-1 hover:bg-slate-50' onClick={downloadSvg}>Download SVG</button>
@@ -544,7 +581,7 @@ export default function TournamentBracket({ divisions, publicView = false, tourn
         <section key={division.id} id={`division-${division.id}`} className='space-y-3'>
           <div className='flex flex-wrap items-start justify-between gap-3'>
             <div>
-              <h3 className='text-lg font-semibold'>{division.division_group} {division.division_name}</h3>
+              <h3 className='text-lg font-semibold'>{bracketDivisionLabel(division)}</h3>
               <p className='text-xs text-slate-500'>Bracket source: saved tournament game records and published tournament score advancement.</p>
             </div>
             {enableDownloads && <DownloadControls title={tournamentTitle} division={division} publicView={publicView} />}

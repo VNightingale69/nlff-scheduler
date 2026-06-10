@@ -38,3 +38,28 @@ assert.match(source, /height="\$\{position\.height\}" rx="\$\{layout\.gameRadius
 assert.match(source, /gameMetadata\(game\)\.forEach\(\(detail\) => \{/);
 assert.match(source, /metadataLines\(detail\.value\)\.forEach\(\(line, lineIndex\) => \{/);
 assert.match(source, /detailY \+= Math\.max\(1, metadataLines\(detail\.value\)\.length\) \* 12;/);
+
+// Bracket canvas headers use one shared header model for live and exported renderers.
+assert.match(source, /type BracketHeaderData = \{/);
+assert.match(source, /function bracketHeaderData\(title: string, division: TournamentBracketDivision, outputLabel\?: string\): BracketHeaderData/);
+assert.match(source, /function BracketHeader\(\{ header \}: \{ header: BracketHeaderData \}\)/);
+assert.match(source, /data-testid='bracket-canvas-header'/);
+assert.match(source, /<BracketHeader header=\{header\} \/>/);
+assert.match(source, /const header = bracketHeaderData\(title, division, outputLabel\);/);
+assert.match(source, /const header = bracketHeaderData\(title, division, publicView \? 'Published bracket export' : 'Administrator bracket export'\);/);
+assert.match(source, /svgText\(layout\.margin, 34, header\.tournamentName/);
+assert.match(source, /svgText\(layout\.margin, 60, header\.divisionLabel/);
+assert.match(source, /aria-label=\{`\$\{header\.tournamentName\} \$\{header\.divisionLabel\} bracket`\}/);
+assert.match(source, /aria-label="\$\{escapeXml\(`\$\{header\.tournamentName\} \$\{header\.divisionLabel\} bracket`\)\}"/);
+assert.doesNotMatch(source, /svgText\(layout\.margin, 60, `\$\{division\.division_group\} \$\{division\.division_name\}`/);
+
+// Division labels are dynamic, prefer display names, and never render a blank division line.
+const bracketDivisionLabelBody = source.match(/function bracketDivisionLabel\([^)]*\) \{([\s\S]*?)\n\}/)?.[1];
+assert.ok(bracketDivisionLabelBody, 'bracketDivisionLabel should be present');
+const bracketDivisionLabel = new Function('division', bracketDivisionLabelBody);
+assert.equal(bracketDivisionLabel({ division_group: 'COED', division_name: 'K-1' }), 'COED K-1');
+assert.equal(bracketDivisionLabel({ division_group: 'COED', division_name: '4-5' }), 'COED 4-5');
+assert.equal(bracketDivisionLabel({ division_group: 'GIRLS', division_name: '3-5' }), 'GIRLS 3-5');
+assert.equal(bracketDivisionLabel({ display_name: 'Girls 6-8 Showcase', division_group: 'GIRLS', division_name: '6-8' }), 'Girls 6-8 Showcase');
+assert.equal(bracketDivisionLabel({ division_group: '', division_name: '' }), 'Division TBD');
+assert.equal(bracketDivisionLabel({}), 'Division TBD');
