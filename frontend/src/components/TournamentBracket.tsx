@@ -96,7 +96,7 @@ const SVG_NS = 'http://www.w3.org/2000/svg';
 const BRACKET_CANVAS = {
   roundWidth: 300,
   roundGap: 64,
-  gameHeight: 190,
+  gameHeight: 220,
   gameGap: 34,
   margin: 32,
   headerHeight: 92,
@@ -362,7 +362,7 @@ function SharedBracketRenderer({ title, division, publicView, outputLabel }: { t
                 <article
                   key={game.id}
                   className={`absolute z-10 rounded-xl border-2 p-3 shadow-sm ${statusClass(game, publicView)}`}
-                  style={{ left: position.x, top: position.y, width: layout.roundWidth, height: layout.gameHeight, backgroundColor: visual.fill, borderColor: visual.stroke }}
+                  style={{ left: position.x, top: position.y, width: layout.roundWidth, minHeight: layout.gameHeight, backgroundColor: visual.fill, borderColor: visual.stroke }}
                 >
                   <div className='mb-3 flex items-start justify-between gap-2'>
                     <div className='min-w-0'>
