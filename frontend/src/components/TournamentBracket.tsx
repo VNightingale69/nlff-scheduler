@@ -75,7 +75,7 @@ type BracketLayout = {
   teamRowRadius: number;
   connectorStroke: string;
   connectorWidth: number;
-  positions: Map<string, { x: number; y: number }>;
+  positions: Map<string, { x: number; y: number; height: number }>;
 };
 
 const statusLabels: Record<string, string> = {
@@ -155,7 +155,7 @@ function TeamRow({ game, slot }: { game: TournamentBracketGame; slot: 1 | 2 }) {
   const isWinner = isWinningSlot(game, slot);
 
   return (
-    <div className={`h-[38px] rounded-lg border px-2.5 py-1.5 ${isWinner ? 'border-emerald-500 bg-emerald-50 font-semibold' : 'border-slate-200 bg-white'}`}>
+    <div className={`min-h-[38px] rounded-lg border px-2.5 py-1.5 ${isWinner ? 'border-emerald-500 bg-emerald-50 font-semibold' : 'border-slate-200 bg-white'}`}>
       <div className='flex items-start justify-between gap-2'>
         <div className='flex min-w-0 items-center gap-2'>
           <CommunityLogo src={teamLogoUrl(game, slot)} name={name} size={28} />
@@ -190,25 +190,33 @@ function divisionsForExport(divisions: TournamentBracketDivision[]): ExportDivis
 }
 
 function buildBracketLayout(rounds: TournamentBracketRound[]): BracketLayout {
-  const maxGames = Math.max(1, ...rounds.map((round) => round.games.length));
+  const roundHeights = rounds.map((round) => {
+    const cardHeights = round.games.map(gameCardHeight);
+    return cardHeights.reduce((total, height) => total + height, 0) + Math.max(0, cardHeights.length - 1) * BRACKET_CANVAS.gameGap;
+  });
+  const maxRoundHeight = Math.max(BRACKET_CANVAS.gameHeight, ...roundHeights);
   const width = BRACKET_CANVAS.margin * 2 + rounds.length * BRACKET_CANVAS.roundWidth + Math.max(0, rounds.length - 1) * BRACKET_CANVAS.roundGap;
-  const height = BRACKET_CANVAS.headerHeight + maxGames * (BRACKET_CANVAS.gameHeight + BRACKET_CANVAS.gameGap) + BRACKET_CANVAS.margin;
-  const positions = new Map<string, { x: number; y: number }>();
+  const height = BRACKET_CANVAS.headerHeight + maxRoundHeight + BRACKET_CANVAS.margin;
+  const positions = new Map<string, { x: number; y: number; height: number }>();
 
   rounds.forEach((round, roundIndex) => {
     const x = BRACKET_CANVAS.margin + roundIndex * (BRACKET_CANVAS.roundWidth + BRACKET_CANVAS.roundGap);
-    const offset = ((maxGames - round.games.length) * (BRACKET_CANVAS.gameHeight + BRACKET_CANVAS.gameGap)) / 2;
-    round.games.forEach((game, gameIndex) => {
-      positions.set(game.id, { x, y: BRACKET_CANVAS.headerHeight + offset + gameIndex * (BRACKET_CANVAS.gameHeight + BRACKET_CANVAS.gameGap) });
+    const roundHeight = roundHeights[roundIndex] || BRACKET_CANVAS.gameHeight;
+    const offset = (maxRoundHeight - roundHeight) / 2;
+    let y = BRACKET_CANVAS.headerHeight + offset;
+    round.games.forEach((game) => {
+      const height = gameCardHeight(game);
+      positions.set(game.id, { x, y, height });
+      y += height + BRACKET_CANVAS.gameGap;
     });
   });
 
   return { ...BRACKET_CANVAS, width, height, positions };
 }
 
-function connectorPath(start: { x: number; y: number }, end: { x: number; y: number }, layout: BracketLayout) {
-  const y1 = start.y + layout.gameHeight / 2;
-  const y2 = end.y + layout.gameHeight / 2;
+function connectorPath(start: { x: number; y: number; height: number }, end: { x: number; y: number; height: number }, layout: BracketLayout) {
+  const y1 = start.y + start.height / 2;
+  const y2 = end.y + end.height / 2;
   const x1 = start.x + layout.roundWidth;
   const midX = x1 + layout.roundGap / 2;
   return `M ${x1} ${y1} H ${midX} V ${y2} H ${end.x}`;
@@ -238,11 +246,27 @@ function sanitizeFilename(value: string) {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'tournament-bracket';
 }
 
-function splitText(value: string, max = 30) {
+function splitText(value: string, max = 30, maxLines = Number.POSITIVE_INFINITY) {
   const words = value.split(/\s+/).filter(Boolean);
   const lines: string[] = [];
   let current = '';
+
+  const pushChunkedWord = (word: string) => {
+    for (let index = 0; index < word.length; index += max) {
+      lines.push(word.slice(index, index + max));
+    }
+  };
+
   words.forEach((word) => {
+    if (word.length > max) {
+      if (current) {
+        lines.push(current);
+        current = '';
+      }
+      pushChunkedWord(word);
+      return;
+    }
+
     const next = current ? `${current} ${word}` : word;
     if (next.length > max && current) {
       lines.push(current);
@@ -252,7 +276,28 @@ function splitText(value: string, max = 30) {
     }
   });
   if (current) lines.push(current);
-  return lines.slice(0, 2);
+  return lines.slice(0, maxLines);
+}
+
+type GameMetadataRow = { label: string; value: string };
+
+function gameMetadata(game: TournamentBracketGame): GameMetadataRow[] {
+  return [
+    { label: 'Date', value: formatDisplayDate(game.date || '') || '—' },
+    { label: 'Time', value: formatDisplayTime(game.time || '') || '—' },
+    { label: 'Host', value: game.host_location_name || '—' },
+    { label: 'Field', value: game.field_name || '—' },
+    { label: 'Winner', value: game.winner_team_name || '—' },
+  ];
+}
+
+function metadataLines(value: string) {
+  return splitText(value, 32);
+}
+
+function gameCardHeight(game: TournamentBracketGame) {
+  const metadataHeight = gameMetadata(game).reduce((height, row) => height + Math.max(1, metadataLines(row.value).length) * 12, 0);
+  return Math.max(BRACKET_CANVAS.gameHeight, 154 + metadataHeight);
 }
 
 function svgText(x: number, y: number, text: string, options: { size?: number; weight?: string; fill?: string; anchor?: string } = {}) {
@@ -282,7 +327,7 @@ function buildBracketSvg(title: string, division: ExportDivision, publicView: bo
       const { x: gameX, y } = position;
       const status = displayStatus(game, publicView);
       const statusColors = statusVisual(game, publicView);
-      body += `<rect x="${gameX}" y="${y}" width="${layout.roundWidth}" height="${layout.gameHeight}" rx="${layout.gameRadius}" fill="${statusColors.fill}" stroke="${statusColors.stroke}" stroke-width="2"/>`;
+      body += `<rect x="${gameX}" y="${y}" width="${layout.roundWidth}" height="${position.height}" rx="${layout.gameRadius}" fill="${statusColors.fill}" stroke="${statusColors.stroke}" stroke-width="2"/>`;
       body += svgText(gameX + 14, y + 24, `${game.round_name} · Game ${game.game_number}`, { size: 12, weight: '700', fill: '#334155' });
       body += svgText(gameX + layout.roundWidth - 14, y + 24, status, { size: 10, weight: '700', fill: '#475569', anchor: 'end' });
       ([1, 2] as const).forEach((slot, slotIndex) => {
@@ -305,14 +350,14 @@ function buildBracketSvg(title: string, division: ExportDivision, publicView: bo
         if (winner) body += svgText(gameX + layout.roundWidth - 54, rowY + 14, 'Winner', { size: 9, weight: '700', fill: '#047857' });
         body += svgText(gameX + layout.roundWidth - 22, rowY + 30, score == null ? '—' : String(score), { size: 13, weight: '700', anchor: 'end' });
       });
-      const details = [
-        `Date: ${formatDisplayDate(game.date || '') || '—'}`,
-        `Time: ${formatDisplayTime(game.time || '') || '—'}`,
-        `Host: ${game.host_location_name || '—'}`,
-        `Field: ${game.field_name || '—'}`,
-        `Winner: ${game.winner_team_name || '—'}`,
-      ];
-      details.forEach((detail, index) => { body += svgText(gameX + 14, y + 142 + index * 12, detail, { size: 10, fill: '#475569' }); });
+      let detailY = y + 144;
+      gameMetadata(game).forEach((detail) => {
+        body += svgText(gameX + 14, detailY, `${detail.label}:`, { size: 10, weight: '700', fill: '#475569' });
+        metadataLines(detail.value).forEach((line, lineIndex) => {
+          body += svgText(gameX + 70, detailY + lineIndex * 12, line || '—', { size: 10, fill: '#475569' });
+        });
+        detailY += Math.max(1, metadataLines(detail.value).length) * 12;
+      });
     });
   });
 
@@ -326,7 +371,7 @@ function SharedBracketRenderer({ title, division, publicView, outputLabel }: { t
 
   return (
     <div
-      className='relative shrink-0 overflow-hidden rounded-2xl bg-slate-50 text-slate-900 shadow-inner ring-1 ring-slate-200'
+      className='relative shrink-0 overflow-visible rounded-2xl bg-slate-50 text-slate-900 shadow-inner ring-1 ring-slate-200'
       style={{ width: layout.width, height: layout.height, minWidth: layout.width }}
       role='img'
       aria-label={`${title} ${division.division_group} ${division.division_name} bracket`}
@@ -374,12 +419,13 @@ function SharedBracketRenderer({ title, division, publicView, outputLabel }: { t
                     <TeamRow game={game} slot={1} />
                     <TeamRow game={game} slot={2} />
                   </div>
-                  <dl className='mt-3 grid grid-cols-[54px_1fr] gap-x-1 gap-y-0.5 text-[10px] leading-3 text-slate-600'>
-                    <dt className='font-medium'>Date:</dt><dd className='truncate'>{formatDisplayDate(game.date || '') || '—'}</dd>
-                    <dt className='font-medium'>Time:</dt><dd className='truncate'>{formatDisplayTime(game.time || '') || '—'}</dd>
-                    <dt className='font-medium'>Host:</dt><dd className='truncate'>{game.host_location_name || '—'}</dd>
-                    <dt className='font-medium'>Field:</dt><dd className='truncate'>{game.field_name || '—'}</dd>
-                    <dt className='font-medium'>Winner:</dt><dd className='truncate'>{game.winner_team_name || '—'}</dd>
+                  <dl className='mt-3 grid grid-cols-[54px_minmax(0,1fr)] gap-x-1 gap-y-0.5 text-[10px] leading-3 text-slate-600' data-testid='bracket-game-metadata'>
+                    {gameMetadata(game).map((detail) => (
+                      <div key={detail.label} className='contents'>
+                        <dt className='font-semibold'>{detail.label}:</dt>
+                        <dd className='min-w-0 whitespace-normal break-words'>{detail.value}</dd>
+                      </div>
+                    ))}
                   </dl>
                 </article>
               );
