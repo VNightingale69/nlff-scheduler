@@ -143,9 +143,9 @@ export default function TeamsByParticipationManager() {
     }
   })(); }, []);
 
-  const grouped = useMemo(() => Object.fromEntries(divisions.map((d) => [d.id, teams.filter((t) => t.division_id === d.id)])), [divisions, teams]);
   const activeTeams = useMemo(() => teams.filter((t: any) => t.is_active), [teams]);
-  const teamsMissingCoachInfo = useMemo(() => teams.filter((t: any) => t.is_active && coachInfoStatus(t)).length, [teams]);
+  const grouped = useMemo(() => Object.fromEntries(divisions.map((d) => [d.id, activeTeams.filter((t) => t.division_id === d.id)])), [divisions, activeTeams]);
+  const teamsMissingCoachInfo = useMemo(() => activeTeams.filter((t: any) => coachInfoStatus(t)).length, [activeTeams]);
 
   const leagueSummary = useMemo(() => {
     const divisionsById = Object.fromEntries(divisions.map((d: any) => [d.id, d]));
@@ -289,7 +289,7 @@ export default function TeamsByParticipationManager() {
       await apiFetch(`/teams/${deleteTarget.id}`, { method: 'DELETE' }, getToken());
       setDeleteTarget(null);
       await refreshSelectedOrg();
-      setMsg('Team deleted successfully.');
+      setMsg('Team removed from active teams.');
     } catch (err) {
       setError(getErrorMessage(err));
     } finally {
@@ -357,7 +357,7 @@ export default function TeamsByParticipationManager() {
         <p>When creating teams, use a consistent team name that includes the community name, division/grade level, and a differentiator such as a color. Examples: Westosha Coed K/1 Maroon, Westosha Coed K/1 Silver.</p>
       </div>
       {teamsMissingCoachInfo > 0 && <p className='rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900'>{teamsMissingCoachInfo} team{teamsMissingCoachInfo === 1 ? ' is' : 's are'} missing coach contact information. Please update team records.</p>}
-      {teams.length === 0 && <p className='rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900'>No teams have been added for this community.</p>}
+      {activeTeams.length === 0 && <p className='rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900'>No active teams have been added for this community.</p>}
       {divisions.length === 0 && !error && <p className='rounded border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700'>No active divisions are available for team setup.</p>}
       {divisions.map((d) => {
         const existing = grouped[d.id] || [];
