@@ -80,6 +80,34 @@ class TestCommunityLogos:
         assert payload['logo_height'] == 500
         assert payload['logo_url'].startswith(f'/api/public/organizations/{self.org_two.id}/logo/')
 
+
+    def test_get_organization_includes_logo_metadata(self, tmp_path):
+        self._set_upload_dir(tmp_path)
+        upload = self._upload(self.org_one.id, self.scheduler.id, filename='community-logo.png')
+        assert upload.status_code == 200
+        response = self.client.get(f'/api/organizations/{self.org_one.id}', headers=_auth_header(self.scheduler.id))
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload['logo_url'] == upload.json()['logo_url']
+        assert payload['logo_filename'].endswith('.png')
+        assert payload['logo_content_type'] == 'image/png'
+        assert payload['logo_file_size'] > 0
+        assert payload['logo_width'] == 500
+        assert payload['logo_height'] == 500
+        assert payload['logo_uploaded_at']
+
+    def test_community_admin_cannot_get_another_community_logo_metadata(self, tmp_path):
+        self._set_upload_dir(tmp_path)
+        response = self.client.get(f'/api/organizations/{self.org_two.id}', headers=_auth_header(self.community_admin.id))
+        assert response.status_code == 403
+
+    def test_png_with_rectangular_recommended_shape_is_allowed(self, tmp_path):
+        self._set_upload_dir(tmp_path)
+        response = self._upload(self.org_one.id, self.scheduler.id, content=_png(500, 900))
+        assert response.status_code == 200
+        assert response.json()['logo_width'] == 500
+        assert response.json()['logo_height'] == 900
+
     def test_non_png_formats_are_rejected(self, tmp_path):
         self._set_upload_dir(tmp_path)
         for filename, content_type in [
