@@ -62,11 +62,13 @@ function isAuthFailure(status: number, parsed: unknown, raw = ''): boolean {
 }
 
 function authHeaders(opts: RequestInit, token?: string): HeadersInit {
-  return {
-    'Content-Type': 'application/json',
-    ...((token || getToken()) ? { Authorization: `Bearer ${token || getToken()}` } : {}),
-    ...(opts.headers || {}),
-  };
+  const headers = new Headers(opts.headers);
+  const authToken = token || getToken();
+  if (authToken) headers.set('Authorization', `Bearer ${authToken}`);
+  if (!(opts.body instanceof FormData) && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json');
+  }
+  return headers;
 }
 
 let refreshPromise: Promise<string | null> | null = null;

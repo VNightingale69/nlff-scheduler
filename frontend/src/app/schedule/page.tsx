@@ -7,6 +7,7 @@ import { getToken } from '@/lib/auth';
 import { getDivisionLabel } from '@/lib/divisionLabel';
 import { formatDisplayDate, formatDisplayTime } from '@/lib/displayFormat';
 import Link from 'next/link';
+import CommunityLogo from '@/components/CommunityLogo';
 import { APP_SCHEDULE_NAME, APP_SUBTITLE } from '@/config/branding';
 
 type Game = {
@@ -19,7 +20,9 @@ type Game = {
   turf_field_slot?: string | null;
   division_name: string;
   home_team_name: string;
+  home_team_logo_url?: string | null;
   away_team_name: string;
+  away_team_logo_url?: string | null;
   home_team_coach_name?: string | null;
   home_team_coach_email?: string | null;
   away_team_coach_name?: string | null;
@@ -176,8 +179,8 @@ function PublicScheduleContent() {
                   <td className='p-2'>{g.host_location_name}</td>
                   <td className='p-2'>{g.field_name}</td>
                   <td className='p-2'>{g.division_name}</td>
-                  <td className='p-2'>{g.home_team_name}</td>
-                  <td className='p-2'>{g.away_team_name}</td>
+                  <td className='p-2'><span className='flex items-center gap-2'><CommunityLogo src={g.home_team_logo_url} name={g.home_team_name} size={24} />{g.home_team_name}</span></td>
+                  <td className='p-2'><span className='flex items-center gap-2'><CommunityLogo src={g.away_team_logo_url} name={g.away_team_name} size={24} />{g.away_team_name}</span></td>
                   <td className='p-2'>{g.date_type === 'PLAYOFF' ? 'PLAYOFF' : g.week_label || 'Regular Season'}</td>
                   <td className='p-2'>{g.game_status_label}</td>
                   <td className='p-2 text-xs'>
