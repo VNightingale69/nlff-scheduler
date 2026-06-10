@@ -26414,41 +26414,80 @@ def _tournament_dict(tournament: Tournament, include_unpublished: bool = True) -
             'seed': tt.seed, 'included': tt.included, 'seed_source': tt.seed_source,
             'original_standings_rank': tt.original_standings_rank,
         } for tt in sorted(td.teams, key=lambda x: x.seed)]
-        games = [_tournament_game_dict(game, include_unpublished=include_unpublished) for game in sorted(td.games, key=lambda g: (g.round_number, g.game_number)) if include_unpublished or tournament.is_published]
+        sorted_games = sorted(td.games, key=lambda g: (g.round_number, g.game_number))
+        source_game_numbers = {game.id: game.game_number for game in sorted_games}
+        games = [_tournament_game_dict(game, include_unpublished=include_unpublished, source_game_numbers=source_game_numbers) for game in sorted_games if include_unpublished or tournament.is_published]
         divisions.append({'id': str(td.id), 'division_id': str(td.division_id), 'division_name': td.division.name if td.division else '', 'division_group': td.division.division_group if td.division else '', 'status': td.status, 'teams': teams, 'games': games})
     return {'id': str(tournament.id), 'season_id': str(tournament.season_id), 'name': tournament.name, 'type': tournament.type, 'status': tournament.status, 'is_published': tournament.is_published, 'published_at': tournament.published_at.isoformat() if tournament.published_at else None, 'divisions': divisions}
 
 
-def _team_label(team: Team | None, seed: int | None, source_game_id: uuid.UUID | None) -> str:
+def _tournament_bracket_dict(tournament: Tournament, include_unpublished: bool = True, division_id: uuid.UUID | None = None) -> dict:
+    tournament_dict = _tournament_dict(tournament, include_unpublished=include_unpublished)
+    divisions = []
+    for division in tournament_dict['divisions']:
+        if division_id and uuid.UUID(division['id']) != division_id and uuid.UUID(division['division_id']) != division_id:
+            continue
+        rounds = []
+        games_by_round: dict[int, list[dict]] = {}
+        for game in division['games']:
+            games_by_round.setdefault(int(game['round_number']), []).append(game)
+        for round_number in sorted(games_by_round):
+            games = sorted(games_by_round[round_number], key=lambda item: int(item['game_number']))
+            rounds.append({'round_number': round_number, 'round_name': games[0]['round_name'] if games else '', 'games': games})
+        divisions.append({**division, 'rounds': rounds})
+    return {**tournament_dict, 'divisions': divisions}
+
+
+def _team_label(team: Team | None, seed: int | None, source_game_id: uuid.UUID | None, source_game_numbers: dict[uuid.UUID, int] | None = None) -> str:
     if team:
         return f"Seed {seed} {team.name}" if seed else team.name
     if source_game_id:
-        return f"Winner of Game {source_game_id}"
+        game_number = (source_game_numbers or {}).get(source_game_id)
+        return f"Winner of Game {game_number or source_game_id}"
     return 'TBD'
 
 
-def _tournament_game_dict(game: TournamentGame, include_unpublished: bool = True) -> dict:
+def _public_tournament_status(game: TournamentGame) -> str:
+    if game.is_published:
+        return 'Official Final'
+    if game.needs_review:
+        return 'Pending Update'
+    if game.team_1_id and game.team_2_id:
+        return 'Scheduled' if game.game_date or game.kickoff_time else 'Ready'
+    return 'Waiting for Teams'
+
+
+def _tournament_game_dict(game: TournamentGame, include_unpublished: bool = True, source_game_numbers: dict[uuid.UUID, int] | None = None) -> dict:
     score_visible = include_unpublished or bool(game.is_published)
+    status = game.status
+    score_status = game.score_status
+    needs_review = bool(game.needs_review)
+    if not include_unpublished:
+        status = _public_tournament_status(game)
+        score_status = SCORE_STATUS_PUBLISHED if game.is_published else SCORE_STATUS_MISSING
+        needs_review = False
     return {
         'id': str(game.id), 'tournament_division_id': str(game.tournament_division_id), 'round_number': game.round_number,
         'round_name': game.round_name, 'game_number': game.game_number,
         'team_1_id': str(game.team_1_id) if game.team_1_id else None, 'team_2_id': str(game.team_2_id) if game.team_2_id else None,
         'team_1_name': game.team_1.name if game.team_1 else None, 'team_2_name': game.team_2.name if game.team_2 else None,
         'team_1_seed': game.team_1_seed, 'team_2_seed': game.team_2_seed,
-        'team_1_placeholder': _team_label(game.team_1, game.team_1_seed, game.team_1_source_game_id),
-        'team_2_placeholder': _team_label(game.team_2, game.team_2_seed, game.team_2_source_game_id),
+        'team_1_placeholder': _team_label(game.team_1, game.team_1_seed, game.team_1_source_game_id, source_game_numbers),
+        'team_2_placeholder': _team_label(game.team_2, game.team_2_seed, game.team_2_source_game_id, source_game_numbers),
         'team_1_source_game_id': str(game.team_1_source_game_id) if game.team_1_source_game_id else None,
         'team_2_source_game_id': str(game.team_2_source_game_id) if game.team_2_source_game_id else None,
+        'team_1_auto_advanced': bool(game.round_number > 1 and game.team_1_id and not game.team_1_source_game_id),
+        'team_2_auto_advanced': bool(game.round_number > 1 and game.team_2_id and not game.team_2_source_game_id),
         'date': game.game_date.isoformat() if game.game_date else None, 'time': game.kickoff_time.isoformat() if game.kickoff_time else None,
         'host_location_id': str(game.host_location_id) if game.host_location_id else None, 'host_location_name': game.host_location.name if game.host_location else None,
         'field_id': str(game.field_id) if game.field_id else None, 'field_name': game.field.name if game.field else None,
-        'status': game.status, 'score_status': game.score_status, 'is_published': game.is_published,
+        'status': status, 'score_status': score_status, 'is_published': game.is_published,
         'home_score': ('F' if game.home_forfeit else game.home_score) if score_visible else None,
         'away_score': ('F' if game.away_forfeit else game.away_score) if score_visible else None,
-        'winner_team_id': str(game.winner_team_id) if game.winner_team_id else None,
-        'winner_team_name': game.winner_team.name if game.winner_team else None,
-        'loser_team_id': str(game.loser_team_id) if game.loser_team_id else None,
-        'needs_review': game.needs_review,
+        'winner_team_id': str(game.winner_team_id) if (include_unpublished or game.is_published) and game.winner_team_id else None,
+        'winner_team_name': game.winner_team.name if (include_unpublished or game.is_published) and game.winner_team else None,
+        'loser_team_id': str(game.loser_team_id) if include_unpublished and game.loser_team_id else None,
+        'needs_review': needs_review,
     }
 
 
@@ -26505,17 +26544,21 @@ def _generate_bracket_for_division(db: Session, td: TournamentDivision) -> None:
 def _advance_tournament_winner(db: Session, game: TournamentGame, winner_id: uuid.UUID, loser_id: uuid.UUID | None) -> None:
     game.winner_team_id = winner_id
     game.loser_team_id = loser_id
-    game.status = 'ADVANCED'
+    game.status = 'COMPLETED'
     downstream = db.query(TournamentGame).filter(or_(TournamentGame.team_1_source_game_id == game.id, TournamentGame.team_2_source_game_id == game.id)).all()
     seed = game.team_1_seed if game.team_1_id == winner_id else game.team_2_seed if game.team_2_id == winner_id else None
     for next_game in downstream:
         if next_game.team_1_source_game_id == game.id:
             if next_game.team_1_id and next_game.team_1_id != winner_id:
                 next_game.needs_review = True
+                if next_game.is_published or next_game.score_status in {SCORE_STATUS_PUBLISHED, SCORE_STATUS_APPROVED, SCORE_STATUS_SUBMITTED}:
+                    next_game.status = 'NEEDS_REVIEW'
             next_game.team_1_id = winner_id; next_game.team_1_seed = seed
         if next_game.team_2_source_game_id == game.id:
             if next_game.team_2_id and next_game.team_2_id != winner_id:
                 next_game.needs_review = True
+                if next_game.is_published or next_game.score_status in {SCORE_STATUS_PUBLISHED, SCORE_STATUS_APPROVED, SCORE_STATUS_SUBMITTED}:
+                    next_game.status = 'NEEDS_REVIEW'
             next_game.team_2_id = winner_id; next_game.team_2_seed = seed
         if next_game.team_1_id and next_game.team_2_id and next_game.status == 'WAITING_FOR_TEAMS':
             next_game.status = 'READY'
@@ -26524,7 +26567,7 @@ def _advance_tournament_winner(db: Session, game: TournamentGame, winner_id: uui
 def _clear_tournament_advancement(db: Session, game: TournamentGame) -> None:
     old_winner = game.winner_team_id
     game.winner_team_id = None; game.loser_team_id = None
-    if game.status == 'ADVANCED':
+    if game.status in {'ADVANCED', 'COMPLETED'}:
         game.status = 'READY' if game.team_1_id and game.team_2_id else 'WAITING_FOR_TEAMS'
     downstream = db.query(TournamentGame).filter(or_(TournamentGame.team_1_source_game_id == game.id, TournamentGame.team_2_source_game_id == game.id)).all()
     for next_game in downstream:
@@ -26606,6 +26649,16 @@ def list_tournaments(season_id: uuid.UUID | None = None, current_user: User = De
     return {'items': [_tournament_dict(t, include_unpublished=include_unpublished) for t in q.order_by(Tournament.created_at.desc()).all()]}
 
 
+@router.get('/tournaments/{tournament_id}/bracket', dependencies=[Depends(require_roles(ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
+def get_tournament_bracket(tournament_id: uuid.UUID, division_id: uuid.UUID | None = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    tournament = db.query(Tournament).filter(Tournament.id == tournament_id).first()
+    if not tournament:
+        raise HTTPException(404, 'Tournament not found.')
+    role_name = normalize_role_name(current_user.role.name)
+    include_unpublished = role_name in {ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN, ROLE_COMMUNITY_ADMIN}
+    return {'tournament': _tournament_bracket_dict(tournament, include_unpublished=include_unpublished, division_id=division_id)}
+
+
 @router.get('/tournaments/{tournament_id}', dependencies=[Depends(require_roles(ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
 def get_tournament(tournament_id: uuid.UUID, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     tournament = db.query(Tournament).filter(Tournament.id == tournament_id).first()
@@ -26620,6 +26673,14 @@ def public_tournaments(season_id: uuid.UUID | None = None, db: Session = Depends
     if season_id:
         q = q.filter(Tournament.season_id == season_id)
     return {'items': [_tournament_dict(t, include_unpublished=False) for t in q.order_by(Tournament.created_at.desc()).all()]}
+
+
+@router.get('/public/tournaments/{tournament_id}/bracket')
+def public_tournament_bracket(tournament_id: uuid.UUID, division_id: uuid.UUID | None = None, db: Session = Depends(get_db)):
+    tournament = db.query(Tournament).filter(Tournament.id == tournament_id, Tournament.is_published.is_(True)).first()
+    if not tournament:
+        raise HTTPException(404, 'Published tournament not found.')
+    return {'tournament': _tournament_bracket_dict(tournament, include_unpublished=False, division_id=division_id)}
 
 
 @router.post('/tournaments/{tournament_id}/publish', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
