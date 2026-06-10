@@ -36,7 +36,6 @@ export default function DashboardShell({ children }: { children: React.ReactNode
       'scores',
       'scores/flagged',
       'scores/missing',
-      'game-statuses',
       'rulebook',
     ];
   const communityTitles: Record<string, string> = {
