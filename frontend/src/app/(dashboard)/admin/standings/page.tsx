@@ -17,11 +17,6 @@ type StandingRow = {
   games_played: number;
   games_scheduled: number;
   games_remaining: number;
-  points_for: number;
-  points_against: number;
-  point_differential: number;
-  win_percentage: number;
-  last_updated: string;
 };
 
 type DivisionBlock = {
@@ -49,10 +44,7 @@ type GameResult = {
 };
 
 const scoreStatuses = ['', 'MISSING', 'SUBMITTED', 'FLAGGED', 'CONFLICT', 'APPROVED', 'PUBLISHED', 'UNPUBLISHED', 'CORRECTION_PENDING'];
-
-function pct(value: number) {
-  return Number.isFinite(value) ? value.toFixed(3) : '0.000';
-}
+const standingsHeaders = ['Rank', 'Team', 'Community', 'Division', 'W', 'L', 'T', 'GP', 'Scheduled', 'Remaining'];
 
 function scoreText(value: number | string | null) {
   return value === null || value === undefined ? '—' : String(value);
@@ -94,7 +86,7 @@ export default function StandingsPage() {
     {message && <div className='rounded border bg-red-50 p-3 text-sm text-red-700'>{message}</div>}
     {payload && <div className='rounded border bg-blue-50 p-3 text-sm text-blue-900'>
       <div>{payload.official_score_note}</div>
-      <div>Last updated: {payload.last_calculated_at || '—'}</div>
+      <div>Calculated at: {payload.last_calculated_at || '—'}</div>
       {missing > 0 && <div className='font-semibold'>Standings may be incomplete because {missing} games are missing scores, pending approval, unpublished, flagged/conflicted, correction pending, or future games.</div>}
     </div>}
 
@@ -123,7 +115,25 @@ export default function StandingsPage() {
           <div className='rounded bg-slate-100 p-2'>Future: <strong>{division.summary.future || 0}</strong></div>
         </div>
       </div>
-      <div className='overflow-x-auto'><table className='min-w-full text-sm'><thead className='bg-slate-100 text-left'><tr>{['Rank','Team','Community','Division','W','L','T','GP','Scheduled','Remaining','PF','PA','Diff','Win %','Last Updated'].map((h) => <th key={h} className='p-2'>{h}</th>)}</tr></thead><tbody>{division.standings.map((row) => <tr key={row.team_name} className='border-t'><td className='p-2'>{row.rank}</td><td className='p-2 font-medium'>{row.team_name}</td><td className='p-2'>{row.community_name}</td><td className='p-2'>{row.division_name}</td><td className='p-2'>{row.wins}</td><td className='p-2'>{row.losses}</td><td className='p-2'>{row.ties}</td><td className='p-2'>{row.games_played}</td><td className='p-2'>{row.games_scheduled}</td><td className='p-2'>{row.games_remaining}</td><td className='p-2'>{row.points_for}</td><td className='p-2'>{row.points_against}</td><td className='p-2'>{row.point_differential}</td><td className='p-2'>{pct(row.win_percentage)}</td><td className='p-2'>{row.last_updated}</td></tr>)}</tbody></table></div>
+      <div className='overflow-x-auto'>
+        <table className='min-w-full text-sm'>
+          <thead className='bg-slate-100 text-left'>
+            <tr>{standingsHeaders.map((h) => <th key={h} className='p-2'>{h}</th>)}</tr>
+          </thead>
+          <tbody>{division.standings.map((row) => <tr key={row.team_name} className='border-t'>
+            <td className='p-2'>{row.rank}</td>
+            <td className='p-2 font-medium'>{row.team_name}</td>
+            <td className='p-2'>{row.community_name}</td>
+            <td className='p-2'>{row.division_name}</td>
+            <td className='p-2'>{row.wins}</td>
+            <td className='p-2'>{row.losses}</td>
+            <td className='p-2'>{row.ties}</td>
+            <td className='p-2'>{row.games_played}</td>
+            <td className='p-2'>{row.games_scheduled}</td>
+            <td className='p-2'>{row.games_remaining}</td>
+          </tr>)}</tbody>
+        </table>
+      </div>
     </section>)}
 
     <section className='space-y-3 rounded border bg-white p-4'>
