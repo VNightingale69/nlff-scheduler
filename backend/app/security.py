@@ -8,6 +8,14 @@ from fastapi import HTTPException, status
 from app.config import ACCESS_TOKEN_EXPIRE_MINUTES, JWT_ALGORITHM, JWT_SECRET_KEY, REFRESH_TOKEN_EXPIRE_MINUTES
 
 PASSWORD_RULE = re.compile(r'^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^\w\s]).{8,128}$')
+AUTH_EXPIRED_MESSAGE = 'Your session expired. Please log in again.'
+
+
+def auth_invalid_token_exception() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail={'error': 'auth_invalid_token', 'message': AUTH_EXPIRED_MESSAGE},
+    )
 
 
 def validate_password_strength(password: str) -> None:
@@ -32,6 +40,10 @@ def create_token(subject: str, token_type: str, expires_delta: timedelta) -> str
     return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
 
 
+def access_token_expires_at() -> datetime:
+    return datetime.now(UTC) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+
+
 def create_access_token(subject: str) -> str:
     return create_token(subject, 'access', timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
 
@@ -44,7 +56,7 @@ def decode_token(token: str, expected_type: str) -> dict:
     try:
         payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
     except jwt.PyJWTError as exc:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='Invalid token') from exc
+        raise auth_invalid_token_exception() from exc
     if payload.get('type') != expected_type:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='Invalid token type')
+        raise auth_invalid_token_exception()
     return payload

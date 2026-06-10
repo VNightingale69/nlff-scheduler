@@ -1,6 +1,21 @@
 import os
 
-JWT_SECRET_KEY = os.getenv('JWT_SECRET_KEY', 'change-me-in-production')
+
+def _is_production_environment() -> bool:
+    environment = os.getenv('ENVIRONMENT') or os.getenv('APP_ENV') or os.getenv('RAILWAY_ENVIRONMENT') or ''
+    return environment.strip().lower() in {'production', 'prod'}
+
+
+def _jwt_secret_key() -> str:
+    configured_secret = os.getenv('JWT_SECRET_KEY')
+    if configured_secret:
+        return configured_secret
+    if _is_production_environment():
+        raise RuntimeError('JWT_SECRET_KEY must be set to a stable value in production environments.')
+    return 'development-jwt-secret-key-change-me'
+
+
+JWT_SECRET_KEY = _jwt_secret_key()
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv('ACCESS_TOKEN_EXPIRE_MINUTES', '30'))
 REFRESH_TOKEN_EXPIRE_MINUTES = int(os.getenv('REFRESH_TOKEN_EXPIRE_MINUTES', str(60 * 24 * 7)))
 JWT_ALGORITHM = 'HS256'

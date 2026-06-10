@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import Role, User
-from app.security import decode_token
+from app.security import auth_invalid_token_exception, decode_token
 
 security = HTTPBearer()
 optional_security = HTTPBearer(auto_error=False)
@@ -50,9 +50,13 @@ def normalize_role_name(role_name: str | None) -> str:
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)) -> User:
     payload = decode_token(credentials.credentials, 'access')
     user_id = payload.get('sub')
-    user = db.query(User).filter(User.id == uuid.UUID(user_id), User.is_active.is_(True)).first()
+    try:
+        user_uuid = uuid.UUID(user_id)
+    except (TypeError, ValueError):
+        raise auth_invalid_token_exception()
+    user = db.query(User).filter(User.id == user_uuid, User.is_active.is_(True)).first()
     if not user:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='User not found or inactive')
+        raise auth_invalid_token_exception()
     return user
 
 

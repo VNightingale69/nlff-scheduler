@@ -52,7 +52,7 @@ export default function DashboardShell({ children }: { children: React.ReactNode
   const links = useMemo(
     () => navOrder
       .map((key) => [key, ENTITIES[key]] as const)
-      .filter(([, c]) => c && c.nav && (!c.roles || (role && c.roles.includes(role)))),
+      .filter(([, c]) => c && c.nav && (!c.roles || (role && (c.roles as readonly string[]).includes(role)))),
     [navOrder, role]
   );
 
