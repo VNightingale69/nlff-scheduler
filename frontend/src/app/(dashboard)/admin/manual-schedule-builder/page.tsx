@@ -112,9 +112,6 @@ type AutoScheduleDiagnosticsSummary = {
   previewGames: number;
   requiredGamesMissing: number;
   finalValidationStatus: string;
-  scheduleQualityStatus: string;
-  diagnosticsStatus: string;
-  diagnosticsError: string;
   validationFailures: number;
   finalValidationFailures: unknown[];
   teamTimeConflicts: number;
@@ -135,22 +132,7 @@ type AutoScheduleDiagnosticsSummary = {
   trueHomeHost: Record<string, unknown>;
   pullForward: Record<string, unknown>;
   rejectionReasons: Record<string, unknown>;
-  preview: string;
-  downloadUrl: string | null;
-  downloadFilename: string;
 };
-
-function safeStringify(value: unknown, maxLength = 20000): string {
-  try {
-    const text = JSON.stringify(value, null, 2);
-    if (text.length > maxLength) {
-      return `${text.slice(0, maxLength)}\n... diagnostics truncated in UI ...`;
-    }
-    return text;
-  } catch (error) {
-    return 'Diagnostics payload too large to display. Use backend logs or export diagnostics instead.';
-  }
-}
 
 function toNumber(value: unknown): number {
   return Number(value ?? 0) || 0;
@@ -189,16 +171,6 @@ function compactRecord(value: unknown, maxEntries = 20): Record<string, unknown>
   return Object.fromEntries(Object.entries(value as Record<string, unknown>).slice(0, maxEntries));
 }
 
-function createDiagnosticsDownload(value: unknown): string | null {
-  if (typeof window === 'undefined') return null;
-  try {
-    const blob = new Blob([safeStringify(value, Number.MAX_SAFE_INTEGER)], { type: 'application/json' });
-    return URL.createObjectURL(blob);
-  } catch (error) {
-    return null;
-  }
-}
-
 function summarizeAutoScheduleDiagnostics(value: any): AutoScheduleDiagnosticsSummary {
   const diagnostics = value?.auto_schedule_diagnostics || {};
   const finalValidation = value?.final_validation || diagnostics?.final_validation || {};
@@ -211,14 +183,9 @@ function summarizeAutoScheduleDiagnostics(value: any): AutoScheduleDiagnosticsSu
   const requiredGamesMissing = itemCount(value?.required_games_still_missing ?? value?.required_games_missing ?? diagnostics?.required_games_still_missing ?? diagnostics?.required_games_missing);
   const validationFailures = toNumber(finalValidation?.final_validation_failure_count ?? value?.final_validation_failure_count ?? diagnostics?.final_validation_failure_count) || (itemCount(value?.validation_failures ?? value?.validation_errors ?? diagnostics?.validation_failures) + toNumber(value?.failed_validation_count ?? diagnostics?.failed_validation_count));
   const hostOwnerAwayGames = hostVerification?.host_owner_is_away_games ?? value?.host_owner_as_away_games ?? diagnostics?.host_owner_as_away_games;
-  const filename = `auto-schedule-diagnostics-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
-
   return {
     status: value?.status || finalValidation?.final_validation_status || 'unknown',
     finalValidationStatus: String(finalValidation?.final_validation_status ?? value?.final_validation_status ?? diagnostics?.final_validation_status ?? 'unknown'),
-    scheduleQualityStatus: String(finalValidation?.schedule_quality_status ?? value?.schedule_quality_status ?? diagnostics?.schedule_quality_status ?? 'unknown'),
-    diagnosticsStatus: String(finalValidation?.diagnostics_status ?? value?.diagnostics_status ?? diagnostics?.diagnostics_status ?? 'unknown'),
-    diagnosticsError: String(finalValidation?.diagnostics_error ?? value?.diagnostics_error ?? diagnostics?.diagnostics_error ?? ''),
     message: value?.message || 'No message returned.',
     rootCauses: toStringArray(value?.root_cause_categories || diagnostics?.root_cause_categories, ['unknown']),
     dryRun: Boolean(value?.dry_run),
@@ -256,16 +223,6 @@ function summarizeAutoScheduleDiagnostics(value: any): AutoScheduleDiagnosticsSu
       games_moved_earlier: toNumber(pullForward?.games_moved_earlier),
     },
     rejectionReasons,
-    preview: safeStringify({
-      status: value?.status,
-      message: value?.message,
-      root_cause_categories: value?.root_cause_categories || diagnostics?.root_cause_categories,
-      skipped_attempts_by_reason: skippedAttemptsByReason,
-      failed_validation_reasons: failedValidationReasons,
-      final_validation: finalValidation,
-    }),
-    downloadUrl: createDiagnosticsDownload(value),
-    downloadFilename: filename,
   };
 }
 
@@ -310,9 +267,6 @@ export default function ManualScheduleBuilderPage() {
   const [scheduledGamesFilters, setScheduledGamesFilters] = useState<ScheduledGamesFilters>(emptyScheduledGamesFilters);
   const [isBulkEditMode, setIsBulkEditMode] = useState(false);
 
-  useEffect(() => () => {
-    if (autoScheduleDiagnostics?.downloadUrl) URL.revokeObjectURL(autoScheduleDiagnostics.downloadUrl);
-  }, [autoScheduleDiagnostics?.downloadUrl]);
 
   useEffect(() => {
     [
@@ -446,7 +400,7 @@ export default function ManualScheduleBuilderPage() {
           if (detail.failure_reasons.includes('DUPLICATE_EXPLICIT_FIELD_SLOT')) return 'Unable to save: this exact field slot is already assigned at the selected date/time.';
         }
         if (validationErrorMessages[errorCode]) return validationErrorMessages[errorCode];
-        return JSON.stringify(detail);
+        return typeof detail.message === 'string' ? detail.message : 'Request failed. Please review the listed fields and try again.';
       }
       return e.message;
     }
@@ -455,25 +409,16 @@ export default function ManualScheduleBuilderPage() {
 
   const loadFinalScheduleValidation = async () => {
     if (!seasonId) return null;
-    const quality: any = await apiFetch(`/schedule-management/quality-report?season_id=${seasonId}`, {}, token);
-    return quality?.final_validation || null;
+    return apiFetch(`/schedule-management/publish-diagnostics?season_id=${seasonId}`, {}, token);
   };
 
   const setManualScheduleBannerFromValidation = (action: string, finalValidation: any) => {
-    const status = String(finalValidation?.final_validation_status || '').toUpperCase();
-    const qualityStatus = String(finalValidation?.schedule_quality_status || '').toUpperCase();
-    const failureCount = Number(finalValidation?.hard_rule_failure_count ?? finalValidation?.final_validation_failure_count ?? 0);
-    const diagnosticsFailureCount = Number(finalValidation?.diagnostics_reporting_failure_count || 0);
-    const missingCount = Number(finalValidation?.required_games_missing_count || 0);
-    if (status === 'COMPLETE' && qualityStatus === 'COMPLETE') {
-      setSuccess(`${action} Final validation COMPLETE.`);
+    const blockingCount = Number(finalValidation?.publish_blocking_issue_count || 0);
+    if (blockingCount === 0) {
+      setSuccess(`${action} Schedule is ready to publish.`);
       return;
     }
-    if (diagnosticsFailureCount > 0 && failureCount === 0) {
-      setError(`${action} Schedule validation could not be fully audited: ${diagnosticsFailureCount} diagnostics/reporting issue(s). Review Schedule Quality Report before publishing.`);
-      return;
-    }
-    setError(`${action} Schedule is ${status || qualityStatus || 'not complete'}: ${failureCount} detailed hard-rule failure(s), ${missingCount} required games missing. Review Schedule Quality Report for affected records/scopes.`);
+    setError(`${action} Schedule validation found blocking issues. Please review the listed games before publishing.`);
   };
 
 
@@ -1050,13 +995,8 @@ export default function ManualScheduleBuilderPage() {
                     setSuccess(`${baseMessage} ${Number(res.committed_games_count ?? res.total_games_created ?? 0)} games scheduled. Final validation COMPLETE.`);
                   } else {
                     const failureCount = Number(finalValidation.hard_rule_failure_count ?? finalValidation.final_validation_failure_count ?? res.final_validation_failure_count ?? 0);
-                    const diagnosticsFailureCount = Number(finalValidation.diagnostics_reporting_failure_count || 0);
                     const missing = Number(finalValidation.required_games_missing_count || 0);
-                    if (diagnosticsFailureCount > 0 && failureCount === 0) {
-                      setError(`${baseMessage} Schedule validation could not be fully audited; ${diagnosticsFailureCount} diagnostics/reporting issue(s). Review Schedule Quality Report.${rootCauses ? ` Root causes: ${rootCauses}.` : ''}`);
-                    } else {
-                      setError(`${baseMessage} Final status ${finalStatus || 'UNKNOWN'}; ${failureCount} detailed hard-rule failure(s), ${missing} required games missing.${rootCauses ? ` Root causes: ${rootCauses}.` : ''}`);
-                    }
+                    setError(`${baseMessage} Schedule validation found blocking issues. Please review the listed games before publishing. ${failureCount} blocking issue(s), ${missing} required games missing.${rootCauses ? ` Root causes: ${rootCauses}.` : ''}`);
                   }
                 } catch (e: unknown) {
                   setError(`Auto-schedule failed: ${extractError(e)}`);
@@ -1071,19 +1011,16 @@ export default function ManualScheduleBuilderPage() {
         </div>
       </div> : null}
       {autoScheduleDiagnostics ? <details className='rounded border border-slate-300 bg-slate-50 p-3'>
-        <summary className='cursor-pointer font-semibold text-slate-800'>Scheduling Diagnostics</summary>
+        <summary className='cursor-pointer font-semibold text-slate-800'>Scheduling Summary</summary>
         <div className='mt-3 space-y-4 text-sm'>
           <section className='rounded border border-slate-200 bg-white p-3'>
             <div className='flex flex-wrap items-start justify-between gap-3'>
               <div>
                 <div><span className='font-semibold'>Status:</span> {autoScheduleDiagnostics.status} — {autoScheduleDiagnostics.message}</div>
                 <div><span className='font-semibold'>Final validation status:</span> {autoScheduleDiagnostics.finalValidationStatus}</div>
-                <div><span className='font-semibold'>Schedule quality status:</span> {autoScheduleDiagnostics.scheduleQualityStatus}</div>
-                <div><span className='font-semibold'>Diagnostics status:</span> {autoScheduleDiagnostics.diagnosticsStatus}{autoScheduleDiagnostics.diagnosticsError ? ` — ${autoScheduleDiagnostics.diagnosticsError}` : ''}</div>
                 <div><span className='font-semibold'>Root causes:</span> {autoScheduleDiagnostics.rootCauses.join(', ')}</div>
                 <div><span className='font-semibold'>Dry run:</span> {autoScheduleDiagnostics.dryRun ? 'Yes' : 'No'}</div>
               </div>
-              {autoScheduleDiagnostics.downloadUrl ? <a className='rounded border border-indigo-700 px-3 py-2 text-xs font-semibold text-indigo-700 hover:bg-indigo-50' href={autoScheduleDiagnostics.downloadUrl} download={autoScheduleDiagnostics.downloadFilename}>Download full diagnostics JSON</a> : null}
             </div>
             <div className='mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3'>
               <div>Games committed: <span className='font-semibold'>{autoScheduleDiagnostics.gamesCommitted}</span></div>
@@ -1108,19 +1045,19 @@ export default function ManualScheduleBuilderPage() {
 
           <section className='grid gap-3 lg:grid-cols-2'>
             <div className='rounded border border-slate-200 bg-white p-3'>
-              <h3 className='font-semibold'>True Home-Host Diagnostics</h3>
+              <h3 className='font-semibold'>True Home-Host Summary</h3>
               <dl className='mt-2 grid grid-cols-2 gap-2'>
                 {Object.entries(autoScheduleDiagnostics.trueHomeHost).map(([label, count]) => <div key={label}><dt className='text-slate-600'>{label.replaceAll('_', ' ')}</dt><dd className='font-semibold'>{String(count)}</dd></div>)}
               </dl>
             </div>
             <div className='rounded border border-slate-200 bg-white p-3'>
-              <h3 className='font-semibold'>Pull-Forward Diagnostics</h3>
+              <h3 className='font-semibold'>Pull-Forward Summary</h3>
               <dl className='mt-2 grid grid-cols-2 gap-2'>
                 {Object.entries(autoScheduleDiagnostics.pullForward).map(([label, count]) => <div key={label}><dt className='text-slate-600'>{label.replaceAll('_', ' ')}</dt><dd className='font-semibold'>{String(count)}</dd></div>)}
               </dl>
             </div>
             <div className='rounded border border-slate-200 bg-white p-3'>
-              <h3 className='font-semibold'>Rejection Diagnostics</h3>
+              <h3 className='font-semibold'>Rejection Summary</h3>
               {Object.keys(autoScheduleDiagnostics.rejectionReasons).length ? <ul className='mt-2 list-inside list-disc'>{Object.entries(autoScheduleDiagnostics.rejectionReasons).map(([reason, count]) => <li key={reason}>{reason}: {String(count)}</li>)}</ul> : <p className='mt-2 text-slate-700'>No rejection counts returned.</p>}
             </div>
           </section>
@@ -1138,12 +1075,6 @@ export default function ManualScheduleBuilderPage() {
               </div>
             </div>
           </section>
-
-          <details className='rounded border border-slate-200 bg-white p-2'>
-            <summary className='cursor-pointer font-semibold'>Safe compact diagnostics preview</summary>
-            <p className='mt-2 text-xs text-slate-600'>The full diagnostics payload is not rendered in the page to prevent browser crashes. Download the JSON file for complete details.</p>
-            <pre className='mt-2 max-h-96 overflow-auto whitespace-pre-wrap text-xs'>{autoScheduleDiagnostics.preview}</pre>
-          </details>
         </div>
       </details> : null}
     </div>

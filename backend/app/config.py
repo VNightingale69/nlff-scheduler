@@ -13,3 +13,5 @@ RULEBOOK_UPLOAD_DIR = os.getenv('RULEBOOK_UPLOAD_DIR', 'uploads/rulebooks')
 RULEBOOK_MAX_SIZE_BYTES = int(os.getenv('RULEBOOK_MAX_SIZE_BYTES', str(25 * 1024 * 1024)))
 
 ENABLE_TURF_OPTIMIZATION = os.getenv('ENABLE_TURF_OPTIMIZATION', 'false').strip().lower() in {'1', 'true', 'yes', 'on'}
+
+ENABLE_SCHEDULE_QUALITY_REPORT = os.getenv('ENABLE_SCHEDULE_QUALITY_REPORT', 'false').strip().lower() in {'1', 'true', 'yes', 'on'}

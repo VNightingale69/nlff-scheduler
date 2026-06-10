@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import Base
 from app.models import Division, FieldInstance, Game, GameSlot, GameStatus, HostLocation, Organization, Season, Team, Week
-from app.routes.api import _build_final_schedule_validation_result, _build_global_doubleheader_validation, _raise_if_single_doubleheader_manual_move, _run_generated_slot_integrity_validation_and_repair, _run_global_doubleheader_repair, build_schedule_quality_report, publish_schedule
+from app.routes.api import _build_final_schedule_validation_result, _build_global_doubleheader_validation, _raise_if_single_doubleheader_manual_move, _run_generated_slot_integrity_validation_and_repair, _run_global_doubleheader_repair, build_publish_final_validation, build_schedule_quality_report, publish_schedule
 
 
 class PublishQualityConsistencyTest(unittest.TestCase):
@@ -268,12 +268,13 @@ class PublishQualityConsistencyTest(unittest.TestCase):
         self.assertEqual(ctx.exception.status_code, 400)
         self.assertEqual(ctx.exception.detail['error'], 'DOUBLEHEADER_PAIR_SPLIT_MOVE_REJECTED')
 
-    def test_publish_uses_same_quality_report_source(self):
-        report = build_schedule_quality_report(self.db, self.season.id)
-        self.assertEqual(report['overall_health'], 'Excellent')
-        self.assertEqual(report['hard_errors'], [])
-        self.assertEqual(report['metrics']['conflicts'], 0)
-        response = publish_schedule(self.season.id, db=self.db)
+    def test_publish_validation_uses_current_saved_games_not_quality_report_artifact(self):
+        validation = build_publish_final_validation(self.db, self.season.id)
+        self.assertEqual(validation['final_validation_source'], 'database_final_scheduled_games')
+        self.assertEqual(validation['final_validation_status'], 'COMPLETE')
+        self.assertEqual(validation['hard_rule_failures'], [])
+        response = publish_schedule(self.season.id, db=self.db, current_user=type('User', (), {'id': uuid.uuid4()})())
         self.assertTrue(response['ok'])
-        self.assertEqual(response['overall_health'], 'Excellent')
+        self.assertEqual(response['publish_validation_message'], 'Schedule is ready to publish.')
+        self.assertNotIn('overall_health', response)
 
