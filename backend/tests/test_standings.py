@@ -64,6 +64,41 @@ class StandingsTest(unittest.TestCase):
         path = f'/api/public/standings?season_id={self.season.id}' if public else f'/api/standings?season_id={self.season.id}'
         return self.client.get(path, headers={} if public else self._token(user or self.scheduling_user))
 
+
+    def test_default_standings_use_active_season_without_filters(self):
+        inactive_season = Season(id=uuid.uuid4(), name='Spring 2026', start_date=date.today() - timedelta(days=180), end_date=date.today() - timedelta(days=120), is_active=False, schedule_status='published')
+        inactive_week = Week(id=uuid.uuid4(), season_id=inactive_season.id, week_number=1, label='Old Week', start_date=date.today() - timedelta(days=170), end_date=date.today() - timedelta(days=164), primary_game_date=date.today() - timedelta(days=166), status='REGULAR_SEASON')
+        self.db.add_all([inactive_season, inactive_week])
+        self.db.commit()
+        self._game(self.teams[0], self.teams[1], score=(21, 14))
+        old_game = Game(id=uuid.uuid4(), season_id=inactive_season.id, week_id=inactive_week.id, home_team_id=self.teams[1].id, away_team_id=self.teams[0].id, game_status_id=self.status.id, game_date=date.today() - timedelta(days=166), kickoff_time=time(9, 0))
+        self.db.add(old_game)
+        self.db.flush()
+        self.db.add(GameScore(game_id=old_game.id, home_score=30, away_score=0, score_status='PUBLISHED', is_published=True))
+        self.db.commit()
+
+        response = self.client.get('/api/standings', headers=self._token(self.scheduling_user))
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload['season_id'], str(self.season.id))
+        rows = {row['team_name']: row for row in payload['divisions'][0]['standings']}
+        self.assertEqual(rows['A Team']['wins'], 1)
+        self.assertEqual(rows['B Team']['losses'], 1)
+        self.assertFalse(payload['no_active_season'])
+
+    def test_default_standings_report_no_active_season(self):
+        self.season.is_active = False
+        self.db.commit()
+
+        response = self.client.get('/api/standings', headers=self._token(self.scheduling_user))
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertTrue(payload['no_active_season'])
+        self.assertEqual(payload['divisions'], [])
+        self.assertEqual(payload['game_results'], [])
+
     def test_division_standings_include_zero_score_teams_and_count_published_results_only(self):
         self._game(self.teams[0], self.teams[1], score=(21, 14))
         self._game(self.teams[1], self.teams[2], score=(7, 20), status='SUBMITTED', published=False)
