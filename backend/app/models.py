@@ -38,6 +38,9 @@ class Organization(Base, TimestampMixin):
     logo_uploaded_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     logo_uploaded_by_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('users.id'), nullable=True)
 
+    users = relationship('User', foreign_keys='User.organization_id', back_populates='organization')
+    logo_uploaded_by_user = relationship('User', foreign_keys=[logo_uploaded_by_user_id])
+
 
 class User(Base, TimestampMixin):
     __tablename__ = 'users'
@@ -51,7 +54,7 @@ class User(Base, TimestampMixin):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
     role = relationship('Role')
-    organization = relationship('Organization')
+    organization = relationship('Organization', foreign_keys=[organization_id], back_populates='users')
 
 
 
