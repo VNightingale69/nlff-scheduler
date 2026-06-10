@@ -317,7 +317,7 @@ export default function FieldAreaManager() {
   };
 
   const renderSetupRows = () => {
-    const colSpan = isCommunityAdmin ? 5 : 8;
+    const colSpan = isCommunityAdmin ? 5 : 9;
     if (!orgId) return <tr><td className='border p-3 text-center text-slate-500' colSpan={colSpan}>Select an organization to view hosting site setups.</td></tr>;
     if (hostLoadError || fieldLoadError) return <tr><td className='border p-3 text-center text-rose-700' colSpan={colSpan}>Unable to load setup data. {hostLoadError || fieldLoadError}</td></tr>;
     if (loadingOrgData) return <tr><td className='border p-3 text-center text-slate-500' colSpan={colSpan}>Loading hosting site setups…</td></tr>;
@@ -388,7 +388,7 @@ export default function FieldAreaManager() {
 
     {isCommunityAdmin && selectedHost && <section className='rounded border p-4'>
       <h2 className='font-semibold'>Facility Type</h2>
-      <p className='mt-1 text-sm text-slate-600'>Choose the business-friendly facility type for this host location. Grass fields stay fixed at the size you select.</p>
+      <p className='mt-1 text-sm text-slate-600'>Choose the business-friendly facility type for this host location. Field sizes are consistent across all locations: Small, Medium, and Large.</p>
       <p className='mt-2 rounded bg-emerald-50 p-3 text-sm text-emerald-900'>For turf stadiums, select Turf Stadium only. The application will determine the best field layout for each hosting date during scheduling.</p>
       <div className='mt-3 grid gap-2 md:grid-cols-[1fr_auto]'>
         <select className='rounded border p-2' value={facilityForm} onChange={(e) => setFacilityForm(e.target.value)}>
@@ -422,12 +422,20 @@ export default function FieldAreaManager() {
     {selectedHost?.surface_type === GRASS_FIELD && <section className='rounded border p-4'>
       <div className='flex flex-wrap items-center justify-between gap-2'>
         <div>
-          <h2 className='font-semibold'>Manual Grass Field Setup</h2>
-          <p className='text-sm text-slate-600'>Grass field locations use active configured fields for slot generation and must have at least one active field before hosting availability can use them. Deactivate keeps existing scheduled assignments; Delete removes the field from active use and flags affected scheduled games for Scheduling Administrator review.</p>
+          <h2 className='font-semibold'>Grass Field Setup Guidance</h2>
+          <p className='text-sm text-slate-600'>Field sizes are consistent across all locations: Small, Medium, and Large. For grass locations, each configured field should represent a field that can realistically be used during the same one-hour game block at that location. Only add fields that can be played at the same time based on available space, lining, staffing, equipment, parking, and field overlap.</p>
+          <ul className='mt-2 list-disc pl-5 text-xs text-slate-600'>
+            <li>If the location can support three Small fields at the same time, add Small Field 1, Small Field 2, and Small Field 3.</li>
+            <li>If the location can support two Large fields at the same time, add Large Field 1 and Large Field 2.</li>
+            <li>If a Large field layout overlaps with Small fields and they cannot be used at the same time, do not configure those overlapping fields as simultaneously active.</li>
+            <li>If a field exists physically but cannot be lined, staffed, equipped, or operated during a one-hour block, do not mark it active.</li>
+          </ul>
+          <p className='mt-2 text-xs text-slate-600'>Grass field locations use active configured fields for slot generation and must have at least one active field before hosting availability can use them. Deactivate keeps existing scheduled assignments; Delete removes the field from active use and flags affected scheduled games for Scheduling Administrator review.</p>
         </div>
         <button className='rounded border px-3 py-2 text-sm' onClick={resetFieldForm}>Add Field</button>
       </div>
-      <div className='mt-3 grid gap-2 md:grid-cols-4'>
+      <p className='mt-3 text-sm font-medium text-slate-700'>Add only fields that this location can support during the same one-hour block.</p>
+      <div className='mt-2 grid gap-2 md:grid-cols-4'>
         <input className='rounded border p-2' placeholder='Field Name' value={fieldForm.name} onChange={(e) => setFieldForm({ ...fieldForm, name: e.target.value })} />
         <select className='rounded border p-2' value={fieldForm.layout_type} onChange={(e) => setFieldForm({ ...fieldForm, layout_type: e.target.value })}>
           <option value=''>Field Type</option>
@@ -454,7 +462,7 @@ export default function FieldAreaManager() {
       <h2 className='mb-2 font-semibold'>Current Facility Setups</h2>
       <div className='overflow-x-auto'>
         <table className='w-full text-sm'>
-          <thead>{isCommunityAdmin ? <tr><th className='border p-2 text-left'>Organization / Community</th><th className='border p-2 text-left'>Host Location</th><th className='border p-2 text-left'>Facility Type</th><th className='border p-2 text-left'>Status</th><th className='border p-2 text-left'>Actions</th></tr> : <tr><th className='border p-2 text-left'>Organization</th><th className='border p-2 text-left'>Host Location</th><th className='border p-2 text-left'>Facility Summary</th><th className='border p-2 text-left'>Available Layout / Configured Fields</th><th className='border p-2 text-left'>Approved Configurations / Large Fields</th><th className='border p-2 text-left'>Max Fields Per Wave / Medium Fields</th><th className='border p-2 text-left'>Surface Type / Small Fields</th><th className='border p-2 text-left'>Status</th><th className='border p-2 text-left'>Actions</th></tr>}</thead>
+          <thead>{isCommunityAdmin ? <tr><th className='border p-2 text-left'>Organization / Community</th><th className='border p-2 text-left'>Host Location</th><th className='border p-2 text-left'>Facility Type</th><th className='border p-2 text-left'>Status</th><th className='border p-2 text-left'>Actions</th></tr> : tableHosts.length > 0 && tableHosts.every((host: any) => (host.surface_type || GRASS_FIELD) !== TURF_STADIUM) ? <tr><th className='border p-2 text-left'>Organization</th><th className='border p-2 text-left'>Host Location</th><th className='border p-2 text-left'>Surface Type</th><th className='border p-2 text-left'>Active Configured Fields</th><th className='border p-2 text-left'>Large Fields</th><th className='border p-2 text-left'>Medium Fields</th><th className='border p-2 text-left'>Small Fields</th><th className='border p-2 text-left'>Status</th><th className='border p-2 text-left'>Actions</th></tr> : <tr><th className='border p-2 text-left'>Organization</th><th className='border p-2 text-left'>Host Location</th><th className='border p-2 text-left'>Surface Type</th><th className='border p-2 text-left'>Active Layouts / Configured Fields</th><th className='border p-2 text-left'>Turf Layout Count / Large Fields</th><th className='border p-2 text-left'>Max Fields Per Hour / Medium Fields</th><th className='border p-2 text-left'>Turf Surface / Small Fields</th><th className='border p-2 text-left'>Status</th><th className='border p-2 text-left'>Actions</th></tr>}</thead>
           <tbody>{renderSetupRows()}</tbody>
         </table>
       </div>
