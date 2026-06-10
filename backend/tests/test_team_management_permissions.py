@@ -6,7 +6,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.pool import StaticPool
 from sqlalchemy.orm import sessionmaker
 
-from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN
+from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN
 from app.database import Base, get_db
 from app.main import app
 from app.models import Division, Organization, OrganizationDivisionParticipation, Role, Team, User
@@ -27,11 +27,13 @@ class TeamManagementPermissionsTest(unittest.TestCase):
 
         self.league_role = Role(id=uuid.uuid4(), name=ROLE_LEAGUE_ADMIN, is_active=True)
         self.community_role = Role(id=uuid.uuid4(), name=ROLE_COMMUNITY_ADMIN, is_active=True)
+        self.scheduling_role = Role(id=uuid.uuid4(), name=ROLE_SCHEDULING_ADMIN, is_active=True)
         self.org = Organization(id=uuid.uuid4(), name='Westosha', is_active=True)
         self.other_org = Organization(id=uuid.uuid4(), name='Other Community', is_active=True)
         self.division = Division(id=uuid.uuid4(), name='K-1', division_group='COED', sort_order=1, required_field_layout_type='SMALL', is_active=True)
         self.other_division = Division(id=uuid.uuid4(), name='2-3', division_group='COED', sort_order=2, required_field_layout_type='SMALL', is_active=True)
         self.league_user = User(id=uuid.uuid4(), email='league@example.com', full_name='League', password_hash=hash_password('Password123!'), role_id=self.league_role.id, organization_id=None, is_active=True)
+        self.scheduling_user = User(id=uuid.uuid4(), email='scheduler@example.com', full_name='Scheduler', password_hash=hash_password('Password123!'), role_id=self.scheduling_role.id, organization_id=None, is_active=True)
         self.community_user = User(id=uuid.uuid4(), email='community@example.com', full_name='Community', password_hash=hash_password('Password123!'), role_id=self.community_role.id, organization_id=self.org.id, is_active=True)
         self.other_user = User(id=uuid.uuid4(), email='other@example.com', full_name='Other', password_hash=hash_password('Password123!'), role_id=self.community_role.id, organization_id=self.other_org.id, is_active=True)
         self.own_team = Team(id=uuid.uuid4(), organization_id=self.org.id, division_id=self.division.id, name='Own Team', is_active=True)
@@ -41,11 +43,13 @@ class TeamManagementPermissionsTest(unittest.TestCase):
         self.db.add_all([
             self.league_role,
             self.community_role,
+            self.scheduling_role,
             self.org,
             self.other_org,
             self.division,
             self.other_division,
             self.league_user,
+            self.scheduling_user,
             self.community_user,
             self.other_user,
             self.own_team,
@@ -87,6 +91,8 @@ class TeamManagementPermissionsTest(unittest.TestCase):
                 'organization_id': str(self.other_org.id),
                 'division_id': str(self.other_division.id),
                 'name': 'Forced Org Team',
+                'coach_name': '  Coach One  ',
+                'coach_email': 'COACH.ONE@EXAMPLE.COM',
                 'is_active': True,
             },
         )
@@ -94,6 +100,8 @@ class TeamManagementPermissionsTest(unittest.TestCase):
         payload = response.json()
         self.assertEqual(payload['organization_id'], str(self.org.id))
         self.assertEqual(payload['name'], 'Forced Org Team')
+        self.assertEqual(payload['coach_name'], 'Coach One')
+        self.assertEqual(payload['coach_email'], 'coach.one@example.com')
 
     def test_community_admin_cannot_update_or_delete_other_organization_team(self):
         update = self.client.patch(
@@ -108,6 +116,62 @@ class TeamManagementPermissionsTest(unittest.TestCase):
         self.db.expire_all()
         self.assertTrue(self.db.get(Team, self.other_team.id).is_active)
 
+
+    def test_team_creation_requires_coach_name_and_email(self):
+        response = self.client.post(
+            '/api/teams',
+            headers=self._token(self.community_user.id),
+            json={
+                'organization_id': str(self.org.id),
+                'division_id': str(self.division.id),
+                'name': 'No Coach Team',
+                'is_active': True,
+            },
+        )
+        self.assertEqual(response.status_code, 422)
+
+    def test_invalid_coach_email_is_rejected(self):
+        response = self.client.post(
+            '/api/teams',
+            headers=self._token(self.community_user.id),
+            json={
+                'organization_id': str(self.org.id),
+                'division_id': str(self.division.id),
+                'name': 'Bad Email Team',
+                'coach_name': 'Bad Email Coach',
+                'coach_email': 'not-an-email',
+                'is_active': True,
+            },
+        )
+        self.assertEqual(response.status_code, 422)
+
+    def test_community_admin_can_update_own_team_coach_info(self):
+        response = self.client.patch(
+            f'/api/teams/{self.own_team.id}',
+            headers=self._token(self.community_user.id),
+            json={'coach_name': ' Updated Coach ', 'coach_email': 'UPDATED.COACH@EXAMPLE.COM'},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload['coach_name'], 'Updated Coach')
+        self.assertEqual(payload['coach_email'], 'updated.coach@example.com')
+
+    def test_scheduling_admin_can_update_any_team_coach_info(self):
+        response = self.client.patch(
+            f'/api/teams/{self.other_team.id}',
+            headers=self._token(self.scheduling_user.id),
+            json={'coach_name': 'Scheduler Coach', 'coach_email': 'scheduler.coach@example.com'},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()['coach_email'], 'scheduler.coach@example.com')
+
+    def test_existing_team_without_coach_info_still_loads(self):
+        response = self.client.get('/api/teams?page_size=500', headers=self._token(self.league_user.id))
+        self.assertEqual(response.status_code, 200, response.text)
+        own = next(item for item in response.json()['items'] if item['id'] == str(self.own_team.id))
+        self.assertIsNone(own['coach_name'])
+        self.assertIsNone(own['coach_email'])
+
     def test_league_admin_team_participation_requirement_is_unchanged(self):
         response = self.client.post(
             '/api/teams',
@@ -116,6 +180,8 @@ class TeamManagementPermissionsTest(unittest.TestCase):
                 'organization_id': str(self.org.id),
                 'division_id': str(self.other_division.id),
                 'name': 'League No Participation',
+                'coach_name': 'Coach Two',
+                'coach_email': 'coach.two@example.com',
                 'is_active': True,
             },
         )

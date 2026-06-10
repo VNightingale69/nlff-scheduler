@@ -60,6 +60,25 @@ class ScheduleManagementExportTest(unittest.TestCase):
             ],
         )
 
+
+    def test_admin_export_row_includes_coach_contact_columns(self):
+        values = _schedule_export_row_values(
+            SimpleNamespace(game_date=date(2026, 8, 9), kickoff_time=time(9, 0), is_manual_edit=False),
+            SimpleNamespace(field_type='SMALL'),
+            SimpleNamespace(field_name='Small Field 1'),
+            SimpleNamespace(name='Westosha Stadium'),
+            SimpleNamespace(name='Home', coach_name='Home Coach', coach_email='home@example.com'),
+            SimpleNamespace(name='Away', coach_name='Away Coach', coach_email='away@example.com'),
+            SimpleNamespace(division_group='Coed', name='2-3'),
+            SimpleNamespace(code='scheduled'),
+            include_admin_columns=True,
+        )
+
+        self.assertIn('Home Coach', values)
+        self.assertIn('home@example.com', values)
+        self.assertIn('Away Coach', values)
+        self.assertIn('away@example.com', values)
+
     def test_turf_export_label_strips_wave_metadata_from_stored_field_name(self):
         wave = SimpleNamespace(sequence_number=1, preferred_layout_code='TWO_SMALL_ONE_MEDIUM')
         slot = SimpleNamespace(field_type='SMALL', turf_wave_id='wave-id', turf_wave=wave)

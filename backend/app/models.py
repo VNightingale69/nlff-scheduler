@@ -187,6 +187,8 @@ class Team(Base, TimestampMixin):
     organization_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('organizations.id'), nullable=False)
     division_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('divisions.id'), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
+    coach_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    coach_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     organization = relationship('Organization')
     division = relationship('Division')

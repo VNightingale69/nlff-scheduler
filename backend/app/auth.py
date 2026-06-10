@@ -10,6 +10,7 @@ from app.models import Role, User
 from app.security import decode_token
 
 security = HTTPBearer()
+optional_security = HTTPBearer(auto_error=False)
 
 ROLE_LEAGUE_ADMIN = 'LEAGUE_ADMIN'
 ROLE_COMMUNITY_ADMIN = 'COMMUNITY_ADMIN'
@@ -54,6 +55,20 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='User not found or inactive')
     return user
 
+
+
+
+def get_optional_current_user(credentials: HTTPAuthorizationCredentials | None = Depends(optional_security), db: Session = Depends(get_db)) -> User | None:
+    if credentials is None:
+        return None
+    try:
+        payload = decode_token(credentials.credentials, 'access')
+        user_id = payload.get('sub')
+        if not user_id:
+            return None
+        return db.query(User).filter(User.id == uuid.UUID(user_id), User.is_active.is_(True)).first()
+    except Exception:
+        return None
 
 def require_roles(*allowed_roles: str):
     normalized_allowed_roles = {normalize_role_name(role) for role in allowed_roles}
@@ -145,7 +160,7 @@ def is_community_admin(current_user: User) -> bool:
 
 
 def enforce_organization_scope(request_org_id: uuid.UUID | None, current_user: User) -> None:
-    if is_league_admin(current_user):
+    if normalize_role_name(current_user.role.name) in {ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN}:
         return
     if is_community_admin(current_user):
         if not current_user.organization_id:
