@@ -6,11 +6,17 @@ const scheduleSource = readFileSync(new URL('../src/app/schedule/page.tsx', impo
 const bracketSource = readFileSync(new URL('../src/components/TournamentBracket.tsx', import.meta.url), 'utf8');
 const logoSource = readFileSync(new URL('../src/components/CommunityLogo.tsx', import.meta.url), 'utf8');
 
-assert.match(organizationsSource, /Community Logo Upload/);
+assert.match(organizationsSource, /Community Logo/);
 assert.match(organizationsSource, /File type: PNG only/);
 assert.match(organizationsSource, /Maximum file size: 2 MB/);
 assert.match(organizationsSource, /Minimum size: 500 × 500 pixels/);
 assert.match(organizationsSource, /accept='image\/png,\.png'/);
+assert.match(organizationsSource, /Upload PNG Logo/);
+assert.match(organizationsSource, /Replace Logo/);
+assert.match(organizationsSource, /Remove Logo/);
+assert.match(organizationsSource, /Only PNG logo files are accepted\./);
+assert.match(organizationsSource, /Logo file must be 2 MB or smaller\./);
+assert.match(organizationsSource, /logo_uploaded_at/);
 assert.match(scheduleSource, /home_team_logo_url/);
 assert.match(scheduleSource, /away_team_logo_url/);
 assert.match(scheduleSource, /<CommunityLogo src=\{g\.home_team_logo_url\}/);

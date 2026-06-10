@@ -3987,8 +3987,6 @@ def _validate_community_logo_upload(file: UploadFile, content: bytes) -> tuple[i
     width, height = dimensions
     if width < COMMUNITY_LOGO_MIN_DIMENSION_PIXELS or height < COMMUNITY_LOGO_MIN_DIMENSION_PIXELS:
         raise HTTPException(status_code=400, detail='Logo image must be at least 500 × 500 pixels.')
-    if min(width, height) / max(width, height) < 0.75:
-        raise HTTPException(status_code=400, detail='Please upload a square or near-square PNG logo.')
     return width, height
 
 
@@ -7025,6 +7023,14 @@ def list_organizations(search: str | None = None, is_active: bool | None = None,
     if search: q = q.filter(func.lower(Organization.name).like(f"%{search.lower()}%"))
     if is_active is not None: q = q.filter(Organization.is_active == is_active)
     return paginate(q.order_by(Organization.name), page, page_size)
+
+@router.get('/organizations/{org_id}', response_model=OrganizationRead, dependencies=[Depends(get_current_user)])
+def get_organization(org_id: uuid.UUID, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    org = db.query(Organization).filter(Organization.id == org_id).first()
+    if not org:
+        raise HTTPException(status_code=404, detail='Organization not found')
+    enforce_organization_scope(org.id, current_user)
+    return org
 
 @router.put('/organizations/{org_id}', response_model=OrganizationRead, dependencies=[Depends(get_current_user)])
 def update_organization(org_id: uuid.UUID, payload: OrganizationCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
