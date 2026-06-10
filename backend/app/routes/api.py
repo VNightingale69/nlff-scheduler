@@ -3968,6 +3968,27 @@ def _community_logo_public_url(org_id: uuid.UUID, stored_filename: str) -> str:
     return f'/api/public/organizations/{org_id}/logo/{stored_filename}'
 
 
+def _community_logo_browser_url(org: Organization | None) -> str | None:
+    if not org:
+        return None
+    filename = getattr(org, 'logo_filename', None)
+    if filename:
+        return _community_logo_public_url(org.id, Path(filename).name)
+    value = (getattr(org, 'logo_url', None) or '').strip()
+    if not value:
+        return None
+    if re.match(r'^https?://', value, flags=re.IGNORECASE):
+        return value
+    if re.match(r'^[A-Za-z]:[\\/]', value) or value.startswith('/app/') or value.startswith('/workspace/'):
+        return None
+    return value if value.startswith('/') else f'/{value}'
+
+
+def _community_logo_alt_text(org: Organization | None, fallback_name: str | None = None) -> str:
+    name = (getattr(org, 'name', None) or fallback_name or 'Community').strip()
+    return f'{name} logo'
+
+
 def _png_dimensions(content: bytes) -> tuple[int, int] | None:
     # PNG signature followed by IHDR length/type, then big-endian width and height.
     if len(content) < 33 or not content.startswith(b'\x89PNG\r\n\x1a\n') or content[12:16] != b'IHDR':
@@ -14973,7 +14994,15 @@ def _to_game_read(
         division_name=division_name,
         division_group=division_group,
         home_team_name=home_team_name,
+        home_team_community_id=getattr(g.home_team, 'organization_id', None),
+        home_team_community_name=getattr(getattr(g.home_team, 'organization', None), 'name', None),
+        home_team_logo_url=_community_logo_browser_url(getattr(g.home_team, 'organization', None)),
+        home_team_logo_alt_text=_community_logo_alt_text(getattr(g.home_team, 'organization', None), home_team_name),
         away_team_name=away_team_name,
+        away_team_community_id=getattr(g.away_team, 'organization_id', None),
+        away_team_community_name=getattr(getattr(g.away_team, 'organization', None), 'name', None),
+        away_team_logo_url=_community_logo_browser_url(getattr(g.away_team, 'organization', None)),
+        away_team_logo_alt_text=_community_logo_alt_text(getattr(g.away_team, 'organization', None), away_team_name),
         generated_slot_id=(generated_slot.id if generated_slot else None),
         field_instance_id=(generated_slot.field_instance_id if generated_slot else g.field_instance_id),
         host_location_id=(generated_slot.host_location_id if generated_slot else g.host_location_id),
@@ -25931,6 +25960,10 @@ def _empty_standings_row(team: Team, division: Division, organization: Organizat
         'team_name': team.name,
         'community_id': str(team.organization_id),
         'community_name': getattr(organization, 'name', None) or getattr(getattr(team, 'organization', None), 'name', None) or '',
+        'organization_id': str(team.organization_id),
+        'organization_name': getattr(organization, 'name', None) or getattr(getattr(team, 'organization', None), 'name', None) or '',
+        'community_logo_url': _community_logo_browser_url(organization or getattr(team, 'organization', None)),
+        'community_logo_alt_text': _community_logo_alt_text(organization or getattr(team, 'organization', None)),
         'division_id': str(division.id),
         'division_name': division.name,
         'division_group': division.division_group,
@@ -26608,8 +26641,8 @@ def _tournament_game_dict(game: TournamentGame, include_unpublished: bool = True
         'round_name': game.round_name, 'game_number': game.game_number,
         'team_1_id': str(game.team_1_id) if game.team_1_id else None, 'team_2_id': str(game.team_2_id) if game.team_2_id else None,
         'team_1_name': game.team_1.name if game.team_1 else None, 'team_2_name': game.team_2.name if game.team_2 else None,
-        'team_1_logo_url': getattr(getattr(game.team_1, 'organization', None), 'logo_url', None) if game.team_1 else None,
-        'team_2_logo_url': getattr(getattr(game.team_2, 'organization', None), 'logo_url', None) if game.team_2 else None,
+        'team_1_logo_url': _community_logo_browser_url(getattr(game.team_1, 'organization', None)) if game.team_1 else None,
+        'team_2_logo_url': _community_logo_browser_url(getattr(game.team_2, 'organization', None)) if game.team_2 else None,
         'team_1_seed': game.team_1_seed, 'team_2_seed': game.team_2_seed,
         'team_1_placeholder': _team_label(game.team_1, game.team_1_seed, game.team_1_source_game_id, source_game_numbers),
         'team_2_placeholder': _team_label(game.team_2, game.team_2_seed, game.team_2_source_game_id, source_game_numbers),
@@ -27073,10 +27106,16 @@ def _public_game_read_from_schedule_row(row, db: Session | None = None, current_
         date_type=_week_date_type(g.week),
         home_team_id=home.id,
         home_team_name=home.name,
-        home_team_logo_url=getattr(getattr(home, 'organization', None), 'logo_url', None),
+        home_team_community_id=home.organization_id,
+        home_team_community_name=getattr(getattr(home, 'organization', None), 'name', None) or '',
+        home_team_logo_url=_community_logo_browser_url(getattr(home, 'organization', None)),
+        home_team_logo_alt_text=_community_logo_alt_text(getattr(home, 'organization', None), home.name),
         away_team_id=away.id,
         away_team_name=away.name,
-        away_team_logo_url=getattr(getattr(away, 'organization', None), 'logo_url', None),
+        away_team_community_id=away.organization_id,
+        away_team_community_name=getattr(getattr(away, 'organization', None), 'name', None) or '',
+        away_team_logo_url=_community_logo_browser_url(getattr(away, 'organization', None)),
+        away_team_logo_alt_text=_community_logo_alt_text(getattr(away, 'organization', None), away.name),
         home_team_coach_name=getattr(home, 'coach_name', None),
         home_team_coach_email=(getattr(home, 'coach_email', None) if coach_contacts_visible else None),
         away_team_coach_name=getattr(away, 'coach_name', None),

@@ -69,6 +69,11 @@ class ResultsStandingsFrontendTest(unittest.TestCase):
         self.assertNotIn("placeholder='Season ID'", self.source)
         self.assertIn('No active season selected.', self.source)
 
+    def test_standings_team_column_renders_community_logo(self):
+        self.assertIn('community_logo_url', self.source)
+        self.assertIn('<CommunityLogo src={row.community_logo_url}', self.source)
+        self.assertIn('community_logo_alt_text', self.source)
+
     def test_game_results_table_keeps_score_columns(self):
         self.assertIn('Home Score', self.source)
         self.assertIn('Away Score', self.source)

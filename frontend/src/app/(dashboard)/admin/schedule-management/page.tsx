@@ -6,6 +6,7 @@ import { API_URL, ApiError, apiFetch } from '@/lib/api';
 import { canPublishSchedule, getAuthUser, getToken } from '@/lib/auth';
 import { getDivisionLabel } from '@/lib/divisionLabel';
 import { formatDisplayDate, formatDisplayTime } from '@/lib/displayFormat';
+import CommunityLogo from '@/components/CommunityLogo';
 
 const tabs = ['By Date', 'By Host Location', 'By Team', 'By Division'] as const;
 type TabKey = (typeof tabs)[number];
@@ -310,7 +311,7 @@ export default function ScheduleManagementPage() {
                 <div><strong>Host Location:</strong> {game.host_location_name || 'Unassigned'}</div>
                 <div><strong>Field:</strong> {game.field || 'Unassigned'}</div>
                 <div><strong>Time:</strong> {game.time ? formatDisplayTime(game.time) : 'N/A'}</div>
-                <div><strong>Matchup:</strong> {game.home_team_name || 'TBD'} vs {game.away_team_name || 'TBD'}</div>
+                <div><strong>Matchup:</strong> <span className='inline-flex items-center gap-2'><CommunityLogo src={game.home_team_logo_url} name={game.home_team_community_name || game.home_team_name} altText={game.home_team_logo_alt_text} size={24} />{game.home_team_name || 'TBD'}</span> vs <span className='inline-flex items-center gap-2'><CommunityLogo src={game.away_team_logo_url} name={game.away_team_community_name || game.away_team_name} altText={game.away_team_logo_alt_text} size={24} />{game.away_team_name || 'TBD'}</span></div>
                 <div><strong>Division:</strong> {game.division_name || 'N/A'}</div>
               </div>
             ))}
