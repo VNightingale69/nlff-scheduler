@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session, aliased
 from app.config import ADMIN_SEED_EMAIL, ENABLE_SCHEDULE_QUALITY_REPORT, ENABLE_TURF_OPTIMIZATION, RULEBOOK_MAX_SIZE_BYTES, RULEBOOK_UPLOAD_DIR
 from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN, can_manage_schedule, enforce_organization_scope, get_current_user, get_optional_current_user, is_community_admin, is_league_admin, is_scheduling_admin, normalize_role_name, require_roles, require_schedule_admin, require_schedule_publisher
 from app.database import get_db
-from app.models import Division, Field, FieldConfigurationOption, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostPlanSelection, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Rulebook, ScheduleChangeLog, ScoreHistory, ScoreSubmission, Season, Team, TurfWave, User, Week
+from app.models import Division, Field, FieldConfigurationOption, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostPlanSelection, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Rulebook, ScheduleChangeLog, ScoreHistory, ScoreSubmission, Season, Team, Tournament, TournamentDivision, TournamentGame, TournamentTeam, TurfWave, User, Week
 from app.schemas import (
     DivisionCreate, DivisionRead, FieldConfigurationOptionCreate, FieldConfigurationOptionRead, FieldCreate, FieldRead, GameCreate, GameRead, GameSaveResponse, ManualGameBulkEditRequest, ManualGameBulkEditResponse, ManualGameEditRequest, ManualGameEditResponse, ScheduleChangeLogRead, ScheduleEditWarning,
     OrganizationDivisionParticipationBulkUpsertRequest, OrganizationDivisionParticipationRead,
@@ -25404,6 +25404,8 @@ def _schedule_management_rows(db: Session, filters: dict | None = None, organiza
     if filters.get('week_id'): q = q.filter(Game.week_id == filters['week_id'])
     if filters.get('status_code'): q = q.filter(func.lower(GameStatus.code) == str(filters['status_code']).strip().lower())
     if filters.get('season_id'): q = q.filter(Game.season_id == filters['season_id'])
+    if filters.get('game_type'):
+        q = q.filter(func.upper(func.coalesce(Game.game_type, 'REGULAR_SEASON')) == str(filters['game_type']).strip().upper())
     rows = q.order_by(Game.game_date, Game.kickoff_time).all()
     if filters.get('final_scheduled_only'):
         return rows
@@ -25451,6 +25453,8 @@ def get_saved_scheduled_game_rows_for_export(db: Session, season_id: uuid.UUID |
     if filters.get('week_id'): q = q.filter(Game.week_id == filters['week_id'])
     if filters.get('status_code'): q = q.filter(func.lower(GameStatus.code) == str(filters['status_code']).strip().lower())
     if filters.get('season_id'): q = q.filter(Game.season_id == filters['season_id'])
+    if filters.get('game_type'):
+        q = q.filter(func.upper(func.coalesce(Game.game_type, 'REGULAR_SEASON')) == str(filters['game_type']).strip().upper())
     return q.order_by(Game.game_date, Game.kickoff_time, HostLocation.name, FieldInstance.field_name, home.name, away.name).all()
 
 
@@ -25882,7 +25886,7 @@ def _build_standings_payload(db: Session, *, season_id: uuid.UUID | None = None,
                 'no_active_season': True,
             }
         season_id = active_season.id
-    filters = {'season_id': season_id, 'division_id': division_id, 'week_id': week_id, 'date': date_filter}
+    filters = {'season_id': season_id, 'division_id': division_id, 'week_id': week_id, 'date': date_filter, 'game_type': GAME_TYPE_REGULAR_SEASON}
     if can_manage:
         filters['organization_id'] = organization_id
     elif community_org_id:
@@ -26128,8 +26132,8 @@ def flag_community_score(game_id: uuid.UUID, payload: ScoreApprovePayload | None
 
 @router.get('/scores', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
 @router.get('/admin/scores', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
-def admin_scores(week_id: uuid.UUID | None = None, division_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, host_location_id: uuid.UUID | None = None, status: str | None = None, date: date | None = None, published: str | None = None, missing: bool = False, flagged: bool = False, conflicts: bool = False, db: Session = Depends(get_db)):
-    rows = _score_rows(db, {'week_id': week_id, 'division_id': division_id, 'organization_id': organization_id, 'host_location_id': host_location_id, 'date': date}, organization_filter_any_team=True)
+def admin_scores(week_id: uuid.UUID | None = None, division_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, host_location_id: uuid.UUID | None = None, status: str | None = None, date: date | None = None, published: str | None = None, game_type: str | None = None, missing: bool = False, flagged: bool = False, conflicts: bool = False, db: Session = Depends(get_db)):
+    rows = _score_rows(db, {'week_id': week_id, 'division_id': division_id, 'organization_id': organization_id, 'host_location_id': host_location_id, 'date': date, 'game_type': game_type}, organization_filter_any_team=True)
     rows = _apply_score_filters(rows, status, published, missing, flagged, conflicts)
     return {'items': [_score_game_dict(row, db=db) for row in rows], 'total': len(rows)}
 
@@ -26333,6 +26337,384 @@ def admin_score_history(game_id: uuid.UUID, db: Session = Depends(get_db)):
     history = db.query(ScoreHistory).filter(ScoreHistory.game_id == game.id).order_by(ScoreHistory.created_at, ScoreHistory.id).all()
     return {'items': [_score_history_dict(item) for item in history], 'total': len(history)}
 
+
+
+GAME_TYPE_REGULAR_SEASON = 'REGULAR_SEASON'
+GAME_TYPE_TOURNAMENT = 'TOURNAMENT'
+TOURNAMENT_TYPE_SINGLE_ELIMINATION = 'SINGLE_ELIMINATION'
+TOURNAMENT_TIE_ERROR = 'Single-elimination tournament games cannot end in a tie. Enter a winning score or resolve the game before publishing.'
+
+
+def _game_type_value(game: Game) -> str:
+    return str(getattr(game, 'game_type', None) or GAME_TYPE_REGULAR_SEASON).upper()
+
+
+def _seed_order(size: int) -> list[int]:
+    if size <= 1:
+        return [1]
+    prev = _seed_order(size // 2)
+    return [value for seed in prev for value in (seed, size + 1 - seed)]
+
+
+def _bracket_size(team_count: int) -> int:
+    if team_count < 2:
+        return max(team_count, 1)
+    size = 1
+    while size < team_count:
+        size *= 2
+    return size
+
+
+def _tournament_round_name(round_number: int, total_rounds: int, team_count: int, bracket_size: int) -> str:
+    if round_number == total_rounds:
+        return 'Championship'
+    if round_number == total_rounds - 1:
+        return 'Semifinal'
+    if round_number == total_rounds - 2 and bracket_size >= 8 and team_count >= 8:
+        return 'Quarterfinal'
+    if round_number == 1 and team_count < bracket_size:
+        return 'Play-In'
+    return 'First Round'
+
+
+def _standings_seed_rows(db: Session, season_id: uuid.UUID, division_id: uuid.UUID, current_user: User) -> tuple[list[dict], dict]:
+    standings_payload = _build_standings_payload(db, season_id=season_id, division_id=division_id, current_user=current_user)
+    block = next((item for item in standings_payload.get('divisions', []) if item.get('division', {}).get('id') == str(division_id)), None)
+    standings_rows = list((block or {}).get('standings') or [])
+    ranked_ids = {uuid.UUID(row['team_id']): row for row in standings_rows if row.get('team_id')}
+    teams = db.query(Team).join(Division).filter(Team.division_id == division_id, Team.is_active.is_(True), Division.is_active.is_(True)).order_by(Team.name).all()
+    rows = []
+    for team in teams:
+        rank_row = ranked_ids.get(team.id)
+        rows.append({
+            'team_id': str(team.id),
+            'team_name': team.name,
+            'community_id': str(team.organization_id),
+            'community_name': getattr(getattr(team, 'organization', None), 'name', None) or '',
+            'rank': int(rank_row.get('rank')) if rank_row else 999999,
+            'wins': int(rank_row.get('wins', 0)) if rank_row else 0,
+            'losses': int(rank_row.get('losses', 0)) if rank_row else 0,
+            'ties': int(rank_row.get('ties', 0)) if rank_row else 0,
+        })
+    rows.sort(key=lambda row: (row['rank'], row['team_name'].lower()))
+    for index, row in enumerate(rows, start=1):
+        row['seed'] = index
+        row['original_standings_rank'] = None if row['rank'] == 999999 else row['rank']
+        row['included'] = True
+        row['seed_source'] = 'RESULTS_STANDINGS'
+    summary = (block or {}).get('summary') or {}
+    return rows, summary
+
+
+def _tournament_dict(tournament: Tournament, include_unpublished: bool = True) -> dict:
+    divisions = []
+    for td in sorted(tournament.divisions, key=lambda d: (getattr(d.division, 'sort_order', 0), getattr(d.division, 'division_group', ''), getattr(d.division, 'name', ''))):
+        teams = [{
+            'id': str(tt.id), 'team_id': str(tt.team_id), 'team_name': tt.team.name if tt.team else '',
+            'seed': tt.seed, 'included': tt.included, 'seed_source': tt.seed_source,
+            'original_standings_rank': tt.original_standings_rank,
+        } for tt in sorted(td.teams, key=lambda x: x.seed)]
+        games = [_tournament_game_dict(game, include_unpublished=include_unpublished) for game in sorted(td.games, key=lambda g: (g.round_number, g.game_number)) if include_unpublished or tournament.is_published]
+        divisions.append({'id': str(td.id), 'division_id': str(td.division_id), 'division_name': td.division.name if td.division else '', 'division_group': td.division.division_group if td.division else '', 'status': td.status, 'teams': teams, 'games': games})
+    return {'id': str(tournament.id), 'season_id': str(tournament.season_id), 'name': tournament.name, 'type': tournament.type, 'status': tournament.status, 'is_published': tournament.is_published, 'published_at': tournament.published_at.isoformat() if tournament.published_at else None, 'divisions': divisions}
+
+
+def _team_label(team: Team | None, seed: int | None, source_game_id: uuid.UUID | None) -> str:
+    if team:
+        return f"Seed {seed} {team.name}" if seed else team.name
+    if source_game_id:
+        return f"Winner of Game {source_game_id}"
+    return 'TBD'
+
+
+def _tournament_game_dict(game: TournamentGame, include_unpublished: bool = True) -> dict:
+    score_visible = include_unpublished or bool(game.is_published)
+    return {
+        'id': str(game.id), 'tournament_division_id': str(game.tournament_division_id), 'round_number': game.round_number,
+        'round_name': game.round_name, 'game_number': game.game_number,
+        'team_1_id': str(game.team_1_id) if game.team_1_id else None, 'team_2_id': str(game.team_2_id) if game.team_2_id else None,
+        'team_1_name': game.team_1.name if game.team_1 else None, 'team_2_name': game.team_2.name if game.team_2 else None,
+        'team_1_seed': game.team_1_seed, 'team_2_seed': game.team_2_seed,
+        'team_1_placeholder': _team_label(game.team_1, game.team_1_seed, game.team_1_source_game_id),
+        'team_2_placeholder': _team_label(game.team_2, game.team_2_seed, game.team_2_source_game_id),
+        'team_1_source_game_id': str(game.team_1_source_game_id) if game.team_1_source_game_id else None,
+        'team_2_source_game_id': str(game.team_2_source_game_id) if game.team_2_source_game_id else None,
+        'date': game.game_date.isoformat() if game.game_date else None, 'time': game.kickoff_time.isoformat() if game.kickoff_time else None,
+        'host_location_id': str(game.host_location_id) if game.host_location_id else None, 'host_location_name': game.host_location.name if game.host_location else None,
+        'field_id': str(game.field_id) if game.field_id else None, 'field_name': game.field.name if game.field else None,
+        'status': game.status, 'score_status': game.score_status, 'is_published': game.is_published,
+        'home_score': ('F' if game.home_forfeit else game.home_score) if score_visible else None,
+        'away_score': ('F' if game.away_forfeit else game.away_score) if score_visible else None,
+        'winner_team_id': str(game.winner_team_id) if game.winner_team_id else None,
+        'winner_team_name': game.winner_team.name if game.winner_team else None,
+        'loser_team_id': str(game.loser_team_id) if game.loser_team_id else None,
+        'needs_review': game.needs_review,
+    }
+
+
+def _generate_bracket_for_division(db: Session, td: TournamentDivision) -> None:
+    db.query(TournamentGame).filter(TournamentGame.tournament_division_id == td.id).delete(synchronize_session=False)
+    entrants = [tt for tt in sorted(td.teams, key=lambda t: t.seed) if tt.included]
+    team_count = len(entrants)
+    if team_count < 2:
+        td.status = 'NEEDS_TEAMS'
+        return
+    seeds = {index: tt for index, tt in enumerate(entrants, start=1)}
+    size = _bracket_size(team_count)
+    order = _seed_order(size)
+    slots = [seeds.get(seed) for seed in order]
+    total_rounds = int(math.log2(size))
+    game_counter = {'value': 0}
+
+    def build(slot_list: list[TournamentTeam | None], round_number: int):
+        if len(slot_list) == 1:
+            tt = slot_list[0]
+            if tt is None:
+                return None
+            return {'team_id': tt.team_id, 'seed': tt.seed, 'game_id': None}
+        half = len(slot_list) // 2
+        left = build(slot_list[:half], round_number - 1)
+        right = build(slot_list[half:], round_number - 1)
+        if left is None:
+            return right
+        if right is None:
+            return left
+        game_counter['value'] += 1
+        game = TournamentGame(
+            tournament_division_id=td.id,
+            round_number=round_number,
+            round_name=_tournament_round_name(round_number, total_rounds, team_count, size),
+            game_number=game_counter['value'],
+            status='READY' if left.get('team_id') and right.get('team_id') else 'WAITING_FOR_TEAMS',
+        )
+        if left.get('game_id'):
+            game.team_1_source_game_id = left['game_id']
+        else:
+            game.team_1_id = left['team_id']; game.team_1_seed = left.get('seed')
+        if right.get('game_id'):
+            game.team_2_source_game_id = right['game_id']
+        else:
+            game.team_2_id = right['team_id']; game.team_2_seed = right.get('seed')
+        db.add(game); db.flush()
+        return {'game_id': game.id, 'team_id': None, 'seed': None}
+
+    build(slots, total_rounds)
+    td.status = 'BRACKET_GENERATED'
+
+
+def _advance_tournament_winner(db: Session, game: TournamentGame, winner_id: uuid.UUID, loser_id: uuid.UUID | None) -> None:
+    game.winner_team_id = winner_id
+    game.loser_team_id = loser_id
+    game.status = 'ADVANCED'
+    downstream = db.query(TournamentGame).filter(or_(TournamentGame.team_1_source_game_id == game.id, TournamentGame.team_2_source_game_id == game.id)).all()
+    seed = game.team_1_seed if game.team_1_id == winner_id else game.team_2_seed if game.team_2_id == winner_id else None
+    for next_game in downstream:
+        if next_game.team_1_source_game_id == game.id:
+            if next_game.team_1_id and next_game.team_1_id != winner_id:
+                next_game.needs_review = True
+            next_game.team_1_id = winner_id; next_game.team_1_seed = seed
+        if next_game.team_2_source_game_id == game.id:
+            if next_game.team_2_id and next_game.team_2_id != winner_id:
+                next_game.needs_review = True
+            next_game.team_2_id = winner_id; next_game.team_2_seed = seed
+        if next_game.team_1_id and next_game.team_2_id and next_game.status == 'WAITING_FOR_TEAMS':
+            next_game.status = 'READY'
+
+
+def _clear_tournament_advancement(db: Session, game: TournamentGame) -> None:
+    old_winner = game.winner_team_id
+    game.winner_team_id = None; game.loser_team_id = None
+    if game.status == 'ADVANCED':
+        game.status = 'READY' if game.team_1_id and game.team_2_id else 'WAITING_FOR_TEAMS'
+    downstream = db.query(TournamentGame).filter(or_(TournamentGame.team_1_source_game_id == game.id, TournamentGame.team_2_source_game_id == game.id)).all()
+    for next_game in downstream:
+        changed = False
+        if next_game.team_1_source_game_id == game.id:
+            next_game.team_1_id = None; next_game.team_1_seed = None; changed = True
+        if next_game.team_2_source_game_id == game.id:
+            next_game.team_2_id = None; next_game.team_2_seed = None; changed = True
+        if changed:
+            if next_game.is_published or next_game.score_status in {SCORE_STATUS_PUBLISHED, SCORE_STATUS_APPROVED, SCORE_STATUS_SUBMITTED}:
+                next_game.needs_review = True
+                next_game.status = 'NEEDS_REVIEW'
+            else:
+                next_game.status = 'WAITING_FOR_TEAMS'
+            if old_winner:
+                _clear_tournament_advancement(db, next_game)
+
+
+def _ensure_tournament_admin(current_user: User) -> None:
+    role_name = normalize_role_name(current_user.role.name)
+    if role_name not in {ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN}:
+        raise HTTPException(403, 'Only Scheduling Administrators can manage tournaments.')
+
+
+@router.get('/tournaments/seed-preview', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
+def tournament_seed_preview(season_id: uuid.UUID, division_id: uuid.UUID, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    rows, summary = _standings_seed_rows(db, season_id, division_id, current_user)
+    warning = 'Some regular-season scores are missing or unpublished. Seeds may be incomplete.' if int(summary.get('not_played', 0) or 0) > 0 else None
+    return {'teams': rows, 'warning': warning, 'summary': summary}
+
+
+@router.post('/tournaments', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
+def create_tournament(payload: dict, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    _ensure_tournament_admin(current_user)
+    season_id = uuid.UUID(str(payload.get('season_id')))
+    season = db.query(Season).filter(Season.id == season_id).first()
+    if not season:
+        raise HTTPException(404, 'Season not found.')
+    division_ids = [uuid.UUID(str(value)) for value in payload.get('division_ids') or []]
+    if not division_ids:
+        raise HTTPException(400, 'Select at least one division.')
+    tournament = Tournament(season_id=season.id, name=str(payload.get('name') or f'{season.name} Tournament'), type=TOURNAMENT_TYPE_SINGLE_ELIMINATION, status='DRAFT', created_by_user_id=current_user.id)
+    db.add(tournament); db.flush()
+    excluded = {uuid.UUID(str(value)) for value in payload.get('excluded_team_ids') or []}
+    overrides = {uuid.UUID(str(item.get('team_id'))): int(item.get('seed')) for item in payload.get('seed_overrides') or [] if item.get('team_id') and item.get('seed')}
+    warnings = []
+    for div_id in division_ids:
+        division = db.query(Division).filter(Division.id == div_id, Division.is_active.is_(True)).first()
+        if not division:
+            raise HTTPException(400, f'Division {div_id} is not active or does not exist.')
+        td = TournamentDivision(tournament_id=tournament.id, division_id=div_id, status='SEEDED')
+        db.add(td); db.flush()
+        seed_rows, summary = _standings_seed_rows(db, season.id, div_id, current_user)
+        if int(summary.get('not_played', 0) or 0) > 0:
+            warnings.append({'division_id': str(div_id), 'message': 'Some regular-season scores are missing or unpublished. Seeds may be incomplete.'})
+        if overrides:
+            seed_rows.sort(key=lambda row: (overrides.get(uuid.UUID(row['team_id']), row['seed']), row['seed']))
+            for index, row in enumerate(seed_rows, start=1):
+                row['seed'] = index
+                if uuid.UUID(row['team_id']) in overrides:
+                    row['seed_source'] = 'MANUAL'
+        for row in seed_rows:
+            team_id = uuid.UUID(row['team_id'])
+            db.add(TournamentTeam(tournament_division_id=td.id, team_id=team_id, seed=int(row['seed']), included=team_id not in excluded, seed_source=row['seed_source'], original_standings_rank=row.get('original_standings_rank')))
+        if payload.get('generate_bracket', True):
+            db.flush(); _generate_bracket_for_division(db, td)
+    tournament.status = 'BRACKET_GENERATED' if payload.get('generate_bracket', True) else 'SEEDED'
+    db.commit(); db.refresh(tournament)
+    return {'tournament': _tournament_dict(tournament), 'warnings': warnings}
+
+
+@router.get('/tournaments', dependencies=[Depends(require_roles(ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
+def list_tournaments(season_id: uuid.UUID | None = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    q = db.query(Tournament)
+    if season_id:
+        q = q.filter(Tournament.season_id == season_id)
+    role_name = normalize_role_name(current_user.role.name)
+    include_unpublished = role_name in {ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN, ROLE_COMMUNITY_ADMIN}
+    return {'items': [_tournament_dict(t, include_unpublished=include_unpublished) for t in q.order_by(Tournament.created_at.desc()).all()]}
+
+
+@router.get('/tournaments/{tournament_id}', dependencies=[Depends(require_roles(ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
+def get_tournament(tournament_id: uuid.UUID, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    tournament = db.query(Tournament).filter(Tournament.id == tournament_id).first()
+    if not tournament:
+        raise HTTPException(404, 'Tournament not found.')
+    return {'tournament': _tournament_dict(tournament)}
+
+
+@router.get('/public/tournaments')
+def public_tournaments(season_id: uuid.UUID | None = None, db: Session = Depends(get_db)):
+    q = db.query(Tournament).filter(Tournament.is_published.is_(True))
+    if season_id:
+        q = q.filter(Tournament.season_id == season_id)
+    return {'items': [_tournament_dict(t, include_unpublished=False) for t in q.order_by(Tournament.created_at.desc()).all()]}
+
+
+@router.post('/tournaments/{tournament_id}/publish', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
+def publish_tournament(tournament_id: uuid.UUID, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    tournament = db.query(Tournament).filter(Tournament.id == tournament_id).first()
+    if not tournament:
+        raise HTTPException(404, 'Tournament not found.')
+    tournament.is_published = True; tournament.status = 'PUBLISHED'; tournament.published_at = _score_now(); tournament.published_by_user_id = current_user.id; tournament.unpublished_at = None; tournament.unpublished_by_user_id = None
+    db.commit(); db.refresh(tournament)
+    return {'tournament': _tournament_dict(tournament)}
+
+
+@router.post('/tournaments/{tournament_id}/unpublish', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
+def unpublish_tournament(tournament_id: uuid.UUID, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    tournament = db.query(Tournament).filter(Tournament.id == tournament_id).first()
+    if not tournament:
+        raise HTTPException(404, 'Tournament not found.')
+    tournament.is_published = False; tournament.status = 'UNPUBLISHED'; tournament.unpublished_at = _score_now(); tournament.unpublished_by_user_id = current_user.id
+    db.commit(); db.refresh(tournament)
+    return {'tournament': _tournament_dict(tournament)}
+
+
+@router.patch('/tournament-games/{game_id}/schedule', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
+def schedule_tournament_game(game_id: uuid.UUID, payload: dict, db: Session = Depends(get_db)):
+    game = db.query(TournamentGame).filter(TournamentGame.id == game_id).first()
+    if not game:
+        raise HTTPException(404, 'Tournament game not found.')
+    if payload.get('date') is not None:
+        game.game_date = date.fromisoformat(payload['date']) if payload['date'] else None
+    if payload.get('time') is not None:
+        game.kickoff_time = time.fromisoformat(payload['time']) if payload['time'] else None
+    if 'host_location_id' in payload:
+        game.host_location_id = uuid.UUID(str(payload['host_location_id'])) if payload.get('host_location_id') else None
+    if 'field_id' in payload:
+        game.field_id = uuid.UUID(str(payload['field_id'])) if payload.get('field_id') else None
+    db.commit(); db.refresh(game)
+    return {'game': _tournament_game_dict(game)}
+
+
+def _ensure_community_can_score_tournament(game: TournamentGame, current_user: User) -> None:
+    if not current_user.organization_id:
+        raise HTTPException(403, 'User has no community scope')
+    org_id = current_user.organization_id
+    if not game.team_1_id or not game.team_2_id:
+        raise HTTPException(400, 'Tournament game teams are not known yet.')
+    if game.team_1.organization_id != org_id and game.team_2.organization_id != org_id:
+        raise HTTPException(403, 'Community admins may only submit scores for tournament games involving their community.')
+
+
+@router.patch('/tournament-games/{game_id}/submit-score', dependencies=[Depends(require_roles(ROLE_COMMUNITY_ADMIN))])
+def submit_tournament_score(game_id: uuid.UUID, payload: ScorePayload, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    game = db.query(TournamentGame).filter(TournamentGame.id == game_id).first()
+    if not game:
+        raise HTTPException(404, 'Tournament game not found.')
+    _ensure_community_can_score_tournament(game, current_user)
+    home_score, away_score, home_forfeit, away_forfeit, _note = _normalize_score_input(payload.home_score, payload.away_score)
+    if game.is_published:
+        raise HTTPException(400, 'Published tournament scores cannot be changed by community admins; flag an issue instead.')
+    game.home_score = home_score; game.away_score = away_score; game.home_forfeit = home_forfeit; game.away_forfeit = away_forfeit; game.score_status = SCORE_STATUS_SUBMITTED; game.status = 'SCORE_SUBMITTED'; game.is_published = False
+    db.commit(); db.refresh(game)
+    return {'message': 'Tournament score submitted for Scheduling Administrator approval.', 'game': _tournament_game_dict(game)}
+
+
+@router.post('/tournament-games/{game_id}/approve-and-publish', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
+def publish_tournament_score(game_id: uuid.UUID, payload: ScorePayload | None = None, db: Session = Depends(get_db)):
+    game = db.query(TournamentGame).filter(TournamentGame.id == game_id).first()
+    if not game:
+        raise HTTPException(404, 'Tournament game not found.')
+    if payload:
+        home_score, away_score, home_forfeit, away_forfeit, _note = _normalize_score_input(payload.home_score, payload.away_score)
+        game.home_score = home_score; game.away_score = away_score; game.home_forfeit = home_forfeit; game.away_forfeit = away_forfeit
+    if not game.team_1_id or not game.team_2_id:
+        raise HTTPException(400, 'Tournament game teams are not known yet.')
+    if game.home_score is None or game.away_score is None:
+        raise HTTPException(400, 'No complete score is available to publish.')
+    outcome = _score_outcome(game.home_score, game.away_score, game.home_forfeit, game.away_forfeit)
+    if outcome == 'TIE':
+        raise HTTPException(400, TOURNAMENT_TIE_ERROR)
+    winner_id = game.team_1_id if outcome == 'HOME_WIN' else game.team_2_id
+    loser_id = game.team_2_id if outcome == 'HOME_WIN' else game.team_1_id
+    game.score_status = SCORE_STATUS_PUBLISHED; game.status = 'COMPLETED'; game.is_published = True; game.needs_review = False
+    _advance_tournament_winner(db, game, winner_id, loser_id)
+    db.commit(); db.refresh(game)
+    return {'game': _tournament_game_dict(game)}
+
+
+@router.post('/tournament-games/{game_id}/unpublish-score', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
+def unpublish_tournament_score(game_id: uuid.UUID, db: Session = Depends(get_db)):
+    game = db.query(TournamentGame).filter(TournamentGame.id == game_id).first()
+    if not game:
+        raise HTTPException(404, 'Tournament game not found.')
+    game.is_published = False; game.score_status = SCORE_STATUS_UNPUBLISHED
+    _clear_tournament_advancement(db, game)
+    db.commit(); db.refresh(game)
+    return {'game': _tournament_game_dict(game)}
 
 
 def _extract_explicit_field_slot_label(value: object | None, field_type: str | None = None) -> str:

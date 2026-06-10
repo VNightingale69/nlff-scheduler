@@ -10,7 +10,7 @@ const statuses = ['MISSING','SUBMITTED','FLAGGED','CONFLICT','APPROVED','PUBLISH
 
 export default function ScoreManagementPage() {
   const [items, setItems] = useState<ScoreGame[]>([]);
-  const [filters, setFilters] = useState({ date: '', division_id: '', organization_id: '', host_location_id: '', status: '', published: '', missing: false, flagged: false, conflicts: false });
+  const [filters, setFilters] = useState({ date: '', division_id: '', organization_id: '', host_location_id: '', status: '', published: '', game_type: '', missing: false, flagged: false, conflicts: false });
   const [drafts, setDrafts] = useState<Record<string, { home_score: string; away_score: string; notes: string }>>({});
   const [message, setMessage] = useState('');
   const token = getToken() || undefined;
@@ -54,6 +54,7 @@ export default function ScoreManagementPage() {
       <input className='rounded border p-2' placeholder='Host Location ID' value={filters.host_location_id} onChange={(e) => setFilters({ ...filters, host_location_id: e.target.value })} />
       <select className='rounded border p-2' value={filters.status} onChange={(e) => setFilters({ ...filters, status: e.target.value })}><option value=''>All score statuses</option>{statuses.map((s) => <option key={s}>{s}</option>)}</select>
       <select className='rounded border p-2' value={filters.published} onChange={(e) => setFilters({ ...filters, published: e.target.value })}><option value=''>All published states</option><option value='published'>Published</option><option value='unpublished'>Unpublished</option></select>
+      <select className='rounded border p-2' value={filters.game_type} onChange={(e) => setFilters({ ...filters, game_type: e.target.value })}><option value=''>Game Type: All</option><option value='REGULAR_SEASON'>Regular Season</option><option value='TOURNAMENT'>Tournament</option></select>
       {(['missing','flagged','conflicts'] as const).map((key) => <label key={key} className='flex items-center gap-2 text-sm'><input type='checkbox' checked={filters[key]} onChange={(e) => setFilters({ ...filters, [key]: e.target.checked })} /> {key === 'missing' ? 'Missing Scores' : key === 'flagged' ? 'Flagged Scores' : 'Conflicts'}</label>)}
       <button className='rounded bg-slate-800 px-3 py-2 text-white' onClick={load}>Apply Filters</button>
     </div>

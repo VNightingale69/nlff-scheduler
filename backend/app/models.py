@@ -386,6 +386,7 @@ class Game(Base, TimestampMixin):
     previous_field_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
     field_deleted_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     field_assignment_status: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    game_type: Mapped[str] = mapped_column(String(30), nullable=False, default='REGULAR_SEASON')
     season = relationship('Season')
     week = relationship('Week')
     field = relationship('Field')
@@ -399,6 +400,91 @@ class Game(Base, TimestampMixin):
     score_submissions = relationship('ScoreSubmission', back_populates='game', cascade='all, delete-orphan')
     score_history = relationship('ScoreHistory', back_populates='game', cascade='all, delete-orphan')
     change_logs = relationship('ScheduleChangeLog', back_populates='game', cascade='all, delete-orphan')
+
+
+class Tournament(Base, TimestampMixin):
+    __tablename__ = 'tournaments'
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    season_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('seasons.id'), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    type: Mapped[str] = mapped_column(String(40), nullable=False, default='SINGLE_ELIMINATION')
+    status: Mapped[str] = mapped_column(String(40), nullable=False, default='DRAFT')
+    is_published: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    published_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    published_by_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('users.id'), nullable=True)
+    unpublished_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    unpublished_by_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('users.id'), nullable=True)
+    created_by_user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('users.id'), nullable=False)
+    season = relationship('Season')
+    created_by = relationship('User', foreign_keys=[created_by_user_id])
+    published_by = relationship('User', foreign_keys=[published_by_user_id])
+    unpublished_by = relationship('User', foreign_keys=[unpublished_by_user_id])
+    divisions = relationship('TournamentDivision', back_populates='tournament', cascade='all, delete-orphan')
+    __table_args__ = (Index('ix_tournaments_season_id', 'season_id'),)
+
+
+class TournamentDivision(Base, TimestampMixin):
+    __tablename__ = 'tournament_divisions'
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tournament_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('tournaments.id', ondelete='CASCADE'), nullable=False)
+    division_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('divisions.id'), nullable=False)
+    status: Mapped[str] = mapped_column(String(40), nullable=False, default='SEEDED')
+    tournament = relationship('Tournament', back_populates='divisions')
+    division = relationship('Division')
+    teams = relationship('TournamentTeam', back_populates='tournament_division', cascade='all, delete-orphan')
+    games = relationship('TournamentGame', back_populates='tournament_division', cascade='all, delete-orphan')
+    __table_args__ = (UniqueConstraint('tournament_id', 'division_id', name='uq_tournament_division'), Index('ix_tournament_divisions_tournament_id', 'tournament_id'))
+
+
+class TournamentTeam(Base, TimestampMixin):
+    __tablename__ = 'tournament_teams'
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tournament_division_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('tournament_divisions.id', ondelete='CASCADE'), nullable=False)
+    team_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('teams.id'), nullable=False)
+    seed: Mapped[int] = mapped_column(Integer, nullable=False)
+    included: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    seed_source: Mapped[str] = mapped_column(String(40), nullable=False, default='RESULTS_STANDINGS')
+    original_standings_rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    tournament_division = relationship('TournamentDivision', back_populates='teams')
+    team = relationship('Team')
+    __table_args__ = (UniqueConstraint('tournament_division_id', 'team_id', name='uq_tournament_team'), UniqueConstraint('tournament_division_id', 'seed', name='uq_tournament_team_seed'), Index('ix_tournament_teams_division_id', 'tournament_division_id'))
+
+
+class TournamentGame(Base, TimestampMixin):
+    __tablename__ = 'tournament_games'
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tournament_division_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('tournament_divisions.id', ondelete='CASCADE'), nullable=False)
+    round_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    round_name: Mapped[str] = mapped_column(String(80), nullable=False)
+    game_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    team_1_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('teams.id'), nullable=True)
+    team_2_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('teams.id'), nullable=True)
+    team_1_seed: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    team_2_seed: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    team_1_source_game_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('tournament_games.id'), nullable=True)
+    team_2_source_game_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('tournament_games.id'), nullable=True)
+    winner_team_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('teams.id'), nullable=True)
+    loser_team_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('teams.id'), nullable=True)
+    game_date: Mapped[Date | None] = mapped_column(Date, nullable=True)
+    kickoff_time: Mapped[Time | None] = mapped_column(Time, nullable=True)
+    host_location_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('host_locations.id'), nullable=True)
+    field_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('fields.id'), nullable=True)
+    status: Mapped[str] = mapped_column(String(40), nullable=False, default='WAITING_FOR_TEAMS')
+    home_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    away_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    home_forfeit: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    away_forfeit: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    score_status: Mapped[str] = mapped_column(String(30), nullable=False, default='MISSING')
+    is_published: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    needs_review: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    tournament_division = relationship('TournamentDivision', back_populates='games')
+    team_1 = relationship('Team', foreign_keys=[team_1_id])
+    team_2 = relationship('Team', foreign_keys=[team_2_id])
+    winner_team = relationship('Team', foreign_keys=[winner_team_id])
+    loser_team = relationship('Team', foreign_keys=[loser_team_id])
+    host_location = relationship('HostLocation')
+    field = relationship('Field')
+    __table_args__ = (UniqueConstraint('tournament_division_id', 'game_number', name='uq_tournament_game_number'), Index('ix_tournament_games_division_round', 'tournament_division_id', 'round_number'))
 
 
 class ScheduleChangeLog(Base):

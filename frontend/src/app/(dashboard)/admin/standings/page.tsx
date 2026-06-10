@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { apiFetch } from '@/lib/api';
-import { getToken } from '@/lib/auth';
+import { canManageSchedule, getAuthUser, getToken } from '@/lib/auth';
 import { formatDisplayDate, formatDisplayTime } from '@/lib/displayFormat';
 
 type StandingRow = {
@@ -51,8 +51,9 @@ function scoreText(value: number | string | null) {
 
 export default function StandingsPage() {
   const token = getToken() || undefined;
-  const [payload, setPayload] = useState<{ divisions: DivisionBlock[]; game_results: GameResult[]; last_calculated_at: string; official_score_note: string; total_missing_or_not_played: number; no_active_season?: boolean } | null>(null);
+  const [payload, setPayload] = useState<{ season_id?: string; divisions: DivisionBlock[]; game_results: GameResult[]; last_calculated_at: string; official_score_note: string; total_missing_or_not_played: number; no_active_season?: boolean } | null>(null);
   const [message, setMessage] = useState('');
+  const canBuildTournament = canManageSchedule(getAuthUser());
 
   const load = async () => {
     try {
@@ -72,6 +73,7 @@ export default function StandingsPage() {
       <h1 className='text-2xl font-bold'>Results & Standings</h1>
       <p className='text-sm text-slate-600'>Division rankings, missing game counts, and result summaries based on the official score workflow.</p>
       <p className='text-xs font-semibold text-slate-500'>Standings calculated from published scores only.</p>
+      {canBuildTournament && payload?.season_id && <Link className='mt-3 inline-flex rounded bg-slate-800 px-3 py-2 text-sm text-white' href={`/admin/tournaments?season_id=${payload.season_id}`}>Create Tournament from Standings</Link>}
     </div>
 
     {message && <div className='rounded border bg-red-50 p-3 text-sm text-red-700'>{message}</div>}
