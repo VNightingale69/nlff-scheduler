@@ -39,6 +39,38 @@ assert.match(source, /gameMetadata\(game\)\.forEach\(\(detail\) => \{/);
 assert.match(source, /metadataLines\(detail\.value\)\.forEach\(\(line, lineIndex\) => \{/);
 assert.match(source, /detailY \+= Math\.max\(1, metadataLines\(detail\.value\)\.length\) \* 12;/);
 
+
+// Bracket header is a dedicated layout row above the bracket body, with gaps before round headers/cards.
+assert.match(source, /style=\{\{ height: BRACKET_CANVAS\.headerHeight \}\}/);
+assert.match(source, /className='relative z-20 flex items-start justify-between gap-6 px-8 pt-\[26px\]'/);
+assert.match(source, /<p className='mt-1\.5 text-base font-bold leading-5 text-slate-700'>\{header\.divisionLabel\}<\/p>/);
+assert.match(source, /shrink-0 pt-\[28px\] text-right text-\[11px\] text-slate-500/);
+assert.match(source, /roundHeaderGap: 16,/);
+assert.match(source, /roundBodyGap: 14,/);
+assert.match(source, /function bracketRoundHeaderY\(layout: Pick<BracketLayout, 'headerHeight' \| 'roundHeaderGap'>\) \{/);
+assert.match(source, /return layout\.headerHeight \+ layout\.roundHeaderGap;/);
+assert.match(source, /function bracketBodyStartY\(layout: Pick<BracketLayout, 'headerHeight' \| 'roundHeaderGap' \| 'roundHeaderHeight' \| 'roundBodyGap'>\) \{/);
+assert.match(source, /return bracketRoundHeaderY\(layout\) \+ layout\.roundHeaderHeight \+ layout\.roundBodyGap;/);
+assert.match(source, /const bracketBodyStart = bracketBodyStartY\(BRACKET_CANVAS\);/);
+assert.match(source, /const height = bracketBodyStart \+ maxRoundHeight \+ BRACKET_CANVAS\.margin;/);
+assert.match(source, /let y = bracketBodyStart \+ offset;/);
+assert.match(source, /style=\{\{ left: x, top: bracketRoundHeaderY\(layout\), width: layout\.roundWidth, height: layout\.roundHeaderHeight \}\}/);
+assert.match(source, /data-testid=\{`bracket-round-header-\$\{round\.round_number\}`\}/);
+assert.match(source, /const roundHeaderY = bracketRoundHeaderY\(layout\);/);
+assert.match(source, /<rect x="\$\{x\}" y="\$\{roundHeaderY\}" width="\$\{layout\.roundWidth\}" height="\$\{layout\.roundHeaderHeight\}"/);
+assert.doesNotMatch(source, /top:\s*layout\.headerHeight - 28/);
+assert.doesNotMatch(source, /y="\$\{layout\.headerHeight - 28\}"/);
+
+const canvasConstants = Object.fromEntries(Array.from(source.matchAll(/  (headerHeight|roundHeaderGap|roundHeaderHeight|roundBodyGap): (\d+),/g)).map(([, key, value]) => [key, Number(value)]));
+assert.equal(canvasConstants.headerHeight, 96);
+assert.equal(canvasConstants.roundHeaderGap, 16);
+assert.equal(canvasConstants.roundHeaderHeight, 28);
+assert.equal(canvasConstants.roundBodyGap, 14);
+const firstRoundHeaderY = canvasConstants.headerHeight + canvasConstants.roundHeaderGap;
+const firstGameY = firstRoundHeaderY + canvasConstants.roundHeaderHeight + canvasConstants.roundBodyGap;
+assert.ok(firstRoundHeaderY > canvasConstants.headerHeight, 'Semifinal/Championship round headers should render below the bracket header row');
+assert.ok(firstGameY > firstRoundHeaderY + canvasConstants.roundHeaderHeight, 'Game cards should start below round headers with a body gap');
+
 // Bracket canvas headers use one shared header model for live and exported renderers.
 assert.match(source, /type BracketHeaderData = \{/);
 assert.match(source, /function bracketHeaderData\(title: string, division: TournamentBracketDivision, outputLabel\?: string\): BracketHeaderData/);

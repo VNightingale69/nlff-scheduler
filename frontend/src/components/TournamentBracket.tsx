@@ -70,8 +70,10 @@ type BracketLayout = {
   gameGap: number;
   margin: number;
   headerHeight: number;
+  roundHeaderGap: number;
   roundHeaderHeight: number;
   roundHeaderRadius: number;
+  roundBodyGap: number;
   gameRadius: number;
   teamRowHeight: number;
   teamRowRadius: number;
@@ -121,13 +123,17 @@ function bracketHeaderData(title: string, division: TournamentBracketDivision, o
 
 function BracketHeader({ header }: { header: BracketHeaderData }) {
   return (
-    <>
-      <div className='absolute left-8 top-[26px]' data-testid='bracket-canvas-header'>
+    <div
+      className='relative z-20 flex items-start justify-between gap-6 px-8 pt-[26px]'
+      style={{ height: BRACKET_CANVAS.headerHeight }}
+      data-testid='bracket-canvas-header'
+    >
+      <div className='min-w-0'>
         <h4 className='text-[22px] font-bold leading-7 text-slate-900'>{header.tournamentName}</h4>
-        <p className='mt-0.5 text-base font-bold text-slate-700'>{header.divisionLabel}</p>
+        <p className='mt-1.5 text-base font-bold leading-5 text-slate-700'>{header.divisionLabel}</p>
       </div>
-      {header.outputLabel && <div className='absolute right-8 top-[50px] text-[11px] text-slate-500'>{header.outputLabel}</div>}
-    </>
+      {header.outputLabel && <div className='shrink-0 pt-[28px] text-right text-[11px] text-slate-500'>{header.outputLabel}</div>}
+    </div>
   );
 }
 
@@ -137,9 +143,11 @@ const BRACKET_CANVAS = {
   gameHeight: 220,
   gameGap: 34,
   margin: 32,
-  headerHeight: 92,
+  headerHeight: 96,
+  roundHeaderGap: 16,
   roundHeaderHeight: 28,
   roundHeaderRadius: 8,
+  roundBodyGap: 14,
   gameRadius: 12,
   teamRowHeight: 38,
   teamRowRadius: 8,
@@ -227,6 +235,14 @@ function divisionsForExport(divisions: TournamentBracketDivision[]): ExportDivis
   return divisions.map((division) => ({ ...division, rounds: roundsForDivision(division) }));
 }
 
+function bracketRoundHeaderY(layout: Pick<BracketLayout, 'headerHeight' | 'roundHeaderGap'>) {
+  return layout.headerHeight + layout.roundHeaderGap;
+}
+
+function bracketBodyStartY(layout: Pick<BracketLayout, 'headerHeight' | 'roundHeaderGap' | 'roundHeaderHeight' | 'roundBodyGap'>) {
+  return bracketRoundHeaderY(layout) + layout.roundHeaderHeight + layout.roundBodyGap;
+}
+
 function buildBracketLayout(rounds: TournamentBracketRound[]): BracketLayout {
   const roundHeights = rounds.map((round) => {
     const cardHeights = round.games.map(gameCardHeight);
@@ -234,14 +250,15 @@ function buildBracketLayout(rounds: TournamentBracketRound[]): BracketLayout {
   });
   const maxRoundHeight = Math.max(BRACKET_CANVAS.gameHeight, ...roundHeights);
   const width = BRACKET_CANVAS.margin * 2 + rounds.length * BRACKET_CANVAS.roundWidth + Math.max(0, rounds.length - 1) * BRACKET_CANVAS.roundGap;
-  const height = BRACKET_CANVAS.headerHeight + maxRoundHeight + BRACKET_CANVAS.margin;
+  const bracketBodyStart = bracketBodyStartY(BRACKET_CANVAS);
+  const height = bracketBodyStart + maxRoundHeight + BRACKET_CANVAS.margin;
   const positions = new Map<string, { x: number; y: number; height: number }>();
 
   rounds.forEach((round, roundIndex) => {
     const x = BRACKET_CANVAS.margin + roundIndex * (BRACKET_CANVAS.roundWidth + BRACKET_CANVAS.roundGap);
     const roundHeight = roundHeights[roundIndex] || BRACKET_CANVAS.gameHeight;
     const offset = (maxRoundHeight - roundHeight) / 2;
-    let y = BRACKET_CANVAS.headerHeight + offset;
+    let y = bracketBodyStart + offset;
     round.games.forEach((game) => {
       const height = gameCardHeight(game);
       positions.set(game.id, { x, y, height });
@@ -358,8 +375,9 @@ function buildBracketSvg(title: string, division: ExportDivision, publicView: bo
 
   rounds.forEach((round, roundIndex) => {
     const x = layout.margin + roundIndex * (layout.roundWidth + layout.roundGap);
-    body += `<rect x="${x}" y="${layout.headerHeight - 28}" width="${layout.roundWidth}" height="${layout.roundHeaderHeight}" rx="${layout.roundHeaderRadius}" fill="#0f172a"/>`;
-    body += svgText(x + 14, layout.headerHeight - 9, round.round_name, { size: 13, weight: '700', fill: '#ffffff' });
+    const roundHeaderY = bracketRoundHeaderY(layout);
+    body += `<rect x="${x}" y="${roundHeaderY}" width="${layout.roundWidth}" height="${layout.roundHeaderHeight}" rx="${layout.roundHeaderRadius}" fill="#0f172a"/>`;
+    body += svgText(x + 14, roundHeaderY + 19, round.round_name, { size: 13, weight: '700', fill: '#ffffff' });
     round.games.forEach((game) => {
       const position = layout.positions.get(game.id);
       if (!position) return;
@@ -431,7 +449,8 @@ function SharedBracketRenderer({ title, division, publicView, outputLabel }: { t
           <div key={round.round_number}>
             <div
               className='absolute z-10 rounded-lg bg-slate-900 px-3.5 py-1.5 text-[13px] font-bold text-white shadow-sm'
-              style={{ left: x, top: layout.headerHeight - 28, width: layout.roundWidth, height: layout.roundHeaderHeight }}
+              style={{ left: x, top: bracketRoundHeaderY(layout), width: layout.roundWidth, height: layout.roundHeaderHeight }}
+              data-testid={`bracket-round-header-${round.round_number}`}
             >
               {round.round_name}
             </div>
