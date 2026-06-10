@@ -17,7 +17,7 @@ export default function DashboardShell({ children }: { children: React.ReactNode
 
   const role = normalizeRoleName(user?.role_name) as AuthUser['role_name'];
   const navOrder = role === 'COMMUNITY_ADMIN'
-    ? ['organizations', 'teams', 'host-locations', 'fields', 'hosting-availability', 'games', 'score-entry', 'standings', 'rulebook']
+    ? ['organizations', 'teams', 'host-locations', 'fields', 'hosting-availability', 'score-entry', 'standings', 'rulebook']
     : [
       'organizations',
       'divisions',
@@ -37,7 +37,6 @@ export default function DashboardShell({ children }: { children: React.ReactNode
       'scores/flagged',
       'scores/missing',
       'game-statuses',
-      'games',
       'rulebook',
     ];
   const communityTitles: Record<string, string> = {
@@ -46,7 +45,6 @@ export default function DashboardShell({ children }: { children: React.ReactNode
     'host-locations': 'My Host Locations',
     fields: 'My Fields',
     'hosting-availability': 'My Hosting Availability',
-    games: 'League Schedule',
     'score-entry': 'Score Entry',
     standings: 'Results & Standings',
     rulebook: 'Rulebook',
