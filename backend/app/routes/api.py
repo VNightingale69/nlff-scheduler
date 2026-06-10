@@ -17,7 +17,7 @@ from sqlalchemy import String, and_, delete, func, inspect as sa_inspect, or_, s
 from sqlalchemy.exc import IntegrityError, ProgrammingError, SQLAlchemyError
 from sqlalchemy.orm import Session, aliased
 
-from app.config import ADMIN_SEED_EMAIL, ENABLE_TURF_OPTIMIZATION, RULEBOOK_MAX_SIZE_BYTES, RULEBOOK_UPLOAD_DIR
+from app.config import ADMIN_SEED_EMAIL, ENABLE_SCHEDULE_QUALITY_REPORT, ENABLE_TURF_OPTIMIZATION, RULEBOOK_MAX_SIZE_BYTES, RULEBOOK_UPLOAD_DIR
 from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN, can_manage_schedule, enforce_organization_scope, get_current_user, is_community_admin, is_league_admin, normalize_role_name, require_roles, require_schedule_admin, require_schedule_publisher
 from app.database import get_db
 from app.models import Division, Field, FieldConfigurationOption, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostPlanSelection, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Rulebook, ScheduleChangeLog, ScoreHistory, ScoreSubmission, Season, Team, TurfWave, User, Week
@@ -11742,16 +11742,21 @@ def update_season(season_id: uuid.UUID, payload: dict, db: Session = Depends(get
 
 
 def build_publish_schedule_quality_report(db: Session, season_id: uuid.UUID) -> dict[str, object]:
-    """Run publish validation without mutating slots, scheduled games, or turf labels."""
-    rows = load_final_scheduled_games_for_validation(db, season_id)
-    final_validation = _build_final_schedule_validation_result(
+    """Run legacy publish quality report generation only when explicitly enabled."""
+    if not ENABLE_SCHEDULE_QUALITY_REPORT:
+        raise HTTPException(status_code=404, detail='Schedule Quality Report is disabled.')
+    final_validation = build_publish_final_validation(db, season_id)
+    return build_schedule_quality_report(db, season_id, final_validation_result=final_validation)
+
+
+def build_publish_final_validation(db: Session, season_id: uuid.UUID) -> dict[str, object]:
+    """Run publish validation directly against current saved scheduled games."""
+    return _build_final_schedule_validation_result(
         db,
         season_id,
-        schedule_quality_games_checked_count=len(rows),
         run_turf_pull_forward_repair=False,
         repair_generated_slot_integrity=False,
     )
-    return build_schedule_quality_report(db, season_id, final_validation_result=final_validation)
 
 
 def build_schedule_quality_report(db: Session, season_id: uuid.UUID, final_validation_result: dict[str, object] | None = None) -> dict[str, object]:
@@ -14423,12 +14428,13 @@ def _scheduled_games_modified_after(db: Session, season_id: uuid.UUID, timestamp
 
 
 def _validation_blocks_publish(validation: dict) -> tuple[bool, dict]:
-    integrity = validation.get('generated_slot_integrity_diagnostics') or (validation.get('final_validation') or {}).get('generated_slot_integrity_diagnostics') or {}
+    integrity = validation.get('generated_slot_integrity_diagnostics') or {}
+    blocking_failures = _final_validation_blocking_failures(validation)
     blocked = (
         validation.get('final_validation_status') != 'COMPLETE'
         or _safe_int(integrity.get('generated_slot_integrity_failure_count')) > 0
         or _safe_int(integrity.get('invalid_scheduled_game_count')) > _safe_int(integrity.get('repaired_scheduled_game_count')) + _safe_int(integrity.get('unscheduled_orphan_game_count'))
-        or bool(validation.get('hard_errors'))
+        or bool(blocking_failures)
     )
     return blocked, integrity
 
@@ -14447,7 +14453,7 @@ def _summarize_validation_issue(detail: object, fallback_code: str) -> str:
 
 
 def _build_publish_validation_summary(validation: dict, *, changed: bool) -> dict:
-    hard_errors = validation.get('hard_errors') or validation.get('hard_rule_failures') or []
+    hard_errors = _final_validation_blocking_failures(validation)
     issues: list[dict[str, object]] = []
     for item in hard_errors:
         if isinstance(item, dict):
@@ -14457,11 +14463,11 @@ def _build_publish_validation_summary(validation: dict, *, changed: bool) -> dic
             issues.append({'issue_type': code, 'affected_count': int(item.get('count') or len(details) or 1), 'summaries': summaries, 'recommended_action': 'Open Manual Schedule Builder and correct the affected scheduled games.'})
         else:
             issues.append({'issue_type': 'VALIDATION_FAILURE', 'affected_count': 1, 'summaries': [str(item)], 'recommended_action': 'Open Manual Schedule Builder and correct the affected scheduled games.'})
-    integrity = validation.get('generated_slot_integrity_diagnostics') or (validation.get('final_validation') or {}).get('generated_slot_integrity_diagnostics') or {}
+    integrity = validation.get('generated_slot_integrity_diagnostics') or {}
     if _safe_int(integrity.get('generated_slot_integrity_failure_count')) > 0 and not any(issue['issue_type'] == 'GENERATED_SLOT_INTEGRITY_FAILURE' for issue in issues):
         issues.append({'issue_type': 'GENERATED_SLOT_INTEGRITY_FAILURE', 'affected_count': _safe_int(integrity.get('generated_slot_integrity_failure_count')), 'summaries': ['Saved scheduled games have slot integrity issues.'], 'recommended_action': 'Review affected games in Manual Schedule Builder.'})
     return {
-        'message': CHANGED_REPUBLISH_BLOCKED_MESSAGE if changed else 'Publish blocked because validation found blocking issues.',
+        'message': 'Schedule validation found blocking issues. Please review the listed games before publishing.',
         'total_blocking_issues': sum(int(issue.get('affected_count') or 0) for issue in issues) or len(issues),
         'issues': issues,
     }
@@ -14502,24 +14508,23 @@ def publish_schedule(season_id: uuid.UUID, db: Session = Depends(get_db), curren
             'ok': True,
             **_schedule_publication_status(season),
             'warnings': [],
-            'overall_health': None,
             'republish_without_validation': True,
             'schedule_change_state': 'unchanged_since_unpublished' if fallback_unchanged else 'unchanged_since_last_publish',
             'message': FALLBACK_REPUBLISH_MESSAGE if fallback_unchanged else UNCHANGED_REPUBLISH_MESSAGE,
         }
 
-    validation = build_publish_schedule_quality_report(db, season_id)
+    validation = build_publish_final_validation(db, season_id)
     blocked, integrity = _validation_blocks_publish(validation)
     if blocked:
         raise HTTPException(status_code=400, detail={
             'error': 'publish_validation_failed',
-            'message': CHANGED_REPUBLISH_BLOCKED_MESSAGE if status_value == SCHEDULE_UNPUBLISHED_STATUS else 'Publish blocked because validation found blocking issues.',
+            'message': 'Schedule validation found blocking issues. Please review the listed games before publishing.',
             'validation_summary': _build_publish_validation_summary(validation, changed=status_value == SCHEDULE_UNPUBLISHED_STATUS),
             'schedule_changed_since_last_publication': status_value == SCHEDULE_UNPUBLISHED_STATUS,
         })
     _mark_schedule_published(season, current_user, current_hash, current_count, now)
     db.commit()
-    return {'ok': True, **_schedule_publication_status(season), 'warnings': validation['warnings'], 'overall_health': validation['overall_health'], 'generated_slot_integrity_diagnostics': integrity, 'message': 'Schedule published.' if status_value != SCHEDULE_UNPUBLISHED_STATUS else 'Schedule republished after validation.'}
+    return {'ok': True, **_schedule_publication_status(season), 'publish_validation_message': 'Schedule is ready to publish.', 'publish_blocking_issue_count': 0, 'message': 'Schedule published.' if status_value != SCHEDULE_UNPUBLISHED_STATUS else 'Schedule republished after validation.'}
 
 
 @router.post('/seasons/{season_id}/unpublish-schedule')
@@ -14986,7 +14991,6 @@ def assign_generated_slot(payload: dict, db: Session = Depends(get_db)):
         'game': _to_game_read(game, db=db, generated_slot=slot),
         'generated_slot_id': slot.id,
         'status': final_validation.get('final_validation_status') or 'SCHEDULED',
-        'schedule_quality_status': final_validation.get('schedule_quality_status'),
         'final_validation': final_validation,
         'adjustment_reason': adjustment_reason,
     }
@@ -26204,8 +26208,8 @@ def schedule_publish_diagnostics(season_id: uuid.UUID | None = None, db: Session
     if not season:
         raise HTTPException(404, 'No season found')
 
-    final_validation = _build_final_schedule_validation_result(db, season.id)
-    integrity = final_validation.get('generated_slot_integrity_diagnostics') or {}
+    final_validation = build_publish_final_validation(db, season.id)
+    blocking_failures = _final_validation_blocking_failures(final_validation)
     counts = dict(
         db.query(func.lower(GameStatus.code), func.count(Game.id))
         .join(Game, Game.game_status_id == GameStatus.id)
@@ -26216,6 +26220,14 @@ def schedule_publish_diagnostics(season_id: uuid.UUID | None = None, db: Session
     archived = int(counts.get('archived', 0))
     authoritative_rows = get_scheduled_games_for_season(db, season.id)
     total = len(authoritative_rows)
+    concise_issues: list[str] = []
+    for failure in blocking_failures[:5]:
+        code = str(failure.get('code') or 'VALIDATION_FAILURE')
+        details = failure.get('details') if isinstance(failure.get('details'), list) else []
+        concise_issues.extend(_summarize_validation_issue(detail, code) for detail in details[:3])
+        if not details:
+            concise_issues.append(str(failure.get('message') or code))
+    blocking_count = sum(int(failure.get('count') or 1) for failure in blocking_failures)
     return {
         'season_id': str(season.id),
         'season_name': season.name,
@@ -26223,25 +26235,18 @@ def schedule_publish_diagnostics(season_id: uuid.UUID | None = None, db: Session
         'total_scheduled_games': total,
         'saved_games': total,
         'archived_games': archived,
-        'final_validation_status': final_validation.get('final_validation_status'),
-        'schedule_quality_status': final_validation.get('schedule_quality_status'),
         **_schedule_publication_status(season),
-        'publish_eligibility_source': 'PUBLISH_ELIGIBILITY_FROM_FINAL_VALIDATION',
-        'publish_block_reason': ('Schedule validation could not be fully audited.' if final_validation.get('diagnostics_reporting_failure_count') else ('Actual scheduling-rule failures require review.' if final_validation.get('hard_rule_failure_count') else None)),
-        'hard_rule_failure_count': final_validation.get('hard_rule_failure_count') or final_validation.get('final_validation_failure_count'),
-        'hard_rule_failures': final_validation.get('hard_rule_failures') or [],
-        'diagnostics_reporting_failure_count': final_validation.get('diagnostics_reporting_failure_count') or 0,
-        'diagnostics_reporting_failures': final_validation.get('diagnostics_reporting_failures') or [],
-        'validation_audit_status': final_validation.get('validation_audit_status'),
-        'generated_slot_integrity_diagnostics': integrity,
-        'generated_slot_integrity_failure_count': integrity.get('generated_slot_integrity_failure_count'),
-        'scheduled_game_missing_host_location_count': sum(1 for row in (integrity.get('remaining_invalid_scheduled_games') or []) if row.get('missing_host_location')),
-        'scheduled_game_missing_field_count': sum(1 for row in (integrity.get('remaining_invalid_scheduled_games') or []) if row.get('missing_field_assignment')),
-        'scheduled_game_missing_field_type_count': sum(1 for row in (integrity.get('remaining_invalid_scheduled_games') or []) if row.get('missing_field_type')),
+        'publish_eligibility_source': 'CURRENT_SAVED_SCHEDULE_FINAL_VALIDATION',
+        'publish_validation_message': 'Schedule validation found blocking issues. Please review the listed games before publishing.' if blocking_count else 'Schedule is ready to publish.',
+        'publish_blocking_issue_count': blocking_count,
+        'publish_blocking_issues': concise_issues[:10],
     }
+
 
 @router.get('/schedule-management/quality-report', dependencies=[Depends(require_schedule_admin)])
 def schedule_quality_report(season_id: uuid.UUID | None = None, division_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, db: Session = Depends(get_db)):
+    if not ENABLE_SCHEDULE_QUALITY_REPORT:
+        raise HTTPException(status_code=404, detail='Schedule Quality Report is disabled.')
     try:
         if season_id:
             season = db.query(Season).filter(Season.id == season_id).first()
@@ -27136,7 +27141,7 @@ def export_schedule_management_csv(date: date | None = None, division_id: uuid.U
         w.writerow(_schedule_export_row_values(g, slot, fi, host, home, away, div, status, db, include_admin_columns=include_admin_columns))
 
     # Normal schedule export intentionally contains only authoritative saved game rows.
-    # Diagnostics and hard-rule issues remain available from the quality report endpoints/exports.
+    # Validation issues are handled by publish-time checks and are not exported as report rows.
     export_validation_warnings: list[dict[str, object]] = []
 
     if export_validation_warnings:

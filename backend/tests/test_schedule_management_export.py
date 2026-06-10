@@ -98,6 +98,19 @@ class ScheduleManagementExportTest(unittest.TestCase):
             self.assertNotRegex(values[6], r'THREE_SMALL|TWO_MEDIUM|ONE_SMALL_ONE_LARGE')
 
 
+    def test_schedule_management_ui_does_not_render_or_call_quality_report(self):
+        root = __import__('pathlib').Path(__file__).parents[2]
+        schedule_management = (root / 'frontend' / 'src' / 'app' / '(dashboard)' / 'admin' / 'schedule-management' / 'page.tsx').read_text()
+        manual_builder = (root / 'frontend' / 'src' / 'app' / '(dashboard)' / 'admin' / 'manual-schedule-builder' / 'page.tsx').read_text()
+        combined = schedule_management + manual_builder
+
+        self.assertNotIn('Schedule Quality Report', combined)
+        self.assertNotIn('/schedule-management/quality-report', combined)
+        self.assertNotIn('Export Quality Report', combined)
+        self.assertNotIn('Download full diagnostics JSON', combined)
+        self.assertNotIn('Safe compact diagnostics preview', combined)
+
+
     def test_normal_export_rows_are_games_only_not_diagnostics(self):
         values = _schedule_export_row_values(
             SimpleNamespace(game_date=date(2026, 8, 9), kickoff_time=time(9, 0)),
