@@ -90,7 +90,7 @@ export default function PublicTournamentsPage() {
           <div className='flex flex-wrap gap-2 text-sm'>
             {bracket.divisions.map((division) => <a key={division.id} className='rounded border px-2 py-1 hover:bg-slate-50' href={`#division-${division.id}`}>{division.division_group} {division.division_name}</a>)}
           </div>
-          <TournamentBracket divisions={bracket.divisions} publicView />
+          <TournamentBracket divisions={bracket.divisions} publicView tournamentTitle={bracket.name} />
         </section>
       )}
     </main>
