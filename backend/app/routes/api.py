@@ -1463,11 +1463,21 @@ def _build_final_schedule_validation_result(
     team_time_conflicts: list[dict[str, object]] = []
     field_time_conflicts: list[dict[str, object]] = []
     generated_slot_integrity_failures: list[dict[str, object]] = list(generated_slot_integrity.get('remaining_invalid_scheduled_games') or [])
+    saved_missing_field_failures: list[dict[str, object]] = []
     overflow_host_ids_used: set[str] = set()
 
     for g, slot, fi, host, home, away, div, _org, _status in rows:
         game_id = str(g.id)
         field_type = getattr(slot, 'field_type', None) or getattr(fi, 'field_type', None)
+        if not fi or not getattr(g, 'field_instance_id', None) or getattr(g, 'missing_field_assignment', False) or getattr(g, 'field_assignment_status', None) == 'MISSING_FIELD':
+            saved_missing_field_failures.append({
+                **_final_validation_game_detail(g, slot, fi, host, home, away, div, failure_code='SCHEDULED_GAME_MISSING_FIELD', failure_category='game', specific_reason='Game is missing a field assignment because the assigned field was deleted.'),
+                'missing_field_assignment': True,
+                'needs_schedule_review': bool(getattr(g, 'needs_schedule_review', False)),
+                'field_deleted_from_game': bool(getattr(g, 'field_deleted_from_game', False)),
+                'previous_field_id': str(getattr(g, 'previous_field_id', None)) if getattr(g, 'previous_field_id', None) else None,
+                'previous_field_name': getattr(g, 'previous_field_name', None),
+            })
         if field_type and div and _normalize_field_size(field_type) != _required_field_type_for_division(div):
             field_type_mismatches.append({
                 **_final_validation_game_detail(g, slot, fi, host, home, away, div, failure_code='FIELD_TYPE_MISMATCH', failure_category='game', specific_reason='Scheduled game field type does not match division required field layout type.'),
@@ -1497,7 +1507,7 @@ def _build_final_schedule_validation_result(
                 team_time_conflicts.append({**detail, 'conflicting_record': team_time_seen[key]})
             else:
                 team_time_seen[key] = detail
-        if g.game_date and g.kickoff_time:
+        if g.game_date and g.kickoff_time and (getattr(slot, 'field_instance_id', None) or g.field_instance_id):
             field_key = (getattr(slot, 'host_location_id', None) or g.host_location_id, getattr(slot, 'field_instance_id', None) or g.field_instance_id, g.game_date, g.kickoff_time)
             detail = _final_validation_game_detail(g, slot, fi, host, home, away, div, failure_code='FIELD_TIME_CONFLICT', failure_category='game', specific_reason='Field is double-booked at the same date and kickoff time.')
             if field_key in field_time_seen:
@@ -1506,10 +1516,14 @@ def _build_final_schedule_validation_result(
             else:
                 field_time_seen[field_key] = detail
 
+    if saved_missing_field_failures:
+        generated_slot_integrity_failures.extend(saved_missing_field_failures)
+        counters['generated_slot_integrity_failure_count'] = _safe_int(counters.get('generated_slot_integrity_failure_count')) + len(saved_missing_field_failures)
+
     counters['field_type_mismatch_count'] = len(field_type_mismatches)
     counters['selected_host_violation_count'] = len(selected_host_violations)
     counters['overflow_location_used_count'] = len(overflow_host_ids_used)
-    counters['generated_slot_integrity_failure_count'] = _safe_int(generated_slot_integrity.get('generated_slot_integrity_failure_count'))
+    counters['generated_slot_integrity_failure_count'] = _safe_int(counters.get('generated_slot_integrity_failure_count')) + _safe_int(generated_slot_integrity.get('generated_slot_integrity_failure_count'))
 
     regular_season_required_week_diagnostics: list[dict[str, object]] = []
     required_games_expected_count = 0
@@ -4365,6 +4379,7 @@ def _grass_field_templates_for_host(db: Session, host_location_id: uuid.UUID) ->
     fields = db.query(Field).filter(
         Field.host_location_id == host_location_id,
         Field.is_active.is_(True),
+        Field.deleted_at.is_(None),
     ).order_by(Field.name).all()
     templates: list[tuple[str, str]] = []
     for field in fields:
@@ -6694,7 +6709,7 @@ def _host_location_effective_status(db: Session) -> dict[uuid.UUID, bool]:
     }
     active_field_host_ids = {
         host_id for (host_id,) in db.query(Field.host_location_id)
-        .filter(Field.is_active.is_(True))
+        .filter(Field.is_active.is_(True), Field.deleted_at.is_(None))
         .distinct()
         .all()
     }
@@ -10154,7 +10169,7 @@ def list_host_locations(search: str | None = None, organization_id: uuid.UUID | 
     if ensured_any:
         db.commit()
     active_area_host_ids = {host_id for (host_id,) in db.query(PhysicalFieldArea.host_location_id).filter(PhysicalFieldArea.is_active.is_(True)).distinct().all()}
-    active_field_host_ids = {host_id for (host_id,) in db.query(Field.host_location_id).filter(Field.is_active.is_(True)).distinct().all()}
+    active_field_host_ids = {host_id for (host_id,) in db.query(Field.host_location_id).filter(Field.is_active.is_(True), Field.deleted_at.is_(None)).distinct().all()}
     active_config_host_ids = {host_id for (host_id,) in db.query(HostLocationConfiguration.host_location_id).filter(HostLocationConfiguration.is_active.is_(True)).distinct().all()}
     logger.info(
         'Host locations API diagnostics: role=%s user_organization_id=%s selected_organization_id=%s returned_count=%s',
@@ -10453,7 +10468,7 @@ def create_field(payload: FieldCreate, current_user: User = Depends(get_current_
 def list_fields(search: str | None = None, host_location_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, page: int = 1, page_size: int = 20, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     role_name = normalize_role_name(current_user.role.name)
     selected_organization_id = organization_id
-    q = db.query(Field).join(Field.host_location)
+    q = db.query(Field).join(Field.host_location).filter(Field.deleted_at.is_(None))
     if is_community_admin(current_user):
         selected_organization_id = current_user.organization_id
         q = q.filter(HostLocation.organization_id == current_user.organization_id)
@@ -10487,12 +10502,136 @@ def upd_field(item_id: uuid.UUID, payload: FieldCreate, current_user: User = Dep
     for k, v in {**payload.model_dump(), 'layout_type': _normalize_field_size(payload.layout_type)}.items(): setattr(x, k, v)
     db.commit(); db.refresh(x); return x
 
+@router.get('/fields/{item_id}/delete-impact', dependencies=[Depends(get_current_user)])
+def get_field_delete_impact(item_id: uuid.UUID, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    x = db.query(Field).filter(Field.id == item_id, Field.deleted_at.is_(None)).first()
+    if not x: raise HTTPException(404, 'Field not found')
+    _field_delete_allowed(current_user, x.host_location)
+    return _field_delete_response(x, x.host_location, _field_delete_impact_counts(db, x))
+
 @router.delete('/fields/{item_id}', dependencies=[Depends(get_current_user)])
 def del_field(item_id: uuid.UUID, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    x = db.query(Field).filter(Field.id == item_id).first()
+    x = db.query(Field).filter(Field.id == item_id, Field.deleted_at.is_(None)).first()
     if not x: raise HTTPException(404, 'Field not found')
-    enforce_organization_scope(x.host_location.organization_id, current_user)
-    db.delete(x); db.commit(); return {'ok': True}
+    host_location = x.host_location
+    _field_delete_allowed(current_user, host_location)
+    deleted_at = datetime.now(timezone.utc)
+    counts = _field_delete_impact_counts(db, x)
+    instance_ids = list(counts.get('affected_field_instance_ids') or [])
+    affected_game_ids = [uuid.UUID(str(game_id)) for game_id in (counts.get('affected_game_ids') or [])]
+    try:
+        if instance_ids:
+            db.query(GameSlot).filter(GameSlot.field_instance_id.in_(instance_ids), GameSlot.assigned_game_id.is_(None)).delete(synchronize_session=False)
+            assigned_slots = db.query(GameSlot).filter(GameSlot.field_instance_id.in_(instance_ids), GameSlot.assigned_game_id.isnot(None)).all()
+            for slot in assigned_slots:
+                slot.status = 'OPEN'
+                slot.assigned_game_id = None
+            db.query(FieldInstance).filter(FieldInstance.id.in_(instance_ids)).update({FieldInstance.is_active: False}, synchronize_session=False)
+        future_availability = db.query(HostingAvailability).filter(
+            HostingAvailability.field_id == x.id,
+            HostingAvailability.available_date >= date.today(),
+        ).all()
+        for availability in future_availability:
+            availability.active = False
+            availability.is_available = False
+            availability.notes = '; '.join(part for part in [availability.notes, f'Field deleted on {deleted_at.date().isoformat()} and removed from future hosting availability.'] if part)
+        affected_games = db.query(Game).filter(Game.id.in_(affected_game_ids)).all() if affected_game_ids else []
+        for game in affected_games:
+            previous_field_instance_id = game.field_instance_id
+            previous_field_name = None
+            if previous_field_instance_id:
+                previous_instance = db.get(FieldInstance, previous_field_instance_id)
+                previous_field_name = getattr(previous_instance, 'field_name', None)
+            game.previous_field_id = previous_field_instance_id or x.id
+            game.previous_field_name = previous_field_name or x.name
+            game.field_id = None
+            game.field_instance_id = None
+            game.missing_field_assignment = True
+            game.needs_schedule_review = True
+            game.field_deleted_from_game = True
+            game.field_deleted_at = deleted_at
+            game.field_assignment_status = 'MISSING_FIELD'
+            game.manual_updated_by_user_id = current_user.id
+            game.manual_updated_at = deleted_at
+            if not game.original_game_snapshot:
+                game.original_game_snapshot = json.dumps(_game_snapshot(game), sort_keys=True)
+            db.add(ScheduleChangeLog(
+                game_id=game.id,
+                changed_by_user_id=current_user.id,
+                changed_at=deleted_at,
+                field_changed='FIELD_DELETED',
+                old_value=json.dumps({'field_id': str(x.id), 'field_instance_id': str(previous_field_instance_id) if previous_field_instance_id else None, 'field_name': previous_field_name or x.name}, sort_keys=True),
+                new_value=json.dumps({'field_id': None, 'field_instance_id': None, 'field_assignment_status': 'MISSING_FIELD'}, sort_keys=True),
+                warning_override=False,
+                warnings='Game is missing a field assignment because the assigned field was deleted.',
+                notes=f'FIELD_DELETED field_id={x.id} host_location_id={host_location.id} community_id={host_location.organization_id}',
+            ))
+        x.is_active = False
+        x.deleted_at = deleted_at
+        x.deleted_by_user_id = current_user.id
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception('field_delete_failed field_id=%s user_id=%s', item_id, current_user.id)
+        raise HTTPException(status_code=500, detail='Field delete failed and was rolled back.')
+    db.refresh(x)
+    return _field_delete_response(x, host_location, counts)
+
+
+def _field_delete_allowed(current_user: User, host_location: HostLocation) -> None:
+    if is_scheduling_admin(current_user):
+        return
+    if is_community_admin(current_user) and current_user.organization_id and host_location.organization_id == current_user.organization_id:
+        return
+    raise HTTPException(status_code=403, detail='Insufficient role')
+
+
+def _field_delete_matching_instances_query(db: Session, field: Field):
+    normalized_type = _normalize_field_size(field.layout_type)
+    query = db.query(FieldInstance).filter(
+        FieldInstance.host_location_id == field.host_location_id,
+        FieldInstance.field_name == field.name,
+    )
+    if normalized_type:
+        query = query.filter(FieldInstance.field_type == normalized_type)
+    return query
+
+
+def _field_delete_impact_counts(db: Session, field: Field) -> dict[str, object]:
+    instance_ids = [row[0] for row in _field_delete_matching_instances_query(db, field).with_entities(FieldInstance.id).all()]
+    game_assignment_filters = [Game.field_id == field.id]
+    if instance_ids:
+        game_assignment_filters.append(Game.field_instance_id.in_(instance_ids))
+    scheduled_game_ids = [row[0] for row in db.query(Game.id).filter(or_(*game_assignment_filters)).all()]
+    generated_slot_count = db.query(GameSlot.id).filter(GameSlot.field_instance_id.in_(instance_ids)).count() if instance_ids else 0
+    hosting_availability_count = db.query(HostingAvailability.id).filter(
+        HostingAvailability.field_id == field.id,
+        HostingAvailability.available_date >= date.today(),
+    ).count()
+    return {
+        'affected_scheduled_games_count': len(scheduled_game_ids),
+        'affected_game_ids': [str(game_id) for game_id in scheduled_game_ids],
+        'affected_generated_slots_count': generated_slot_count,
+        'affected_hosting_availability_count': hosting_availability_count,
+        'affected_field_instance_ids': instance_ids,
+    }
+
+
+def _field_delete_response(field: Field, host_location: HostLocation, counts: dict[str, object]) -> dict[str, object]:
+    community = host_location.organization
+    affected_scheduled_games_count = int(counts.get('affected_scheduled_games_count') or 0)
+    return {
+        'ok': True,
+        'deleted_field_id': str(field.id),
+        'deleted_field_name': field.name,
+        'host_location': {'id': str(host_location.id), 'name': host_location.name},
+        'community': {'id': str(community.id), 'name': community.name} if community else None,
+        'affected_scheduled_games_count': affected_scheduled_games_count,
+        'affected_generated_slots_count': int(counts.get('affected_generated_slots_count') or 0),
+        'affected_hosting_availability_count': int(counts.get('affected_hosting_availability_count') or 0),
+        'affected_game_ids': counts.get('affected_game_ids') or [],
+        'message': f'Field deleted. {affected_scheduled_games_count} scheduled game(s) were flagged as missing a field assignment.',
+    }
 
 def _force_community_admin_availability_organization(payload, current_user: User) -> None:
     if not is_community_admin(current_user):
@@ -10540,7 +10679,7 @@ def _resolve_availability_host_and_validate(payload, current_user: User, db: Ses
                 raise HTTPException(400, 'Grass field availability does not use turf layout selection')
     elif payload.field_id:
         field = db.query(Field).join(Field.host_location).filter(Field.id == payload.field_id).first()
-        if not field: raise HTTPException(400, 'Invalid field')
+        if not field or getattr(field, 'deleted_at', None): raise HTTPException(400, 'Invalid field')
         host = field.host_location
         enforce_organization_scope(host.organization_id, current_user)
         if (host.surface_type or 'GRASS_FIELD') != 'GRASS_FIELD':
@@ -10564,8 +10703,8 @@ def _resolve_availability_host_and_validate(payload, current_user: User, db: Ses
         raise HTTPException(400, 'host_location_id, field_id, or physical_field_area_id is required')
 
     if payload.field_id:
-        selected_field = field or db.query(Field).join(Field.host_location).filter(Field.id == payload.field_id).first()
-        if not selected_field:
+        selected_field = field or db.query(Field).join(Field.host_location).filter(Field.id == payload.field_id, Field.deleted_at.is_(None)).first()
+        if not selected_field or getattr(selected_field, 'deleted_at', None):
             raise HTTPException(400, 'Invalid field')
         enforce_organization_scope(selected_field.host_location.organization_id, current_user)
         if selected_field.host_location.organization_id != host.organization_id:
@@ -10939,6 +11078,7 @@ def list_saved_hosting_availability(season_id: uuid.UUID | None = None, organiza
     field_q = db.query(HostingAvailability).join(HostingAvailability.field).join(Field.host_location).filter(
         HostingAvailability.is_available.is_(True),
         HostingAvailability.field_id.is_not(None),
+        Field.deleted_at.is_(None),
     )
     if season_id:
         field_q = field_q.filter(HostingAvailability.season_id == season_id)
@@ -26258,6 +26398,8 @@ def _field_export_display_label(slot: GameSlot | None, field_instance: FieldInst
     if _is_turf_stadium_display_context(slot, field_instance):
         raw = (_canonical_turf_field_export_label(db, slot, field_instance) if db is not None and slot else _turf_field_export_label(slot, field_instance))
         return _standard_turf_field_slot_display_label(raw, field_type)
+    if not field_instance and not slot:
+        return 'Field Not Assigned'
     raw = getattr(field_instance, 'field_name', None)
     if not raw and slot and getattr(slot, 'field_instance', None):
         raw = getattr(slot.field_instance, 'field_name', None)
@@ -26816,6 +26958,13 @@ def schedule_management_games(season_id: uuid.UUID | None = None, date: date | N
             'manual_updated_by_name': g.manual_updated_by.full_name if getattr(g, 'manual_updated_by', None) else None,
             'public_notes': getattr(g, 'public_notes', None),
             'internal_admin_notes': getattr(g, 'internal_admin_notes', None),
+            'missing_field_assignment': bool(getattr(g, 'missing_field_assignment', False) or not getattr(g, 'field_instance_id', None)),
+            'needs_schedule_review': bool(getattr(g, 'needs_schedule_review', False)),
+            'field_deleted_from_game': bool(getattr(g, 'field_deleted_from_game', False)),
+            'field_assignment_status': getattr(g, 'field_assignment_status', None),
+            'previous_field_id': str(getattr(g, 'previous_field_id', None)) if getattr(g, 'previous_field_id', None) else None,
+            'previous_field_name': getattr(g, 'previous_field_name', None),
+            'field_deleted_at': g.field_deleted_at.isoformat() if getattr(g, 'field_deleted_at', None) else None,
         })
     return {'items': items}
 
@@ -27238,6 +27387,11 @@ def _apply_manual_game_edit(db: Session, game: Game, payload: ManualGameEditRequ
     game.away_team_id = payload.away_team_id
     game.host_location_id = payload.host_location_id
     game.field_instance_id = payload.field_instance_id
+    if payload.field_instance_id:
+        game.missing_field_assignment = False
+        game.needs_schedule_review = False
+        game.field_deleted_from_game = False
+        game.field_assignment_status = None
     game.game_status_id = payload.game_status_id or game.game_status_id
     game.game_date = payload.game_date
     game.kickoff_time = payload.kickoff_time
