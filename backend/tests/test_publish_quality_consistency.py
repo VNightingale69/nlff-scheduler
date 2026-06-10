@@ -6,7 +6,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import Base
-from app.models import Division, FieldInstance, Game, GameSlot, GameStatus, HostLocation, Organization, Season, Team, Week
+from app.models import Division, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, Organization, Season, Team, Week
 from app.routes.api import _build_final_schedule_validation_result, _build_global_doubleheader_validation, _raise_if_single_doubleheader_manual_move, _run_generated_slot_integrity_validation_and_repair, _run_global_doubleheader_repair, build_publish_final_validation, build_schedule_quality_report, publish_schedule
 
 
@@ -267,6 +267,102 @@ class PublishQualityConsistencyTest(unittest.TestCase):
 
         self.assertEqual(ctx.exception.status_code, 400)
         self.assertEqual(ctx.exception.detail['error'], 'DOUBLEHEADER_PAIR_SPLIT_MOVE_REJECTED')
+
+
+    def test_publish_validation_ignores_stale_generated_slot_mismatch_for_current_saved_game(self):
+        self.db.query(Game).delete()
+        host = HostLocation(id=uuid.uuid4(), organization_id=self.org.id, name='Current Host', is_active=True)
+        self.db.add(host)
+        current_field = FieldInstance(
+            id=uuid.uuid4(), host_location_id=host.id, hosting_availability_id=uuid.uuid4(),
+            instance_date=self.week.start_date, field_name='Small Field 1', field_type='SMALL', is_active=True,
+        )
+        stale_field = FieldInstance(
+            id=uuid.uuid4(), host_location_id=host.id, hosting_availability_id=uuid.uuid4(),
+            instance_date=self.week.start_date, field_name='Old Wave Field', field_type='LARGE', is_active=True,
+        )
+        game = Game(
+            id=uuid.uuid4(), season_id=self.season.id, week_id=self.week.id,
+            home_team_id=self.team_a.id, away_team_id=self.team_b.id, host_location_id=host.id,
+            field_instance_id=current_field.id, game_status_id=self.status.id,
+            game_date=self.week.start_date, kickoff_time=time(10, 0),
+        )
+        stale_slot = GameSlot(
+            id=uuid.uuid4(), season_id=self.season.id, week_id=self.week.id,
+            field_instance_id=stale_field.id, host_location_id=host.id,
+            slot_date=self.week.start_date, start_time=time(11, 0), end_time=time(12, 0),
+            field_type='LARGE', status='ASSIGNED', assigned_game_id=game.id,
+        )
+        self.db.add_all([current_field, stale_field, game, stale_slot])
+        self.db.commit()
+
+        validation = build_publish_final_validation(self.db, self.season.id)
+
+        self.assertEqual(validation['final_validation_status'], 'COMPLETE')
+        self.assertTrue(validation['current_saved_games_only'])
+        self.assertEqual(validation['generated_slot_integrity_failure_count'], 0)
+        self.assertFalse(any(failure['code'] == 'GENERATED_SLOT_INTEGRITY_FAILURE' for failure in validation['hard_rule_failures']))
+        self.assertEqual(validation['final_validation_games_checked_count'], 1)
+
+    def test_publish_validation_detects_current_duplicate_exact_field_slot(self):
+        self.db.query(Game).delete()
+        host = HostLocation(id=uuid.uuid4(), organization_id=self.org.id, name='Current Host', is_active=True)
+        field = FieldInstance(
+            id=uuid.uuid4(), host_location_id=host.id, hosting_availability_id=uuid.uuid4(),
+            instance_date=self.week.start_date, field_name='Small Field 1', field_type='SMALL', is_active=True,
+        )
+        team_c = Team(id=uuid.uuid4(), organization_id=self.org.id, division_id=self.division.id, name='C', is_active=True)
+        team_d = Team(id=uuid.uuid4(), organization_id=self.org.id, division_id=self.division.id, name='D', is_active=True)
+        self.db.add_all([host, field, team_c, team_d])
+        for home, away in ((self.team_a, self.team_b), (team_c, team_d)):
+            self.db.add(Game(
+                id=uuid.uuid4(), season_id=self.season.id, week_id=self.week.id,
+                home_team_id=home.id, away_team_id=away.id, host_location_id=host.id,
+                field_instance_id=field.id, game_status_id=self.status.id,
+                game_date=self.week.start_date, kickoff_time=time(10, 0),
+            ))
+        self.db.commit()
+
+        validation = build_publish_final_validation(self.db, self.season.id)
+
+        self.assertEqual(validation['final_validation_status'], 'VALIDATION_FAILED')
+        self.assertTrue(any(failure['code'] == 'FIELD_TIME_CONFLICT' for failure in validation['hard_rule_failures']))
+
+    def test_publish_validation_valid_and_invalid_doubleheaders_use_current_saved_games(self):
+        self.db.query(Game).delete()
+        host_a = HostLocation(id=uuid.uuid4(), organization_id=self.org.id, name='Host A', is_active=True)
+        host_b = HostLocation(id=uuid.uuid4(), organization_id=self.org.id, name='Host B', is_active=True)
+        team_c = Team(id=uuid.uuid4(), organization_id=self.org.id, division_id=self.division.id, name='C', is_active=True)
+        self.db.add_all([host_a, host_b, team_c])
+        first = self._add_scheduled_game_with_slot(self.team_b, self.team_a, time(9, 0), host_a)
+        second = self._add_scheduled_game_with_slot(team_c, self.team_a, time(10, 0), host_a)
+        self.db.commit()
+
+        valid = build_publish_final_validation(self.db, self.season.id)
+        self.assertFalse(any(str(failure['code']).startswith('DOUBLEHEADER_') for failure in valid['hard_rule_failures']))
+
+        second.host_location_id = host_b.id
+        self.db.commit()
+        invalid = build_publish_final_validation(self.db, self.season.id)
+        self.assertTrue(any(failure['code'] == 'DOUBLEHEADER_SPLIT_LOCATION' for failure in invalid['hard_rule_failures']))
+
+    def test_publish_validation_does_not_mutate_scheduled_games_or_scores(self):
+        self.db.query(Game).delete()
+        host = HostLocation(id=uuid.uuid4(), organization_id=self.org.id, name='Current Host', is_active=True)
+        self.db.add(host)
+        game = self._add_scheduled_game_with_slot(self.team_a, self.team_b, time(10, 0), host)
+        score = GameScore(id=uuid.uuid4(), game_id=game.id, home_score=7, away_score=6, score_status='APPROVED', is_published=True)
+        self.db.add(score)
+        self.db.commit()
+        before_game = (game.host_location_id, game.field_instance_id, game.game_date, game.kickoff_time)
+        before_score = (score.home_score, score.away_score, score.score_status, score.is_published)
+
+        build_publish_final_validation(self.db, self.season.id)
+        self.db.refresh(game)
+        self.db.refresh(score)
+
+        self.assertEqual((game.host_location_id, game.field_instance_id, game.game_date, game.kickoff_time), before_game)
+        self.assertEqual((score.home_score, score.away_score, score.score_status, score.is_published), before_score)
 
     def test_publish_validation_uses_current_saved_games_not_quality_report_artifact(self):
         validation = build_publish_final_validation(self.db, self.season.id)
