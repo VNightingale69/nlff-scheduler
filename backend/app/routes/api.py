@@ -25595,6 +25595,280 @@ def _mark_last_updated(score: GameScore, user: User) -> None:
 
 
 
+
+def _is_official_score(score: GameScore | None) -> bool:
+    if not score:
+        return False
+    if not bool(getattr(score, 'is_published', False)):
+        return False
+    if getattr(score, 'home_score', None) is None or getattr(score, 'away_score', None) is None:
+        return False
+    status = str(getattr(score, 'score_status', '') or '').upper()
+    if status in {SCORE_STATUS_MISSING, SCORE_STATUS_SUBMITTED, SCORE_STATUS_FLAGGED, SCORE_STATUS_CONFLICT, SCORE_STATUS_UNPUBLISHED, SCORE_STATUS_CORRECTION_PENDING}:
+        return False
+    if bool(getattr(score, 'flagged', False)) or bool(getattr(score, 'score_conflict', False)):
+        return False
+    return True
+
+
+def _standings_result_status(game: Game, score: GameScore | None, public: bool = False) -> str:
+    if _is_official_score(score):
+        return 'Played'
+    if not _game_has_started(game):
+        return 'Future Game'
+    if public:
+        return 'Missing Score'
+    status = _effective_score_status(game, score)
+    if status == SCORE_STATUS_SUBMITTED:
+        return 'Submitted Pending Approval'
+    if status == SCORE_STATUS_FLAGGED or bool(getattr(score, 'flagged', False)):
+        return 'Flagged'
+    if status == SCORE_STATUS_CONFLICT or bool(getattr(score, 'score_conflict', False)):
+        return 'Conflict'
+    if status == SCORE_STATUS_CORRECTION_PENDING:
+        return 'Correction Pending'
+    if status == SCORE_STATUS_UNPUBLISHED:
+        return 'Unpublished'
+    return 'Missing Score'
+
+
+def _empty_standings_row(team: Team, division: Division, organization: Organization | None, now: datetime) -> dict:
+    return {
+        'rank': 0,
+        'team_id': str(team.id),
+        'team_name': team.name,
+        'community_id': str(team.organization_id),
+        'community_name': getattr(organization, 'name', None) or getattr(getattr(team, 'organization', None), 'name', None) or '',
+        'division_id': str(division.id),
+        'division_name': division.name,
+        'division_group': division.division_group,
+        'wins': 0,
+        'losses': 0,
+        'ties': 0,
+        'games_played': 0,
+        'games_scheduled': 0,
+        'games_remaining': 0,
+        'games_not_played': 0,
+        'points_for': 0,
+        'points_against': 0,
+        'point_differential': 0,
+        'win_percentage': 0.0,
+        'forfeits_won': 0,
+        'forfeits_lost': 0,
+        'last_updated': now.isoformat(),
+    }
+
+
+def _standings_game_summary(row, *, public: bool, can_manage: bool, community_org_id: uuid.UUID | None = None) -> dict:
+    g, _slot, _fi, _host, home, away, div, _org, _status = row
+    score = getattr(g, 'score', None)
+    official = _is_official_score(score)
+    result_status = _standings_result_status(g, score, public=public)
+    outcome = _score_outcome(score.home_score, score.away_score, bool(getattr(score, 'home_forfeit', False)), bool(getattr(score, 'away_forfeit', False))) if official else None
+    winner = home.name if outcome == 'HOME_WIN' else away.name if outcome == 'AWAY_WIN' else 'Tie' if outcome == 'TIE' else None
+    visible_score = official or not public
+    actions = []
+    if can_manage and not public:
+        actions = ['View in Score Management', 'Edit Score', 'Approve', 'Publish', 'Unpublish', 'Resolve Conflict']
+    elif community_org_id and community_org_id in {home.organization_id, away.organization_id} and not public:
+        actions = ['Submit Score for eligible games', 'Flag Score Issue', 'View Status']
+    return {
+        'game_id': str(g.id),
+        'date': g.game_date.isoformat(),
+        'time': g.kickoff_time.isoformat(),
+        'division_id': str(div.id),
+        'division_name': div.name,
+        'division_group': div.division_group,
+        'home_team_id': str(home.id),
+        'home_team': home.name,
+        'away_team_id': str(away.id),
+        'away_team': away.name,
+        'home_score': ('F' if bool(getattr(score, 'home_forfeit', False)) else getattr(score, 'home_score', None)) if visible_score and score else None,
+        'away_score': ('F' if bool(getattr(score, 'away_forfeit', False)) else getattr(score, 'away_score', None)) if visible_score and score else None,
+        'winner': winner,
+        'score_status': (SCORE_STATUS_PUBLISHED if official else ('Not Published' if public else _effective_score_status(g, score))),
+        'published_status': 'Published' if official else 'Unpublished',
+        'result_status': result_status,
+        'is_official': official,
+        'is_published': bool(getattr(score, 'is_published', False)) if score else False,
+        'actions': actions,
+    }
+
+
+def _build_standings_payload(db: Session, *, season_id: uuid.UUID | None = None, division_id: uuid.UUID | None = None, week_id: uuid.UUID | None = None, date_filter: date | None = None, organization_id: uuid.UUID | None = None, team_id: uuid.UUID | None = None, score_status: str | None = None, published: str | None = None, played: str | None = None, current_user: User | None = None, public: bool = False) -> dict:
+    role_name = normalize_role_name(getattr(getattr(current_user, 'role', None), 'name', None)) if current_user else None
+    can_manage = role_name in {ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN}
+    community_org_id = getattr(current_user, 'organization_id', None) if role_name == ROLE_COMMUNITY_ADMIN else None
+    if not public and not current_user:
+        raise HTTPException(401, 'Authentication required')
+    if not public and role_name not in {ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN, ROLE_COMMUNITY_ADMIN}:
+        raise HTTPException(403, 'Not authorized to view standings.')
+    filters = {'season_id': season_id, 'division_id': division_id, 'week_id': week_id, 'date': date_filter}
+    if can_manage:
+        filters['organization_id'] = organization_id
+    elif community_org_id:
+        filters['organization_id'] = community_org_id
+    elif organization_id:
+        filters['organization_id'] = organization_id
+    rows = _score_rows(db, filters, organization_filter_any_team=True)
+    if team_id:
+        rows = [row for row in rows if row[4].id == team_id or row[5].id == team_id]
+    if public:
+        # Public result summaries never expose unpublished/internal status details.
+        pass
+    elif score_status:
+        rows = [row for row in rows if _effective_score_status(row[0], getattr(row[0], 'score', None)) == score_status.strip().upper()]
+    if published:
+        want = published.strip().lower() in {'true', '1', 'published'}
+        rows = [row for row in rows if _is_official_score(getattr(row[0], 'score', None)) == want]
+    result_rows = [_standings_game_summary(row, public=public, can_manage=can_manage, community_org_id=community_org_id) for row in rows]
+    if played:
+        want_played = played.strip().lower() in {'true', '1', 'played'}
+        result_rows = [row for row in result_rows if (row['result_status'] == 'Played') == want_played]
+    now = _score_now()
+    division_ids = {row[6].id for row in rows}
+    if division_id:
+        division_ids.add(division_id)
+    if not rows and not division_id:
+        division_query = db.query(Division).filter(Division.is_active.is_(True))
+        if community_org_id:
+            division_query = division_query.join(Team, Team.division_id == Division.id).filter(Team.organization_id == community_org_id, Team.is_active.is_(True))
+        division_ids = {item.id for item in division_query.all()}
+    teams_query = db.query(Team, Organization, Division).join(Organization, Team.organization_id == Organization.id).join(Division, Team.division_id == Division.id).filter(Team.is_active.is_(True), Division.is_active.is_(True))
+    if division_ids:
+        teams_query = teams_query.filter(Team.division_id.in_(division_ids))
+    if community_org_id and not division_ids:
+        teams_query = teams_query.filter(Team.organization_id == community_org_id)
+    teams = teams_query.order_by(Division.sort_order, Division.name, Organization.name, Team.name).all()
+    standings: dict[uuid.UUID, dict] = {}
+    divisions: dict[uuid.UUID, dict] = {}
+    for team, org, div in teams:
+        divisions.setdefault(div.id, {'id': str(div.id), 'name': div.name, 'division_group': div.division_group, 'sort_order': div.sort_order})
+        standings[team.id] = _empty_standings_row(team, div, org, now)
+    summary_by_division = {div_id: {'scheduled': 0, 'official_played': 0, 'missing': 0, 'pending_approval': 0, 'flagged_conflict': 0, 'future': 0, 'unpublished': 0, 'not_played': 0} for div_id in divisions}
+    for source_row in rows:
+        g, _slot, _fi, _host, home, away, div, _org, _status = source_row
+        divisions.setdefault(div.id, {'id': str(div.id), 'name': div.name, 'division_group': div.division_group, 'sort_order': div.sort_order})
+        summary = summary_by_division.setdefault(div.id, {'scheduled': 0, 'official_played': 0, 'missing': 0, 'pending_approval': 0, 'flagged_conflict': 0, 'future': 0, 'unpublished': 0, 'not_played': 0})
+        summary['scheduled'] += 1
+        for team in (home, away):
+            if team.id in standings:
+                standings[team.id]['games_scheduled'] += 1
+        score = getattr(g, 'score', None)
+        official = _is_official_score(score)
+        result_status = _standings_result_status(g, score, public=False)
+        if official:
+            summary['official_played'] += 1
+        elif result_status == 'Future Game':
+            summary['future'] += 1
+            summary['not_played'] += 1
+        elif result_status == 'Submitted Pending Approval':
+            summary['pending_approval'] += 1
+            summary['not_played'] += 1
+        elif result_status in {'Flagged', 'Conflict', 'Correction Pending'}:
+            summary['flagged_conflict'] += 1
+            summary['not_played'] += 1
+        elif result_status == 'Unpublished':
+            summary['unpublished'] += 1
+            summary['not_played'] += 1
+        else:
+            summary['missing'] += 1
+            summary['not_played'] += 1
+        if not official:
+            continue
+        home_row = standings.get(home.id)
+        away_row = standings.get(away.id)
+        if not home_row or not away_row:
+            continue
+        home_score = int(score.home_score or 0)
+        away_score = int(score.away_score or 0)
+        outcome = _score_outcome(home_score, away_score, bool(getattr(score, 'home_forfeit', False)), bool(getattr(score, 'away_forfeit', False)))
+        for row, pf, pa in ((home_row, home_score, away_score), (away_row, away_score, home_score)):
+            row['games_played'] += 1
+            row['points_for'] += pf
+            row['points_against'] += pa
+        if outcome == 'HOME_WIN':
+            home_row['wins'] += 1; away_row['losses'] += 1
+            if bool(getattr(score, 'away_forfeit', False)):
+                home_row['forfeits_won'] += 1; away_row['forfeits_lost'] += 1
+        elif outcome == 'AWAY_WIN':
+            away_row['wins'] += 1; home_row['losses'] += 1
+            if bool(getattr(score, 'home_forfeit', False)):
+                away_row['forfeits_won'] += 1; home_row['forfeits_lost'] += 1
+        else:
+            home_row['ties'] += 1; away_row['ties'] += 1
+    standings_by_division: dict[uuid.UUID, list[dict]] = {}
+    for row in standings.values():
+        row['games_remaining'] = max(int(row['games_scheduled']) - int(row['games_played']), 0)
+        row['games_not_played'] = row['games_remaining']
+        row['point_differential'] = int(row['points_for']) - int(row['points_against'])
+        decisions = int(row['wins']) + int(row['losses']) + int(row['ties'])
+        row['win_percentage'] = round((int(row['wins']) + 0.5 * int(row['ties'])) / decisions, 3) if decisions else 0.0
+        standings_by_division.setdefault(uuid.UUID(row['division_id']), []).append(row)
+    division_payloads = []
+    for div_id, div_meta in sorted(divisions.items(), key=lambda item: (item[1].get('sort_order') or 0, item[1].get('division_group') or '', item[1].get('name') or '')):
+        rows_for_div = standings_by_division.get(div_id, [])
+        rows_for_div.sort(key=lambda row: (-row['win_percentage'], -row['wins'], row['losses'], -row['point_differential'], row['team_name'].lower()))
+        for index, row in enumerate(rows_for_div, start=1):
+            row['rank'] = index
+        div_summary = summary_by_division.get(div_id, {'scheduled': 0, 'official_played': 0, 'missing': 0, 'pending_approval': 0, 'flagged_conflict': 0, 'future': 0, 'unpublished': 0, 'not_played': 0})
+        if public:
+            hidden_not_played = max(int(div_summary.get('not_played', 0) or 0) - int(div_summary.get('future', 0) or 0), 0)
+            div_summary = {
+                'scheduled': div_summary.get('scheduled', 0),
+                'official_played': div_summary.get('official_played', 0),
+                'missing': hidden_not_played,
+                'pending_approval': 0,
+                'flagged_conflict': 0,
+                'future': div_summary.get('future', 0),
+                'unpublished': 0,
+                'not_played': div_summary.get('not_played', 0),
+            }
+        division_payloads.append({
+            'division': div_meta,
+            'summary': div_summary,
+            'standings': rows_for_div,
+            'message': 'No published scores yet for this division.' if div_summary.get('official_played', 0) == 0 else None,
+        })
+    visible_result_rows = result_rows if not public else [row for row in result_rows if row['is_official'] or row['result_status'] == 'Future Game']
+    return {
+        'season_id': str(season_id) if season_id else None,
+        'last_calculated_at': now.isoformat(),
+        'official_score_note': 'Standings calculated from published scores only.',
+        'tie_breaker_note': 'Formal playoff tie-breakers are not implemented; standings use deterministic sorting.',
+        'divisions': division_payloads,
+        'game_results': visible_result_rows,
+        'total_missing_or_not_played': sum(item['summary'].get('not_played', 0) for item in division_payloads),
+    }
+
+
+@router.get('/standings', dependencies=[Depends(require_roles(ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
+def standings(season_id: uuid.UUID | None = None, division_id: uuid.UUID | None = None, week_id: uuid.UUID | None = None, date: date | None = None, organization_id: uuid.UUID | None = None, team_id: uuid.UUID | None = None, score_status: str | None = None, published: str | None = None, played: str | None = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return _build_standings_payload(db, season_id=season_id, division_id=division_id, week_id=week_id, date_filter=date, organization_id=organization_id, team_id=team_id, score_status=score_status, published=published, played=played, current_user=current_user)
+
+
+@router.get('/standings/divisions', dependencies=[Depends(require_roles(ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
+def standings_divisions(season_id: uuid.UUID | None = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    payload = _build_standings_payload(db, season_id=season_id, current_user=current_user)
+    return {'items': [item['division'] for item in payload['divisions']], 'total': len(payload['divisions'])}
+
+
+@router.get('/standings/results', dependencies=[Depends(require_roles(ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
+def standings_results(season_id: uuid.UUID | None = None, division_id: uuid.UUID | None = None, week_id: uuid.UUID | None = None, date: date | None = None, organization_id: uuid.UUID | None = None, team_id: uuid.UUID | None = None, score_status: str | None = None, published: str | None = None, played: str | None = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    payload = _build_standings_payload(db, season_id=season_id, division_id=division_id, week_id=week_id, date_filter=date, organization_id=organization_id, team_id=team_id, score_status=score_status, published=published, played=played, current_user=current_user)
+    return {'items': payload['game_results'], 'total': len(payload['game_results']), 'last_calculated_at': payload['last_calculated_at']}
+
+
+@router.get('/standings/{division_id}', dependencies=[Depends(require_roles(ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
+def standings_for_division(division_id: uuid.UUID, season_id: uuid.UUID | None = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return _build_standings_payload(db, season_id=season_id, division_id=division_id, current_user=current_user)
+
+
+@router.get('/public/standings')
+def public_standings(season_id: uuid.UUID | None = None, division_id: uuid.UUID | None = None, db: Session = Depends(get_db)):
+    return _build_standings_payload(db, season_id=season_id, division_id=division_id, public=True)
+
+
 @router.get('/scores/my-community', dependencies=[Depends(require_roles(ROLE_COMMUNITY_ADMIN))])
 @router.get('/community/scores', dependencies=[Depends(require_roles(ROLE_COMMUNITY_ADMIN))])
 def community_scores(week_id: uuid.UUID | None = None, division_id: uuid.UUID | None = None, team_id: uuid.UUID | None = None, host_location_id: uuid.UUID | None = None, status: str | None = None, published: str | None = None, missing: bool = False, flagged: bool = False, conflicts: bool = False, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
