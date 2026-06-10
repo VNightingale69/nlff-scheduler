@@ -200,7 +200,8 @@ class FieldCreate(BaseModel):
     notes: str | None = None
 
 class FieldRead(BaseSchema, FieldCreate):
-    pass
+    deleted_at: datetime | None = None
+    deleted_by_user_id: uuid.UUID | None = None
 
 class TeamCreate(BaseModel):
     organization_id: uuid.UUID
@@ -710,6 +711,13 @@ class GameRead(BaseSchema, GameCreate):
     host_location_id: uuid.UUID | None = None
     field_instance_name: str | None = None
     host_location_name: str | None = None
+    missing_field_assignment: bool = False
+    needs_schedule_review: bool = False
+    field_deleted_from_game: bool = False
+    previous_field_id: uuid.UUID | None = None
+    previous_field_name: str | None = None
+    field_deleted_at: datetime | None = None
+    field_assignment_status: str | None = None
 
 
 class ManualGameEditRequest(BaseModel):

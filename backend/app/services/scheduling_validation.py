@@ -93,7 +93,7 @@ def validate_game(db: Session, payload: GameCreate, game_id: uuid.UUID | None = 
 
     home_team = db.query(Team).filter(Team.id == payload.home_team_id).first()
     away_team = db.query(Team).filter(Team.id == payload.away_team_id).first()
-    field = db.query(Field).filter(Field.id == payload.field_id).first() if payload.field_id else None
+    field = db.query(Field).filter(Field.id == payload.field_id, Field.deleted_at.is_(None)).first() if payload.field_id else None
     field_instance = db.query(FieldInstance).filter(FieldInstance.id == payload.field_instance_id).first() if payload.field_instance_id else None
     host = None
     if payload.host_location_id:

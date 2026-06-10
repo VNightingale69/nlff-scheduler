@@ -234,10 +234,42 @@ export default function FieldAreaManager() {
   const deactivateField = async (field: any) => {
     try {
       await apiFetch(`/fields/${field.id}`, { method: 'PUT', body: JSON.stringify({ ...field, layout_type: field.layout_type, is_active: false }) }, token);
-      setType('ok'); setMessage('Field deactivated. Inactive fields are not available for slot generation.');
+      setType('ok'); setMessage('Field deactivated. Existing scheduled games keep this field, but inactive fields are not available for future slot generation.');
       await loadOrgData(orgId, hostId);
     } catch (e: any) { setType('err'); setMessage(e.message || 'Unable to deactivate field'); }
   };
+
+  const deleteField = async (field: any) => {
+    try {
+      const impact = await apiFetch(`/fields/${field.id}/delete-impact`, {}, token) as any;
+      const scheduledCount = Number(impact?.affected_scheduled_games_count || 0);
+      const availabilityCount = Number(impact?.affected_hosting_availability_count || 0);
+      const generatedSlotCount = Number(impact?.affected_generated_slots_count || 0);
+      const communityName = impact?.community?.name || orgNameById[selectedHost?.organization_id] || 'Unknown community';
+      const hostName = impact?.host_location?.name || selectedHost?.name || 'Unknown host location';
+      const warning = scheduledCount > 0
+        ? `This field is assigned to ${scheduledCount} scheduled game(s). Deleting it will remove the field from those games and flag them as missing a field assignment. Continue?`
+        : 'Delete this field? This will remove the field from active use. Any scheduled games currently assigned to this field will remain scheduled but will be flagged as missing a field assignment and must be reviewed.';
+      const details = [
+        warning,
+        '',
+        `Field: ${field.name}`,
+        `Host location: ${hostName}`,
+        `Community: ${communityName}`,
+        `Scheduled games affected: ${scheduledCount}`,
+        `Future hosting availability records affected: ${availabilityCount}`,
+        `Generated slots affected: ${generatedSlotCount}`,
+      ].join('\n');
+      if (!window.confirm(details)) return;
+      const response = await apiFetch(`/fields/${field.id}`, { method: 'DELETE' }, token) as any;
+      const affected = Number(response?.affected_scheduled_games_count ?? scheduledCount);
+      setType('ok');
+      setMessage(`Field deleted. ${affected} scheduled game(s) were flagged as missing a field assignment.${affected ? ' Review affected games in Manual Schedule Builder using the Missing Field filter.' : ''}`);
+      if (editingFieldId === field.id) resetFieldForm();
+      await loadOrgData(orgId, hostId);
+    } catch (e: any) { setType('err'); setMessage(e.message || 'Unable to delete field'); }
+  };
+
 
   const hostPayload = (host: any, surfaceType: string, fieldSize?: string) => ({
     organization_id: host.organization_id,
@@ -387,11 +419,11 @@ export default function FieldAreaManager() {
       <p className='mt-3 rounded bg-emerald-50 p-3 text-sm text-emerald-900'>This turf location supports the four approved league turf configurations. During scheduling, each one-hour wave will be assigned one approved configuration code. Unused field slots are allowed when there are not enough compatible games to fill the selected layout.</p>
     </section>}
 
-    {!isCommunityAdmin && selectedHost?.surface_type === GRASS_FIELD && <section className='rounded border p-4'>
+    {selectedHost?.surface_type === GRASS_FIELD && <section className='rounded border p-4'>
       <div className='flex flex-wrap items-center justify-between gap-2'>
         <div>
           <h2 className='font-semibold'>Manual Grass Field Setup</h2>
-          <p className='text-sm text-slate-600'>Grass field locations use active configured fields for slot generation and must have at least one active field before hosting availability can use them.</p>
+          <p className='text-sm text-slate-600'>Grass field locations use active configured fields for slot generation and must have at least one active field before hosting availability can use them. Deactivate keeps existing scheduled assignments; Delete removes the field from active use and flags affected scheduled games for Scheduling Administrator review.</p>
         </div>
         <button className='rounded border px-3 py-2 text-sm' onClick={resetFieldForm}>Add Field</button>
       </div>
@@ -407,7 +439,7 @@ export default function FieldAreaManager() {
       <div className='mt-4 overflow-x-auto'>
         <table className='w-full text-sm'>
           <thead><tr><th className='border p-2 text-left'>Field Name</th><th className='border p-2 text-left'>Field Type</th><th className='border p-2 text-left'>Active</th><th className='border p-2 text-left'>Actions</th></tr></thead>
-          <tbody>{fieldLoadError ? <tr><td className='border p-3 text-center text-rose-700' colSpan={4}>Field configurations failed to load: {fieldLoadError}</td></tr> : selectedHostFields.length ? selectedHostFields.map((field: any) => <tr key={field.id}><td className='border p-2'>{field.name}</td><td className='border p-2'>{fieldTypeLabel(field.layout_type)}</td><td className='border p-2'>{field.is_active ? 'Active' : 'Inactive'}</td><td className='border p-2'><div className='flex gap-2'><button className='rounded border px-2 py-1 text-xs' onClick={() => { setFieldForm({ name: field.name || '', layout_type: field.layout_type || '', is_active: Boolean(field.is_active) }); setEditingFieldId(field.id); }}>Edit Field</button><button className='rounded border px-2 py-1 text-xs' disabled={!field.is_active} onClick={() => deactivateField(field)}>Deactivate Field</button></div></td></tr>) : <tr><td className='border p-3 text-center text-slate-500' colSpan={4}>No fields configured.</td></tr>}</tbody>
+          <tbody>{fieldLoadError ? <tr><td className='border p-3 text-center text-rose-700' colSpan={4}>Field configurations failed to load: {fieldLoadError}</td></tr> : selectedHostFields.length ? selectedHostFields.map((field: any) => <tr key={field.id}><td className='border p-2'>{field.name}</td><td className='border p-2'>{fieldTypeLabel(field.layout_type)}</td><td className='border p-2'>{field.is_active ? 'Active' : 'Inactive'}</td><td className='border p-2'><div className='flex gap-2'><button className='rounded border px-2 py-1 text-xs' onClick={() => { setFieldForm({ name: field.name || '', layout_type: field.layout_type || '', is_active: Boolean(field.is_active) }); setEditingFieldId(field.id); }}>Edit Field</button><button className='rounded border px-2 py-1 text-xs' disabled={!field.is_active} onClick={() => deactivateField(field)}>Deactivate Field</button><button className='rounded border border-rose-700 bg-rose-600 px-2 py-1 text-xs font-semibold text-white hover:bg-rose-700' onClick={() => deleteField(field)}>Delete Field</button></div></td></tr>) : <tr><td className='border p-3 text-center text-slate-500' colSpan={4}>No fields configured.</td></tr>}</tbody>
         </table>
       </div>
       <div className='mt-3 rounded bg-slate-50 p-3 text-xs text-slate-700'>
