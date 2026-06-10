@@ -5,11 +5,12 @@ import { useSearchParams } from 'next/navigation';
 import { apiFetch } from '@/lib/api';
 import { getToken } from '@/lib/auth';
 import { formatDisplayDate, formatDisplayTime } from '@/lib/displayFormat';
+import TournamentBracket, { type TournamentBracketGame } from '@/components/TournamentBracket';
 
 type SeedTeam = { team_id: string; team_name: string; community_name: string; seed: number; included: boolean; original_standings_rank?: number | null; seed_source: string };
 type Division = { id: string; name: string; division_group: string; sort_order?: number };
 type Season = { id: string; name: string; is_active: boolean };
-type TournamentGame = { id: string; round_name: string; round_number: number; game_number: number; team_1_placeholder: string; team_2_placeholder: string; team_1_name?: string | null; team_2_name?: string | null; team_1_seed?: number | null; team_2_seed?: number | null; date?: string | null; time?: string | null; host_location_name?: string | null; field_name?: string | null; status: string; score_status: string; home_score?: number | string | null; away_score?: number | string | null; winner_team_name?: string | null; needs_review?: boolean };
+type TournamentGame = TournamentBracketGame;
 type Tournament = { id: string; name: string; status: string; is_published: boolean; divisions: { id: string; division_name: string; division_group: string; teams: SeedTeam[]; games: TournamentGame[] }[] };
 
 const divisionLabel = (division: Division) => `${division.division_group} ${division.name}`;
@@ -27,6 +28,7 @@ export default function TournamentBuilderPage() {
   const [warnings, setWarnings] = useState<Record<string, string>>({});
   const [message, setMessage] = useState('');
   const [loading, setLoading] = useState(false);
+  const [viewModes, setViewModes] = useState<Record<string, 'schedule' | 'bracket'>>({});
 
   const selectedDivisionObjects = useMemo(() => divisions.filter((division) => selectedDivisions.includes(division.id)), [divisions, selectedDivisions]);
 
@@ -48,6 +50,11 @@ export default function TournamentBuilderPage() {
   };
 
   useEffect(() => { loadOptions(); }, []);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => { loadOptions(); }, 30000);
+    return () => window.clearInterval(timer);
+  }, [token]);
 
   const toggleDivision = (divisionId: string) => {
     setSelectedDivisions((current) => current.includes(divisionId) ? current.filter((id) => id !== divisionId) : [...current, divisionId]);
@@ -137,11 +144,25 @@ export default function TournamentBuilderPage() {
     </section>)}
 
     <section className='space-y-4 rounded border bg-white p-4'>
-      <h2 className='text-xl font-semibold'>Tournament Schedule Editor</h2>
-      {tournaments.map((tournament) => <div key={tournament.id} className='space-y-3 rounded border p-3'>
-        <div className='flex flex-wrap items-center justify-between gap-2'><div><h3 className='text-lg font-semibold'>{tournament.name}</h3><p className='text-sm text-slate-600'>{tournament.status} · {tournament.is_published ? 'Published' : 'Unpublished'}</p></div><div className='flex gap-2'><button className='rounded border px-3 py-1' onClick={() => publishTournament(tournament.id, true)}>Publish Tournament</button><button className='rounded border px-3 py-1' onClick={() => publishTournament(tournament.id, false)}>Unpublish</button></div></div>
-        {tournament.divisions.map((division) => <div key={division.id} className='space-y-2'><h4 className='font-semibold'>{division.division_group} {division.division_name}</h4><div className='overflow-x-auto'><table className='min-w-full text-xs'><thead className='bg-slate-100 text-left'><tr>{['Round','Game #','Team 1 / Seed','Team 2 / Seed','Date','Time','Host Location','Field','Status','Score','Winner','Review'].map((h) => <th key={h} className='p-2'>{h}</th>)}</tr></thead><tbody>{division.games.map((game) => <tr key={game.id} className='border-t'><td className='p-2'>{game.round_name}</td><td className='p-2'>{game.game_number}</td><td className='p-2'>{game.team_1_placeholder}</td><td className='p-2'>{game.team_2_placeholder}</td><td className='p-2'>{formatDisplayDate(game.date || '')}</td><td className='p-2'>{formatDisplayTime(game.time || '')}</td><td className='p-2'>{game.host_location_name || '—'}</td><td className='p-2'>{game.field_name || '—'}</td><td className='p-2'>{game.status}</td><td className='p-2'>{game.home_score ?? '—'} - {game.away_score ?? '—'}</td><td className='p-2'>{game.winner_team_name || '—'}</td><td className='p-2'>{game.needs_review ? 'Needs review' : '—'}</td></tr>)}</tbody></table></div></div>)}
-      </div>)}
+      <h2 className='text-xl font-semibold'>Tournament Views</h2>
+      {tournaments.map((tournament) => {
+        const activeView = viewModes[tournament.id] || 'schedule';
+        return <div key={tournament.id} className='space-y-3 rounded border p-3'>
+          <div className='flex flex-wrap items-center justify-between gap-2'>
+            <div><h3 className='text-lg font-semibold'>{tournament.name}</h3><p className='text-sm text-slate-600'>{tournament.status} · {tournament.is_published ? 'Published' : 'Unpublished'}</p></div>
+            <div className='flex flex-wrap gap-2'>
+              <div className='inline-flex rounded border p-1 text-sm'>
+                <button className={`rounded px-3 py-1 ${activeView === 'schedule' ? 'bg-slate-900 text-white' : 'hover:bg-slate-50'}`} onClick={() => setViewModes((current) => ({ ...current, [tournament.id]: 'schedule' }))}>Schedule View</button>
+                <button className={`rounded px-3 py-1 ${activeView === 'bracket' ? 'bg-slate-900 text-white' : 'hover:bg-slate-50'}`} onClick={() => setViewModes((current) => ({ ...current, [tournament.id]: 'bracket' }))}>Bracket View</button>
+              </div>
+              <button className='rounded border px-3 py-1' onClick={() => loadOptions()}>Refresh</button>
+              <button className='rounded border px-3 py-1' onClick={() => publishTournament(tournament.id, true)}>Publish Tournament</button>
+              <button className='rounded border px-3 py-1' onClick={() => publishTournament(tournament.id, false)}>Unpublish</button>
+            </div>
+          </div>
+          {activeView === 'bracket' ? <TournamentBracket divisions={tournament.divisions} /> : tournament.divisions.map((division) => <div key={division.id} className='space-y-2'><h4 className='font-semibold'>{division.division_group} {division.division_name}</h4><div className='overflow-x-auto'><table className='min-w-full text-xs'><thead className='bg-slate-100 text-left'><tr>{['Round','Game #','Team 1 / Seed','Team 2 / Seed','Date','Time','Host Location','Field','Status','Score','Winner','Review'].map((h) => <th key={h} className='p-2'>{h}</th>)}</tr></thead><tbody>{division.games.map((game) => <tr key={game.id} className='border-t'><td className='p-2'>{game.round_name}</td><td className='p-2'>{game.game_number}</td><td className='p-2'>{game.team_1_placeholder}</td><td className='p-2'>{game.team_2_placeholder}</td><td className='p-2'>{formatDisplayDate(game.date || '')}</td><td className='p-2'>{formatDisplayTime(game.time || '')}</td><td className='p-2'>{game.host_location_name || '—'}</td><td className='p-2'>{game.field_name || '—'}</td><td className='p-2'>{game.status}</td><td className='p-2'>{game.home_score ?? '—'} - {game.away_score ?? '—'}</td><td className='p-2'>{game.winner_team_name || '—'}</td><td className='p-2'>{game.needs_review ? 'Needs review' : '—'}</td></tr>)}</tbody></table></div></div>)}
+        </div>;
+      })}
     </section>
   </div>;
 }
