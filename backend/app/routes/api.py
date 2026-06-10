@@ -489,6 +489,7 @@ def _final_validation_game_detail(g: Game, slot: GameSlot | None, fi: FieldInsta
         'failure_code': failure_code,
         'failure_category': failure_category,
         'game_id': str(getattr(g, 'id', '') or ''),
+        'scheduled_game_id': str(getattr(g, 'id', '') or ''),
         'season_id': str(getattr(g, 'season_id', '') or '') if getattr(g, 'season_id', None) else None,
         'week_id': str(getattr(g, 'week_id', '') or '') if getattr(g, 'week_id', None) else None,
         'game_date': _format_diagnostic_date(getattr(g, 'game_date', None)),
@@ -515,12 +516,13 @@ def _final_validation_game_detail(g: Game, slot: GameSlot | None, fi: FieldInsta
 
 
 def load_final_scheduled_games_for_validation(db: Session, season_id: uuid.UUID | str | None, filters: dict | None = None, *, refresh: bool = True):
-    """Reload the final database-backed scheduled games used by validation/reporting/export.
+    """Reload the persisted scheduled games used by validation/reporting/export.
 
-    This is the reusable source-of-truth query for final validation consumers. It
-    flushes pending ORM changes, expires stale loaded entities, and then queries
-    only active final schedule statuses from the database so mandatory repair
-    passes cannot leave validation pointed at stale preview or pre-repair rows.
+    Publish validation, Manual Schedule Builder Scheduled Games, public schedule
+    publish, and CSV export must all read the same authoritative Game row fields
+    (date/time/host/field).  Generated slots are joined only when they exactly
+    match the current saved Game assignment, so stale optimizer slot rows cannot
+    override or block the saved schedule.
     """
     if refresh:
         db.flush()
@@ -528,8 +530,7 @@ def load_final_scheduled_games_for_validation(db: Session, season_id: uuid.UUID 
     shared_filters = dict(filters or {})
     if season_id:
         shared_filters['season_id'] = season_id
-    shared_filters['final_scheduled_only'] = True
-    return _schedule_management_rows(db, shared_filters)
+    return get_saved_scheduled_game_rows_for_export(db, season_id, shared_filters)
 
 
 def _build_final_source_reconciliation(*, rows_count: int, validation_games_checked_count: int, schedule_quality_games_checked_count: int | None = None, export_games_count: int | None = None, preview_games_count: int | None = None, committed_games_count: int | None = None, run_id: object | None = None, export_source: str | None = None) -> dict[str, object]:
@@ -628,6 +629,7 @@ def _scheduled_game_integrity_detail(
     field_type = getattr(slot, 'field_type', None) or getattr(fi, 'field_type', None)
     return {
         'game_id': str(game.id),
+        'scheduled_game_id': str(game.id),
         'season_id': str(game.season_id) if game.season_id else None,
         'week_id': str(game.week_id) if game.week_id else None,
         'game_date': _format_diagnostic_date(game.game_date),
@@ -1308,6 +1310,7 @@ def _build_final_schedule_validation_result(
     export_games_count: int | None = None,
     export_source: str | None = None,
     run_id: object | None = None,
+    current_saved_games_only: bool = False,
 ) -> dict[str, object]:
     """Single source of truth for final schedule status and hard-rule counters.
 
@@ -1317,13 +1320,26 @@ def _build_final_schedule_validation_result(
     """
     counters = {key: 0 for key in FINAL_VALIDATION_COUNTER_KEYS}
     failures: list[dict[str, object]] = []
-    generated_slot_integrity = _run_generated_slot_integrity_validation_and_repair(db, season_id, repair=repair_generated_slot_integrity)
+    generated_slot_integrity = (
+        {
+            'generated_slot_integrity_check_ran': False,
+            'generated_slot_integrity_status': 'HISTORICAL_DIAGNOSTICS_IGNORED_FOR_PUBLISH',
+            'generated_slot_integrity_failure_count': 0,
+            'invalid_scheduled_game_count': 0,
+            'repaired_scheduled_game_count': 0,
+            'unscheduled_orphan_game_count': 0,
+            'remaining_invalid_scheduled_games': [],
+            'non_blocking_reason': 'Publish validation uses current saved scheduled games only; stale generated-slot diagnostics are not blocking.',
+        }
+        if current_saved_games_only
+        else _run_generated_slot_integrity_validation_and_repair(db, season_id, repair=repair_generated_slot_integrity)
+    )
     turf_pull_forward_repair = turf_pull_forward_repair_diagnostics or _default_turf_pull_forward_repair_diagnostics(
         ran=False,
         status='SKIPPED_NO_SEASON' if not season_id else 'NOT_RUN',
         reason='season_id was not provided to final validation' if not season_id else None,
     )
-    if season_id and run_turf_pull_forward_repair and turf_pull_forward_repair_diagnostics is None:
+    if season_id and run_turf_pull_forward_repair and not current_saved_games_only and turf_pull_forward_repair_diagnostics is None:
         try:
             turf_pull_forward_repair = _run_turf_pull_forward_repair(db, season_id)
             db.flush()
@@ -1347,7 +1363,7 @@ def _build_final_schedule_validation_result(
     turf_wave_source_of_truth_repair = _default_turf_wave_source_of_truth_repair(
         reason='season_id was not provided to final validation' if not season_id else None,
     )
-    if season_id:
+    if season_id and not current_saved_games_only:
         try:
             turf_wave_source_of_truth_repair = _repair_turf_wave_source_of_truth(db, season_id)
         except Exception as exc:
@@ -1497,7 +1513,7 @@ def _build_final_schedule_validation_result(
 
     regular_season_required_week_diagnostics: list[dict[str, object]] = []
     required_games_expected_count = 0
-    if season_id:
+    if season_id and not current_saved_games_only:
         missing_required_rows: list[dict[str, object]] = []
         try:
             weeks = db.query(Week).filter(Week.season_id == season_id).order_by(Week.week_number.asc()).all()
@@ -1609,15 +1625,17 @@ def _build_final_schedule_validation_result(
                 })
         failures.append(_final_validation_failure('HOST_OWNER_AS_AWAY', counters['host_owner_as_away_count'], 'A host-owning team is away at its selected owned host.', host_owner_details))
 
-    # Final validation must not reuse pre-repair hierarchy diagnostics; rebuild hard-rule diagnostics from the final database state.
-    placement_hierarchy_diagnostics = revised_hierarchy_diagnostics or {}
+    # Final validation must not reuse pre-repair hierarchy diagnostics; publish
+    # validation intentionally avoids quality-report/turf/generated-slot artifacts.
+    placement_hierarchy_diagnostics = {} if current_saved_games_only else (revised_hierarchy_diagnostics or {})
     hierarchy = {}
-    try:
-        if season_id:
-            hierarchy = _build_revised_scheduling_hierarchy_diagnostics(db, season_id)
-    except Exception as exc:
-        diagnostics_error = diagnostics_error or str(exc)
-        hierarchy = {'diagnostics_status': 'FAILED', 'diagnostics_error': str(exc)}
+    if not current_saved_games_only:
+        try:
+            if season_id:
+                hierarchy = _build_revised_scheduling_hierarchy_diagnostics(db, season_id)
+        except Exception as exc:
+            diagnostics_error = diagnostics_error or str(exc)
+            hierarchy = {'diagnostics_status': 'FAILED', 'diagnostics_error': str(exc)}
 
     true_home = hierarchy.get('true_home_host_diagnostics') or {}
     counters['true_home_host_violation_count'] = _safe_int(true_home.get('total_home_host_violations') or true_home.get('TRUE_HOME_HOST_VIOLATION'))
@@ -1635,7 +1653,7 @@ def _build_final_schedule_validation_result(
                 })
         failures.append(_final_validation_failure('TRUE_HOME_HOST_VIOLATION', counters['true_home_host_violation_count'], 'True home-host hard rule violations remain.', true_home_details))
 
-    doubleheader = hierarchy.get('doubleheader_diagnostics') or _build_global_doubleheader_validation(db, season_id)
+    doubleheader = _build_global_doubleheader_validation(db, season_id) if current_saved_games_only else (hierarchy.get('doubleheader_diagnostics') or _build_global_doubleheader_validation(db, season_id))
     for key in (
         'doubleheader_not_back_to_back_count',
         'doubleheader_split_location_count',
@@ -1663,7 +1681,7 @@ def _build_final_schedule_validation_result(
         if code_details:
             failures.append(_final_validation_failure(code, len(code_details), 'Doubleheader hard-rule validation failed.', code_details))
 
-    turf = _build_turf_wave_chronological_validation(db, season_id) if season_id else (hierarchy.get('turf_wave_diagnostics') or {})
+    turf = {} if current_saved_games_only else (_build_turf_wave_chronological_validation(db, season_id) if season_id else (hierarchy.get('turf_wave_diagnostics') or {}))
     if turf_wave_source_of_truth_repair:
         turf = {**turf, 'Turf Wave Source-of-Truth Diagnostics': turf_wave_source_of_truth_repair.get('source_of_truth_diagnostics'), 'repaired_turf_labels': turf_wave_source_of_truth_repair.get('repaired_turf_labels')}
     counters['turf_wave_label_mismatch_count'] = _safe_int(turf.get('turf_wave_label_mismatch_count') or turf.get('NON_CONTIGUOUS_TURF_WAVE_USAGE'))
@@ -1705,23 +1723,23 @@ def _build_final_schedule_validation_result(
         failures.append(_final_validation_failure('TURF_WAVE_PULL_FORWARD_UNRESOLVED', counters['turf_wave_pull_forward_unresolved_count'], 'Mandatory turf pull-forward repair ran but unresolved turf gaps remain.', turf_pull_forward_repair))
     turf_pull_forward_ran = bool(turf_pull_forward_repair.get('turf_pull_forward_repair_ran'))
     turf_pull_forward_status = str(turf_pull_forward_repair.get('turf_pull_forward_repair_status') or '')
-    if season_id and (run_turf_pull_forward_repair or turf_pull_forward_repair_diagnostics is not None) and not turf_pull_forward_ran:
+    if season_id and not current_saved_games_only and (run_turf_pull_forward_repair or turf_pull_forward_repair_diagnostics is not None) and not turf_pull_forward_ran:
         counters['turf_wave_pull_forward_unresolved_count'] = max(1, _safe_int(counters.get('turf_wave_pull_forward_unresolved_count')))
         failures.append(_final_validation_failure('TURF_PULL_FORWARD_REPAIR_NOT_RUN', 1, 'Mandatory turf pull-forward repair did not run before final validation.', turf_pull_forward_repair))
-    if season_id and turf_pull_forward_status == 'FAILED':
+    if season_id and not current_saved_games_only and turf_pull_forward_status == 'FAILED':
         counters['turf_wave_pull_forward_unresolved_count'] = max(1, _safe_int(counters.get('turf_wave_pull_forward_unresolved_count')))
         failures.append(_final_validation_failure('TURF_PULL_FORWARD_REPAIR_FAILED', 1, 'Mandatory turf pull-forward repair failed before final validation.', turf_pull_forward_repair))
-    if counters.get('turf_wave_canonical_mapping_missing_count'):
+    if not current_saved_games_only and counters.get('turf_wave_canonical_mapping_missing_count'):
         failures.append(_final_validation_failure('TURF_WAVE_CANONICAL_MAPPING_MISSING', counters['turf_wave_canonical_mapping_missing_count'], 'Scheduled turf games could not be mapped to canonical host/date/start wave metadata.', turf_wave_source_of_truth_repair.get('repaired_turf_labels') or []))
     repair_failures = [detail for detail in (turf_wave_source_of_truth_repair.get('repaired_turf_labels') or []) if not detail.get('repair_success')]
     non_mapping_repair_failures = [detail for detail in repair_failures if detail.get('repair_failure_reason') != 'TURF_WAVE_CANONICAL_MAPPING_MISSING']
-    if non_mapping_repair_failures:
+    if not current_saved_games_only and non_mapping_repair_failures:
         failures.append(_final_validation_failure('TURF_WAVE_LABEL_MISMATCH', len(non_mapping_repair_failures), 'Turf wave labels could not be repaired from canonical metadata.', non_mapping_repair_failures))
     unrepaired_turf_component_label_collisions = [
         detail for detail in (turf_component_label_validation.get('turf_component_label_collisions') or [])
         if not detail.get('repair_success')
     ]
-    if unrepaired_turf_component_label_collisions:
+    if not current_saved_games_only and unrepaired_turf_component_label_collisions:
         failures.append(_final_validation_failure('TURF_COMPONENT_LABEL_COLLISION', len(unrepaired_turf_component_label_collisions), 'Turf component display labels collide and could not be regenerated from assigned slot metadata.', unrepaired_turf_component_label_collisions))
 
     for failure in extra_failures or []:
@@ -1816,6 +1834,7 @@ def _build_final_schedule_validation_result(
         'schedule_quality_source': final_source_reconciliation.get('schedule_quality_source'),
         'export_source': final_source_reconciliation.get('export_source'),
         'validation_query_used': final_source_reconciliation.get('validation_query_used'),
+        'current_saved_games_only': current_saved_games_only,
         'run_id': final_source_reconciliation.get('run_id'),
         'final_validation_run_id': final_validation_run_id,
         'final_validation_timestamp': final_validation_timestamp,
@@ -1898,31 +1917,11 @@ def _stable_doubleheader_pair_id(team_id: uuid.UUID, division_id: uuid.UUID | No
 def _build_global_doubleheader_validation(db: Session, season_id: uuid.UUID | str | None) -> dict[str, object]:
     """Validate every team/division/date with exactly two scheduled games as a doubleheader.
 
-    This is intentionally data-driven and season-wide.  It does not assume odd-team
-    divisions or any concrete grade, community, field size, surface, host, or date.
+    This is intentionally data-driven and season-wide.  It reads the same saved
+    Game row assignments used by schedule export and only joins a generated slot
+    when that slot exactly matches the current saved game date/time/host/field.
     """
-    home_alias = aliased(Team)
-    away_alias = aliased(Team)
-    query = db.query(Game, GameSlot, FieldInstance, HostLocation, home_alias, away_alias, Division, Organization, GameStatus).join(
-        Game.status
-    ).join(
-        home_alias, Game.home_team_id == home_alias.id
-    ).join(
-        away_alias, Game.away_team_id == away_alias.id
-    ).join(
-        Division, home_alias.division_id == Division.id
-    ).join(
-        Organization, home_alias.organization_id == Organization.id
-    ).outerjoin(
-        GameSlot, GameSlot.assigned_game_id == Game.id
-    ).outerjoin(
-        FieldInstance, FieldInstance.id == GameSlot.field_instance_id
-    ).outerjoin(
-        HostLocation, HostLocation.id == GameSlot.host_location_id
-    ).filter(GameStatus.is_active.is_(True), _final_schedule_status_filter(db))
-    if season_id:
-        query = query.filter(Game.season_id == season_id)
-    rows = query.order_by(Game.game_date, Game.kickoff_time).all()
+    rows = get_saved_scheduled_game_rows_for_export(db, season_id)
     game_rows_by_id: dict[uuid.UUID, tuple[Game, GameSlot | None, FieldInstance | None, HostLocation | None, Team, Team, Division, object, object]] = {}
     games_by_team_division_date: dict[tuple[uuid.UUID, uuid.UUID | None, date], list[Game]] = {}
     all_start_times_by_date_host: dict[tuple[date, uuid.UUID | None], set[time]] = {}
@@ -11751,11 +11750,15 @@ def build_publish_schedule_quality_report(db: Session, season_id: uuid.UUID) -> 
 
 def build_publish_final_validation(db: Session, season_id: uuid.UUID) -> dict[str, object]:
     """Run publish validation directly against current saved scheduled games."""
+    export_games_count = len(get_saved_scheduled_game_rows_for_export(db, season_id))
     return _build_final_schedule_validation_result(
         db,
         season_id,
         run_turf_pull_forward_repair=False,
         repair_generated_slot_integrity=False,
+        export_games_count=export_games_count,
+        export_source=FINAL_SCHEDULE_SOURCE_NAME,
+        current_saved_games_only=True,
     )
 
 
@@ -14430,12 +14433,7 @@ def _scheduled_games_modified_after(db: Session, season_id: uuid.UUID, timestamp
 def _validation_blocks_publish(validation: dict) -> tuple[bool, dict]:
     integrity = validation.get('generated_slot_integrity_diagnostics') or {}
     blocking_failures = _final_validation_blocking_failures(validation)
-    blocked = (
-        validation.get('final_validation_status') != 'COMPLETE'
-        or _safe_int(integrity.get('generated_slot_integrity_failure_count')) > 0
-        or _safe_int(integrity.get('invalid_scheduled_game_count')) > _safe_int(integrity.get('repaired_scheduled_game_count')) + _safe_int(integrity.get('unscheduled_orphan_game_count'))
-        or bool(blocking_failures)
-    )
+    blocked = bool(blocking_failures)
     return blocked, integrity
 
 
@@ -14452,6 +14450,40 @@ def _summarize_validation_issue(detail: object, fallback_code: str) -> str:
     return f"{code}: {' · '.join(bits) if bits else 'Review affected scheduled games in Manual Schedule Builder.'}"
 
 
+
+def _publish_validation_issue_summary(detail: object, fallback_code: str) -> dict[str, object]:
+    if not isinstance(detail, dict):
+        return {
+            'issue_code': fallback_code,
+            'scheduled_game_id': None,
+            'team': None,
+            'date': None,
+            'time': None,
+            'location': None,
+            'field': None,
+            'recommended_action': 'Open Manual Schedule Builder and correct the current saved scheduled game.',
+            'summary': str(detail or fallback_code),
+        }
+    code = str(detail.get('failure_code') or detail.get('code') or fallback_code)
+    team = detail.get('team_name') or detail.get('conflicting_team_name') or detail.get('home_team_name')
+    date_value = detail.get('game_date') or detail.get('date')
+    time_value = detail.get('kickoff_time') or detail.get('start_time')
+    host = detail.get('host_location_name') or detail.get('host_location') or detail.get('location')
+    field = detail.get('field_name') or detail.get('field') or detail.get('canonical_field_label')
+    scheduled_game_id = detail.get('scheduled_game_id') or detail.get('game_id')
+    bits = [str(value) for value in [team, date_value, time_value, host, field] if value]
+    return {
+        'issue_code': code,
+        'scheduled_game_id': str(scheduled_game_id) if scheduled_game_id else None,
+        'team': team,
+        'date': date_value,
+        'time': time_value,
+        'location': host,
+        'field': field,
+        'recommended_action': 'Open Manual Schedule Builder and correct the affected current saved scheduled game.',
+        'summary': f"{code}: {' · '.join(bits) if bits else 'Review affected current saved scheduled games.'}",
+    }
+
 def _build_publish_validation_summary(validation: dict, *, changed: bool) -> dict:
     hard_errors = _final_validation_blocking_failures(validation)
     issues: list[dict[str, object]] = []
@@ -14463,9 +14495,6 @@ def _build_publish_validation_summary(validation: dict, *, changed: bool) -> dic
             issues.append({'issue_type': code, 'affected_count': int(item.get('count') or len(details) or 1), 'summaries': summaries, 'recommended_action': 'Open Manual Schedule Builder and correct the affected scheduled games.'})
         else:
             issues.append({'issue_type': 'VALIDATION_FAILURE', 'affected_count': 1, 'summaries': [str(item)], 'recommended_action': 'Open Manual Schedule Builder and correct the affected scheduled games.'})
-    integrity = validation.get('generated_slot_integrity_diagnostics') or {}
-    if _safe_int(integrity.get('generated_slot_integrity_failure_count')) > 0 and not any(issue['issue_type'] == 'GENERATED_SLOT_INTEGRITY_FAILURE' for issue in issues):
-        issues.append({'issue_type': 'GENERATED_SLOT_INTEGRITY_FAILURE', 'affected_count': _safe_int(integrity.get('generated_slot_integrity_failure_count')), 'summaries': ['Saved scheduled games have slot integrity issues.'], 'recommended_action': 'Review affected games in Manual Schedule Builder.'})
     return {
         'message': 'Schedule validation found blocking issues. Please review the listed games before publishing.',
         'total_blocking_issues': sum(int(issue.get('affected_count') or 0) for issue in issues) or len(issues),
@@ -26220,14 +26249,16 @@ def schedule_publish_diagnostics(season_id: uuid.UUID | None = None, db: Session
     archived = int(counts.get('archived', 0))
     authoritative_rows = get_scheduled_games_for_season(db, season.id)
     total = len(authoritative_rows)
-    concise_issues: list[str] = []
+    concise_issues: list[dict[str, object]] = []
     for failure in blocking_failures[:5]:
         code = str(failure.get('code') or 'VALIDATION_FAILURE')
         details = failure.get('details') if isinstance(failure.get('details'), list) else []
-        concise_issues.extend(_summarize_validation_issue(detail, code) for detail in details[:3])
+        concise_issues.extend(_publish_validation_issue_summary(detail, code) for detail in details[:3])
         if not details:
-            concise_issues.append(str(failure.get('message') or code))
+            concise_issues.append(_publish_validation_issue_summary({'code': code, 'specific_reason': failure.get('message')}, code))
     blocking_count = sum(int(failure.get('count') or 1) for failure in blocking_failures)
+    source_mismatch = bool((final_validation.get('final_source_reconciliation') or {}).get('count_mismatch'))
+    validation_message = 'Publish validation source does not match current saved schedule.' if source_mismatch else ('Schedule validation found blocking issues. Please review the listed games before publishing.' if blocking_count else 'Schedule is ready to publish.')
     return {
         'season_id': str(season.id),
         'season_name': season.name,
@@ -26237,7 +26268,12 @@ def schedule_publish_diagnostics(season_id: uuid.UUID | None = None, db: Session
         'archived_games': archived,
         **_schedule_publication_status(season),
         'publish_eligibility_source': 'CURRENT_SAVED_SCHEDULE_FINAL_VALIDATION',
-        'publish_validation_message': 'Schedule validation found blocking issues. Please review the listed games before publishing.' if blocking_count else 'Schedule is ready to publish.',
+        'publish_validation_run_id': final_validation.get('final_validation_run_id'),
+        'publish_validation_timestamp': final_validation.get('final_validation_timestamp'),
+        'publish_validation_games_checked_count': final_validation.get('final_validation_games_checked_count'),
+        'export_games_count': final_validation.get('export_games_count') or total,
+        'source_reconciliation': final_validation.get('final_source_reconciliation'),
+        'publish_validation_message': validation_message,
         'publish_blocking_issue_count': blocking_count,
         'publish_blocking_issues': concise_issues[:10],
     }

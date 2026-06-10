@@ -181,14 +181,47 @@ export default function ScheduleManagementPage() {
           <div>Authoritative Source: <span className='font-semibold'>Saved scheduled games</span></div>
           <div>Archived Games: <span className='font-semibold'>{publishDiagnostics.archived_games ?? 0}</span></div>
           <div>Validation: <span className='font-semibold'>{publishDiagnostics.publish_blocking_issue_count ? 'Blocking issues found' : 'Ready'}</span></div>
+          <div>Games Checked: <span className='font-semibold'>{publishDiagnostics.publish_validation_games_checked_count ?? publishDiagnostics.saved_games ?? 0}</span></div>
+          <div>Export Count: <span className='font-semibold'>{publishDiagnostics.export_games_count ?? publishDiagnostics.saved_games ?? 0}</span></div>
+          <div>Validation Run: <span className='font-semibold'>{publishDiagnostics.publish_validation_run_id ? String(publishDiagnostics.publish_validation_run_id).slice(0, 8) : 'Current'}</span></div>
         </div>
         <p className={`mt-2 rounded p-2 ${publishDiagnostics.publish_blocking_issue_count ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-800'}`}>
           {publishDiagnostics.publish_validation_message || (publishDiagnostics.publish_blocking_issue_count ? 'Schedule validation found blocking issues. Please review the listed games before publishing.' : 'Schedule is ready to publish.')}
         </p>
         {publishDiagnostics.publish_blocking_issues?.length ? (
-          <ul className='mt-2 list-disc pl-5 text-sm'>
-            {publishDiagnostics.publish_blocking_issues.map((issue: any, index: number) => <li key={index}>{issue}</li>)}
-          </ul>
+          <div className='mt-2 overflow-x-auto'>
+            <table className='min-w-full border text-left text-xs'>
+              <thead className='bg-white'>
+                <tr>
+                  <th className='border p-2'>Issue</th>
+                  <th className='border p-2'>Scheduled Game</th>
+                  <th className='border p-2'>Team</th>
+                  <th className='border p-2'>Date</th>
+                  <th className='border p-2'>Time</th>
+                  <th className='border p-2'>Location</th>
+                  <th className='border p-2'>Field</th>
+                  <th className='border p-2'>Recommended Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {publishDiagnostics.publish_blocking_issues.map((issue: any, index: number) => {
+                  const currentIssue = typeof issue === 'string' ? { issue_code: issue, summary: issue } : issue;
+                  return (
+                    <tr key={index}>
+                      <td className='border p-2 font-semibold'>{currentIssue.issue_code || currentIssue.summary || 'VALIDATION_FAILURE'}</td>
+                      <td className='border p-2'>{currentIssue.scheduled_game_id || 'Current game'}</td>
+                      <td className='border p-2'>{currentIssue.team || '—'}</td>
+                      <td className='border p-2'>{currentIssue.date ? formatDisplayDate(currentIssue.date) : '—'}</td>
+                      <td className='border p-2'>{currentIssue.time ? formatDisplayTime(currentIssue.time) : '—'}</td>
+                      <td className='border p-2'>{currentIssue.location || '—'}</td>
+                      <td className='border p-2'>{currentIssue.field || '—'}</td>
+                      <td className='border p-2'>{currentIssue.recommended_action || 'Open Manual Schedule Builder and correct the affected current saved scheduled game.'}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         ) : null}
       </div> : null}
 
