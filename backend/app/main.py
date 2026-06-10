@@ -1,7 +1,7 @@
 import logging
 from datetime import date, timedelta
 
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import inspect, text
 from sqlalchemy.exc import SQLAlchemyError
@@ -30,6 +30,13 @@ REQUIRED_TABLES = {
     'rulebooks': 'rulebooks',
 }
 
+
+
+@app.exception_handler(HTTPException)
+def handle_http_exception(_: Request, exc: HTTPException):
+    if isinstance(exc.detail, dict) and exc.detail.get('error') == 'auth_invalid_token':
+        return JSONResponse(status_code=exc.status_code, content=exc.detail)
+    return JSONResponse(status_code=exc.status_code, content={'detail': exc.detail})
 
 
 @app.exception_handler(SQLAlchemyError)

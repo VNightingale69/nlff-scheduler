@@ -1,5 +1,6 @@
 import unittest
 import uuid
+from datetime import UTC, datetime, timedelta
 
 from app.schemas import TokenResponse
 
@@ -15,6 +16,7 @@ class AuthResponseTest(unittest.TestCase):
             access_token='access-token',
             refresh_token='refresh-token',
             token_type='bearer',
+            expires_at=datetime.now(UTC) + timedelta(minutes=30),
             user={
                 'id': user_id,
                 'email': 'admin@example.com',

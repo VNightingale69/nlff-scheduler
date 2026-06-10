@@ -29,7 +29,7 @@ from app.schemas import (
     TeamCreate, TeamRead, TeamUpdate, TokenResponse, UserCreate, UserRead,
     HOST_PLAN_SELECTION_STATUSES, ScheduleReadinessDivisionRow, ScheduleReadinessHostDateRow, ScheduleReadinessHostSiteRow, ScheduleReadinessResponse, ScheduleReadinessTotals, ScheduleReadinessTurfWaveRow, ScheduleReadinessTurfWaveSlotRow
 )
-from app.security import create_access_token, create_refresh_token, hash_password, validate_password_strength, verify_password, decode_token
+from app.security import access_token_expires_at, auth_invalid_token_exception, create_access_token, create_refresh_token, hash_password, validate_password_strength, verify_password, decode_token
 from app.services.game_statuses import REQUIRED_GAME_STATUSES, ensure_required_game_statuses
 from app.services.organization_cleanup import cleanup_organization_dependencies, collect_organization_delete_inventory
 from app.services.scheduling_validation import validate_game
@@ -6840,6 +6840,16 @@ def _user_payload(user: User) -> dict:
     }
 
 
+def _token_response(user: User) -> TokenResponse:
+    return TokenResponse(
+        access_token=create_access_token(str(user.id)),
+        refresh_token=create_refresh_token(str(user.id)),
+        token_type='bearer',
+        expires_at=access_token_expires_at(),
+        user=_user_payload(user),
+    )
+
+
 @router.post('/admin/rulebook/upload', response_model=RulebookRead, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def upload_rulebook(file: UploadFile = File(...), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     original_filename = _validate_rulebook_upload(file)
@@ -6926,15 +6936,19 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
     user = db.query(User).join(User.role).filter(func.lower(User.email) == payload.email.lower(), User.is_active.is_(True), Role.is_active.is_(True)).first()
     if not user or not verify_password(payload.password, user.password_hash):
         raise HTTPException(status_code=401, detail='Invalid credentials')
-    return TokenResponse(access_token=create_access_token(str(user.id)), refresh_token=create_refresh_token(str(user.id)), token_type='bearer', user=_user_payload(user))
+    return _token_response(user)
 
 @router.post('/auth/refresh', response_model=TokenResponse)
 def refresh(payload: RefreshRequest, db: Session = Depends(get_db)):
     token_data = decode_token(payload.refresh_token, 'refresh')
-    user = db.query(User).join(User.role).filter(User.id == uuid.UUID(token_data['sub']), User.is_active.is_(True), Role.is_active.is_(True)).first()
+    try:
+        user_uuid = uuid.UUID(token_data['sub'])
+    except (KeyError, TypeError, ValueError):
+        raise auth_invalid_token_exception()
+    user = db.query(User).join(User.role).filter(User.id == user_uuid, User.is_active.is_(True), Role.is_active.is_(True)).first()
     if not user:
-        raise HTTPException(status_code=401, detail='Invalid refresh token')
-    return TokenResponse(access_token=create_access_token(str(user.id)), refresh_token=create_refresh_token(str(user.id)), token_type='bearer', user=_user_payload(user))
+        raise auth_invalid_token_exception()
+    return _token_response(user)
 
 @router.get('/auth/me')
 def me(current_user: User = Depends(get_current_user)):

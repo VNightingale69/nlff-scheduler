@@ -1,16 +1,19 @@
 'use client';
-import { useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { Suspense, useState } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { ApiError, apiFetch } from '@/lib/api';
-import { type AuthUser, setTokens } from '@/lib/auth';
+import { clearTokens, type AuthUser, SESSION_EXPIRED_MESSAGE, setTokens } from '@/lib/auth';
 import { APP_NAME, APP_SUBTITLE } from '@/config/branding';
 
-export default function Login() {
+function LoginForm() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const sessionExpired = searchParams.get('session_expired') === '1';
+  const returnTo = searchParams.get('return_to') || '/dashboard';
 
   const extractErrorMessage = (error: unknown): string => {
     if (!(error instanceof ApiError)) return 'Login failed. Please verify credentials.';
@@ -54,12 +57,17 @@ export default function Login() {
   const submit = async () => {
     try {
       setLoading(true); setError('');
+      clearTokens();
       const data: any = await apiFetch('/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) });
       if (!data?.access_token) throw new Error('Login response missing access token');
-      setTokens(data.access_token, data.refresh_token, buildAuthUser(data));
-      router.push('/dashboard');
+      setTokens(data.access_token, data.refresh_token, buildAuthUser(data), data.expires_at);
+      router.push(returnTo.startsWith('/') ? returnTo : '/dashboard');
     } catch (error) { setError(extractErrorMessage(error)); } finally { setLoading(false); }
   };
 
-  return <main className='flex min-h-screen items-center justify-center p-4'><div className='w-full max-w-md rounded border bg-white p-6 shadow-sm'><h1 className='mb-1 text-xl font-bold'>{APP_NAME}</h1><p className='text-sm font-medium text-slate-700'>{APP_SUBTITLE}</p><p className='mb-4 mt-2 text-sm text-slate-600'>Sign in to manage scheduling setup entities.</p>{error && <p className='mb-3 text-sm text-rose-600'>{error}</p>}<input className='mb-2 w-full rounded border p-2' placeholder='Email' value={email} onChange={(e) => setEmail(e.target.value)} /><input className='mb-3 w-full rounded border p-2' type='password' placeholder='Password' value={password} onChange={(e) => setPassword(e.target.value)} /><button onClick={submit} disabled={loading} className='w-full rounded bg-slate-900 p-2 text-white'>{loading ? 'Signing in...' : 'Sign in'}</button></div></main>;
+  return <main className='flex min-h-screen items-center justify-center p-4'><div className='w-full max-w-md rounded border bg-white p-6 shadow-sm'><h1 className='mb-1 text-xl font-bold'>{APP_NAME}</h1><p className='text-sm font-medium text-slate-700'>{APP_SUBTITLE}</p><p className='mb-4 mt-2 text-sm text-slate-600'>Sign in to manage scheduling setup entities.</p>{sessionExpired && !error && <p className='mb-3 rounded border border-amber-200 bg-amber-50 p-2 text-sm text-amber-800'>{SESSION_EXPIRED_MESSAGE}</p>}{error && <p className='mb-3 text-sm text-rose-600'>{error}</p>}<input className='mb-2 w-full rounded border p-2' placeholder='Email' value={email} onChange={(e) => setEmail(e.target.value)} /><input className='mb-3 w-full rounded border p-2' type='password' placeholder='Password' value={password} onChange={(e) => setPassword(e.target.value)} /><button onClick={submit} disabled={loading} className='w-full rounded bg-slate-900 p-2 text-white'>{loading ? 'Signing in...' : 'Sign in'}</button></div></main>;
+}
+
+export default function Login() {
+  return <Suspense fallback={null}><LoginForm /></Suspense>;
 }
