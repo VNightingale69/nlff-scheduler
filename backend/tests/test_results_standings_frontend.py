@@ -40,6 +40,35 @@ class ResultsStandingsFrontendTest(unittest.TestCase):
         rendered_cell_count = self.standings_row_markup.count("<td className='p-2")
         self.assertEqual(rendered_cell_count, len(self.standings_headers))
 
+
+    def test_filter_controls_are_removed(self):
+        removed_labels = [
+            'Season ID',
+            'Division ID',
+            'Week ID',
+            'Community ID',
+            'Team ID',
+            'All score statuses',
+            'All published states',
+            'Played and not played',
+            'Apply Filters',
+        ]
+        for label in removed_labels:
+            self.assertNotIn(label, self.source)
+        self.assertNotIn("type='date'", self.source)
+
+    def test_standings_load_without_filter_interaction(self):
+        self.assertIn("apiFetch('/standings'", self.source)
+        self.assertNotIn('URLSearchParams', self.source)
+        self.assertNotIn('setFilters', self.source)
+        self.assertNotIn('scoreStatuses', self.source)
+        self.assertNotRegex(self.source, r"onClick=\{load\}[^>]*>Apply Filters")
+
+    def test_filter_card_is_not_rendered_empty(self):
+        self.assertNotIn("md:grid-cols-4", self.source)
+        self.assertNotIn("placeholder='Season ID'", self.source)
+        self.assertIn('No active season selected.', self.source)
+
     def test_game_results_table_keeps_score_columns(self):
         self.assertIn('Home Score', self.source)
         self.assertIn('Away Score', self.source)

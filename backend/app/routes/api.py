@@ -25695,6 +25695,19 @@ def _standings_game_summary(row, *, public: bool, can_manage: bool, community_or
     }
 
 
+def _active_standings_season(db: Session) -> Season | None:
+    today = date.today()
+    current = (
+        db.query(Season)
+        .filter(Season.is_active.is_(True), Season.start_date <= today, Season.end_date >= today)
+        .order_by(Season.start_date.desc(), Season.name.asc())
+        .first()
+    )
+    if current:
+        return current
+    return db.query(Season).filter(Season.is_active.is_(True)).order_by(Season.start_date.desc(), Season.name.asc()).first()
+
+
 def _build_standings_payload(db: Session, *, season_id: uuid.UUID | None = None, division_id: uuid.UUID | None = None, week_id: uuid.UUID | None = None, date_filter: date | None = None, organization_id: uuid.UUID | None = None, team_id: uuid.UUID | None = None, score_status: str | None = None, published: str | None = None, played: str | None = None, current_user: User | None = None, public: bool = False) -> dict:
     role_name = normalize_role_name(getattr(getattr(current_user, 'role', None), 'name', None)) if current_user else None
     can_manage = role_name in {ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN}
@@ -25703,6 +25716,21 @@ def _build_standings_payload(db: Session, *, season_id: uuid.UUID | None = None,
         raise HTTPException(401, 'Authentication required')
     if not public and role_name not in {ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN, ROLE_COMMUNITY_ADMIN}:
         raise HTTPException(403, 'Not authorized to view standings.')
+    if season_id is None:
+        active_season = _active_standings_season(db)
+        if active_season is None:
+            now = _score_now()
+            return {
+                'season_id': None,
+                'last_calculated_at': now.isoformat(),
+                'official_score_note': 'Standings calculated from published scores only.',
+                'tie_breaker_note': 'Formal playoff tie-breakers are not implemented; standings use deterministic sorting.',
+                'divisions': [],
+                'game_results': [],
+                'total_missing_or_not_played': 0,
+                'no_active_season': True,
+            }
+        season_id = active_season.id
     filters = {'season_id': season_id, 'division_id': division_id, 'week_id': week_id, 'date': date_filter}
     if can_manage:
         filters['organization_id'] = organization_id
@@ -25839,6 +25867,7 @@ def _build_standings_payload(db: Session, *, season_id: uuid.UUID | None = None,
         'divisions': division_payloads,
         'game_results': visible_result_rows,
         'total_missing_or_not_played': sum(item['summary'].get('not_played', 0) for item in division_payloads),
+        'no_active_season': False,
     }
 
 

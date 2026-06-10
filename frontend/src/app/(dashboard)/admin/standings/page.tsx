@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { apiFetch } from '@/lib/api';
 import { getToken } from '@/lib/auth';
 import { formatDisplayDate, formatDisplayTime } from '@/lib/displayFormat';
@@ -43,7 +43,6 @@ type GameResult = {
   actions: string[];
 };
 
-const scoreStatuses = ['', 'MISSING', 'SUBMITTED', 'FLAGGED', 'CONFLICT', 'APPROVED', 'PUBLISHED', 'UNPUBLISHED', 'CORRECTION_PENDING'];
 const standingsHeaders = ['Rank', 'Team', 'Community', 'Division', 'W', 'L', 'T', 'GP', 'Scheduled', 'Remaining'];
 
 function scoreText(value: number | string | null) {
@@ -52,20 +51,12 @@ function scoreText(value: number | string | null) {
 
 export default function StandingsPage() {
   const token = getToken() || undefined;
-  const [payload, setPayload] = useState<{ divisions: DivisionBlock[]; game_results: GameResult[]; last_calculated_at: string; official_score_note: string; total_missing_or_not_played: number } | null>(null);
+  const [payload, setPayload] = useState<{ divisions: DivisionBlock[]; game_results: GameResult[]; last_calculated_at: string; official_score_note: string; total_missing_or_not_played: number; no_active_season?: boolean } | null>(null);
   const [message, setMessage] = useState('');
-  const [filters, setFilters] = useState({ season_id: '', division_id: '', week_id: '', date: '', organization_id: '', team_id: '', score_status: '', published: '', played: '' });
-
-  const query = useMemo(() => {
-    const params = new URLSearchParams();
-    Object.entries(filters).forEach(([key, value]) => { if (value) params.set(key, value); });
-    const text = params.toString();
-    return text ? `?${text}` : '';
-  }, [filters]);
 
   const load = async () => {
     try {
-      setPayload(await apiFetch(`/standings${query}`, {}, token));
+      setPayload(await apiFetch('/standings', {}, token));
       setMessage('');
     } catch (error: any) {
       setMessage(error?.message || 'Unable to load standings.');
@@ -90,18 +81,7 @@ export default function StandingsPage() {
       {missing > 0 && <div className='font-semibold'>Standings may be incomplete because {missing} games are missing scores, pending approval, unpublished, flagged/conflicted, correction pending, or future games.</div>}
     </div>}
 
-    <div className='grid gap-2 rounded border bg-white p-3 md:grid-cols-4'>
-      <input className='rounded border p-2' placeholder='Season ID' value={filters.season_id} onChange={(e) => setFilters({ ...filters, season_id: e.target.value })} />
-      <input className='rounded border p-2' placeholder='Division ID' value={filters.division_id} onChange={(e) => setFilters({ ...filters, division_id: e.target.value })} />
-      <input className='rounded border p-2' placeholder='Week ID' value={filters.week_id} onChange={(e) => setFilters({ ...filters, week_id: e.target.value })} />
-      <input className='rounded border p-2' type='date' value={filters.date} onChange={(e) => setFilters({ ...filters, date: e.target.value })} />
-      <input className='rounded border p-2' placeholder='Community ID' value={filters.organization_id} onChange={(e) => setFilters({ ...filters, organization_id: e.target.value })} />
-      <input className='rounded border p-2' placeholder='Team ID' value={filters.team_id} onChange={(e) => setFilters({ ...filters, team_id: e.target.value })} />
-      <select className='rounded border p-2' value={filters.score_status} onChange={(e) => setFilters({ ...filters, score_status: e.target.value })}>{scoreStatuses.map((status) => <option key={status} value={status}>{status || 'All score statuses'}</option>)}</select>
-      <select className='rounded border p-2' value={filters.published} onChange={(e) => setFilters({ ...filters, published: e.target.value })}><option value=''>All published states</option><option value='published'>Published</option><option value='unpublished'>Unpublished</option></select>
-      <select className='rounded border p-2' value={filters.played} onChange={(e) => setFilters({ ...filters, played: e.target.value })}><option value=''>Played and not played</option><option value='played'>Played</option><option value='not-played'>Not played</option></select>
-      <button className='rounded bg-slate-800 px-3 py-2 text-white' onClick={load}>Apply Filters</button>
-    </div>
+    {payload?.no_active_season && <div className='rounded border bg-amber-50 p-3 text-sm text-amber-800'>No active season selected.</div>}
 
     {(payload?.divisions || []).map((division) => <section key={division.division.id} className='space-y-3 rounded border bg-white p-4'>
       <div className='flex flex-wrap items-start justify-between gap-3'>
