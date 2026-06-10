@@ -56,6 +56,25 @@ type Props = {
 
 type ExportDivision = TournamentBracketDivision & { rounds: TournamentBracketRound[] };
 
+type BracketLayout = {
+  width: number;
+  height: number;
+  roundWidth: number;
+  roundGap: number;
+  gameHeight: number;
+  gameGap: number;
+  margin: number;
+  headerHeight: number;
+  roundHeaderHeight: number;
+  roundHeaderRadius: number;
+  gameRadius: number;
+  teamRowHeight: number;
+  teamRowRadius: number;
+  connectorStroke: string;
+  connectorWidth: number;
+  positions: Map<string, { x: number; y: number }>;
+};
+
 const statusLabels: Record<string, string> = {
   READY: 'Ready',
   WAITING_FOR_TEAMS: 'Waiting for Teams',
@@ -71,6 +90,21 @@ const statusLabels: Record<string, string> = {
 };
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
+const BRACKET_CANVAS = {
+  roundWidth: 300,
+  roundGap: 64,
+  gameHeight: 190,
+  gameGap: 34,
+  margin: 32,
+  headerHeight: 92,
+  roundHeaderHeight: 28,
+  roundHeaderRadius: 8,
+  gameRadius: 12,
+  teamRowHeight: 38,
+  teamRowRadius: 8,
+  connectorStroke: '#94a3b8',
+  connectorWidth: 2,
+} as const;
 
 function displayStatus(game: TournamentBracketGame, publicView?: boolean) {
   if (publicView) return game.status || (game.is_published ? 'Official Final' : 'Scheduled');
@@ -85,6 +119,12 @@ function statusClass(game: TournamentBracketGame, publicView?: boolean) {
   if (label.includes('submitted') || label.includes('approved')) return 'border-blue-300 bg-blue-50 text-blue-900';
   if (label.includes('waiting')) return 'border-slate-300 bg-slate-50 text-slate-700';
   return 'border-slate-300 bg-white text-slate-800';
+}
+
+function statusVisual(game: TournamentBracketGame, publicView?: boolean) {
+  if (game.needs_review && !publicView) return { fill: '#fef3c7', stroke: '#f59e0b' };
+  if (game.is_published) return { fill: '#dcfce7', stroke: '#10b981' };
+  return { fill: '#ffffff', stroke: '#cbd5e1' };
 }
 
 function formatSeed(seed?: number | null) {
@@ -108,16 +148,18 @@ function TeamRow({ game, slot }: { game: TournamentBracketGame; slot: 1 | 2 }) {
   const isWinner = isWinningSlot(game, slot);
 
   return (
-    <div className={`rounded border p-2 ${isWinner ? 'border-emerald-400 bg-emerald-50 font-semibold' : 'border-slate-200 bg-white'}`}>
+    <div className={`h-[38px] rounded-lg border px-2.5 py-1.5 ${isWinner ? 'border-emerald-500 bg-emerald-50 font-semibold' : 'border-slate-200 bg-white'}`}>
       <div className='flex items-start justify-between gap-2'>
-        <div>
-          <div className='text-[11px] uppercase tracking-wide text-slate-500'>{formatSeed(seed)}</div>
-          <div>{name || 'TBD'}</div>
-          {autoAdvanced && <div className='mt-1 inline-flex rounded bg-sky-50 px-2 py-0.5 text-[11px] font-medium text-sky-800'>BYE · Auto-Advance</div>}
-          {isWinner && <div className='mt-1 inline-flex rounded bg-emerald-600 px-2 py-0.5 text-[11px] font-semibold text-white'>Winner</div>}
+        <div className='min-w-0'>
+          <div className='text-[9px] leading-3 text-slate-500'>{seed ? `Seed ${seed}` : autoAdvanced ? 'BYE' : 'Seed TBD'}</div>
+          <div className='truncate text-xs leading-4 text-slate-900'>{name || 'TBD'}</div>
         </div>
-        <div className='min-w-8 text-right text-sm font-semibold'>{score ?? '—'}</div>
+        <div className='flex min-w-[56px] flex-col items-end'>
+          {isWinner && <div className='text-[9px] font-bold leading-3 text-emerald-700'>Winner</div>}
+          <div className='text-right text-[13px] font-bold leading-4 text-slate-900'>{score ?? '—'}</div>
+        </div>
       </div>
+      {autoAdvanced && <span className='sr-only'>BYE · Auto-Advance</span>}
     </div>
   );
 }
@@ -135,6 +177,47 @@ function roundsForDivision(division: TournamentBracketDivision): TournamentBrack
 
 function divisionsForExport(divisions: TournamentBracketDivision[]): ExportDivision[] {
   return divisions.map((division) => ({ ...division, rounds: roundsForDivision(division) }));
+}
+
+function buildBracketLayout(rounds: TournamentBracketRound[]): BracketLayout {
+  const maxGames = Math.max(1, ...rounds.map((round) => round.games.length));
+  const width = BRACKET_CANVAS.margin * 2 + rounds.length * BRACKET_CANVAS.roundWidth + Math.max(0, rounds.length - 1) * BRACKET_CANVAS.roundGap;
+  const height = BRACKET_CANVAS.headerHeight + maxGames * (BRACKET_CANVAS.gameHeight + BRACKET_CANVAS.gameGap) + BRACKET_CANVAS.margin;
+  const positions = new Map<string, { x: number; y: number }>();
+
+  rounds.forEach((round, roundIndex) => {
+    const x = BRACKET_CANVAS.margin + roundIndex * (BRACKET_CANVAS.roundWidth + BRACKET_CANVAS.roundGap);
+    const offset = ((maxGames - round.games.length) * (BRACKET_CANVAS.gameHeight + BRACKET_CANVAS.gameGap)) / 2;
+    round.games.forEach((game, gameIndex) => {
+      positions.set(game.id, { x, y: BRACKET_CANVAS.headerHeight + offset + gameIndex * (BRACKET_CANVAS.gameHeight + BRACKET_CANVAS.gameGap) });
+    });
+  });
+
+  return { ...BRACKET_CANVAS, width, height, positions };
+}
+
+function connectorPath(start: { x: number; y: number }, end: { x: number; y: number }, layout: BracketLayout) {
+  const y1 = start.y + layout.gameHeight / 2;
+  const y2 = end.y + layout.gameHeight / 2;
+  const x1 = start.x + layout.roundWidth;
+  const midX = x1 + layout.roundGap / 2;
+  return `M ${x1} ${y1} H ${midX} V ${y2} H ${end.x}`;
+}
+
+function bracketConnectors(rounds: TournamentBracketRound[], layout: BracketLayout) {
+  return rounds.flatMap((round, roundIndex) => {
+    if (roundIndex === rounds.length - 1) return [];
+    return round.games.flatMap((game) => {
+      const start = layout.positions.get(game.id);
+      if (!start) return [];
+      const nextRound = rounds[roundIndex + 1];
+      const nextGame = nextRound.games.find((candidate) => candidate.team_1_source_game_id === game.id || candidate.team_2_source_game_id === game.id);
+      if (!nextGame) return [];
+      const end = layout.positions.get(nextGame.id);
+      if (!end) return [];
+      return [{ id: `${game.id}-${nextGame.id}`, d: connectorPath(start, end, layout) }];
+    });
+  });
 }
 
 function escapeXml(value: unknown) {
@@ -167,37 +250,31 @@ function svgText(x: number, y: number, text: string, options: { size?: number; w
 }
 
 function buildBracketSvg(title: string, division: ExportDivision, publicView: boolean) {
-  const roundWidth = 300;
-  const roundGap = 64;
-  const gameHeight = 190;
-  const gameGap = 34;
-  const margin = 32;
-  const headerHeight = 92;
   const rounds = division.rounds;
-  const maxGames = Math.max(1, ...rounds.map((round) => round.games.length));
-  const width = margin * 2 + rounds.length * roundWidth + Math.max(0, rounds.length - 1) * roundGap;
-  const height = headerHeight + maxGames * (gameHeight + gameGap) + margin;
-  const gamePositions = new Map<string, { x: number; y: number }>();
-  let body = `<svg xmlns="${SVG_NS}" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeXml(`${title} ${division.division_group} ${division.division_name} bracket`)}">`;
+  const layout = buildBracketLayout(rounds);
+  let body = `<svg xmlns="${SVG_NS}" width="${layout.width}" height="${layout.height}" viewBox="0 0 ${layout.width} ${layout.height}" role="img" aria-label="${escapeXml(`${title} ${division.division_group} ${division.division_name} bracket`)}">`;
   body += '<rect width="100%" height="100%" fill="#f8fafc"/>';
-  body += svgText(margin, 34, title, { size: 22, weight: '700' });
-  body += svgText(margin, 60, `${division.division_group} ${division.division_name}`, { size: 16, weight: '700', fill: '#334155' });
-  body += svgText(width - margin, 60, publicView ? 'Published bracket export' : 'Administrator bracket export', { size: 11, fill: '#64748b', anchor: 'end' });
+  body += svgText(layout.margin, 34, title, { size: 22, weight: '700' });
+  body += svgText(layout.margin, 60, `${division.division_group} ${division.division_name}`, { size: 16, weight: '700', fill: '#334155' });
+  body += svgText(layout.width - layout.margin, 60, publicView ? 'Published bracket export' : 'Administrator bracket export', { size: 11, fill: '#64748b', anchor: 'end' });
+
+  bracketConnectors(rounds, layout).forEach((connector) => {
+    body += `<path d="${connector.d}" fill="none" stroke="${layout.connectorStroke}" stroke-width="${layout.connectorWidth}"/>`;
+  });
 
   rounds.forEach((round, roundIndex) => {
-    const x = margin + roundIndex * (roundWidth + roundGap);
-    body += `<rect x="${x}" y="${headerHeight - 28}" width="${roundWidth}" height="28" rx="8" fill="#0f172a"/>`;
-    body += svgText(x + 14, headerHeight - 9, round.round_name, { size: 13, weight: '700', fill: '#ffffff' });
-    const offset = ((maxGames - round.games.length) * (gameHeight + gameGap)) / 2;
-    round.games.forEach((game, gameIndex) => {
-      const y = headerHeight + offset + gameIndex * (gameHeight + gameGap);
-      gamePositions.set(game.id, { x, y });
+    const x = layout.margin + roundIndex * (layout.roundWidth + layout.roundGap);
+    body += `<rect x="${x}" y="${layout.headerHeight - 28}" width="${layout.roundWidth}" height="${layout.roundHeaderHeight}" rx="${layout.roundHeaderRadius}" fill="#0f172a"/>`;
+    body += svgText(x + 14, layout.headerHeight - 9, round.round_name, { size: 13, weight: '700', fill: '#ffffff' });
+    round.games.forEach((game) => {
+      const position = layout.positions.get(game.id);
+      if (!position) return;
+      const { x: gameX, y } = position;
       const status = displayStatus(game, publicView);
-      const statusFill = game.needs_review && !publicView ? '#fef3c7' : game.is_published ? '#dcfce7' : '#ffffff';
-      const statusStroke = game.needs_review && !publicView ? '#f59e0b' : game.is_published ? '#10b981' : '#cbd5e1';
-      body += `<rect x="${x}" y="${y}" width="${roundWidth}" height="${gameHeight}" rx="12" fill="${statusFill}" stroke="${statusStroke}" stroke-width="2"/>`;
-      body += svgText(x + 14, y + 24, `${game.round_name} · Game ${game.game_number}`, { size: 12, weight: '700', fill: '#334155' });
-      body += svgText(x + roundWidth - 14, y + 24, status, { size: 10, weight: '700', fill: '#475569', anchor: 'end' });
+      const statusColors = statusVisual(game, publicView);
+      body += `<rect x="${gameX}" y="${y}" width="${layout.roundWidth}" height="${layout.gameHeight}" rx="${layout.gameRadius}" fill="${statusColors.fill}" stroke="${statusColors.stroke}" stroke-width="2"/>`;
+      body += svgText(gameX + 14, y + 24, `${game.round_name} · Game ${game.game_number}`, { size: 12, weight: '700', fill: '#334155' });
+      body += svgText(gameX + layout.roundWidth - 14, y + 24, status, { size: 10, weight: '700', fill: '#475569', anchor: 'end' });
       ([1, 2] as const).forEach((slot, slotIndex) => {
         const rowY = y + 42 + slotIndex * 44;
         const winner = isWinningSlot(game, slot);
@@ -205,11 +282,11 @@ function buildBracketSvg(title: string, division: ExportDivision, publicView: bo
         const seed = slot === 1 ? game.team_1_seed : game.team_2_seed;
         const score = slot === 1 ? game.home_score : game.away_score;
         const autoAdvanced = slot === 1 ? game.team_1_auto_advanced : game.team_2_auto_advanced;
-        body += `<rect x="${x + 12}" y="${rowY}" width="${roundWidth - 24}" height="38" rx="8" fill="${winner ? '#ecfdf5' : '#ffffff'}" stroke="${winner ? '#10b981' : '#e2e8f0'}"/>`;
-        body += svgText(x + 22, rowY + 14, seed ? `Seed ${seed}` : autoAdvanced ? 'BYE' : 'Seed TBD', { size: 9, fill: '#64748b' });
-        body += svgText(x + 22, rowY + 30, splitText(name, 28)[0] || 'TBD', { size: 12, weight: winner ? '700' : '500' });
-        if (winner) body += svgText(x + roundWidth - 54, rowY + 14, 'Winner', { size: 9, weight: '700', fill: '#047857' });
-        body += svgText(x + roundWidth - 22, rowY + 30, score == null ? '—' : String(score), { size: 13, weight: '700', anchor: 'end' });
+        body += `<rect x="${gameX + 12}" y="${rowY}" width="${layout.roundWidth - 24}" height="${layout.teamRowHeight}" rx="${layout.teamRowRadius}" fill="${winner ? '#ecfdf5' : '#ffffff'}" stroke="${winner ? '#10b981' : '#e2e8f0'}"/>`;
+        body += svgText(gameX + 22, rowY + 14, seed ? `Seed ${seed}` : autoAdvanced ? 'BYE' : 'Seed TBD', { size: 9, fill: '#64748b' });
+        body += svgText(gameX + 22, rowY + 30, splitText(name, 28)[0] || 'TBD', { size: 12, weight: winner ? '700' : '500' });
+        if (winner) body += svgText(gameX + layout.roundWidth - 54, rowY + 14, 'Winner', { size: 9, weight: '700', fill: '#047857' });
+        body += svgText(gameX + layout.roundWidth - 22, rowY + 30, score == null ? '—' : String(score), { size: 13, weight: '700', anchor: 'end' });
       });
       const details = [
         `Date: ${formatDisplayDate(game.date || '') || '—'}`,
@@ -218,29 +295,83 @@ function buildBracketSvg(title: string, division: ExportDivision, publicView: bo
         `Field: ${game.field_name || '—'}`,
         `Winner: ${game.winner_team_name || '—'}`,
       ];
-      details.forEach((detail, index) => body += svgText(x + 14, y + 142 + index * 12, detail, { size: 10, fill: '#475569' }));
-    });
-  });
-
-  rounds.forEach((round, roundIndex) => {
-    if (roundIndex === rounds.length - 1) return;
-    round.games.forEach((game) => {
-      const start = gamePositions.get(game.id);
-      if (!start) return;
-      const nextRound = rounds[roundIndex + 1];
-      const nextGame = nextRound.games.find((candidate) => candidate.team_1_source_game_id === game.id || candidate.team_2_source_game_id === game.id);
-      const end = nextGame ? gamePositions.get(nextGame.id) : null;
-      if (!end) return;
-      const y1 = start.y + gameHeight / 2;
-      const y2 = end.y + gameHeight / 2;
-      const x1 = start.x + roundWidth;
-      const midX = x1 + roundGap / 2;
-      body += `<path d="M ${x1} ${y1} H ${midX} V ${y2} H ${end.x}" fill="none" stroke="#94a3b8" stroke-width="2"/>`;
+      details.forEach((detail, index) => { body += svgText(gameX + 14, y + 142 + index * 12, detail, { size: 10, fill: '#475569' }); });
     });
   });
 
   body += '</svg>';
   return body;
+}
+
+function SharedBracketRenderer({ title, division, publicView, outputLabel }: { title: string; division: ExportDivision; publicView: boolean; outputLabel: string }) {
+  const rounds = division.rounds;
+  const layout = buildBracketLayout(rounds);
+
+  return (
+    <div
+      className='relative shrink-0 overflow-hidden rounded-2xl bg-slate-50 text-slate-900 shadow-inner ring-1 ring-slate-200'
+      style={{ width: layout.width, height: layout.height, minWidth: layout.width }}
+      role='img'
+      aria-label={`${title} ${division.division_group} ${division.division_name} bracket`}
+      data-shared-bracket-renderer='true'
+    >
+      <div className='absolute left-8 top-[26px]'>
+        <h4 className='text-[22px] font-bold leading-7 text-slate-900'>{title}</h4>
+        <p className='mt-0.5 text-base font-bold text-slate-700'>{division.division_group} {division.division_name}</p>
+      </div>
+      <div className='absolute right-8 top-[50px] text-[11px] text-slate-500'>{outputLabel}</div>
+
+      <svg className='pointer-events-none absolute inset-0 z-0' width={layout.width} height={layout.height} viewBox={`0 0 ${layout.width} ${layout.height}`} aria-hidden='true'>
+        {bracketConnectors(rounds, layout).map((connector) => (
+          <path key={connector.id} d={connector.d} fill='none' stroke={layout.connectorStroke} strokeWidth={layout.connectorWidth} />
+        ))}
+      </svg>
+
+      {rounds.map((round, roundIndex) => {
+        const x = layout.margin + roundIndex * (layout.roundWidth + layout.roundGap);
+        return (
+          <div key={round.round_number}>
+            <div
+              className='absolute z-10 rounded-lg bg-slate-900 px-3.5 py-1.5 text-[13px] font-bold text-white shadow-sm'
+              style={{ left: x, top: layout.headerHeight - 28, width: layout.roundWidth, height: layout.roundHeaderHeight }}
+            >
+              {round.round_name}
+            </div>
+            {round.games.map((game) => {
+              const position = layout.positions.get(game.id);
+              if (!position) return null;
+              const visual = statusVisual(game, publicView);
+              return (
+                <article
+                  key={game.id}
+                  className={`absolute z-10 rounded-xl border-2 p-3 shadow-sm ${statusClass(game, publicView)}`}
+                  style={{ left: position.x, top: position.y, width: layout.roundWidth, height: layout.gameHeight, backgroundColor: visual.fill, borderColor: visual.stroke }}
+                >
+                  <div className='mb-3 flex items-start justify-between gap-2'>
+                    <div className='min-w-0'>
+                      <div className='truncate text-xs font-bold text-slate-700'>{game.round_name} · Game {game.game_number}</div>
+                    </div>
+                    <span className='max-w-[110px] truncate rounded-full border border-slate-300 bg-white/80 px-2 py-0.5 text-[10px] font-bold text-slate-600'>{displayStatus(game, publicView)}</span>
+                  </div>
+                  <div className='space-y-1.5'>
+                    <TeamRow game={game} slot={1} />
+                    <TeamRow game={game} slot={2} />
+                  </div>
+                  <dl className='mt-3 grid grid-cols-[54px_1fr] gap-x-1 gap-y-0.5 text-[10px] leading-3 text-slate-600'>
+                    <dt className='font-medium'>Date:</dt><dd className='truncate'>{formatDisplayDate(game.date || '') || '—'}</dd>
+                    <dt className='font-medium'>Time:</dt><dd className='truncate'>{formatDisplayTime(game.time || '') || '—'}</dd>
+                    <dt className='font-medium'>Host:</dt><dd className='truncate'>{game.host_location_name || '—'}</dd>
+                    <dt className='font-medium'>Field:</dt><dd className='truncate'>{game.field_name || '—'}</dd>
+                    <dt className='font-medium'>Winner:</dt><dd className='truncate'>{game.winner_team_name || '—'}</dd>
+                  </dl>
+                </article>
+              );
+            })}
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 function downloadBlob(blob: Blob, filename: string) {
@@ -345,53 +476,20 @@ export default function TournamentBracket({ divisions, publicView = false, tourn
           <span key={label} className='rounded-full border bg-white px-2 py-1 text-slate-700'>{label}</span>
         ))}
       </div>
-      {exportDivisions.map((division) => {
-        const rounds = division.rounds;
-        return (
-          <section key={division.id} id={`division-${division.id}`} className='space-y-3'>
-            <div className='flex flex-wrap items-start justify-between gap-3'>
-              <div>
-                <h3 className='text-lg font-semibold'>{division.division_group} {division.division_name}</h3>
-                <p className='text-xs text-slate-500'>Bracket source: saved tournament game records and published tournament score advancement.</p>
-              </div>
-              {enableDownloads && <DownloadControls title={tournamentTitle} division={division} publicView={publicView} />}
+      {exportDivisions.map((division) => (
+        <section key={division.id} id={`division-${division.id}`} className='space-y-3'>
+          <div className='flex flex-wrap items-start justify-between gap-3'>
+            <div>
+              <h3 className='text-lg font-semibold'>{division.division_group} {division.division_name}</h3>
+              <p className='text-xs text-slate-500'>Bracket source: saved tournament game records and published tournament score advancement.</p>
             </div>
-            <div className='overflow-x-auto pb-2'>
-              <div className='grid min-w-max auto-cols-[19rem] grid-flow-col gap-6'>
-                {rounds.map((round) => (
-                  <div key={round.round_number} className='space-y-3'>
-                    <div className='sticky left-0 rounded bg-slate-900 px-3 py-2 text-sm font-semibold text-white'>{round.round_name}</div>
-                    <div className='space-y-4'>
-                      {round.games.map((game) => (
-                        <article key={game.id} className={`relative rounded-lg border p-3 shadow-sm ${statusClass(game, publicView)} after:absolute after:left-full after:top-1/2 after:hidden after:h-px after:w-6 after:bg-slate-300 md:after:block`}>
-                          <div className='mb-2 flex items-start justify-between gap-2'>
-                            <div>
-                              <div className='text-xs font-semibold uppercase tracking-wide text-slate-500'>{game.round_name}</div>
-                              <div className='font-semibold'>Game {game.game_number}</div>
-                            </div>
-                            <span className='rounded-full border bg-white/80 px-2 py-1 text-[11px]'>{displayStatus(game, publicView)}</span>
-                          </div>
-                          <div className='space-y-2'>
-                            <TeamRow game={game} slot={1} />
-                            <TeamRow game={game} slot={2} />
-                          </div>
-                          <dl className='mt-3 grid grid-cols-2 gap-x-3 gap-y-1 text-xs text-slate-600'>
-                            <dt className='font-medium'>Date</dt><dd>{formatDisplayDate(game.date || '') || '—'}</dd>
-                            <dt className='font-medium'>Time</dt><dd>{formatDisplayTime(game.time || '') || '—'}</dd>
-                            <dt className='font-medium'>Host</dt><dd>{game.host_location_name || '—'}</dd>
-                            <dt className='font-medium'>Field</dt><dd>{game.field_name || '—'}</dd>
-                            <dt className='font-medium'>Winner</dt><dd>{game.winner_team_name || '—'}</dd>
-                          </dl>
-                        </article>
-                      ))}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </section>
-        );
-      })}
+            {enableDownloads && <DownloadControls title={tournamentTitle} division={division} publicView={publicView} />}
+          </div>
+          <div className='overflow-x-auto overflow-y-auto pb-3' data-testid='bracket-horizontal-scroll'>
+            <SharedBracketRenderer title={tournamentTitle} division={division} publicView={publicView} outputLabel={publicView ? 'Published bracket' : 'Administrator bracket'} />
+          </div>
+        </section>
+      ))}
     </div>
   );
 }
