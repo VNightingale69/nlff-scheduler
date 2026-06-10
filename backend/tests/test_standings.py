@@ -97,6 +97,12 @@ class StandingsTest(unittest.TestCase):
         ordered = [row['team_name'] for row in response.json()['divisions'][0]['standings']]
         self.assertLess(ordered.index('A Team'), ordered.index('B Team'))
 
+    def test_rank_order_is_deterministic_for_equal_records(self):
+        response = self._standings()
+        self.assertEqual(response.status_code, 200, response.text)
+        ordered = [row['team_name'] for row in response.json()['divisions'][0]['standings']]
+        self.assertEqual(ordered, ['A Team', 'B Team', 'C Team', 'D No Scores'])
+
     def test_unpublish_and_republish_recalculate_standings(self):
         game = self._game(self.teams[0], self.teams[1], score=(10, 0))
         first = self._standings().json()['divisions'][0]['standings'][0]
