@@ -29,6 +29,14 @@ class Organization(Base, TimestampMixin):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    logo_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    logo_filename: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    logo_content_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    logo_file_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    logo_width: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    logo_height: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    logo_uploaded_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    logo_uploaded_by_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('users.id'), nullable=True)
 
 
 class User(Base, TimestampMixin):
