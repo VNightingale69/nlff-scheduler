@@ -1,5 +1,6 @@
 import unittest
 import uuid
+from datetime import date, time
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -9,7 +10,7 @@ from sqlalchemy.orm import sessionmaker
 from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN
 from app.database import Base, get_db
 from app.main import app
-from app.models import Division, Organization, OrganizationDivisionParticipation, Role, Team, User
+from app.models import Division, Game, GameScore, GameStatus, Organization, OrganizationDivisionParticipation, Role, ScoreHistory, Team, User
 from app.security import create_access_token, hash_password
 
 
@@ -76,6 +77,21 @@ class TeamManagementPermissionsTest(unittest.TestCase):
     def _token(self, user_id):
         return {'Authorization': f'Bearer {create_access_token(str(user_id))}'}
 
+    def _add_scheduled_game_for_team(self, team):
+        opponent = self.other_team if team.id != self.other_team.id else self.own_team
+        status = GameStatus(id=uuid.uuid4(), code='SCHEDULED', label='Scheduled', is_active=True)
+        game = Game(
+            id=uuid.uuid4(),
+            home_team_id=team.id,
+            away_team_id=opponent.id,
+            game_status_id=status.id,
+            game_date=date(2026, 9, 12),
+            kickoff_time=time(9, 0),
+        )
+        self.db.add_all([status, game])
+        self.db.commit()
+        return game
+
     def test_community_admin_list_teams_is_scoped_to_own_organization(self):
         response = self.client.get('/api/teams?page_size=500', headers=self._token(self.community_user.id))
         self.assertEqual(response.status_code, 200, response.text)
@@ -116,6 +132,88 @@ class TeamManagementPermissionsTest(unittest.TestCase):
         self.db.expire_all()
         self.assertTrue(self.db.get(Team, self.other_team.id).is_active)
 
+
+    def test_default_team_list_excludes_inactive_teams(self):
+        self.own_team.is_active = False
+        self.db.commit()
+
+        response = self.client.get('/api/teams?page_size=500', headers=self._token(self.community_user.id))
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()['items'], [])
+
+    def test_scheduling_admin_can_include_inactive_teams(self):
+        self.own_team.is_active = False
+        self.db.commit()
+
+        default_response = self.client.get('/api/teams?page_size=500', headers=self._token(self.scheduling_user.id))
+        self.assertEqual(default_response.status_code, 200, default_response.text)
+        self.assertNotIn(str(self.own_team.id), [item['id'] for item in default_response.json()['items']])
+
+        response = self.client.get('/api/teams?page_size=500&include_inactive=true', headers=self._token(self.scheduling_user.id))
+        self.assertEqual(response.status_code, 200, response.text)
+        inactive = next(item for item in response.json()['items'] if item['id'] == str(self.own_team.id))
+        self.assertFalse(inactive['is_active'])
+
+    def test_community_admin_cannot_include_inactive_teams(self):
+        response = self.client.get('/api/teams?page_size=500&include_inactive=true', headers=self._token(self.community_user.id))
+        self.assertEqual(response.status_code, 403)
+
+    def test_delete_soft_deactivates_and_hides_team_from_default_list(self):
+        delete = self.client.delete(f'/api/teams/{self.own_team.id}', headers=self._token(self.community_user.id))
+        self.assertEqual(delete.status_code, 200, delete.text)
+        self.assertEqual(delete.json()['message'], 'Team removed from active teams.')
+        self.db.expire_all()
+        self.assertFalse(self.db.get(Team, self.own_team.id).is_active)
+
+        response = self.client.get('/api/teams?page_size=500', headers=self._token(self.community_user.id))
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()['items'], [])
+
+    def test_inactive_team_does_not_count_toward_participation_limit(self):
+        self.participation.team_count = 1
+        self.own_team.is_active = False
+        self.db.commit()
+
+        response = self.client.post(
+            '/api/teams',
+            headers=self._token(self.community_user.id),
+            json={
+                'organization_id': str(self.org.id),
+                'division_id': str(self.division.id),
+                'name': 'Replacement Team',
+                'coach_name': 'Replacement Coach',
+                'coach_email': 'replacement@example.com',
+                'is_active': True,
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()['name'], 'Replacement Team')
+
+    def test_community_admin_cannot_delete_team_with_scheduled_games(self):
+        game = self._add_scheduled_game_for_team(self.own_team)
+
+        response = self.client.delete(f'/api/teams/{self.own_team.id}', headers=self._token(self.community_user.id))
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertIn('already scheduled', response.json()['detail'])
+        self.db.expire_all()
+        self.assertTrue(self.db.get(Team, self.own_team.id).is_active)
+        self.assertIsNotNone(self.db.get(Game, game.id))
+
+    def test_scheduling_admin_can_soft_delete_scheduled_team_without_breaking_game_reference(self):
+        game = self._add_scheduled_game_for_team(self.own_team)
+        score = GameScore(id=uuid.uuid4(), game_id=game.id, home_score=14, away_score=7, score_status='APPROVED')
+        history = ScoreHistory(id=uuid.uuid4(), game_id=game.id, action='score_saved', new_home_score=14, new_away_score=7)
+        self.db.add_all([score, history])
+        self.db.commit()
+
+        response = self.client.delete(f'/api/teams/{self.own_team.id}', headers=self._token(self.scheduling_user.id))
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()['scheduled_game_count'], 1)
+        self.db.expire_all()
+        self.assertFalse(self.db.get(Team, self.own_team.id).is_active)
+        self.assertEqual(self.db.get(Game, game.id).home_team_id, self.own_team.id)
+        self.assertEqual(self.db.get(GameScore, score.id).game_id, game.id)
+        self.assertEqual(self.db.get(ScoreHistory, history.id).game_id, game.id)
 
     def test_team_creation_requires_coach_name_and_email(self):
         response = self.client.post(

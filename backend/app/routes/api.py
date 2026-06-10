@@ -18,7 +18,7 @@ from sqlalchemy.exc import IntegrityError, ProgrammingError, SQLAlchemyError
 from sqlalchemy.orm import Session, aliased
 
 from app.config import ADMIN_SEED_EMAIL, ENABLE_SCHEDULE_QUALITY_REPORT, ENABLE_TURF_OPTIMIZATION, RULEBOOK_MAX_SIZE_BYTES, RULEBOOK_UPLOAD_DIR
-from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN, can_manage_schedule, enforce_organization_scope, get_current_user, get_optional_current_user, is_community_admin, is_league_admin, normalize_role_name, require_roles, require_schedule_admin, require_schedule_publisher
+from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN, can_manage_schedule, enforce_organization_scope, get_current_user, get_optional_current_user, is_community_admin, is_league_admin, is_scheduling_admin, normalize_role_name, require_roles, require_schedule_admin, require_schedule_publisher
 from app.database import get_db
 from app.models import Division, Field, FieldConfigurationOption, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostPlanSelection, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Rulebook, ScheduleChangeLog, ScoreHistory, ScoreSubmission, Season, Team, TurfWave, User, Week
 from app.schemas import (
@@ -11558,10 +11558,15 @@ def create_team(payload: TeamCreate, current_user: User = Depends(get_current_us
     x = Team(**data); db.add(x); db.commit(); db.refresh(x); return x
 
 @router.get('/teams', response_model=PagedResponse[TeamRead], dependencies=[Depends(get_current_user)])
-def list_teams(search: str | None = None, organization_id: uuid.UUID | None = None, division_id: uuid.UUID | None = None, active_divisions_only: bool = True, page: int = 1, page_size: int = 20, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def list_teams(search: str | None = None, organization_id: uuid.UUID | None = None, division_id: uuid.UUID | None = None, active_divisions_only: bool = True, include_inactive: bool = False, page: int = 1, page_size: int = 20, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if include_inactive and not (is_league_admin(current_user) or is_scheduling_admin(current_user)):
+        raise HTTPException(status_code=403, detail='Only schedule administrators can include inactive teams')
+
     q = db.query(Team)
     if active_divisions_only:
         q = q.join(Team.division).filter(Division.is_active.is_(True))
+    if not include_inactive:
+        q = q.filter(Team.is_active.is_(True))
     if is_community_admin(current_user): q = q.filter(Team.organization_id == current_user.organization_id)
     elif organization_id: q = q.filter(Team.organization_id == organization_id)
     if division_id: q = q.filter(Team.division_id == division_id)
@@ -11609,9 +11614,15 @@ def del_team(item_id: uuid.UUID, current_user: User = Depends(get_current_user),
     x = db.query(Team).filter(Team.id == item_id).first()
     if not x: raise HTTPException(404, 'Team not found')
     enforce_organization_scope(x.organization_id, current_user)
+    scheduled_game_count = db.query(Game.id).filter(or_(Game.home_team_id == item_id, Game.away_team_id == item_id)).count()
+    if scheduled_game_count and is_community_admin(current_user):
+        raise HTTPException(
+            status_code=409,
+            detail='This team is already scheduled and cannot be deleted by a Community Admin. Contact the Scheduling Administrator.',
+        )
     x.is_active = False
     db.commit()
-    return {'ok': True}
+    return {'ok': True, 'message': 'Team removed from active teams.', 'scheduled_game_count': scheduled_game_count}
 
 # keep existing game/public routes omitted for brevity
 
