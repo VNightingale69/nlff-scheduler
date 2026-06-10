@@ -17,7 +17,7 @@ export default function DashboardShell({ children }: { children: React.ReactNode
 
   const role = normalizeRoleName(user?.role_name) as AuthUser['role_name'];
   const navOrder = role === 'COMMUNITY_ADMIN'
-    ? ['organizations', 'teams', 'host-locations', 'fields', 'hosting-availability', 'games', 'score-entry', 'rulebook']
+    ? ['organizations', 'teams', 'host-locations', 'fields', 'hosting-availability', 'games', 'score-entry', 'standings', 'rulebook']
     : [
       'organizations',
       'divisions',
@@ -32,6 +32,7 @@ export default function DashboardShell({ children }: { children: React.ReactNode
       'schedule-readiness',
       'manual-schedule-builder',
       'schedule-management',
+      'standings',
       'scores',
       'scores/flagged',
       'scores/missing',
@@ -47,6 +48,7 @@ export default function DashboardShell({ children }: { children: React.ReactNode
     'hosting-availability': 'My Hosting Availability',
     games: 'League Schedule',
     'score-entry': 'Score Entry',
+    standings: 'Results & Standings',
     rulebook: 'Rulebook',
   };
   const links = useMemo(

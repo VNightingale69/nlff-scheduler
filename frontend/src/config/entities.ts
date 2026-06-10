@@ -22,6 +22,7 @@ export const ENTITIES: Record<string, EntityConfig> = {
   'schedule-readiness': { title: 'Schedule Readiness', path: '/schedule-readiness', nav: true, fields: [] },
   'manual-schedule-builder': { title: 'Manual Schedule Builder', path: '/manual-schedule-builder', nav: true, fields: [] },
   'schedule-management': { title: 'Schedule Management', path: '/schedule-management', nav: true, fields: [] },
+  standings: { title: 'Results & Standings', path: '/standings', nav: true, roles: ['LEAGUE_ADMIN', 'SCHEDULING_ADMIN', 'COMMUNITY_ADMIN'], fields: [] },
   scores: { title: 'Score Management', path: '/scores', nav: true, roles: ['LEAGUE_ADMIN', 'SCHEDULING_ADMIN'], fields: [] },
   'scores/flagged': { title: 'Flagged Scores', path: '/scores/flagged', nav: true, roles: ['LEAGUE_ADMIN', 'SCHEDULING_ADMIN'], fields: [] },
   'scores/missing': { title: 'Missing Scores', path: '/scores/missing', nav: true, roles: ['LEAGUE_ADMIN', 'SCHEDULING_ADMIN'], fields: [] },
