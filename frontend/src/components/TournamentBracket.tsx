@@ -359,7 +359,7 @@ function svgText(x: number, y: number, text: string, options: { size?: number; w
   return `<text x="${x}" y="${y}" font-family="Inter, Arial, sans-serif" font-size="${options.size || 12}" font-weight="${options.weight || 400}" fill="${options.fill || '#0f172a'}"${options.anchor ? ` text-anchor="${options.anchor}"` : ''}>${escapeXml(text)}</text>`;
 }
 
-function buildBracketSvg(title: string, division: ExportDivision, publicView: boolean) {
+function buildBracketSvg(title: string, division: ExportDivision, publicView: boolean, failedLogoUrls: Set<string> = new Set()) {
   const rounds = division.rounds;
   const layout = buildBracketLayout(rounds);
   const header = bracketHeaderData(title, division, publicView ? 'Published bracket export' : 'Administrator bracket export');
@@ -396,7 +396,7 @@ function buildBracketSvg(title: string, division: ExportDivision, publicView: bo
         const autoAdvanced = slot === 1 ? game.team_1_auto_advanced : game.team_2_auto_advanced;
         body += `<rect x="${gameX + 12}" y="${rowY}" width="${layout.roundWidth - 24}" height="${layout.teamRowHeight}" rx="${layout.teamRowRadius}" fill="${winner ? '#ecfdf5' : '#ffffff'}" stroke="${winner ? '#10b981' : '#e2e8f0'}"/>`;
         const logo = logoSource(teamLogoUrl(game, slot));
-        if (logo) {
+        if (logo && !failedLogoUrls.has(logo)) {
           body += `<image href="${escapeXml(logo)}" x="${gameX + 20}" y="${rowY + 6}" width="28" height="28" preserveAspectRatio="xMidYMid meet"/>`;
         } else {
           body += `<circle cx="${gameX + 34}" cy="${rowY + 20}" r="14" fill="#f1f5f9" stroke="#cbd5e1"/>`;
@@ -492,6 +492,32 @@ function SharedBracketRenderer({ title, division, publicView, outputLabel }: { t
   );
 }
 
+
+function bracketLogoUrls(division: ExportDivision) {
+  const urls = new Set<string>();
+  division.rounds.forEach((round) => {
+    round.games.forEach((game) => {
+      ([1, 2] as const).forEach((slot) => {
+        const url = logoSource(teamLogoUrl(game, slot));
+        if (url) urls.add(url);
+      });
+    });
+  });
+  return Array.from(urls);
+}
+
+async function failedBracketLogoUrls(division: ExportDivision) {
+  const failed = new Set<string>();
+  await Promise.all(bracketLogoUrls(division).map(async (url) => {
+    try {
+      await loadImage(url);
+    } catch {
+      failed.add(url);
+    }
+  }));
+  return failed;
+}
+
 function downloadBlob(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
@@ -563,14 +589,15 @@ function pdfFromJpegDataUrl(jpegDataUrl: string, width: number, height: number) 
 function DownloadControls({ title, division, publicView }: { title: string; division: ExportDivision; publicView: boolean }) {
   const divisionLabel = bracketDivisionLabel(division);
   const filenameBase = sanitizeFilename(`${title}-${divisionLabel}-bracket`);
-  const svg = () => buildBracketSvg(title, division, publicView);
-  const downloadSvg = () => downloadBlob(new Blob([svg()], { type: 'image/svg+xml;charset=utf-8' }), `${filenameBase}.svg`);
+  const svg = (failedLogoUrls: Set<string> = new Set()) => buildBracketSvg(title, division, publicView, failedLogoUrls);
+  const exportSvg = async () => svg(await failedBracketLogoUrls(division));
+  const downloadSvg = async () => downloadBlob(new Blob([await exportSvg()], { type: 'image/svg+xml;charset=utf-8' }), `${filenameBase}.svg`);
   const downloadPng = async () => {
-    const canvas = await svgToCanvas(svg());
+    const canvas = await svgToCanvas(await exportSvg());
     canvas.toBlob((blob) => { if (blob) downloadBlob(blob, `${filenameBase}.png`); }, 'image/png');
   };
   const downloadPdf = async () => {
-    const canvas = await svgToCanvas(svg());
+    const canvas = await svgToCanvas(await exportSvg());
     const pdf = pdfFromJpegDataUrl(canvas.toDataURL('image/jpeg', 0.92), canvas.width, canvas.height);
     downloadBlob(pdf, `${filenameBase}.pdf`);
   };

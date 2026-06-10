@@ -713,7 +713,15 @@ class GameRead(BaseSchema, GameCreate):
     division_name: str | None = None
     division_group: str | None = None
     home_team_name: str | None = None
+    home_team_community_id: uuid.UUID | None = None
+    home_team_community_name: str | None = None
+    home_team_logo_url: str | None = None
+    home_team_logo_alt_text: str | None = None
     away_team_name: str | None = None
+    away_team_community_id: uuid.UUID | None = None
+    away_team_community_name: str | None = None
+    away_team_logo_url: str | None = None
+    away_team_logo_alt_text: str | None = None
     generated_slot_id: uuid.UUID | None = None
     field_instance_id: uuid.UUID | None = None
     host_location_id: uuid.UUID | None = None
@@ -850,10 +858,16 @@ class PublicGameRead(BaseModel):
     date_type: str | None = None
     home_team_id: uuid.UUID
     home_team_name: str
+    home_team_community_id: uuid.UUID | None = None
+    home_team_community_name: str | None = None
     home_team_logo_url: str | None = None
+    home_team_logo_alt_text: str | None = None
     away_team_id: uuid.UUID
     away_team_name: str
+    away_team_community_id: uuid.UUID | None = None
+    away_team_community_name: str | None = None
     away_team_logo_url: str | None = None
+    away_team_logo_alt_text: str | None = None
     home_team_coach_name: str | None = None
     home_team_coach_email: EmailStr | None = None
     away_team_coach_name: str | None = None

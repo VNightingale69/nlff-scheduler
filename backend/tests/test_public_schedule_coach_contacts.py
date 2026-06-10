@@ -72,6 +72,23 @@ class PublicScheduleCoachContactsTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         return response.json()['items'][0]
 
+    def test_public_schedule_returns_team_community_logo_metadata(self):
+        self.home_org.logo_filename = 'home-logo.png'
+        self.home_org.logo_url = '/legacy/home.png'
+        self.away_org.logo_url = 'uploads/away-logo.png'
+        self.db.commit()
+
+        row = self._first_public_game()
+
+        self.assertEqual(row['home_team_community_id'], str(self.home_org.id))
+        self.assertEqual(row['home_team_community_name'], 'Home Community')
+        self.assertEqual(row['home_team_logo_url'], f'/api/public/organizations/{self.home_org.id}/logo/home-logo.png')
+        self.assertEqual(row['home_team_logo_alt_text'], 'Home Community logo')
+        self.assertEqual(row['away_team_community_id'], str(self.away_org.id))
+        self.assertEqual(row['away_team_community_name'], 'Away Community')
+        self.assertEqual(row['away_team_logo_url'], '/uploads/away-logo.png')
+        self.assertEqual(row['away_team_logo_alt_text'], 'Away Community logo')
+
     def test_public_schedule_does_not_expose_coach_emails_unauthenticated(self):
         row = self._first_public_game()
         self.assertEqual(row['home_team_coach_name'], 'Home Coach')

@@ -3,6 +3,8 @@ import { readFileSync } from 'node:fs';
 
 const organizationsSource = readFileSync(new URL('../src/app/(dashboard)/admin/organizations/page.tsx', import.meta.url), 'utf8');
 const scheduleSource = readFileSync(new URL('../src/app/schedule/page.tsx', import.meta.url), 'utf8');
+const standingsSource = readFileSync(new URL('../src/app/(dashboard)/admin/standings/page.tsx', import.meta.url), 'utf8');
+const scheduleManagementSource = readFileSync(new URL('../src/app/(dashboard)/admin/schedule-management/page.tsx', import.meta.url), 'utf8');
 const bracketSource = readFileSync(new URL('../src/components/TournamentBracket.tsx', import.meta.url), 'utf8');
 const logoSource = readFileSync(new URL('../src/components/CommunityLogo.tsx', import.meta.url), 'utf8');
 
@@ -20,9 +22,17 @@ assert.match(organizationsSource, /logo_uploaded_at/);
 assert.match(scheduleSource, /home_team_logo_url/);
 assert.match(scheduleSource, /away_team_logo_url/);
 assert.match(scheduleSource, /<CommunityLogo src=\{g\.home_team_logo_url\}/);
+assert.match(scheduleSource, /home_team_community_name/);
+assert.match(scheduleSource, /home_team_logo_alt_text/);
+assert.match(standingsSource, /community_logo_url/);
+assert.match(standingsSource, /<CommunityLogo src=\{row\.community_logo_url\}/);
+assert.match(scheduleManagementSource, /home_team_logo_url/);
+assert.match(scheduleManagementSource, /away_team_logo_url/);
 assert.match(bracketSource, /team_1_logo_url/);
 assert.match(bracketSource, /team_2_logo_url/);
 assert.match(bracketSource, /<CommunityLogo src=\{teamLogoUrl\(game, slot\)\}/);
 assert.match(bracketSource, /<image href=/);
 assert.match(logoSource, /object-contain/);
+assert.match(logoSource, /onError/);
+assert.match(logoSource, /setFailedSrc/);
 assert.match(logoSource, /logo fallback/);

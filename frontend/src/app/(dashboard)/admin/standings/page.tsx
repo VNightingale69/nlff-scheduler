@@ -5,11 +5,18 @@ import { useEffect, useState } from 'react';
 import { apiFetch } from '@/lib/api';
 import { canManageSchedule, getAuthUser, getToken } from '@/lib/auth';
 import { formatDisplayDate, formatDisplayTime } from '@/lib/displayFormat';
+import CommunityLogo from '@/components/CommunityLogo';
 
 type StandingRow = {
   rank: number;
+  team_id: string;
   team_name: string;
+  community_id: string;
   community_name: string;
+  organization_id?: string;
+  organization_name?: string;
+  community_logo_url?: string | null;
+  community_logo_alt_text?: string | null;
   division_name: string;
   wins: number;
   losses: number;
@@ -104,7 +111,7 @@ export default function StandingsPage() {
           </thead>
           <tbody>{division.standings.map((row) => <tr key={row.team_name} className='border-t'>
             <td className='p-2'>{row.rank}</td>
-            <td className='p-2 font-medium'>{row.team_name}</td>
+            <td className='p-2 font-medium'><span className='flex items-center gap-2'><CommunityLogo src={row.community_logo_url} name={row.community_name} altText={row.community_logo_alt_text} size={24} />{row.team_name}</span></td>
             <td className='p-2'>{row.community_name}</td>
             <td className='p-2'>{row.division_name}</td>
             <td className='p-2'>{row.wins}</td>

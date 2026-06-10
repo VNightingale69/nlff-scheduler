@@ -99,6 +99,22 @@ class StandingsTest(unittest.TestCase):
         self.assertEqual(payload['divisions'], [])
         self.assertEqual(payload['game_results'], [])
 
+    def test_standings_rows_include_community_logo_metadata(self):
+        self.org_a.logo_filename = 'westosha.png'
+        self.org_a.logo_url = '/bad/legacy/path.png'
+        self.org_b.logo_url = 'uploads/lake-county.png'
+        self.db.commit()
+        self._game(self.teams[0], self.teams[1], score=(21, 14))
+
+        response = self._standings()
+
+        self.assertEqual(response.status_code, 200, response.text)
+        rows = {row['team_name']: row for row in response.json()['divisions'][0]['standings']}
+        self.assertEqual(rows['A Team']['community_logo_url'], f'/api/public/organizations/{self.org_a.id}/logo/westosha.png')
+        self.assertEqual(rows['A Team']['community_logo_alt_text'], 'Westosha logo')
+        self.assertEqual(rows['B Team']['community_logo_url'], '/uploads/lake-county.png')
+        self.assertIsNone(rows['C Team']['community_logo_url'])
+
     def test_division_standings_include_zero_score_teams_and_count_published_results_only(self):
         self._game(self.teams[0], self.teams[1], score=(21, 14))
         self._game(self.teams[1], self.teams[2], score=(7, 20), status='SUBMITTED', published=False)
