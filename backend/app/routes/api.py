@@ -18,7 +18,7 @@ from sqlalchemy.exc import IntegrityError, ProgrammingError, SQLAlchemyError
 from sqlalchemy.orm import Session, aliased
 
 from app.config import ADMIN_SEED_EMAIL, ENABLE_SCHEDULE_QUALITY_REPORT, ENABLE_TURF_OPTIMIZATION, RULEBOOK_MAX_SIZE_BYTES, RULEBOOK_UPLOAD_DIR
-from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN, can_manage_schedule, enforce_organization_scope, get_current_user, is_community_admin, is_league_admin, normalize_role_name, require_roles, require_schedule_admin, require_schedule_publisher
+from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN, can_manage_schedule, enforce_organization_scope, get_current_user, get_optional_current_user, is_community_admin, is_league_admin, normalize_role_name, require_roles, require_schedule_admin, require_schedule_publisher
 from app.database import get_db
 from app.models import Division, Field, FieldConfigurationOption, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostPlanSelection, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Rulebook, ScheduleChangeLog, ScoreHistory, ScoreSubmission, Season, Team, TurfWave, User, Week
 from app.schemas import (
@@ -11505,8 +11505,18 @@ def regenerate_generated_game_slots(payload: dict | None = None, current_user: U
     )
 
 
+def _normalize_team_coach_fields(data: dict) -> dict:
+    if 'name' in data and data['name'] is not None:
+        data['name'] = str(data['name']).strip()
+    if 'coach_name' in data and data['coach_name'] is not None:
+        data['coach_name'] = str(data['coach_name']).strip()
+    if 'coach_email' in data and data['coach_email'] is not None:
+        data['coach_email'] = str(data['coach_email']).strip().lower()
+    return data
+
+
 def _team_payload_for_user(payload: TeamCreate, current_user: User) -> dict:
-    data = payload.model_dump()
+    data = _normalize_team_coach_fields(payload.model_dump())
     if is_community_admin(current_user):
         if not current_user.organization_id:
             raise HTTPException(status_code=403, detail='User has no community scope')
@@ -11577,7 +11587,7 @@ def patch_team(item_id: uuid.UUID, payload: TeamUpdate, current_user: User = Dep
         raise HTTPException(404, 'Team not found')
     enforce_organization_scope(x.organization_id, current_user)
 
-    updates = payload.model_dump(exclude_unset=True)
+    updates = _normalize_team_coach_fields(payload.model_dump(exclude_unset=True))
     if not updates:
         return x
 
@@ -23193,7 +23203,7 @@ def run_same_community_home_field_repair(payload: dict, db: Session = Depends(ge
 
 @router.get('/public/games', response_model=PagedResponse[PublicGameRead])
 @router.get('/public/schedule', response_model=PagedResponse[PublicGameRead])
-def list_public_games(season_id: uuid.UUID | None = None, host_location_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, division_id: uuid.UUID | None = None, week_id: uuid.UUID | None = None, field_type: str | None = None, field_id: uuid.UUID | None = None, team_id: uuid.UUID | None = None, status_code: str | None = None, date: date | None = None, page: int = 1, page_size: int = 500, db: Session = Depends(get_db)):
+def list_public_games(season_id: uuid.UUID | None = None, host_location_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, division_id: uuid.UUID | None = None, week_id: uuid.UUID | None = None, field_type: str | None = None, field_id: uuid.UUID | None = None, team_id: uuid.UUID | None = None, status_code: str | None = None, date: date | None = None, page: int = 1, page_size: int = 500, current_user: User | None = Depends(get_optional_current_user), db: Session = Depends(get_db)):
     season = _get_schedule_scope_season(db, season_id)
     filters = _scheduled_games_filters(
         season.id if season else season_id,
@@ -23234,7 +23244,7 @@ def list_public_games(season_id: uuid.UUID | None = None, host_location_id: uuid
     start = max(page - 1, 0) * page_size
     items = rows[start:start + page_size]
     return PagedResponse(
-        items=[_public_game_read_from_schedule_row(row, db) for row in items],
+        items=[_public_game_read_from_schedule_row(row, db, current_user) for row in items],
         total=total,
         page=page,
         page_size=page_size,
@@ -25958,10 +25968,21 @@ def _turf_field_export_label(slot: GameSlot | None, field_instance: FieldInstanc
         return getattr(field_instance, 'field_name', None)
     return _clean_explicit_field_slot_label(_turf_field_component_label(slot, field_instance) or getattr(field_instance or getattr(slot, 'field_instance', None), 'field_name', None), getattr(slot, 'field_type', None) or getattr(field_instance, 'field_type', None))
 
-def _public_game_read_from_schedule_row(row, db: Session | None = None) -> PublicGameRead:
+def _can_view_game_coach_emails(current_user: User | None, home: Team, away: Team) -> bool:
+    if not current_user or not getattr(current_user, 'role', None):
+        return False
+    if can_manage_schedule(current_user):
+        return True
+    if is_community_admin(current_user) and current_user.organization_id:
+        return current_user.organization_id in {home.organization_id, away.organization_id}
+    return False
+
+
+def _public_game_read_from_schedule_row(row, db: Session | None = None, current_user: User | None = None) -> PublicGameRead:
     g, slot, fi, host, home, away, div, org, status = row
     wave = slot.turf_wave if slot and slot.turf_wave_id else None
     turf_configuration_code = _normalize_configuration_name(wave.preferred_layout_code) if wave else None
+    coach_contacts_visible = _can_view_game_coach_emails(current_user, home, away)
     return PublicGameRead(
         id=g.id,
         game_date=g.game_date,
@@ -25987,6 +26008,11 @@ def _public_game_read_from_schedule_row(row, db: Session | None = None) -> Publi
         home_team_name=home.name,
         away_team_id=away.id,
         away_team_name=away.name,
+        home_team_coach_name=getattr(home, 'coach_name', None),
+        home_team_coach_email=(getattr(home, 'coach_email', None) if coach_contacts_visible else None),
+        away_team_coach_name=getattr(away, 'coach_name', None),
+        away_team_coach_email=(getattr(away, 'coach_email', None) if coach_contacts_visible else None),
+        coach_contacts_visible=coach_contacts_visible,
         game_status_id=g.game_status_id,
         game_status_code=status.code,
         game_status_label=status.label,
@@ -26425,6 +26451,8 @@ def schedule_management_games(season_id: uuid.UUID | None = None, date: date | N
         items.append({
             'id': str(g.id), 'date': g.game_date.isoformat(), 'time': g.kickoff_time.strftime('%H:%M:%S'), 'division_id': str(div.id), 'division_name': div.name,
             'home_team_id': str(home.id), 'home_team_name': home.name, 'away_team_id': str(away.id), 'away_team_name': away.name,
+            'home_team_coach_name': getattr(home, 'coach_name', None), 'home_team_coach_email': getattr(home, 'coach_email', None),
+            'away_team_coach_name': getattr(away, 'coach_name', None), 'away_team_coach_email': getattr(away, 'coach_email', None),
             'organization_id': str(org.id), 'organization_name': org.name, 'host_location_id': (str(host.id) if host else None), 'host_location_name': (host.name if host else None),
             'field_id': (str(fi.id) if fi else None), 'field': _field_export_display_label(slot, fi, db), 'field_type': ((slot.field_type if slot else None) or (fi.field_type if fi else None)), 'status': status.code, 'slot_id': (str(slot.id) if slot else None), 'is_slot_active': (fi.is_active if fi else False),
             'turf_wave_id': str(slot.turf_wave_id) if slot and slot.turf_wave_id else None,
@@ -27114,6 +27142,10 @@ def _schedule_export_row_values(g, slot, fi, host, home, away, div, status, db: 
     ]
     if include_admin_columns:
         values.extend([
+            getattr(home, 'coach_name', None) or '',
+            getattr(home, 'coach_email', None) or '',
+            getattr(away, 'coach_name', None) or '',
+            getattr(away, 'coach_email', None) or '',
             'YES' if getattr(g, 'is_manual_edit', False) else 'NO',
             (g.manual_updated_at.isoformat() if getattr(g, 'manual_updated_at', None) else ''),
             getattr(g, 'internal_admin_notes', None) or '',
@@ -27132,7 +27164,7 @@ def export_schedule_management_csv(date: date | None = None, division_id: uuid.U
     include_admin_columns = can_manage_schedule(current_user)
     headers = ['Date', 'Time', 'Normalized Division Key', 'Home Team', 'Away Team', 'Host Location', 'Field', 'Field Type', 'Status']
     if include_admin_columns:
-        headers.extend(['Edited', 'Last Updated', 'Admin Notes'])
+        headers.extend(['Home Coach Name', 'Home Coach Email', 'Away Coach Name', 'Away Coach Email', 'Edited', 'Last Updated', 'Admin Notes'])
     w.writerow(headers)
     export_division_names: set[str] = set()
     exported_dates = {g.game_date for g, *_ in rows if g.game_date}

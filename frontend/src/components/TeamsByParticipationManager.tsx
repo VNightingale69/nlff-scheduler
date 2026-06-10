@@ -4,7 +4,7 @@ import { ApiError, apiFetch } from '@/lib/api';
 import { getAuthUser, getToken, type AuthUser } from '@/lib/auth';
 
 type FieldType = 'SMALL' | 'MEDIUM' | 'LARGE';
-type TeamFormState = { name: string; is_active: boolean };
+type TeamFormState = { name: string; coach_name: string; coach_email: string; is_active: boolean };
 
 const DIVISION_SORT_ORDER = ['K-1', '2-3', '4-5', '6-7', '8', 'K-2', '3-5', '6-8'];
 
@@ -42,6 +42,16 @@ const divisionSortRank = (division: any) => {
 };
 
 const getErrorMessage = (error: unknown) => error instanceof ApiError ? error.message : 'Request failed. Please try again.';
+const emptyTeamForm: TeamFormState = { name: '', coach_name: '', coach_email: '', is_active: true };
+const isValidEmail = (value: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+const coachInfoStatus = (team: any) => {
+  const missingName = !String(team.coach_name || '').trim();
+  const missingEmail = !String(team.coach_email || '').trim();
+  if (missingName && missingEmail) return 'Coach info incomplete';
+  if (missingName) return 'Missing coach name';
+  if (missingEmail) return 'Missing coach email';
+  return '';
+};
 
 export default function TeamsByParticipationManager() {
   const [user, setUser] = useState<AuthUser | null>(null);
@@ -52,6 +62,8 @@ export default function TeamsByParticipationManager() {
   const [newTeams, setNewTeams] = useState<Record<string, TeamFormState>>({});
   const [editingTeamId, setEditingTeamId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState('');
+  const [editingCoachName, setEditingCoachName] = useState('');
+  const [editingCoachEmail, setEditingCoachEmail] = useState('');
   const [editingIsActive, setEditingIsActive] = useState(true);
   const [deleteTarget, setDeleteTarget] = useState<any | null>(null);
   const [msg, setMsg] = useState('');
@@ -133,6 +145,7 @@ export default function TeamsByParticipationManager() {
 
   const grouped = useMemo(() => Object.fromEntries(divisions.map((d) => [d.id, teams.filter((t) => t.division_id === d.id)])), [divisions, teams]);
   const activeTeams = useMemo(() => teams.filter((t: any) => t.is_active), [teams]);
+  const teamsMissingCoachInfo = useMemo(() => teams.filter((t: any) => t.is_active && coachInfoStatus(t)).length, [teams]);
 
   const leagueSummary = useMemo(() => {
     const divisionsById = Object.fromEntries(divisions.map((d: any) => [d.id, d]));
@@ -184,18 +197,32 @@ export default function TeamsByParticipationManager() {
 
   const addTeam = async (divisionId: string, expectedCount: number | null, activeCount: number) => {
     if (expectedCount !== null && activeCount >= expectedCount) return;
-    const form = newTeams[divisionId] || { name: '', is_active: true };
+    const form = newTeams[divisionId] || emptyTeamForm;
     const name = form.name.trim();
+    const coachName = form.coach_name.trim();
+    const coachEmail = form.coach_email.trim().toLowerCase();
     if (!name) {
       setError('Team name is required.');
+      return;
+    }
+    if (!coachName) {
+      setError('Coach Name is required.');
+      return;
+    }
+    if (!coachEmail) {
+      setError('Coach Email is required.');
+      return;
+    }
+    if (!isValidEmail(coachEmail)) {
+      setError('Coach Email must be a valid email address.');
       return;
     }
     setSaving(true);
     setError('');
     setMsg('');
     try {
-      await apiFetch('/teams', { method: 'POST', body: JSON.stringify({ organization_id: orgId, division_id: divisionId, name, is_active: form.is_active }) }, getToken());
-      setNewTeams({ ...newTeams, [divisionId]: { name: '', is_active: true } });
+      await apiFetch('/teams', { method: 'POST', body: JSON.stringify({ organization_id: orgId, division_id: divisionId, name, coach_name: coachName, coach_email: coachEmail, is_active: form.is_active }) }, getToken());
+      setNewTeams({ ...newTeams, [divisionId]: emptyTeamForm });
       await load(orgId);
       setMsg('Team saved.');
     } catch (err) {
@@ -208,6 +235,8 @@ export default function TeamsByParticipationManager() {
   const startEdit = (team: any) => {
     setEditingTeamId(team.id);
     setEditingName(team.name);
+    setEditingCoachName(team.coach_name || '');
+    setEditingCoachEmail(team.coach_email || '');
     setEditingIsActive(team.is_active);
     setMsg('');
     setError('');
@@ -215,17 +244,33 @@ export default function TeamsByParticipationManager() {
 
   const saveEdit = async (team: any) => {
     const name = editingName.trim();
+    const coachName = editingCoachName.trim();
+    const coachEmail = editingCoachEmail.trim().toLowerCase();
     if (!name) {
       setError('Team name is required.');
+      return;
+    }
+    if (!coachName) {
+      setError('Coach Name is required.');
+      return;
+    }
+    if (!coachEmail) {
+      setError('Coach Email is required.');
+      return;
+    }
+    if (!isValidEmail(coachEmail)) {
+      setError('Coach Email must be a valid email address.');
       return;
     }
     setSaving(true);
     setError('');
     setMsg('');
     try {
-      await apiFetch(`/teams/${team.id}`, { method: 'PATCH', body: JSON.stringify({ name, is_active: editingIsActive }) }, getToken());
+      await apiFetch(`/teams/${team.id}`, { method: 'PATCH', body: JSON.stringify({ name, coach_name: coachName, coach_email: coachEmail, is_active: editingIsActive }) }, getToken());
       setEditingTeamId(null);
       setEditingName('');
+      setEditingCoachName('');
+      setEditingCoachEmail('');
       await refreshSelectedOrg();
       setMsg('Team updated successfully.');
     } catch (err) {
@@ -311,6 +356,7 @@ export default function TeamsByParticipationManager() {
         <div className='mb-1 font-semibold'>Team naming guidance</div>
         <p>When creating teams, use a consistent team name that includes the community name, division/grade level, and a differentiator such as a color. Examples: Westosha Coed K/1 Maroon, Westosha Coed K/1 Silver.</p>
       </div>
+      {teamsMissingCoachInfo > 0 && <p className='rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900'>{teamsMissingCoachInfo} team{teamsMissingCoachInfo === 1 ? ' is' : 's are'} missing coach contact information. Please update team records.</p>}
       {teams.length === 0 && <p className='rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900'>No teams have been added for this community.</p>}
       {divisions.length === 0 && !error && <p className='rounded border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700'>No active divisions are available for team setup.</p>}
       {divisions.map((d) => {
@@ -318,7 +364,7 @@ export default function TeamsByParticipationManager() {
         const activeExisting = existing.filter((t: any) => t.is_active);
         const expectedCount = d.expected_count as number | null;
         const atLimit = expectedCount !== null && activeExisting.length >= expectedCount;
-        const form = newTeams[d.id] || { name: '', is_active: true };
+        const form = newTeams[d.id] || emptyTeamForm;
         return <div key={d.id} className='space-y-3 rounded border bg-white p-3'>
           <div className='flex flex-wrap items-start justify-between gap-2'>
             <div>
@@ -328,15 +374,17 @@ export default function TeamsByParticipationManager() {
           </div>
           <div className='overflow-x-auto rounded border'>
             <table className='w-full text-left text-sm'>
-              <thead className='bg-slate-100'><tr><th className='p-2'>Team name</th><th className='p-2'>Division / grade level</th><th className='p-2'>Active status</th><th className='p-2'>Actions</th></tr></thead>
-              <tbody>{existing.length === 0 ? <tr><td className='p-2 text-slate-500' colSpan={4}>No teams have been added for this division.</td></tr> : existing.map((t: any) => <tr key={t.id} className='border-t'>
+              <thead className='bg-slate-100'><tr><th className='p-2'>Team name</th><th className='p-2'>Coach Contact</th><th className='p-2'>Division / grade level</th><th className='p-2'>Active status</th><th className='p-2'>Actions</th></tr></thead>
+              <tbody>{existing.length === 0 ? <tr><td className='p-2 text-slate-500' colSpan={5}>No teams have been added for this division.</td></tr> : existing.map((t: any) => <tr key={t.id} className='border-t'>
                 {editingTeamId === t.id ? <>
                   <td className='p-2'><input className='w-full rounded border p-1' value={editingName} onChange={(e) => setEditingName(e.target.value)} /></td>
+                  <td className='space-y-1 p-2'><input className='w-full rounded border p-1' value={editingCoachName} onChange={(e) => setEditingCoachName(e.target.value)} placeholder='Coach Name' /><input className='w-full rounded border p-1' type='email' value={editingCoachEmail} onChange={(e) => setEditingCoachEmail(e.target.value)} placeholder='Coach Email' /></td>
                   <td className='p-2'>{resolveDivisionLabel(d)}</td>
                   <td className='p-2'><label className='flex items-center gap-2'><input type='checkbox' checked={editingIsActive} onChange={(e) => setEditingIsActive(e.target.checked)} /> Active</label></td>
-                  <td className='space-x-2 p-2'><button disabled={saving} className='rounded bg-emerald-700 px-2 py-1 text-white disabled:bg-slate-400' onClick={() => saveEdit(t)}>Save</button><button className='rounded border px-2 py-1' onClick={() => { setEditingTeamId(null); setEditingName(''); }}>Cancel</button></td>
+                  <td className='space-x-2 p-2'><button disabled={saving} className='rounded bg-emerald-700 px-2 py-1 text-white disabled:bg-slate-400' onClick={() => saveEdit(t)}>Save</button><button className='rounded border px-2 py-1' onClick={() => { setEditingTeamId(null); setEditingName(''); setEditingCoachName(''); setEditingCoachEmail(''); }}>Cancel</button></td>
                 </> : <>
                   <td className='p-2'>{t.name}</td>
+                  <td className='p-2'>{coachInfoStatus(t) ? <span className='rounded bg-amber-100 px-2 py-1 text-xs font-semibold text-amber-900'>{coachInfoStatus(t)}</span> : <div><div>{t.coach_name}</div><a className='text-sky-700 underline' href={`mailto:${t.coach_email}`}>{t.coach_email}</a></div>}</td>
                   <td className='p-2'>{resolveDivisionLabel(d)}</td>
                   <td className='p-2'>{t.is_active ? 'Active' : 'Inactive'}</td>
                   <td className='space-x-2 p-2'><button className='text-sm underline' onClick={() => startEdit(t)}>Edit</button><button className='text-sm underline text-rose-700' onClick={() => setDeleteTarget(t)}>Delete</button></td>
@@ -344,8 +392,10 @@ export default function TeamsByParticipationManager() {
               </tr>)}</tbody>
             </table>
           </div>
-          <div className='grid gap-2 rounded bg-slate-50 p-3 md:grid-cols-[1fr_auto_auto] md:items-end'>
+          <div className='grid gap-2 rounded bg-slate-50 p-3 md:grid-cols-[1fr_1fr_1fr_auto_auto] md:items-end'>
             <label className='text-sm'><span className='mb-1 block font-medium'>Team name</span><input disabled={atLimit || saving} className='w-full rounded border p-2 disabled:cursor-not-allowed disabled:bg-slate-100' value={form.name} onChange={(e) => setNewTeams({ ...newTeams, [d.id]: { ...form, name: e.target.value } })} placeholder='Team Name' /></label>
+            <label className='text-sm'><span className='mb-1 block font-medium'>Coach Name</span><input disabled={atLimit || saving} className='w-full rounded border p-2 disabled:cursor-not-allowed disabled:bg-slate-100' value={form.coach_name} onChange={(e) => setNewTeams({ ...newTeams, [d.id]: { ...form, coach_name: e.target.value } })} placeholder='Coach Name' /></label>
+            <label className='text-sm'><span className='mb-1 block font-medium'>Coach Email</span><input disabled={atLimit || saving} className='w-full rounded border p-2 disabled:cursor-not-allowed disabled:bg-slate-100' type='email' value={form.coach_email} onChange={(e) => setNewTeams({ ...newTeams, [d.id]: { ...form, coach_email: e.target.value } })} placeholder='coach@example.com' /></label>
             <label className='flex items-center gap-2 text-sm'><input disabled={saving} type='checkbox' checked={form.is_active} onChange={(e) => setNewTeams({ ...newTeams, [d.id]: { ...form, is_active: e.target.checked } })} /> Active</label>
             <button disabled={atLimit || saving} className='rounded bg-slate-700 px-3 py-2 text-white disabled:cursor-not-allowed disabled:bg-slate-400' onClick={() => addTeam(d.id, expectedCount, activeExisting.length)}>{atLimit ? 'Team Limit Reached' : 'Add Team'}</button>
           </div>

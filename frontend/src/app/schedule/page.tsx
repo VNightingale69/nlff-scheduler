@@ -3,6 +3,7 @@
 import { Suspense, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { API_URL } from '@/lib/api';
+import { getToken } from '@/lib/auth';
 import { getDivisionLabel } from '@/lib/divisionLabel';
 import { formatDisplayDate, formatDisplayTime } from '@/lib/displayFormat';
 import Link from 'next/link';
@@ -19,6 +20,11 @@ type Game = {
   division_name: string;
   home_team_name: string;
   away_team_name: string;
+  home_team_coach_name?: string | null;
+  home_team_coach_email?: string | null;
+  away_team_coach_name?: string | null;
+  away_team_coach_email?: string | null;
+  coach_contacts_visible?: boolean;
   game_status_label: string;
   public_score_status?: string | null;
   home_score?: number | string | null;
@@ -89,8 +95,10 @@ function PublicScheduleContent() {
   const load = async (activeFilters: PublicScheduleFilters = filters) => {
     setLoading(true);
     const q = buildScheduleQuery(activeFilters);
+    const token = getToken();
+    const authHeaders = token ? { Authorization: `Bearer ${token}` } : undefined;
     const [gamesRes, optionsRes] = await Promise.all([
-      fetch(`${API_URL}/public/schedule?${q.toString()}`),
+      fetch(`${API_URL}/public/schedule?${q.toString()}`, { headers: authHeaders }),
       fetch(`${API_URL}/public/schedule/options`),
     ]);
     const gamesPayload = await gamesRes.json();
@@ -156,6 +164,7 @@ function PublicScheduleContent() {
                 <th className='p-2'>Away team</th>
                 <th className='p-2'>Game type</th>
                 <th className='p-2'>Game status</th>
+                <th className='p-2'>Coach Contacts</th>
                 <th className='p-2'>Score</th>
               </tr>
             </thead>
@@ -171,6 +180,11 @@ function PublicScheduleContent() {
                   <td className='p-2'>{g.away_team_name}</td>
                   <td className='p-2'>{g.date_type === 'PLAYOFF' ? 'PLAYOFF' : g.week_label || 'Regular Season'}</td>
                   <td className='p-2'>{g.game_status_label}</td>
+                  <td className='p-2 text-xs'>
+                    <div><span className='font-semibold'>Home Coach:</span> {g.home_team_coach_name || 'Not provided'}{g.home_team_coach_email ? <> &lt;<a className='text-sky-700 underline' href={`mailto:${g.home_team_coach_email}`}>{g.home_team_coach_email}</a>&gt;</> : null}</div>
+                    <div><span className='font-semibold'>Away Coach:</span> {g.away_team_coach_name || 'Not provided'}{g.away_team_coach_email ? <> &lt;<a className='text-sky-700 underline' href={`mailto:${g.away_team_coach_email}`}>{g.away_team_coach_email}</a>&gt;</> : null}</div>
+                    {!g.coach_contacts_visible && <div className='text-slate-500'>Sign in with an authorized role to view coach emails.</div>}
+                  </td>
                   <td className='p-2'>{['APPROVED','PUBLISHED'].includes(g.public_score_status || '') ? `${g.home_team_name} ${g.home_score}, ${g.away_team_name} ${g.away_score}` : g.public_score_status === 'SCORE_PENDING' ? 'Score Pending' : ''}</td>
                 </tr>
               ))}

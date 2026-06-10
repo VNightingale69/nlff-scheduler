@@ -1,7 +1,7 @@
 import uuid
 from datetime import date, datetime, time
 
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, field_validator
 
 
 class BaseSchema(BaseModel):
@@ -206,15 +206,65 @@ class TeamCreate(BaseModel):
     organization_id: uuid.UUID
     division_id: uuid.UUID
     name: str
+    coach_name: str
+    coach_email: EmailStr
     is_active: bool = True
 
-class TeamRead(BaseSchema, TeamCreate):
-    pass
+    @field_validator('name', 'coach_name')
+    @classmethod
+    def trim_required_text(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError('Field is required')
+        return value
+
+    @field_validator('coach_email', mode='before')
+    @classmethod
+    def trim_coach_email(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator('coach_email')
+    @classmethod
+    def normalize_coach_email(cls, value: EmailStr) -> str:
+        return str(value).strip().lower()
+
+
+class TeamRead(BaseSchema):
+    organization_id: uuid.UUID
+    division_id: uuid.UUID
+    name: str
+    coach_name: str | None = None
+    coach_email: EmailStr | None = None
+    is_active: bool = True
 
 
 class TeamUpdate(BaseModel):
     name: str | None = None
+    coach_name: str | None = None
+    coach_email: EmailStr | None = None
     is_active: bool | None = None
+
+    @field_validator('name', 'coach_name')
+    @classmethod
+    def trim_optional_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        value = value.strip()
+        if not value:
+            raise ValueError('Field is required')
+        return value
+
+    @field_validator('coach_email', mode='before')
+    @classmethod
+    def trim_optional_coach_email(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator('coach_email')
+    @classmethod
+    def normalize_optional_coach_email(cls, value: EmailStr | None) -> str | None:
+        if value is None:
+            return value
+        return str(value).strip().lower()
 
 class SeasonCreate(BaseModel):
     name: str
@@ -786,6 +836,11 @@ class PublicGameRead(BaseModel):
     home_team_name: str
     away_team_id: uuid.UUID
     away_team_name: str
+    home_team_coach_name: str | None = None
+    home_team_coach_email: EmailStr | None = None
+    away_team_coach_name: str | None = None
+    away_team_coach_email: EmailStr | None = None
+    coach_contacts_visible: bool = False
     game_status_id: uuid.UUID
     game_status_code: str
     game_status_label: str
