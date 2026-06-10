@@ -11615,7 +11615,7 @@ def del_team(item_id: uuid.UUID, current_user: User = Depends(get_current_user),
 
 # keep existing game/public routes omitted for brevity
 
-@router.get('/game-statuses', response_model=PagedResponse[dict], dependencies=[Depends(get_current_user)])
+@router.get('/game-statuses', response_model=PagedResponse[dict], dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
 def list_game_statuses(page:int=1,page_size:int=50, db:Session=Depends(get_db)):
     q=db.query(GameStatus).order_by(GameStatus.label)
     return PagedResponse(items=[{"id":x.id,"code":x.code,"label":x.label} for x in q.offset((page-1)*page_size).limit(page_size).all()], total=q.count(), page=page, page_size=page_size)

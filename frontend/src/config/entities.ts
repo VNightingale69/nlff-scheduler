@@ -26,5 +26,4 @@ export const ENTITIES: Record<string, EntityConfig> = {
   'scores/flagged': { title: 'Flagged Scores', path: '/scores/flagged', nav: true, roles: ['LEAGUE_ADMIN', 'SCHEDULING_ADMIN'], fields: [] },
   'scores/missing': { title: 'Missing Scores', path: '/scores/missing', nav: true, roles: ['LEAGUE_ADMIN', 'SCHEDULING_ADMIN'], fields: [] },
   'score-entry': { title: 'Score Entry', path: '/score-entry', nav: true, roles: ['COMMUNITY_ADMIN'], fields: [] },
-  'game-statuses': { title: 'Game Statuses', path: '/game-statuses', nav: true, roles: ['LEAGUE_ADMIN'], fields: [] },
 };

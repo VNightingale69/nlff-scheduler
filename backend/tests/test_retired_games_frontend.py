@@ -104,7 +104,6 @@ class RetiredGamesFrontendTest(unittest.TestCase):
             'Score Management',
             'Flagged Scores',
             'Missing Scores',
-            'Game Statuses',
             'Results & Standings',
             'Teams',
             'Community Division Participation',
