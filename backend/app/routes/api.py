@@ -3919,17 +3919,39 @@ def _rulebook_storage_dir() -> Path:
     return upload_dir
 
 
+def _rulebook_storage_path(stored_filename: str) -> str:
+    return f'rulebooks/{Path(stored_filename).name}'
+
+
+def _rulebook_view_url(rulebook_id: uuid.UUID) -> str:
+    return f'/api/rulebooks/{rulebook_id}/view'
+
+
+def _rulebook_download_url(rulebook_id: uuid.UUID) -> str:
+    return f'/api/rulebooks/{rulebook_id}/download'
+
+
+def _rulebook_stored_file_available(rulebook: Rulebook) -> bool:
+    if rulebook.stored_filename and (_rulebook_storage_dir() / Path(rulebook.stored_filename).name).is_file():
+        return True
+    return bool(rulebook.file_path and Path(rulebook.file_path).is_file())
+
+
 def _active_rulebook(db: Session) -> Rulebook | None:
     return db.query(Rulebook).filter(Rulebook.is_active.is_(True)).order_by(Rulebook.uploaded_at.desc(), Rulebook.created_at.desc()).first()
 
 
 def _serialize_rulebook(rulebook: Rulebook) -> dict:
     uploader = getattr(rulebook, 'uploaded_by', None)
+    view_url = rulebook.file_url or _rulebook_view_url(rulebook.id)
+    download_url = _rulebook_download_url(rulebook.id)
+    file_available = _rulebook_stored_file_available(rulebook)
     return {
         'id': rulebook.id,
         'created_at': rulebook.created_at,
         'updated_at': rulebook.updated_at,
         'original_filename': rulebook.original_filename,
+        'stored_filename': rulebook.stored_filename,
         'content_type': rulebook.content_type,
         'file_size_bytes': rulebook.file_size_bytes,
         'uploaded_by_user_id': rulebook.uploaded_by_user_id,
@@ -3937,8 +3959,12 @@ def _serialize_rulebook(rulebook: Rulebook) -> dict:
         'uploaded_by_email': getattr(uploader, 'email', None),
         'uploaded_at': rulebook.uploaded_at,
         'is_active': rulebook.is_active,
-        'view_url': '/api/public/rulebook/view',
-        'download_url': '/api/public/rulebook/download',
+        'storage_path': rulebook.storage_path or _rulebook_storage_path(rulebook.stored_filename),
+        'file_url': view_url,
+        'view_url': view_url,
+        'download_url': download_url,
+        'file_available': file_available,
+        'storage_error': None if file_available else _missing_rulebook_detail(admin=True),
     }
 
 
@@ -6955,8 +6981,13 @@ def upload_rulebook(file: UploadFile = File(...), current_user: User = Depends(g
             destination.unlink(missing_ok=True)
             raise HTTPException(status_code=400, detail='Uploaded rulebook PDF is empty.')
 
+        if not destination.exists() or not destination.is_file():
+            raise HTTPException(status_code=500, detail='Rulebook upload could not be saved to persistent storage.')
+
         db.query(Rulebook).filter(Rulebook.is_active.is_(True)).update({Rulebook.is_active: False}, synchronize_session=False)
+        rulebook_id = uuid.uuid4()
         rulebook = Rulebook(
+            id=rulebook_id,
             original_filename=original_filename,
             stored_filename=stored_filename,
             content_type=RULEBOOK_ALLOWED_CONTENT_TYPE,
@@ -6964,7 +6995,9 @@ def upload_rulebook(file: UploadFile = File(...), current_user: User = Depends(g
             uploaded_by_user_id=current_user.id,
             is_active=True,
             file_path=str(destination),
+            storage_path=_rulebook_storage_path(stored_filename),
         )
+        rulebook.file_url = _rulebook_view_url(rulebook_id)
         db.add(rulebook)
         db.commit()
         db.refresh(rulebook)
@@ -6987,30 +7020,76 @@ def get_rulebook(db: Session = Depends(get_db)):
 
 @router.get('/public/rulebook', response_model=RulebookRead)
 def get_public_rulebook(db: Session = Depends(get_db)):
-    return _serialize_rulebook(_ensure_active_rulebook(db))
-
-
-def _rulebook_file_response(db: Session, disposition: str) -> FileResponse:
     rulebook = _ensure_active_rulebook(db)
-    file_path = Path(rulebook.file_path)
-    if not file_path.exists() or not file_path.is_file():
-        raise HTTPException(status_code=404, detail='The active rulebook file is not available.')
+    if not _rulebook_stored_file_available(rulebook):
+        raise HTTPException(status_code=404, detail=_missing_rulebook_detail(admin=False))
+    return _serialize_rulebook(rulebook)
+
+
+def _rulebook_file_path(rulebook: Rulebook) -> Path | None:
+    candidates: list[Path] = []
+    if rulebook.stored_filename:
+        candidates.append(_rulebook_storage_dir() / Path(rulebook.stored_filename).name)
+    if rulebook.file_path:
+        candidates.append(Path(rulebook.file_path))
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    return None
+
+
+def _missing_rulebook_detail(admin: bool = False) -> str:
+    if admin:
+        return 'Active rulebook metadata exists, but the uploaded file could not be found. Please re-upload the rulebook or check persistent storage configuration.'
+    return 'Rulebook is temporarily unavailable.'
+
+
+def _rulebook_file_response(rulebook: Rulebook, disposition: str, admin_error: bool = False) -> FileResponse:
+    file_path = _rulebook_file_path(rulebook)
+    if not file_path:
+        raise HTTPException(status_code=404, detail=_missing_rulebook_detail(admin_error))
     return FileResponse(
         path=file_path,
-        media_type=RULEBOOK_ALLOWED_CONTENT_TYPE,
+        media_type=rulebook.content_type or RULEBOOK_ALLOWED_CONTENT_TYPE,
         filename=rulebook.original_filename,
         content_disposition_type=disposition,
     )
 
 
+@router.get('/rulebooks/{rulebook_id}/download')
+def download_rulebook_by_id(rulebook_id: uuid.UUID, db: Session = Depends(get_db)):
+    rulebook = db.query(Rulebook).filter(Rulebook.id == rulebook_id, Rulebook.is_active.is_(True)).first()
+    if not rulebook:
+        raise HTTPException(status_code=404, detail='No active rulebook was found for this download link.')
+    return _rulebook_file_response(rulebook, 'attachment')
+
+
+@router.get('/rulebooks/{rulebook_id}/view')
+def view_rulebook_by_id(rulebook_id: uuid.UUID, db: Session = Depends(get_db)):
+    rulebook = db.query(Rulebook).filter(Rulebook.id == rulebook_id, Rulebook.is_active.is_(True)).first()
+    if not rulebook:
+        raise HTTPException(status_code=404, detail='No active rulebook was found for this view link.')
+    return _rulebook_file_response(rulebook, 'inline')
+
+
 @router.get('/public/rulebook/download')
 def download_public_rulebook(db: Session = Depends(get_db)):
-    return _rulebook_file_response(db, 'attachment')
+    return _rulebook_file_response(_ensure_active_rulebook(db), 'attachment')
 
 
 @router.get('/public/rulebook/view')
 def view_public_rulebook(db: Session = Depends(get_db)):
-    return _rulebook_file_response(db, 'inline')
+    return _rulebook_file_response(_ensure_active_rulebook(db), 'inline')
+
+
+@router.get('/rulebook/active/download', dependencies=[Depends(get_current_user)])
+def download_active_rulebook(db: Session = Depends(get_db)):
+    return _rulebook_file_response(_ensure_active_rulebook(db), 'attachment', admin_error=True)
+
+
+@router.get('/rulebook/active/view', dependencies=[Depends(get_current_user)])
+def view_active_rulebook(db: Session = Depends(get_db)):
+    return _rulebook_file_response(_ensure_active_rulebook(db), 'inline', admin_error=True)
 
 
 @router.post('/auth/login', response_model=TokenResponse)

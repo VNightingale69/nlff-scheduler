@@ -89,6 +89,13 @@ class TestRulebookFeature:
         assert payload['file_size_bytes'] == len(b'%PDF-1.4\nrulebook')
         assert payload['uploaded_by_email'] == 'league@example.com'
         assert payload['is_active'] is True
+        assert payload['stored_filename'].endswith('.pdf')
+        assert payload['storage_path'] == f"rulebooks/{payload['stored_filename']}"
+        assert payload['view_url'] == f"/api/rulebooks/{payload['id']}/view"
+        assert payload['download_url'] == f"/api/rulebooks/{payload['id']}/download"
+        assert payload['file_url'] == payload['view_url']
+        assert payload['file_available'] is True
+        assert 'file_path' not in payload
 
     def test_non_admin_users_cannot_upload_pdf(self, tmp_path):
         self._set_upload_dir(tmp_path)
@@ -124,6 +131,7 @@ class TestRulebookFeature:
         assert public.status_code == 200
         assert authenticated.json()['original_filename'] == 'rules.pdf'
         assert public.json()['original_filename'] == 'rules.pdf'
+        assert public.json()['download_url'].startswith('/api/rulebooks/')
 
     def test_public_users_can_download_active_pdf(self, tmp_path):
         self._set_upload_dir(tmp_path)
@@ -136,6 +144,72 @@ class TestRulebookFeature:
         assert response.content == content
         assert response.headers['content-type'] == 'application/pdf'
         assert 'attachment' in response.headers['content-disposition']
+
+
+    def test_active_rulebook_download_by_stable_url_streams_pdf(self, tmp_path):
+        self._set_upload_dir(tmp_path)
+        content = b'%PDF-1.4\nstable url'
+        upload = self._upload_pdf('stable.pdf', content).json()
+
+        response = self.client.get(upload['download_url'])
+        view_response = self.client.get(upload['view_url'])
+
+        assert response.status_code == 200
+        assert response.content == content
+        assert 'attachment' in response.headers['content-disposition']
+        assert view_response.status_code == 200
+        assert view_response.content == content
+        assert 'inline' in view_response.headers['content-disposition']
+
+    def test_active_rulebook_resolves_after_new_session(self, tmp_path):
+        self._set_upload_dir(tmp_path)
+        content = b'%PDF-1.4\nafter login'
+        self._upload_pdf('session.pdf', content)
+
+        authenticated = self.client.get('/api/rulebook', headers=_auth_header(self.community_admin.id))
+        public = self.client.get(authenticated.json()['download_url'])
+
+        assert authenticated.status_code == 200
+        assert authenticated.json()['original_filename'] == 'session.pdf'
+        assert authenticated.json()['file_available'] is True
+        assert public.status_code == 200
+        assert public.content == content
+
+    def test_missing_active_file_returns_clear_admin_and_public_errors(self, tmp_path):
+        self._set_upload_dir(tmp_path)
+        upload = self._upload_pdf('missing.pdf').json()
+        record = self.db.query(Rulebook).filter(Rulebook.id == uuid.UUID(upload['id'])).one()
+        file_path = api_routes._rulebook_storage_dir() / record.stored_filename
+        file_path.unlink()
+
+        admin_metadata = self.client.get('/api/rulebook', headers=_auth_header(self.league_admin.id))
+        admin_download = self.client.get('/api/rulebook/active/download', headers=_auth_header(self.league_admin.id))
+        public_metadata = self.client.get('/api/public/rulebook')
+        public_download = self.client.get(upload['download_url'])
+
+        assert admin_metadata.status_code == 200
+        assert admin_metadata.json()['file_available'] is False
+        assert 'Please re-upload the rulebook' in admin_metadata.json()['storage_error']
+        assert admin_download.status_code == 404
+        assert 'Please re-upload the rulebook' in admin_download.json()['detail']
+        assert public_metadata.status_code == 404
+        assert public_metadata.json()['detail'] == 'Rulebook is temporarily unavailable.'
+        assert public_download.status_code == 404
+        assert public_download.json()['detail'] == 'Rulebook is temporarily unavailable.'
+
+    def test_admin_can_replace_missing_active_rulebook(self, tmp_path):
+        self._set_upload_dir(tmp_path)
+        old = self._upload_pdf('old.pdf').json()
+        old_record = self.db.query(Rulebook).filter(Rulebook.id == uuid.UUID(old['id'])).one()
+        (api_routes._rulebook_storage_dir() / old_record.stored_filename).unlink()
+
+        new = self._upload_pdf('new.pdf', b'%PDF-1.4\nreplacement').json()
+        old_record = self.db.query(Rulebook).filter(Rulebook.id == uuid.UUID(old['id'])).one()
+
+        assert new['original_filename'] == 'new.pdf'
+        assert new['file_available'] is True
+        assert old_record.is_active is False
+        assert self.client.get(new['download_url']).status_code == 200
 
     def test_replacing_rulebook_makes_newest_active_and_prior_inactive(self, tmp_path):
         self._set_upload_dir(tmp_path)

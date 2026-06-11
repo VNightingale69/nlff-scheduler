@@ -10,6 +10,11 @@ type Rulebook = {
   uploaded_at: string;
   uploaded_by_name?: string | null;
   uploaded_by_email?: string | null;
+  view_url: string;
+  download_url: string;
+  file_url?: string | null;
+  file_available?: boolean;
+  storage_error?: string | null;
 };
 
 const formatBytes = (bytes: number) => {
@@ -20,6 +25,13 @@ const formatBytes = (bytes: number) => {
 };
 
 const noRulebookMessage = 'No rulebook has been uploaded yet.';
+
+const rulebookUrl = (path?: string | null) => {
+  if (!path) return '#';
+  if (/^https?:\/\//.test(path)) return path;
+  const normalizedPath = path.startsWith('/api/') ? path.slice(4) : path;
+  return `${API_URL}${normalizedPath.startsWith('/') ? normalizedPath : `/${normalizedPath}`}`;
+};
 
 export default function RulebookManagementPage() {
   const [rulebook, setRulebook] = useState<Rulebook | null>(null);
@@ -106,9 +118,23 @@ export default function RulebookManagementPage() {
             <div><dt className='font-medium text-slate-500'>Uploaded by</dt><dd>{rulebook.uploaded_by_name || rulebook.uploaded_by_email || 'Unknown'}</dd></div>
             <div><dt className='font-medium text-slate-500'>File size</dt><dd>{formatBytes(rulebook.file_size_bytes)}</dd></div>
           </dl>
+          {rulebook.file_available === false && (
+            <div className='mt-4 rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900'>
+              {rulebook.storage_error || 'Active rulebook metadata exists, but the uploaded file could not be found. Please re-upload the rulebook or check persistent storage configuration.'}
+            </div>
+          )}
           <div className='mt-4 flex flex-wrap gap-2'>
-            <a className='rounded bg-slate-800 px-3 py-2 text-white' href={`${API_URL}/public/rulebook/view`} target='_blank' rel='noreferrer'>View</a>
-            <a className='rounded border px-3 py-2' href={`${API_URL}/public/rulebook/download`}>Download</a>
+            {rulebook.file_available === false ? (
+              <>
+                <span className='rounded bg-slate-300 px-3 py-2 text-slate-600'>View unavailable</span>
+                <span className='rounded border px-3 py-2 text-slate-500'>Download unavailable</span>
+              </>
+            ) : (
+              <>
+                <a className='rounded bg-slate-800 px-3 py-2 text-white' href={rulebookUrl(rulebook.view_url || rulebook.file_url)} target='_blank' rel='noreferrer'>View</a>
+                <a className='rounded border px-3 py-2' href={rulebookUrl(rulebook.download_url)}>Download</a>
+              </>
+            )}
           </div>
         </section>
       )}

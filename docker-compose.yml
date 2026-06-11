@@ -22,11 +22,15 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://nlff:nlff_password@db:5432/nlff
       PYTHONPATH: /app
+      UPLOAD_STORAGE_DIR: /app/uploads
+      RULEBOOK_UPLOAD_DIR: /app/uploads/rulebooks
     ports:
       - '8000:8000'
     depends_on:
       db:
         condition: service_healthy
+    volumes:
+      - backend_uploads:/app/uploads
 
   frontend:
     build:
@@ -38,3 +42,4 @@ services:
 
 volumes:
   postgres_data:
+  backend_uploads:
