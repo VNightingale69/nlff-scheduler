@@ -207,9 +207,9 @@ Expected response headers include:
 
 ## Persistent rulebook uploads
 
-Uploaded rulebooks are stored as files and referenced from database metadata. In production, configure `RULEBOOK_UPLOAD_DIR` to point at persistent storage rather than an ephemeral container layer. On Railway this should be a mounted volume such as `/app/uploads/rulebooks`; alternatively, replace local storage with durable object storage.
+Uploaded rulebooks are stored as files and referenced from database metadata. In production, configure `UPLOAD_STORAGE_DIR` to point at persistent storage rather than an ephemeral container layer. On Railway, mount a persistent volume at `/app/uploads` and set `UPLOAD_STORAGE_DIR=/app/uploads`; if `RULEBOOK_UPLOAD_DIR` is set separately, point it at the rulebook subdirectory on that same volume. The production app should not rely on ephemeral container storage for rulebook PDFs. Alternatively, replace local storage with durable object storage.
 
-Recommended environment variables:
+Required Railway/local file-storage environment variables:
 
 ```env
 UPLOAD_STORAGE_DIR=/app/uploads

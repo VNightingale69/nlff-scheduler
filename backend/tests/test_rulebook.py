@@ -1,4 +1,5 @@
 import uuid
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -68,6 +69,7 @@ class TestRulebookFeature:
         self.db.close()
 
     def _set_upload_dir(self, tmp_path):
+        api_routes.UPLOAD_STORAGE_DIR = str(tmp_path / 'uploads')
         api_routes.RULEBOOK_UPLOAD_DIR = str(tmp_path / 'rulebooks')
 
     def _upload_pdf(self, filename='rules.pdf', content=b'%PDF-1.4\nrulebook'):
@@ -96,6 +98,55 @@ class TestRulebookFeature:
         assert payload['file_url'] == payload['view_url']
         assert payload['file_available'] is True
         assert 'file_path' not in payload
+
+    def test_upload_creates_configured_rulebook_directory_and_stores_file_there(self, tmp_path):
+        upload_dir = tmp_path / 'configured' / 'rulebooks'
+        api_routes.RULEBOOK_UPLOAD_DIR = str(upload_dir)
+
+        response = self._upload_pdf('configured.pdf', b'%PDF-1.4\nconfigured')
+
+        assert response.status_code == 200
+        payload = response.json()
+        stored_file = upload_dir / payload['stored_filename']
+        record = self.db.query(Rulebook).filter(Rulebook.id == uuid.UUID(payload['id'])).one()
+        assert upload_dir.is_dir()
+        assert stored_file.is_file()
+        assert stored_file.read_bytes() == b'%PDF-1.4\nconfigured'
+        assert record.storage_path == f"rulebooks/{payload['stored_filename']}"
+        assert record.file_path == record.storage_path
+        assert not record.file_path.startswith('/')
+
+    def test_upload_uses_upload_storage_dir_when_rulebook_upload_dir_is_unset(self, tmp_path):
+        api_routes.UPLOAD_STORAGE_DIR = str(tmp_path / 'uploads')
+        api_routes.RULEBOOK_UPLOAD_DIR = ''
+
+        response = self._upload_pdf('fallback.pdf')
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert (tmp_path / 'uploads' / 'rulebooks' / payload['stored_filename']).is_file()
+
+    def test_upload_does_not_activate_rulebook_when_saved_file_cannot_be_verified(self, tmp_path):
+        self._set_upload_dir(tmp_path)
+
+        with patch('pathlib.Path.is_file', return_value=False):
+            response = self._upload_pdf('unverified.pdf')
+
+        active_rulebook = self.db.query(Rulebook).filter(Rulebook.is_active.is_(True)).first()
+        assert response.status_code == 500
+        assert response.json()['detail'] == 'Rulebook upload could not be saved to persistent storage.'
+        assert active_rulebook is None
+
+    def test_upload_returns_clear_error_when_storage_directory_is_unavailable(self, tmp_path):
+        blocking_file = tmp_path / 'not-a-directory'
+        blocking_file.write_text('blocks mkdir')
+        api_routes.RULEBOOK_UPLOAD_DIR = str(blocking_file / 'rulebooks')
+
+        response = self._upload_pdf('unavailable.pdf')
+
+        assert response.status_code == 500
+        assert response.json()['detail'] == 'Rulebook upload storage is unavailable. Please verify persistent storage configuration.'
+        assert self.db.query(Rulebook).filter(Rulebook.is_active.is_(True)).first() is None
 
     def test_non_admin_users_cannot_upload_pdf(self, tmp_path):
         self._set_upload_dir(tmp_path)
