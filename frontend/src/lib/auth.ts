@@ -8,7 +8,7 @@ export type AuthUser = {
 };
 
 export const SESSION_EXPIRED_MESSAGE = 'Your session expired. Please log in again.';
-export const APP_STORAGE_VERSION = process.env.NEXT_PUBLIC_APP_STORAGE_VERSION || '2026-06-10-auth-v2';
+export const APP_STORAGE_VERSION = process.env.NEXT_PUBLIC_APP_STORAGE_VERSION || '2026-06-11-auth-hydration-v3';
 export const APP_STORAGE_VERSION_KEY = 'nlff_app_storage_version';
 const ACCESS_TOKEN_KEY = 'access_token';
 const REFRESH_TOKEN_KEY = 'refresh_token';
@@ -34,6 +34,17 @@ const UI_CACHE_STORAGE_KEYS = [
   'feature_flags',
   'sidebar_state',
   'navigation_state',
+  'scheduleViewMode',
+  'manualScheduleBuilderScheduleMode',
+  'optimizationPreview',
+  'optimization-preview',
+  'turfOptimizationState',
+  'turf-optimization-state',
+  'scheduleStateLabel',
+  'old_tournament_view_cache',
+  'old_schedule_view_cache',
+  'logo_ui_state',
+  'rulebook_ui_state',
 ] as const;
 
 const VERSIONED_STORAGE_KEYS = [...AUTH_STORAGE_KEYS, ...UI_CACHE_STORAGE_KEYS] as const;

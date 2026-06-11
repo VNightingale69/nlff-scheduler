@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { apiFetch } from '@/lib/api';
-import { getToken } from '@/lib/auth';
+import { useAuthSession } from '@/components/AuthGate';
 import { formatDisplayDate, formatDisplayTime } from '@/lib/displayFormat';
 import TournamentBracket, { type TournamentBracketGame } from '@/components/TournamentBracket';
 
@@ -16,7 +16,8 @@ type Tournament = { id: string; name: string; status: string; is_published: bool
 const divisionLabel = (division: Division) => `${division.division_group} ${division.name}`;
 
 export default function TournamentBuilderPage() {
-  const token = getToken() || undefined;
+  const { accessToken } = useAuthSession();
+  const token = accessToken || undefined;
   const searchParams = useSearchParams();
   const [seasons, setSeasons] = useState<Season[]>([]);
   const [divisions, setDivisions] = useState<Division[]>([]);

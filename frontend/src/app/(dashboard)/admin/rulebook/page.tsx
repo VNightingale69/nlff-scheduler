@@ -2,7 +2,7 @@
 
 import { FormEvent, useEffect, useState } from 'react';
 import { API_URL, apiFetch } from '@/lib/api';
-import { getAuthUser, getToken } from '@/lib/auth';
+import { useAuthSession } from '@/components/AuthGate';
 
 type Rulebook = {
   original_filename: string;
@@ -51,18 +51,18 @@ export default function RulebookManagementPage() {
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const [storageDiagnostics, setStorageDiagnostics] = useState<StorageDiagnostics | null>(null);
-  const user = getAuthUser();
+  const { accessToken: token, currentUser: user } = useAuthSession();
   const isLeagueAdmin = user?.role_name === 'LEAGUE_ADMIN';
 
   const load = async () => {
     setLoading(true);
     setError('');
     try {
-      const data = await apiFetch('/rulebook', {}, getToken());
+      const data = await apiFetch('/rulebook', {}, token);
       setRulebook(data);
       if (data?.file_available === false) {
         try {
-          setStorageDiagnostics(await apiFetch('/admin/storage-diagnostics', {}, getToken()));
+          setStorageDiagnostics(await apiFetch('/admin/storage-diagnostics', {}, token));
         } catch {
           setStorageDiagnostics(null);
         }
@@ -104,7 +104,7 @@ export default function RulebookManagementPage() {
     try {
       const response = await fetch(`${API_URL}/admin/rulebook/upload`, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${getToken()}` },
+        headers: { Authorization: `Bearer ${token}` },
         body,
       });
       const payload = await response.json().catch(() => null);

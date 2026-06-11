@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { apiFetch } from '@/lib/api';
-import { getAuthUser, getToken } from '@/lib/auth';
+import { useAuthSession } from '@/components/AuthGate';
 import { formatDisplayDate, formatDisplayTime } from '@/lib/displayFormat';
 import Toast from './Toast';
 import { useSearchParams } from 'next/navigation';
@@ -117,9 +117,8 @@ export default function HostingAvailabilityManager() {
   const [savedSiteTypeFilter, setSavedSiteTypeFilter] = useState('');
   const [savedLayoutFilter, setSavedLayoutFilter] = useState('');
 
-  const user = getAuthUser();
+  const { currentUser: user, accessToken: token } = useAuthSession();
   const isCommunityAdmin = user?.role_name === 'COMMUNITY_ADMIN';
-  const token = getToken();
   const searchParams = useSearchParams();
   const preselectedHostId = searchParams.get('host_location_id') || '';
   const preselectedOrgId = searchParams.get('organization_id') || '';

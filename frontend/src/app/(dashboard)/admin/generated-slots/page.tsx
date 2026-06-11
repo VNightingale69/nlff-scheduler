@@ -3,11 +3,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { apiFetch } from '@/lib/api';
-import { getToken } from '@/lib/auth';
+import { useAuthSession } from '@/components/AuthGate';
 import { formatDisplayDate, formatDisplayTime, formatDisplayTimestamp } from '@/lib/displayFormat';
 
 export default function GeneratedSlotsPage() {
-  const token = getToken();
+  const { accessToken: token } = useAuthSession();
   const searchParams = useSearchParams();
   const startDate = searchParams.get('start_date') || '';
   const endDate = searchParams.get('end_date') || '';

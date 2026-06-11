@@ -3,7 +3,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { API_URL, ApiError, apiFetch } from '@/lib/api';
-import { canPublishSchedule, getAuthUser, getToken } from '@/lib/auth';
+import { canPublishSchedule } from '@/lib/auth';
+import { useAuthSession } from '@/components/AuthGate';
 import { getDivisionLabel } from '@/lib/divisionLabel';
 import { formatDisplayDate, formatDisplayTime } from '@/lib/displayFormat';
 import CommunityLogo from '@/components/CommunityLogo';
@@ -12,8 +13,7 @@ const tabs = ['By Date', 'By Host Location', 'By Team', 'By Division'] as const;
 type TabKey = (typeof tabs)[number];
 
 export default function ScheduleManagementPage() {
-  const token = getToken();
-  const authUser = getAuthUser();
+  const { accessToken: token, currentUser: authUser } = useAuthSession();
   const canControlSchedulePublication = canPublishSchedule(authUser);
   const searchParams = useSearchParams();
   const [tab, setTab] = useState<TabKey>('By Date');

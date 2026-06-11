@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
 import { apiFetch } from '@/lib/api';
-import { getToken } from '@/lib/auth';
+import { useAuthSession } from '@/components/AuthGate';
 
 const WEEK_STATUSES = ['draft', 'active', 'locked', 'completed', 'cancelled'];
 const WEEK_DATE_TYPES = ['REGULAR_SEASON', 'BLACKOUT', 'PLAYOFF'];
@@ -47,7 +47,7 @@ const formatDate = (value: string | null | undefined) => {
 const weekOptionLabel = (week: any) => week.label || `Week ${week.week_number}`;
 
 export default function WeeksPage() {
-  const token = getToken();
+  const { accessToken: token } = useAuthSession();
   const [items, setItems] = useState<any[]>([]);
   const [seasons, setSeasons] = useState<any[]>([]);
   const [form, setForm] = useState<any>(emptyForm);

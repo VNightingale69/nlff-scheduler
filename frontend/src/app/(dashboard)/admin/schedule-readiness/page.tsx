@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { apiFetch } from '@/lib/api';
-import { getToken } from '@/lib/auth';
+import { useAuthSession } from '@/components/AuthGate';
 
 type ReadinessRow = {
   division_id: string;
@@ -90,7 +90,7 @@ const MINIMUM_UNIQUE_MATCHUPS_HELP =
   'This represents the minimum number of unique matchups required for a single round-robin format before repeat matchups or double headers are considered.';
 
 export default function ScheduleReadinessPage() {
-  const token = getToken();
+  const { accessToken: token } = useAuthSession();
   const [rows, setRows] = useState<ReadinessRow[]>([]);
   const [totals, setTotals] = useState<ReadinessTotals | null>(null);
   const [error, setError] = useState('');

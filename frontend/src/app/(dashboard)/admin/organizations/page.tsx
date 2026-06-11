@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent } from 'react';
 import { ApiError, apiFetch } from '@/lib/api';
-import { getAuthUser, getToken } from '@/lib/auth';
+import { useAuthSession } from '@/components/AuthGate';
 import Toast from '@/components/Toast';
 import CommunityLogo from '@/components/CommunityLogo';
 import FormField from '@/components/ui/FormField';
@@ -56,7 +56,7 @@ export default function OrganizationsAdminPage() {
   const [logoUploadingId, setLogoUploadingId] = useState<string | null>(null);
   const [logoErrors, setLogoErrors] = useState<Record<string, string>>({});
 
-  const user = getAuthUser();
+  const { accessToken: token, currentUser: user } = useAuthSession();
   const isLeagueAdmin = user?.role_name === 'LEAGUE_ADMIN';
   const isSchedulingAdmin = user?.role_name === 'SCHEDULING_ADMIN';
   const canDeleteOrganizations = isLeagueAdmin || isSchedulingAdmin;
@@ -66,7 +66,7 @@ export default function OrganizationsAdminPage() {
   const load = async () => {
     setLoading(true);
     try {
-      const d = await apiFetch(`/organizations?page_size=500&search=${encodeURIComponent(query)}`, {}, getToken());
+      const d = await apiFetch(`/organizations?page_size=500&search=${encodeURIComponent(query)}`, {}, token);
       setItems(d.items || []);
     } catch (e: any) {
       setMessage(e?.message || 'Failed to load organizations');
@@ -83,8 +83,8 @@ export default function OrganizationsAdminPage() {
     setSaving(true);
     try {
       const payload = { name: form.name?.trim(), is_active: Boolean(form.is_active) };
-      if (editingId) await apiFetch(`/organizations/${editingId}`, { method: 'PUT', body: JSON.stringify(payload) }, getToken());
-      else await apiFetch('/organizations', { method: 'POST', body: JSON.stringify(payload) }, getToken());
+      if (editingId) await apiFetch(`/organizations/${editingId}`, { method: 'PUT', body: JSON.stringify(payload) }, token);
+      else await apiFetch('/organizations', { method: 'POST', body: JSON.stringify(payload) }, token);
       setMessage(editingId ? 'Updated successfully' : 'Created successfully'); setType('ok'); setForm({ is_active: true }); setEditingId(null); notifyOrganizationsChanged(); load();
     } catch (e: any) { setMessage(e?.message || 'Save failed'); setType('err'); }
     finally { setSaving(false); }
@@ -100,7 +100,7 @@ export default function OrganizationsAdminPage() {
     if (!deleteTarget) return;
     setDeleteError('');
     try {
-      await apiFetch(`/organizations/${deleteTarget.id}`, { method: 'PUT', body: JSON.stringify({ ...deleteTarget, is_active: false }) }, getToken());
+      await apiFetch(`/organizations/${deleteTarget.id}`, { method: 'PUT', body: JSON.stringify({ ...deleteTarget, is_active: false }) }, token);
       setMessage(`${deleteTarget.name} marked inactive`); setType('ok'); closeDeleteModal(); notifyOrganizationsChanged(); await load();
     } catch (e: any) {
       const message = e?.message || 'Unable to mark organization inactive.';
@@ -114,7 +114,7 @@ export default function OrganizationsAdminPage() {
     if (!deleteTarget) return;
     setDeleteError('');
     try {
-      const deleted = await apiFetch(`/organizations/${deleteTarget.id}`, { method: 'DELETE' }, getToken());
+      const deleted = await apiFetch(`/organizations/${deleteTarget.id}`, { method: 'DELETE' }, token);
       if (deleted?.is_active !== false || !deleted?.deleted_at) throw new ApiError('Delete did not return a persisted inactive state.', 500, deleted);
       setMessage(`${deleteTarget.name} deleted.`); setType('ok'); closeDeleteModal(); notifyOrganizationsChanged(); notifyAdminDataChanged(); await load();
     } catch (e: any) {
@@ -149,7 +149,7 @@ export default function OrganizationsAdminPage() {
     data.append('file', file as File);
     setLogoUploadingId(organization.id);
     try {
-      const updated = await apiFetch(`/organizations/${organization.id}/logo`, { method: 'POST', body: data }, getToken());
+      const updated = await apiFetch(`/organizations/${organization.id}/logo`, { method: 'POST', body: data }, token);
       setItems((current) => current.map((item) => item.id === organization.id ? updated : item));
       setMessage(`${organization.name} logo uploaded.`); setType('ok'); load();
     } catch (e: any) { setLogoErrors((current) => ({ ...current, [organization.id]: e?.message || 'Logo upload failed' })); setMessage(e?.message || 'Logo upload failed'); setType('err'); }
@@ -164,7 +164,7 @@ export default function OrganizationsAdminPage() {
   const removeLogo = async (organization: Organization) => {
     setLogoUploadingId(organization.id);
     try {
-      const updated = await apiFetch(`/organizations/${organization.id}/logo`, { method: 'DELETE' }, getToken());
+      const updated = await apiFetch(`/organizations/${organization.id}/logo`, { method: 'DELETE' }, token);
       setItems((current) => current.map((item) => item.id === organization.id ? updated : item));
       setLogoErrors((current) => ({ ...current, [organization.id]: '' }));
       setMessage(`${organization.name} logo removed.`); setType('ok'); load();
