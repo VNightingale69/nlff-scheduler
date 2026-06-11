@@ -1,19 +1,14 @@
 'use client';
 import Link from 'next/link';
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
-import { type AuthUser, clearTokens, getAuthUser, normalizeRoleName } from '@/lib/auth';
+import { type AuthUser, clearTokens, normalizeRoleName } from '@/lib/auth';
 import { ENTITIES } from '@/config/entities';
 import { APP_NAME, APP_SUBTITLE } from '@/config/branding';
 
-export default function DashboardShell({ children }: { children: React.ReactNode }) {
+export default function DashboardShell({ children, user }: { children: React.ReactNode; user: AuthUser }) {
   const pathname = usePathname();
   const router = useRouter();
-  const [user, setUser] = useState<AuthUser | null>(null);
-
-  useEffect(() => {
-    setUser(getAuthUser());
-  }, []);
 
   const role = normalizeRoleName(user?.role_name) as AuthUser['role_name'];
   const navOrder = role === 'COMMUNITY_ADMIN'
