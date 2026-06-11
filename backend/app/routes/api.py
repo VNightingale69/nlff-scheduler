@@ -17,7 +17,7 @@ from sqlalchemy import String, and_, delete, func, inspect as sa_inspect, or_, s
 from sqlalchemy.exc import IntegrityError, ProgrammingError, SQLAlchemyError
 from sqlalchemy.orm import Session, aliased
 
-from app.config import ADMIN_SEED_EMAIL, COMMUNITY_LOGO_MAX_SIZE_BYTES, COMMUNITY_LOGO_UPLOAD_DIR, ENABLE_SCHEDULE_QUALITY_REPORT, ENABLE_TURF_OPTIMIZATION, RULEBOOK_MAX_SIZE_BYTES, RULEBOOK_UPLOAD_DIR
+from app.config import ADMIN_SEED_EMAIL, COMMUNITY_LOGO_MAX_SIZE_BYTES, COMMUNITY_LOGO_UPLOAD_DIR, ENABLE_SCHEDULE_QUALITY_REPORT, ENABLE_TURF_OPTIMIZATION, RULEBOOK_MAX_SIZE_BYTES, RULEBOOK_UPLOAD_DIR, UPLOAD_STORAGE_DIR
 from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN, can_manage_schedule, enforce_organization_scope, get_current_user, get_optional_current_user, is_community_admin, is_league_admin, is_scheduling_admin, normalize_role_name, require_roles, require_schedule_admin, require_schedule_publisher
 from app.database import get_db
 from app.models import Division, Field, FieldConfigurationOption, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostPlanSelection, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Rulebook, LoginAuditLog, ScheduleChangeLog, ScoreHistory, ScoreSubmission, Season, Team, Tournament, TournamentDivision, TournamentGame, TournamentTeam, TurfWave, User, Week
@@ -3912,15 +3912,39 @@ def _build_revised_scheduling_hierarchy_diagnostics(db: Session, season_id: uuid
     }
 
 def _rulebook_storage_dir() -> Path:
-    upload_dir = Path(RULEBOOK_UPLOAD_DIR)
+    configured_dir = (RULEBOOK_UPLOAD_DIR or '').strip()
+    upload_dir = Path(configured_dir) if configured_dir else Path(UPLOAD_STORAGE_DIR) / 'rulebooks'
     if not upload_dir.is_absolute():
         upload_dir = Path.cwd() / upload_dir
-    upload_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        upload_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        logger.exception('Rulebook upload storage directory is unavailable: %s', upload_dir)
+        raise HTTPException(
+            status_code=500,
+            detail='Rulebook upload storage is unavailable. Please verify persistent storage configuration.',
+        ) from exc
     return upload_dir
 
 
 def _rulebook_storage_path(stored_filename: str) -> str:
     return f'rulebooks/{Path(stored_filename).name}'
+
+
+def _rulebook_path_from_storage_key(storage_key: str | None) -> Path | None:
+    if not storage_key:
+        return None
+    storage_path = Path(storage_key)
+    if storage_path.is_absolute():
+        return None
+    parts = storage_path.parts
+    if not parts:
+        return None
+    if len(parts) == 1:
+        return _rulebook_storage_dir() / Path(parts[0]).name
+    if parts[0] == 'rulebooks':
+        return _rulebook_storage_dir() / Path(parts[-1]).name
+    return None
 
 
 def _rulebook_view_url(rulebook_id: uuid.UUID) -> str:
@@ -3932,9 +3956,7 @@ def _rulebook_download_url(rulebook_id: uuid.UUID) -> str:
 
 
 def _rulebook_stored_file_available(rulebook: Rulebook) -> bool:
-    if rulebook.stored_filename and (_rulebook_storage_dir() / Path(rulebook.stored_filename).name).is_file():
-        return True
-    return bool(rulebook.file_path and Path(rulebook.file_path).is_file())
+    return _rulebook_file_path(rulebook) is not None
 
 
 def _active_rulebook(db: Session) -> Rulebook | None:
@@ -7010,24 +7032,27 @@ def _log_login_attempt(email: str, *, success: bool, user: User | None = None, f
 @router.post('/admin/rulebook/upload', response_model=RulebookRead, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def upload_rulebook(file: UploadFile = File(...), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     original_filename = _validate_rulebook_upload(file)
-    storage_dir = _rulebook_storage_dir()
     stored_filename = f'{uuid.uuid4()}.pdf'
-    destination = storage_dir / stored_filename
+    destination: Path | None = None
     total_bytes = 0
 
     try:
+        storage_dir = _rulebook_storage_dir()
+        destination = storage_dir / stored_filename
         with destination.open('wb') as output:
             while chunk := file.file.read(1024 * 1024):
                 total_bytes += len(chunk)
                 if total_bytes > RULEBOOK_MAX_SIZE_BYTES:
                     output.close()
-                    destination.unlink(missing_ok=True)
+                    if destination:
+                        destination.unlink(missing_ok=True)
                     limit_mb = RULEBOOK_MAX_SIZE_BYTES // (1024 * 1024)
                     raise HTTPException(status_code=413, detail=f'File is too large. Maximum size is {limit_mb} MB.')
                 output.write(chunk)
 
         if total_bytes == 0:
-            destination.unlink(missing_ok=True)
+            if destination:
+                destination.unlink(missing_ok=True)
             raise HTTPException(status_code=400, detail='Uploaded rulebook PDF is empty.')
 
         if not destination.exists() or not destination.is_file():
@@ -7043,7 +7068,7 @@ def upload_rulebook(file: UploadFile = File(...), current_user: User = Depends(g
             file_size_bytes=total_bytes,
             uploaded_by_user_id=current_user.id,
             is_active=True,
-            file_path=str(destination),
+            file_path=_rulebook_storage_path(stored_filename),
             storage_path=_rulebook_storage_path(stored_filename),
         )
         rulebook.file_url = _rulebook_view_url(rulebook_id)
@@ -7054,9 +7079,19 @@ def upload_rulebook(file: UploadFile = File(...), current_user: User = Depends(g
     except HTTPException:
         db.rollback()
         raise
+    except OSError as exc:
+        db.rollback()
+        if destination:
+            destination.unlink(missing_ok=True)
+        logger.exception('Rulebook upload could not be saved to persistent storage: %s', destination)
+        raise HTTPException(
+            status_code=500,
+            detail='Rulebook upload could not be saved to persistent storage. Please verify persistent storage configuration.',
+        ) from exc
     except Exception:
         db.rollback()
-        destination.unlink(missing_ok=True)
+        if destination:
+            destination.unlink(missing_ok=True)
         raise
     finally:
         file.file.close()
@@ -7077,10 +7112,12 @@ def get_public_rulebook(db: Session = Depends(get_db)):
 
 def _rulebook_file_path(rulebook: Rulebook) -> Path | None:
     candidates: list[Path] = []
+    for storage_key in (rulebook.storage_path, rulebook.file_path):
+        candidate = _rulebook_path_from_storage_key(storage_key)
+        if candidate is not None:
+            candidates.append(candidate)
     if rulebook.stored_filename:
         candidates.append(_rulebook_storage_dir() / Path(rulebook.stored_filename).name)
-    if rulebook.file_path:
-        candidates.append(Path(rulebook.file_path))
     for candidate in candidates:
         if candidate.exists() and candidate.is_file():
             return candidate
