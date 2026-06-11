@@ -281,13 +281,22 @@ class TestRulebookFeature:
         caplog.set_level(logging.INFO, logger='app.routes.api')
         api_routes.UPLOAD_STORAGE_DIR = str(tmp_path / 'uploads')
         api_routes.RULEBOOK_UPLOAD_DIR = ''
+        api_routes.COMMUNITY_LOGO_UPLOAD_DIR = ''
 
         diagnostics = api_routes.validate_rulebook_storage_on_startup()
 
+        assert (tmp_path / 'uploads').is_dir()
         assert (tmp_path / 'uploads' / 'rulebooks').is_dir()
+        assert (tmp_path / 'uploads' / 'community-logos').is_dir()
+        assert diagnostics['upload_storage_writable'] is True
         assert diagnostics['rulebook_storage_writable'] is True
+        assert diagnostics['logo_storage_writable'] is True
         assert diagnostics['rulebook_storage_created'] is True
-        assert 'Rulebook storage directory:' in caplog.text
+        assert diagnostics['logo_storage_created'] is True
+        assert 'Upload storage root:' in caplog.text
+        assert 'Rulebook upload directory:' in caplog.text
+        assert 'Community logo upload directory:' in caplog.text
+        assert 'Upload storage status: writable' in caplog.text
         assert 'Rulebook storage status: writable' in caplog.text
 
     def test_non_writable_storage_validation_logs_warning(self, tmp_path, monkeypatch, caplog):

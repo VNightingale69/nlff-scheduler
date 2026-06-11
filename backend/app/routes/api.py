@@ -44,9 +44,10 @@ HOST_PLAN_SELECTION_PERMISSION_MESSAGE = 'Only admin@example.com can modify host
 RULEBOOK_ALLOWED_CONTENT_TYPE = 'application/pdf'
 COMMUNITY_LOGO_ALLOWED_CONTENT_TYPE = 'image/png'
 COMMUNITY_LOGO_MIN_DIMENSION_PIXELS = 500
-RULEBOOK_STORAGE_WARNING = (
-    'Rulebook storage warning: local filesystem storage requires a persistent Railway volume in production'
+UPLOAD_STORAGE_WARNING = (
+    'Upload storage warning: local filesystem storage in production requires persistent Railway volume'
 )
+RULEBOOK_STORAGE_WARNING = UPLOAD_STORAGE_WARNING
 GAME_DURATION_MINUTES = 60
 GAME_DURATION = timedelta(minutes=GAME_DURATION_MINUTES)
 AUTO_SCHEDULE_PHASE_WARN_MS = 10_000
@@ -3935,72 +3936,120 @@ def _resolved_rulebook_storage_dir() -> Path:
 
 def _check_directory_writable(directory: Path) -> bool:
     try:
-        with tempfile.NamedTemporaryFile(prefix='.rulebook-storage-check-', dir=directory, delete=True):
+        with tempfile.NamedTemporaryFile(prefix='.upload-storage-check-', dir=directory, delete=True):
             pass
         return True
     except OSError:
         return False
 
 
-def _rulebook_storage_diagnostics(create: bool = True) -> dict:
-    upload_dir = _resolved_upload_storage_dir()
-    rulebook_dir = _resolved_rulebook_storage_dir()
+def _resolved_community_logo_storage_dir() -> Path:
+    configured_dir = (COMMUNITY_LOGO_UPLOAD_DIR or '').strip()
+    upload_dir = Path(configured_dir) if configured_dir else _resolved_upload_storage_dir() / 'community-logos'
+    if not upload_dir.is_absolute():
+        upload_dir = Path.cwd() / upload_dir
+    return upload_dir
+
+
+def _ensure_directory_status(directory: Path, create: bool = True, label: str = 'Upload storage') -> dict:
     created = False
     create_error: str | None = None
-
-    if create and not rulebook_dir.exists():
+    if create and not directory.exists():
         try:
-            rulebook_dir.mkdir(parents=True, exist_ok=True)
+            directory.mkdir(parents=True, exist_ok=True)
             created = True
         except OSError as exc:
             create_error = f'{exc.__class__.__name__}: {exc}'
-            logger.warning('Rulebook storage warning: directory missing and could not be created: %s', rulebook_dir)
-
-    exists = rulebook_dir.exists()
-    is_directory = rulebook_dir.is_dir()
-    writable = bool(exists and is_directory and _check_directory_writable(rulebook_dir))
-
+            logger.warning('%s warning: directory missing and could not be created: %s', label, directory)
+    exists = directory.exists()
+    is_directory = directory.is_dir()
+    writable = bool(exists and is_directory and _check_directory_writable(directory))
     if exists and not is_directory:
-        logger.warning('Rulebook storage warning: configured path is not a directory: %s', rulebook_dir)
+        logger.warning('%s warning: configured path is not a directory: %s', label, directory)
     if exists and is_directory and not writable:
-        logger.warning('Rulebook storage warning: directory is not writable: %s', rulebook_dir)
-
+        logger.warning('%s warning: directory is not writable: %s', label, directory)
     return {
-        'upload_storage_dir': str(upload_dir),
-        'rulebook_storage_dir': str(rulebook_dir),
-        'upload_storage_dir_configured': bool((UPLOAD_STORAGE_DIR or '').strip()),
-        'rulebook_storage_configured': bool((RULEBOOK_UPLOAD_DIR or '').strip() or (UPLOAD_STORAGE_DIR or '').strip()),
-        'rulebook_storage_exists': exists,
-        'rulebook_storage_created': created,
-        'rulebook_storage_writable': writable,
-        'rulebook_storage_create_error': create_error,
+        'exists': exists,
+        'is_directory': is_directory,
+        'created': created,
+        'writable': writable,
+        'create_error': create_error,
     }
 
 
-def validate_rulebook_storage_on_startup() -> dict:
-    diagnostics = _rulebook_storage_diagnostics(create=True)
-    logger.info('Upload storage directory: %s', diagnostics['upload_storage_dir'])
+def _upload_storage_diagnostics(create: bool = True) -> dict:
+    upload_dir = _resolved_upload_storage_dir()
+    rulebook_dir = _resolved_rulebook_storage_dir()
+    logo_dir = _resolved_community_logo_storage_dir()
+    upload_status = _ensure_directory_status(upload_dir, create=create, label='Upload storage')
+    rulebook_status = _ensure_directory_status(rulebook_dir, create=create, label='Rulebook upload storage')
+    logo_status = _ensure_directory_status(logo_dir, create=create, label='Community logo upload storage')
+    return {
+        'upload_storage_dir': str(upload_dir),
+        'upload_storage_dir_configured': bool((UPLOAD_STORAGE_DIR or '').strip()),
+        'upload_storage_exists': upload_status['exists'],
+        'upload_storage_created': upload_status['created'],
+        'upload_storage_writable': upload_status['writable'],
+        'upload_storage_create_error': upload_status['create_error'],
+        'rulebook_storage_dir': str(rulebook_dir),
+        'rulebook_storage_configured': bool((RULEBOOK_UPLOAD_DIR or '').strip() or (UPLOAD_STORAGE_DIR or '').strip()),
+        'rulebook_storage_exists': rulebook_status['exists'],
+        'rulebook_storage_created': rulebook_status['created'],
+        'rulebook_storage_writable': rulebook_status['writable'],
+        'rulebook_storage_create_error': rulebook_status['create_error'],
+        'community_logo_storage_dir': str(logo_dir),
+        'logo_storage_dir': str(logo_dir),
+        'logo_storage_configured': bool((COMMUNITY_LOGO_UPLOAD_DIR or '').strip() or (UPLOAD_STORAGE_DIR or '').strip()),
+        'logo_storage_exists': logo_status['exists'],
+        'logo_storage_created': logo_status['created'],
+        'logo_storage_writable': logo_status['writable'],
+        'logo_storage_create_error': logo_status['create_error'],
+    }
+
+
+def _rulebook_storage_diagnostics(create: bool = True) -> dict:
+    return _upload_storage_diagnostics(create=create)
+
+def validate_upload_storage_on_startup() -> dict:
+    diagnostics = _upload_storage_diagnostics(create=True)
+    logger.info('Upload storage root: %s', diagnostics['upload_storage_dir'])
+    logger.info('Upload storage exists: %s', diagnostics['upload_storage_exists'])
+    logger.info('Upload storage writable: %s', diagnostics['upload_storage_writable'])
+    logger.info('Rulebook upload directory: %s', diagnostics['rulebook_storage_dir'])
     logger.info('Rulebook storage directory: %s', diagnostics['rulebook_storage_dir'])
+    logger.info('Rulebook upload directory writable: %s', diagnostics['rulebook_storage_writable'])
+    logger.info('Community logo upload directory: %s', diagnostics['community_logo_storage_dir'])
+    logger.info('Community logo upload directory writable: %s', diagnostics['logo_storage_writable'])
     logger.info(
-        'Rulebook storage status: %s',
-        'writable' if diagnostics['rulebook_storage_writable'] else 'not writable',
+        'Upload storage status: %s',
+        'writable' if diagnostics['upload_storage_writable'] and diagnostics['rulebook_storage_writable'] and diagnostics['logo_storage_writable'] else 'not writable',
     )
-    if diagnostics['rulebook_storage_create_error']:
-        logger.warning(
-            'Rulebook storage warning: directory missing and cannot be created: %s',
-            diagnostics['rulebook_storage_create_error'],
-        )
+    logger.info('Rulebook storage status: %s', 'writable' if diagnostics['rulebook_storage_writable'] else 'not writable')
+    for key, label in (
+        ('upload_storage_create_error', 'upload storage'),
+        ('rulebook_storage_create_error', 'rulebook upload storage'),
+        ('logo_storage_create_error', 'community logo upload storage'),
+    ):
+        if diagnostics[key]:
+            logger.warning('Upload storage warning: %s directory missing and cannot be created: %s', label, diagnostics[key])
+    if not diagnostics['upload_storage_writable']:
+        logger.warning('Upload storage warning: root directory is not writable: %s', diagnostics['upload_storage_dir'])
     if not diagnostics['rulebook_storage_writable']:
         logger.warning('Rulebook storage warning: directory is not writable: %s', diagnostics['rulebook_storage_dir'])
+    if not diagnostics['logo_storage_writable']:
+        logger.warning('Community logo storage warning: directory is not writable: %s', diagnostics['community_logo_storage_dir'])
     if _is_production_environment():
-        logger.warning(RULEBOOK_STORAGE_WARNING)
+        logger.warning(UPLOAD_STORAGE_WARNING)
     return diagnostics
 
+
+def validate_rulebook_storage_on_startup() -> dict:
+    return validate_upload_storage_on_startup()
 
 def _rulebook_storage_dir() -> Path:
     diagnostics = _rulebook_storage_diagnostics(create=True)
     upload_dir = Path(diagnostics['rulebook_storage_dir'])
-    if not diagnostics['rulebook_storage_exists'] or not upload_dir.is_dir():
+    if not diagnostics['rulebook_storage_exists'] or not upload_dir.is_dir() or not diagnostics['rulebook_storage_writable']:
         raise HTTPException(
             status_code=500,
             detail='Rulebook upload storage is unavailable. Please verify persistent storage configuration.',
@@ -4022,9 +4071,9 @@ def _rulebook_path_from_storage_key(storage_key: str | None) -> Path | None:
     if not parts:
         return None
     if len(parts) == 1:
-        return _rulebook_storage_dir() / Path(parts[0]).name
+        return _resolved_rulebook_storage_dir() / Path(parts[0]).name
     if parts[0] == 'rulebooks':
-        return _rulebook_storage_dir() / Path(parts[-1]).name
+        return _resolved_rulebook_storage_dir() / Path(parts[-1]).name
     return None
 
 
@@ -4086,10 +4135,13 @@ def _validate_rulebook_upload(file: UploadFile) -> str:
 
 
 def _community_logo_storage_dir() -> Path:
-    upload_dir = Path(COMMUNITY_LOGO_UPLOAD_DIR)
-    if not upload_dir.is_absolute():
-        upload_dir = Path.cwd() / upload_dir
-    upload_dir.mkdir(parents=True, exist_ok=True)
+    diagnostics = _upload_storage_diagnostics(create=True)
+    upload_dir = Path(diagnostics['community_logo_storage_dir'])
+    if not diagnostics['logo_storage_exists'] or not upload_dir.is_dir() or not diagnostics['logo_storage_writable']:
+        raise HTTPException(
+            status_code=500,
+            detail='Community logo upload storage is unavailable. Please verify persistent storage configuration.',
+        )
     return upload_dir
 
 
@@ -4117,11 +4169,30 @@ def _community_logo_browser_url(org: Organization | None) -> str | None:
     return value if value.startswith('/') else f'/{value}'
 
 
+
+
+def _community_logo_file_available(org: Organization | None) -> bool:
+    if not org or not getattr(org, 'logo_filename', None):
+        return False
+    try:
+        candidate = _resolved_community_logo_storage_dir() / Path(org.logo_filename).name
+    except HTTPException:
+        return False
+    return candidate.exists() and candidate.is_file()
+
+
+def _missing_logo_detail() -> str:
+    return 'Logo metadata exists, but the image file could not be found. Confirm persistent upload storage is configured, then replace the logo.'
+
 def _organization_read(org: Organization) -> OrganizationRead:
     is_deleted = bool(getattr(org, 'deleted_at', None)) or not bool(getattr(org, 'is_active', False))
+    logo_metadata_exists = bool(org.logo_filename or org.logo_content_type or org.logo_file_size or org.logo_width or org.logo_height or org.logo_uploaded_at)
+    logo_file_available = _community_logo_file_available(org) if org.logo_filename else False
     return OrganizationRead.model_validate(org).model_copy(update={
         'logo_url': _community_logo_browser_url(org),
         'deletion_status': 'deleted' if is_deleted else 'active',
+        'logo_file_available': logo_file_available if logo_metadata_exists else None,
+        'logo_storage_error': _missing_logo_detail() if logo_metadata_exists and not logo_file_available else None,
     })
 
 
@@ -7235,7 +7306,7 @@ def _rulebook_file_path(rulebook: Rulebook) -> Path | None:
         if candidate is not None:
             candidates.append(candidate)
     if rulebook.stored_filename:
-        candidates.append(_rulebook_storage_dir() / Path(rulebook.stored_filename).name)
+        candidates.append(_resolved_rulebook_storage_dir() / Path(rulebook.stored_filename).name)
     for candidate in candidates:
         if candidate.exists() and candidate.is_file():
             return candidate
@@ -7249,10 +7320,24 @@ def _missing_rulebook_detail(admin: bool = False) -> str:
 
 
 def _admin_storage_diagnostics_payload(db: Session) -> dict:
-    diagnostics = _rulebook_storage_diagnostics(create=True)
+    diagnostics = _upload_storage_diagnostics(create=True)
     active_rulebook = _active_rulebook(db)
     active_file_exists = bool(active_rulebook and _rulebook_stored_file_available(active_rulebook))
+    logo_metadata_count = db.query(Organization).filter(
+        or_(
+            Organization.logo_filename.isnot(None),
+            Organization.logo_url.isnot(None),
+            Organization.logo_uploaded_at.isnot(None),
+        )
+    ).count()
+    logo_missing_count = 0
+    for org in db.query(Organization).filter(Organization.logo_filename.isnot(None)).all():
+        if not _community_logo_file_available(org):
+            logo_missing_count += 1
     return {
+        'upload_storage_configured': diagnostics['upload_storage_dir_configured'],
+        'upload_storage_exists': diagnostics['upload_storage_exists'],
+        'upload_storage_writable': diagnostics['upload_storage_writable'],
         'rulebook_storage_configured': diagnostics['rulebook_storage_configured'],
         'rulebook_storage_writable': diagnostics['rulebook_storage_writable'],
         'rulebook_storage_exists': diagnostics['rulebook_storage_exists'],
@@ -7261,7 +7346,12 @@ def _admin_storage_diagnostics_payload(db: Session) -> dict:
         'rulebook_storage_dir': diagnostics['rulebook_storage_dir'],
         'upload_storage_dir_configured': diagnostics['upload_storage_dir_configured'],
         'upload_storage_dir': diagnostics['upload_storage_dir'],
-        'logo_storage_configured': bool((COMMUNITY_LOGO_UPLOAD_DIR or '').strip()),
+        'logo_storage_configured': diagnostics['logo_storage_configured'],
+        'logo_storage_writable': diagnostics['logo_storage_writable'],
+        'logo_storage_exists': diagnostics['logo_storage_exists'],
+        'community_logo_storage_dir': diagnostics['community_logo_storage_dir'],
+        'logo_metadata_count': logo_metadata_count,
+        'logo_missing_file_count': logo_missing_count,
     }
 
 
@@ -7468,6 +7558,8 @@ def upload_organization_logo(org_id: uuid.UUID, file: UploadFile = File(...), cu
     destination = storage_dir / stored_filename
     try:
         destination.write_bytes(content)
+        if not destination.exists() or not destination.is_file():
+            raise HTTPException(status_code=500, detail='Community logo upload could not be saved to persistent storage.')
         org.logo_url = _community_logo_public_url(org.id, stored_filename)
         org.logo_filename = stored_filename
         org.logo_content_type = COMMUNITY_LOGO_ALLOWED_CONTENT_TYPE
@@ -7484,7 +7576,16 @@ def upload_organization_logo(org_id: uuid.UUID, file: UploadFile = File(...), cu
         return _organization_read(org)
     except HTTPException:
         db.rollback()
+        destination.unlink(missing_ok=True)
         raise
+    except OSError as exc:
+        db.rollback()
+        destination.unlink(missing_ok=True)
+        logger.exception('Community logo upload could not be saved to persistent storage: %s', destination)
+        raise HTTPException(
+            status_code=500,
+            detail='Community logo upload could not be saved to persistent storage. Please verify persistent storage configuration.',
+        ) from exc
     except Exception:
         db.rollback()
         destination.unlink(missing_ok=True)
@@ -7516,7 +7617,7 @@ def view_public_organization_logo(org_id: uuid.UUID, filename: str, db: Session 
     org = db.query(Organization).filter(Organization.id == org_id, Organization.logo_filename == safe_filename).first()
     if not org or not org.logo_filename:
         raise HTTPException(status_code=404, detail='Community logo not found')
-    file_path = _community_logo_storage_dir() / safe_filename
+    file_path = _resolved_community_logo_storage_dir() / safe_filename
     if not file_path.exists() or not file_path.is_file():
         raise HTTPException(status_code=404, detail='Community logo file is not available')
     return FileResponse(path=file_path, media_type=COMMUNITY_LOGO_ALLOWED_CONTENT_TYPE, filename=org.logo_filename, content_disposition_type='inline')
