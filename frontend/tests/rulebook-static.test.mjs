@@ -18,4 +18,7 @@ for (const source of [adminRulebookSource, publicRulebookSource]) {
 
 assert.match(adminRulebookSource, /file_available\?: boolean/);
 assert.match(adminRulebookSource, /storage_error\?: string \| null/);
-assert.match(adminRulebookSource, /Please re-upload the rulebook or check persistent storage configuration/);
+assert.match(adminRulebookSource, /Confirm that UPLOAD_STORAGE_DIR is backed by persistent storage/);
+assert.match(adminRulebookSource, /admin\/storage-diagnostics/);
+assert.match(adminRulebookSource, /Directory writable/);
+assert.match(adminRulebookSource, /Active file exists/);

@@ -17,6 +17,16 @@ type Rulebook = {
   storage_error?: string | null;
 };
 
+
+type StorageDiagnostics = {
+  rulebook_storage_writable?: boolean;
+  rulebook_active_file_exists?: boolean;
+  rulebook_active_metadata_exists?: boolean;
+  rulebook_storage_dir?: string;
+  upload_storage_dir?: string;
+  upload_storage_dir_configured?: boolean;
+};
+
 const formatBytes = (bytes: number) => {
   if (!bytes) return '0 B';
   const units = ['B', 'KB', 'MB', 'GB'];
@@ -40,6 +50,7 @@ export default function RulebookManagementPage() {
   const [uploading, setUploading] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
+  const [storageDiagnostics, setStorageDiagnostics] = useState<StorageDiagnostics | null>(null);
   const user = getAuthUser();
   const isLeagueAdmin = user?.role_name === 'LEAGUE_ADMIN';
 
@@ -49,8 +60,18 @@ export default function RulebookManagementPage() {
     try {
       const data = await apiFetch('/rulebook', {}, getToken());
       setRulebook(data);
+      if (data?.file_available === false) {
+        try {
+          setStorageDiagnostics(await apiFetch('/admin/storage-diagnostics', {}, getToken()));
+        } catch {
+          setStorageDiagnostics(null);
+        }
+      } else {
+        setStorageDiagnostics(null);
+      }
     } catch (err: any) {
       setRulebook(null);
+      setStorageDiagnostics(null);
       if (err?.status === 404) setMessage(noRulebookMessage);
       else setError(err?.message || 'Unable to load the rulebook.');
     } finally {
@@ -89,6 +110,7 @@ export default function RulebookManagementPage() {
       const payload = await response.json().catch(() => null);
       if (!response.ok) throw new Error(payload?.detail || 'Upload failed.');
       setRulebook(payload);
+      setStorageDiagnostics(null);
       setSelectedFile(null);
       setMessage('Rulebook uploaded successfully.');
     } catch (err: any) {
@@ -120,7 +142,14 @@ export default function RulebookManagementPage() {
           </dl>
           {rulebook.file_available === false && (
             <div className='mt-4 rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900'>
-              {rulebook.storage_error || 'Active rulebook metadata exists, but the uploaded file could not be found. Please re-upload the rulebook or check persistent storage configuration.'}
+              <p>{rulebook.storage_error || 'Rulebook metadata exists, but the file is missing from configured storage. Confirm that UPLOAD_STORAGE_DIR is backed by persistent storage, then re-upload the rulebook.'}</p>
+              {storageDiagnostics && (
+                <dl className='mt-3 grid gap-2 sm:grid-cols-3'>
+                  <div><dt className='font-medium'>Configured upload directory</dt><dd className='break-all'>{storageDiagnostics.upload_storage_dir || storageDiagnostics.rulebook_storage_dir || 'Not configured'}</dd></div>
+                  <div><dt className='font-medium'>Directory writable</dt><dd>{storageDiagnostics.rulebook_storage_writable ? 'Yes' : 'No'}</dd></div>
+                  <div><dt className='font-medium'>Active file exists</dt><dd>{storageDiagnostics.rulebook_active_file_exists ? 'Yes' : 'No'}</dd></div>
+                </dl>
+              )}
             </div>
           )}
           <div className='mt-4 flex flex-wrap gap-2'>

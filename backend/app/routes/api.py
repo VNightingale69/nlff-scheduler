@@ -6,6 +6,7 @@ import json
 import math
 import re
 import uuid
+import tempfile
 from pathlib import Path
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
@@ -44,8 +45,7 @@ RULEBOOK_ALLOWED_CONTENT_TYPE = 'application/pdf'
 COMMUNITY_LOGO_ALLOWED_CONTENT_TYPE = 'image/png'
 COMMUNITY_LOGO_MIN_DIMENSION_PIXELS = 500
 RULEBOOK_STORAGE_WARNING = (
-    'TODO: Configure RULEBOOK_UPLOAD_DIR to use a Railway volume or replace local rulebook storage '
-    'with S3-compatible storage, Supabase Storage, or Cloudinary before relying on uploads in production.'
+    'Rulebook storage warning: local filesystem storage requires a persistent Railway volume in production'
 )
 GAME_DURATION_MINUTES = 60
 GAME_DURATION = timedelta(minutes=GAME_DURATION_MINUTES)
@@ -3912,19 +3912,99 @@ def _build_revised_scheduling_hierarchy_diagnostics(db: Session, season_id: uuid
         },
     }
 
-def _rulebook_storage_dir() -> Path:
-    configured_dir = (RULEBOOK_UPLOAD_DIR or '').strip()
-    upload_dir = Path(configured_dir) if configured_dir else Path(UPLOAD_STORAGE_DIR) / 'rulebooks'
+def _is_production_environment() -> bool:
+    environment = os.getenv('ENVIRONMENT') or os.getenv('APP_ENV') or os.getenv('RAILWAY_ENVIRONMENT') or ''
+    return environment.strip().lower() in {'production', 'prod'}
+
+
+def _resolved_upload_storage_dir() -> Path:
+    configured_dir = (UPLOAD_STORAGE_DIR or '').strip()
+    upload_dir = Path(configured_dir) if configured_dir else Path('uploads')
     if not upload_dir.is_absolute():
         upload_dir = Path.cwd() / upload_dir
+    return upload_dir
+
+
+def _resolved_rulebook_storage_dir() -> Path:
+    configured_dir = (RULEBOOK_UPLOAD_DIR or '').strip()
+    upload_dir = Path(configured_dir) if configured_dir else _resolved_upload_storage_dir() / 'rulebooks'
+    if not upload_dir.is_absolute():
+        upload_dir = Path.cwd() / upload_dir
+    return upload_dir
+
+
+def _check_directory_writable(directory: Path) -> bool:
     try:
-        upload_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        logger.exception('Rulebook upload storage directory is unavailable: %s', upload_dir)
+        with tempfile.NamedTemporaryFile(prefix='.rulebook-storage-check-', dir=directory, delete=True):
+            pass
+        return True
+    except OSError:
+        return False
+
+
+def _rulebook_storage_diagnostics(create: bool = True) -> dict:
+    upload_dir = _resolved_upload_storage_dir()
+    rulebook_dir = _resolved_rulebook_storage_dir()
+    created = False
+    create_error: str | None = None
+
+    if create and not rulebook_dir.exists():
+        try:
+            rulebook_dir.mkdir(parents=True, exist_ok=True)
+            created = True
+        except OSError as exc:
+            create_error = f'{exc.__class__.__name__}: {exc}'
+            logger.warning('Rulebook storage warning: directory missing and could not be created: %s', rulebook_dir)
+
+    exists = rulebook_dir.exists()
+    is_directory = rulebook_dir.is_dir()
+    writable = bool(exists and is_directory and _check_directory_writable(rulebook_dir))
+
+    if exists and not is_directory:
+        logger.warning('Rulebook storage warning: configured path is not a directory: %s', rulebook_dir)
+    if exists and is_directory and not writable:
+        logger.warning('Rulebook storage warning: directory is not writable: %s', rulebook_dir)
+
+    return {
+        'upload_storage_dir': str(upload_dir),
+        'rulebook_storage_dir': str(rulebook_dir),
+        'upload_storage_dir_configured': bool((UPLOAD_STORAGE_DIR or '').strip()),
+        'rulebook_storage_configured': bool((RULEBOOK_UPLOAD_DIR or '').strip() or (UPLOAD_STORAGE_DIR or '').strip()),
+        'rulebook_storage_exists': exists,
+        'rulebook_storage_created': created,
+        'rulebook_storage_writable': writable,
+        'rulebook_storage_create_error': create_error,
+    }
+
+
+def validate_rulebook_storage_on_startup() -> dict:
+    diagnostics = _rulebook_storage_diagnostics(create=True)
+    logger.info('Upload storage directory: %s', diagnostics['upload_storage_dir'])
+    logger.info('Rulebook storage directory: %s', diagnostics['rulebook_storage_dir'])
+    logger.info(
+        'Rulebook storage status: %s',
+        'writable' if diagnostics['rulebook_storage_writable'] else 'not writable',
+    )
+    if diagnostics['rulebook_storage_create_error']:
+        logger.warning(
+            'Rulebook storage warning: directory missing and cannot be created: %s',
+            diagnostics['rulebook_storage_create_error'],
+        )
+    if not diagnostics['rulebook_storage_writable']:
+        logger.warning('Rulebook storage warning: directory is not writable: %s', diagnostics['rulebook_storage_dir'])
+    if _is_production_environment():
+        logger.warning(RULEBOOK_STORAGE_WARNING)
+    return diagnostics
+
+
+def _rulebook_storage_dir() -> Path:
+    diagnostics = _rulebook_storage_diagnostics(create=True)
+    upload_dir = Path(diagnostics['rulebook_storage_dir'])
+    if not diagnostics['rulebook_storage_exists'] or not upload_dir.is_dir():
         raise HTTPException(
             status_code=500,
             detail='Rulebook upload storage is unavailable. Please verify persistent storage configuration.',
-        ) from exc
+        )
     return upload_dir
 
 
@@ -7083,7 +7163,17 @@ def upload_rulebook(file: UploadFile = File(...), current_user: User = Depends(g
                 destination.unlink(missing_ok=True)
             raise HTTPException(status_code=400, detail='Uploaded rulebook PDF is empty.')
 
-        if not destination.exists() or not destination.is_file():
+        saved_file_exists = destination.exists() and destination.is_file()
+        diagnostics = _rulebook_storage_diagnostics(create=True)
+        logger.info(
+            'Rulebook upload saved: original_filename=%s stored_filename=%s file_size_bytes=%s storage_status=%s saved_file_exists=%s',
+            original_filename,
+            stored_filename,
+            total_bytes,
+            'writable' if diagnostics['rulebook_storage_writable'] else 'not writable',
+            saved_file_exists,
+        )
+        if not saved_file_exists:
             raise HTTPException(status_code=500, detail='Rulebook upload could not be saved to persistent storage.')
 
         db.query(Rulebook).filter(Rulebook.is_active.is_(True)).update({Rulebook.is_active: False}, synchronize_session=False)
@@ -7154,8 +7244,30 @@ def _rulebook_file_path(rulebook: Rulebook) -> Path | None:
 
 def _missing_rulebook_detail(admin: bool = False) -> str:
     if admin:
-        return 'Active rulebook metadata exists, but the uploaded file could not be found. Please re-upload the rulebook or check persistent storage configuration.'
+        return 'Rulebook metadata exists, but the file is missing from configured storage. Confirm that UPLOAD_STORAGE_DIR is backed by persistent storage, then re-upload the rulebook.'
     return 'Rulebook is temporarily unavailable.'
+
+
+def _admin_storage_diagnostics_payload(db: Session) -> dict:
+    diagnostics = _rulebook_storage_diagnostics(create=True)
+    active_rulebook = _active_rulebook(db)
+    active_file_exists = bool(active_rulebook and _rulebook_stored_file_available(active_rulebook))
+    return {
+        'rulebook_storage_configured': diagnostics['rulebook_storage_configured'],
+        'rulebook_storage_writable': diagnostics['rulebook_storage_writable'],
+        'rulebook_storage_exists': diagnostics['rulebook_storage_exists'],
+        'rulebook_active_file_exists': active_file_exists,
+        'rulebook_active_metadata_exists': active_rulebook is not None,
+        'rulebook_storage_dir': diagnostics['rulebook_storage_dir'],
+        'upload_storage_dir_configured': diagnostics['upload_storage_dir_configured'],
+        'upload_storage_dir': diagnostics['upload_storage_dir'],
+        'logo_storage_configured': bool((COMMUNITY_LOGO_UPLOAD_DIR or '').strip()),
+    }
+
+
+@router.get('/admin/storage-diagnostics', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
+def admin_storage_diagnostics(db: Session = Depends(get_db)):
+    return _admin_storage_diagnostics_payload(db)
 
 
 def _rulebook_file_response(rulebook: Rulebook, disposition: str, admin_error: bool = False) -> FileResponse:
