@@ -205,16 +205,20 @@ Expected response headers include:
 - No automated schedule generation or playoff logic in this MVP.
 - No dedicated seed script for full demo dataset; testers create most records manually.
 
-## Persistent rulebook uploads
+## Persistent upload storage
 
-Uploaded rulebooks are stored as files and referenced from database metadata. In production, configure `UPLOAD_STORAGE_DIR` to point at persistent storage rather than an ephemeral container layer. On Railway, mount a persistent volume at `/app/uploads` and set `UPLOAD_STORAGE_DIR=/app/uploads`; if `RULEBOOK_UPLOAD_DIR` is set separately, point it at the rulebook subdirectory on that same volume. The production app should not rely on ephemeral container storage for rulebook PDFs. Alternatively, replace local storage with durable object storage.
+Application-uploaded files are stored under one configured persistent upload root and referenced from database metadata using stable storage keys or browser-safe API URLs. Production must not write uploads only to an ephemeral container filesystem. On Railway, mount a persistent volume at `/app/uploads` and set `UPLOAD_STORAGE_DIR=/app/uploads`, or replace local filesystem storage with durable external object storage.
 
-Required Railway/local file-storage environment variables:
+Recommended Railway/local file-storage environment variables:
 
 ```env
 UPLOAD_STORAGE_DIR=/app/uploads
 RULEBOOK_UPLOAD_DIR=/app/uploads/rulebooks
+COMMUNITY_LOGO_UPLOAD_DIR=/app/uploads/community-logos
 RULEBOOK_MAX_SIZE_BYTES=26214400
+COMMUNITY_LOGO_MAX_SIZE_BYTES=2097152
 ```
 
-The API returns stable rulebook view/download routes (for example `/api/rulebooks/{rulebook_id}/view`) instead of exposing local filesystem paths. If active rulebook metadata exists but the file is missing, administrators should re-upload the rulebook and verify the persistent storage mount.
+`RULEBOOK_UPLOAD_DIR` and `COMMUNITY_LOGO_UPLOAD_DIR` are optional when they follow the default subdirectory layout under `UPLOAD_STORAGE_DIR`. The backend creates and checks the upload root plus rulebook and community-logo subdirectories on startup and logs whether each directory is writable.
+
+The API returns stable rulebook view/download routes (for example `/api/rulebooks/{rulebook_id}/view`) and public logo routes (for example `/api/public/organizations/{organization_id}/logo/{filename}`) instead of exposing local filesystem paths. If active rulebook or logo metadata exists but the file is missing, administrators should confirm persistent storage is mounted and re-upload or replace the missing asset; the app does not fabricate files from metadata.

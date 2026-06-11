@@ -119,6 +119,8 @@ class OrganizationRead(BaseSchema, OrganizationCreate):
     logo_height: int | None = None
     logo_uploaded_at: datetime | None = None
     logo_uploaded_by_user_id: uuid.UUID | None = None
+    logo_file_available: bool | None = None
+    logo_storage_error: str | None = None
 
 class DivisionCreate(BaseModel):
     name: str

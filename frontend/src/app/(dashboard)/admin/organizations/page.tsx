@@ -19,6 +19,8 @@ type Organization = {
   logo_width?: number | null;
   logo_height?: number | null;
   logo_uploaded_at?: string | null;
+  logo_file_available?: boolean | null;
+  logo_storage_error?: string | null;
 };
 type DeleteDependencyErrorDetail = { error?: string; message?: string; dependencies?: Record<string, number | string> };
 
@@ -225,6 +227,7 @@ function CommunityLogoCard({ organization, isBusy, error, onFileChange, onRemove
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [logoLoadFailed, setLogoLoadFailed] = useState(false);
   const hasLogo = Boolean(organization.logo_url);
+  const logoFileMissing = organization.logo_file_available === false;
   const hasLogoMetadata = Boolean(organization.logo_filename || organization.logo_content_type || organization.logo_file_size || organization.logo_width || organization.logo_height || organization.logo_uploaded_at);
   const dimensions = organization.logo_width && organization.logo_height ? `${organization.logo_width} × ${organization.logo_height}px` : '';
   const uploadedAt = formatDate(organization.logo_uploaded_at);
@@ -241,7 +244,7 @@ function CommunityLogoCard({ organization, isBusy, error, onFileChange, onRemove
           <div className='mt-3 text-sm text-slate-700'>
             {hasLogo ? <>
               <p className='font-medium text-slate-900'>Current logo preview</p>
-              {logoLoadFailed && <p className='mt-2 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-800'>Logo image could not be loaded. Please replace the logo or check storage configuration.</p>}
+              {(logoLoadFailed || logoFileMissing) && <p className='mt-2 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-800'>{organization.logo_storage_error || 'Logo metadata exists, but the image file could not be found. Confirm persistent upload storage is configured, then replace the logo.'}</p>}
               <dl className='mt-1 grid gap-x-4 gap-y-1 text-xs sm:grid-cols-2'>
                 {organization.logo_filename && <><dt className='font-medium text-slate-500'>File name</dt><dd className='truncate'>{organization.logo_filename}</dd></>}
                 {dimensions && <><dt className='font-medium text-slate-500'>Dimensions</dt><dd>{dimensions}</dd></>}
@@ -251,7 +254,7 @@ function CommunityLogoCard({ organization, isBusy, error, onFileChange, onRemove
               </dl>
             </> : <>
               <p>No logo uploaded. The placeholder initials shown here will be used until a PNG logo is uploaded.</p>
-              {hasLogoMetadata && <p className='mt-2 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-800'>Logo metadata exists, but the logo image URL is missing.</p>}
+              {hasLogoMetadata && <p className='mt-2 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-800'>Logo metadata exists, but the image file could not be found. Confirm persistent upload storage is configured, then replace the logo.</p>}
             </>}
           </div>
         </div>
