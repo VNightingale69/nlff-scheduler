@@ -8,10 +8,35 @@ export type AuthUser = {
 };
 
 export const SESSION_EXPIRED_MESSAGE = 'Your session expired. Please log in again.';
+export const APP_STORAGE_VERSION = process.env.NEXT_PUBLIC_APP_STORAGE_VERSION || '2026-06-10-auth-v2';
+export const APP_STORAGE_VERSION_KEY = 'nlff_app_storage_version';
 const ACCESS_TOKEN_KEY = 'access_token';
 const REFRESH_TOKEN_KEY = 'refresh_token';
 const AUTH_USER_KEY = 'auth_user';
 const AUTH_EXPIRES_AT_KEY = 'auth_expires_at';
+
+const AUTH_STORAGE_KEYS = [
+  ACCESS_TOKEN_KEY,
+  REFRESH_TOKEN_KEY,
+  AUTH_USER_KEY,
+  AUTH_EXPIRES_AT_KEY,
+  'token',
+  'current_user',
+  'user',
+  'role',
+] as const;
+
+const UI_CACHE_STORAGE_KEYS = [
+  'schedule_mode',
+  'optimization_preview',
+  'tournament_ui_cache',
+  'tournament_bracket_cache',
+  'feature_flags',
+  'sidebar_state',
+  'navigation_state',
+] as const;
+
+const VERSIONED_STORAGE_KEYS = [...AUTH_STORAGE_KEYS, ...UI_CACHE_STORAGE_KEYS] as const;
 
 export function normalizeRoleName(roleName?: string | null): string {
   if (!roleName) return '';
@@ -57,6 +82,12 @@ function readLocalStorage(key: string): string {
   return localStorage.getItem(key) || '';
 }
 
+function removeClientStorageKey(key: string) {
+  if (typeof window === 'undefined') return;
+  window.localStorage.removeItem(key);
+  window.sessionStorage.removeItem(key);
+}
+
 function decodeJwtExpiration(token: string): string {
   try {
     const encodedPayload = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
@@ -83,28 +114,43 @@ export const getAuthUser = (): AuthUser | null => {
   } catch { return null; }
 };
 
+export const setAuthUser = (user: AuthUser) => {
+  if (typeof window === 'undefined') return;
+  localStorage.setItem(AUTH_USER_KEY, JSON.stringify({
+    ...user,
+    email: user.email,
+    role_name: normalizeRoleName(user.role_name) as UserRole,
+    organization_id: user.organization_id ?? null,
+  }));
+};
+
 export const setTokens = (accessToken: string, refreshToken: string, user?: AuthUser, expiresAt?: string) => {
+  localStorage.setItem(APP_STORAGE_VERSION_KEY, APP_STORAGE_VERSION);
   localStorage.setItem(ACCESS_TOKEN_KEY, accessToken);
   localStorage.setItem(REFRESH_TOKEN_KEY, refreshToken);
   const resolvedExpiresAt = expiresAt || decodeJwtExpiration(accessToken);
   if (resolvedExpiresAt) localStorage.setItem(AUTH_EXPIRES_AT_KEY, resolvedExpiresAt);
   else localStorage.removeItem(AUTH_EXPIRES_AT_KEY);
-  if (user) {
-    localStorage.setItem(AUTH_USER_KEY, JSON.stringify({
-      ...user,
-      email: user.email,
-      role_name: normalizeRoleName(user.role_name) as UserRole,
-      organization_id: user.organization_id ?? null,
-    }));
-  }
+  if (user) setAuthUser(user);
 };
 
 export const clearTokens = () => {
   if (typeof window === 'undefined') return;
-  localStorage.removeItem(ACCESS_TOKEN_KEY);
-  localStorage.removeItem(REFRESH_TOKEN_KEY);
-  localStorage.removeItem(AUTH_USER_KEY);
-  localStorage.removeItem(AUTH_EXPIRES_AT_KEY);
+  AUTH_STORAGE_KEYS.forEach(removeClientStorageKey);
+};
+
+export const clearVersionedClientState = () => {
+  if (typeof window === 'undefined') return;
+  VERSIONED_STORAGE_KEYS.forEach(removeClientStorageKey);
+};
+
+export const reconcileClientStorageVersion = () => {
+  if (typeof window === 'undefined') return;
+  const storedVersion = window.localStorage.getItem(APP_STORAGE_VERSION_KEY);
+  if (storedVersion !== APP_STORAGE_VERSION) {
+    clearVersionedClientState();
+    window.localStorage.setItem(APP_STORAGE_VERSION_KEY, APP_STORAGE_VERSION);
+  }
 };
 
 export const isTokenNearExpiration = (thresholdMs = 5 * 60 * 1000): boolean => {
