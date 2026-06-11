@@ -3,7 +3,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { ApiError, apiFetch } from '@/lib/api';
-import { canManageSchedule, getAuthUser, getToken } from '@/lib/auth';
+import { canManageSchedule } from '@/lib/auth';
+import { useAuthSession } from '@/components/AuthGate';
 import { getDivisionLabel } from '@/lib/divisionLabel';
 import { formatDisplayDate, formatDisplayDateTime, formatDisplayTime } from '@/lib/displayFormat';
 
@@ -232,8 +233,7 @@ function summarizeAutoScheduleDiagnostics(value: any): AutoScheduleDiagnosticsSu
 }
 
 export default function ManualScheduleBuilderPage() {
-  const token = getToken();
-  const authUser = getAuthUser();
+  const { accessToken: token, currentUser: authUser } = useAuthSession();
   const canManageGeneratedGames = canManageSchedule(authUser);
   const canBulkInlineEditScheduledGames = canManageSchedule(authUser);
   const searchParams = useSearchParams();

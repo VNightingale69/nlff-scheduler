@@ -2,7 +2,8 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { apiFetch } from '@/lib/api';
-import { type AuthUser, getAuthUser, getToken } from '@/lib/auth';
+import { type AuthUser, getAuthUser } from '@/lib/auth';
+import { useAuthSession } from '@/components/AuthGate';
 
 type MatrixDate = {
   game_date: string;
@@ -144,7 +145,7 @@ function extractError(error: unknown) {
 }
 
 export default function HostAvailabilityMatrix() {
-  const token = getToken();
+  const { accessToken: token } = useAuthSession();
   const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
   const [seasons, setSeasons] = useState<Array<{ id: string; name: string }>>([]);
   const [seasonId, setSeasonId] = useState('');

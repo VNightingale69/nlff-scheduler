@@ -3,7 +3,8 @@
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { apiFetch } from '@/lib/api';
-import { canManageSchedule, getAuthUser, getToken } from '@/lib/auth';
+import { canManageSchedule } from '@/lib/auth';
+import { useAuthSession } from '@/components/AuthGate';
 import { formatDisplayDate, formatDisplayTime } from '@/lib/displayFormat';
 import CommunityLogo from '@/components/CommunityLogo';
 
@@ -57,10 +58,11 @@ function scoreText(value: number | string | null) {
 }
 
 export default function StandingsPage() {
-  const token = getToken() || undefined;
+  const { accessToken, currentUser } = useAuthSession();
+  const token = accessToken || undefined;
   const [payload, setPayload] = useState<{ season_id?: string; divisions: DivisionBlock[]; game_results: GameResult[]; last_calculated_at: string; official_score_note: string; total_missing_or_not_played: number; no_active_season?: boolean } | null>(null);
   const [message, setMessage] = useState('');
-  const canBuildTournament = canManageSchedule(getAuthUser());
+  const canBuildTournament = canManageSchedule(currentUser);
 
   const load = async () => {
     try {

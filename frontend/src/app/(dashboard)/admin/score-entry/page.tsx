@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { apiFetch } from '@/lib/api';
-import { getToken } from '@/lib/auth';
+import { useAuthSession } from '@/components/AuthGate';
 import { formatDisplayDate, formatDisplayTime } from '@/lib/displayFormat';
 
 const statuses = ['MISSING','SUBMITTED','FLAGGED','CONFLICT','APPROVED','PUBLISHED','UNPUBLISHED','CORRECTION_PENDING'];
@@ -12,7 +12,8 @@ export default function CommunityScoreEntryPage() {
   const [message, setMessage] = useState('');
   const [status, setStatus] = useState('');
   const [drafts, setDrafts] = useState<Record<string, { home_score: string; away_score: string; notes: string }>>({});
-  const token = getToken() || undefined;
+  const { accessToken } = useAuthSession();
+  const token = accessToken || undefined;
   const load = async () => {
     const query = status ? `?status=${encodeURIComponent(status)}` : '';
     setItems((await apiFetch(`/scores/my-community${query}`, {}, token)).items || []);

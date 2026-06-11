@@ -2,13 +2,14 @@
 
 import { useEffect, useState } from 'react';
 import { apiFetch } from '@/lib/api';
-import { getToken } from '@/lib/auth';
+import { useAuthSession } from '@/components/AuthGate';
 import { formatDisplayDate, formatDisplayTime } from '@/lib/displayFormat';
 
 export default function FlaggedScoresPage() {
   const [items, setItems] = useState<any[]>([]);
   const [message, setMessage] = useState('');
-  const token = getToken() || undefined;
+  const { accessToken } = useAuthSession();
+  const token = accessToken || undefined;
   const load = async () => setItems((await apiFetch('/admin/scores/flagged', {}, token)).items || []);
   useEffect(() => { load().catch((error) => setMessage(error.message)); }, []);
   const resolve = async (game: any) => {

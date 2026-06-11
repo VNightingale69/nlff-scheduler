@@ -4,16 +4,17 @@ import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { APP_NAME, APP_SUBTITLE } from '@/config/branding';
 import { apiFetch } from '@/lib/api';
-import { getAuthUser, getToken } from '@/lib/auth';
+import { useAuthSession } from '@/components/AuthGate';
 
 export default function DashboardPage() {
   const [missingCount, setMissingCount] = useState(0);
   const [linkTarget, setLinkTarget] = useState('/admin/score-entry');
   const [dismissed, setDismissed] = useState(false);
+  const { currentUser, accessToken } = useAuthSession();
 
   useEffect(() => {
-    const user = getAuthUser();
-    const token = getToken() || undefined;
+    const user = currentUser;
+    const token = accessToken || undefined;
     if (!token || user?.role_name !== 'COMMUNITY_ADMIN') return;
     apiFetch('/scores/missing-summary', {}, token)
       .then((data) => {
@@ -21,7 +22,7 @@ export default function DashboardPage() {
         setLinkTarget(data?.link_target || '/admin/score-entry');
       })
       .catch(() => undefined);
-  }, []);
+  }, [accessToken, currentUser]);
 
   return <div className='space-y-4'>
     {missingCount > 0 && !dismissed && <div className='rounded border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900'>

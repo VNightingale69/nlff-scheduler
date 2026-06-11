@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { apiFetch } from '@/lib/api';
-import { getToken } from '@/lib/auth';
+import { useAuthSession } from '@/components/AuthGate';
 import { formatDisplayDate, formatDisplayTime } from '@/lib/displayFormat';
 
 type ScoreGame = any;
@@ -13,7 +13,8 @@ export default function ScoreManagementPage() {
   const [filters, setFilters] = useState({ date: '', division_id: '', organization_id: '', host_location_id: '', status: '', published: '', game_type: '', missing: false, flagged: false, conflicts: false });
   const [drafts, setDrafts] = useState<Record<string, { home_score: string; away_score: string; notes: string }>>({});
   const [message, setMessage] = useState('');
-  const token = getToken() || undefined;
+  const { accessToken } = useAuthSession();
+  const token = accessToken || undefined;
 
   const query = () => {
     const params = new URLSearchParams();

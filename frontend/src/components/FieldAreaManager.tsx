@@ -2,7 +2,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import Toast from './Toast';
 import { apiFetch } from '@/lib/api';
-import { getAuthUser, getToken } from '@/lib/auth';
+import { useAuthSession } from '@/components/AuthGate';
 import { APPROVED_TURF_CONFIGURATIONS, turfAvailableFieldsLabel, turfConfigurationLabel, type TurfConfiguration } from '@/lib/turfConfigurations';
 
 const TURF_STADIUM = 'TURF_STADIUM';
@@ -107,8 +107,7 @@ const schedulingNote = (layout?: FieldAreaLayout | null): string => layout?.sche
 
 
 export default function FieldAreaManager() {
-  const token = getToken();
-  const authUser = getAuthUser();
+  const { accessToken: token, currentUser: authUser } = useAuthSession();
   const isCommunityAdmin = authUser?.role_name === 'COMMUNITY_ADMIN';
   const [message, setMessage] = useState('');
   const [type, setType] = useState<'ok' | 'err'>('ok');
