@@ -108,6 +108,9 @@ class OrganizationCreate(BaseModel):
     is_active: bool = True
 
 class OrganizationRead(BaseSchema, OrganizationCreate):
+    deleted_at: datetime | None = None
+    deleted_by_user_id: uuid.UUID | None = None
+    deletion_status: str | None = None
     logo_url: str | None = None
     logo_filename: str | None = None
     logo_content_type: str | None = None

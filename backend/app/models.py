@@ -29,6 +29,8 @@ class Organization(Base, TimestampMixin):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    deleted_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    deleted_by_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('users.id'), nullable=True)
     logo_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     logo_filename: Mapped[str | None] = mapped_column(String(255), nullable=True)
     logo_content_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
@@ -40,6 +42,9 @@ class Organization(Base, TimestampMixin):
 
     users = relationship('User', foreign_keys='User.organization_id', back_populates='organization')
     logo_uploaded_by_user = relationship('User', foreign_keys=[logo_uploaded_by_user_id])
+    deleted_by = relationship('User', foreign_keys=[deleted_by_user_id])
+
+    __table_args__ = (Index('ix_organizations_active_not_deleted', 'is_active', 'deleted_at'),)
 
 
 class User(Base, TimestampMixin):
