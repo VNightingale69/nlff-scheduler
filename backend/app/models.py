@@ -57,6 +57,31 @@ class User(Base, TimestampMixin):
     organization = relationship('Organization', foreign_keys=[organization_id], back_populates='users')
 
 
+class LoginAuditLog(Base):
+    __tablename__ = 'login_audit_logs'
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('users.id'), nullable=True)
+    email_attempted: Mapped[str] = mapped_column(String(255), nullable=False)
+    user_role: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    community_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('organizations.id'), nullable=True)
+    community_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    success: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    failure_reason: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    ip_address: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    user_agent: Mapped[str | None] = mapped_column(Text, nullable=True)
+    login_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    user = relationship('User')
+    community = relationship('Organization')
+
+    __table_args__ = (
+        Index('ix_login_audit_logs_login_at', 'login_at'),
+        Index('ix_login_audit_logs_email_attempted', 'email_attempted'),
+        Index('ix_login_audit_logs_success', 'success'),
+        Index('ix_login_audit_logs_community_id', 'community_id'),
+    )
 
 
 class Rulebook(Base, TimestampMixin):

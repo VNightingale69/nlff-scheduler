@@ -7,7 +7,7 @@ import math
 import re
 import uuid
 from pathlib import Path
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 import logging
 from time import perf_counter
@@ -20,12 +20,12 @@ from sqlalchemy.orm import Session, aliased
 from app.config import ADMIN_SEED_EMAIL, COMMUNITY_LOGO_MAX_SIZE_BYTES, COMMUNITY_LOGO_UPLOAD_DIR, ENABLE_SCHEDULE_QUALITY_REPORT, ENABLE_TURF_OPTIMIZATION, RULEBOOK_MAX_SIZE_BYTES, RULEBOOK_UPLOAD_DIR
 from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN, can_manage_schedule, enforce_organization_scope, get_current_user, get_optional_current_user, is_community_admin, is_league_admin, is_scheduling_admin, normalize_role_name, require_roles, require_schedule_admin, require_schedule_publisher
 from app.database import get_db
-from app.models import Division, Field, FieldConfigurationOption, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostPlanSelection, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Rulebook, ScheduleChangeLog, ScoreHistory, ScoreSubmission, Season, Team, Tournament, TournamentDivision, TournamentGame, TournamentTeam, TurfWave, User, Week
+from app.models import Division, Field, FieldConfigurationOption, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostPlanSelection, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Rulebook, LoginAuditLog, ScheduleChangeLog, ScoreHistory, ScoreSubmission, Season, Team, Tournament, TournamentDivision, TournamentGame, TournamentTeam, TurfWave, User, Week
 from app.schemas import (
     DivisionCreate, DivisionRead, FieldConfigurationOptionCreate, FieldConfigurationOptionRead, FieldCreate, FieldRead, GameCreate, GameRead, GameSaveResponse, ManualGameBulkEditRequest, ManualGameBulkEditResponse, ManualGameEditRequest, ManualGameEditResponse, ScheduleChangeLogRead, ScheduleEditWarning,
     OrganizationDivisionParticipationBulkUpsertRequest, OrganizationDivisionParticipationRead,
     GeneratedSlotRead, GeneratedSlotsClearResponse, HostAvailabilityMatrixSaveRequest, HostAvailabilityMatrixSaveResponse, HostLocationCreate, HostLocationRead, HostLocationConfigurationCreate, HostLocationConfigurationRead, HostingAvailabilityCreate, HostingAvailabilityRead, HostingAvailabilityBulkUpsertRequest, HostingAvailabilityBulkUpsertResponse, HostingGenerationRunResult, HostingGenerationLocationResult, PhysicalFieldAreaCreate, PhysicalFieldAreaRead, SavedAvailabilityResponse,
-    LoginRequest, OrganizationCreate, OrganizationRead, PagedResponse, PublicGameRead, RefreshRequest, RulebookRead, ScoreApprovePayload, ScorePayload,
+    LoginAuditLogRead, LoginRequest, OrganizationCreate, OrganizationRead, PagedResponse, PublicGameRead, RefreshRequest, RulebookRead, ScoreApprovePayload, ScorePayload,
     TeamCreate, TeamRead, TeamUpdate, TokenResponse, UserCreate, UserRead,
     HOST_PLAN_SELECTION_STATUSES, ScheduleReadinessDivisionRow, ScheduleReadinessHostDateRow, ScheduleReadinessHostSiteRow, ScheduleReadinessResponse, ScheduleReadinessTotals, ScheduleReadinessTurfWaveRow, ScheduleReadinessTurfWaveSlotRow
 )
@@ -6958,6 +6958,55 @@ def _token_response(user: User) -> TokenResponse:
     )
 
 
+def _request_ip_address(request: Request) -> str | None:
+    forwarded_for = request.headers.get('x-forwarded-for')
+    if forwarded_for:
+        return forwarded_for.split(',')[0].strip()[:100] or None
+    real_ip = request.headers.get('x-real-ip')
+    if real_ip:
+        return real_ip[:100]
+    return request.client.host[:100] if request.client and request.client.host else None
+
+
+def _record_login_audit(
+    db: Session,
+    *,
+    email_attempted: str,
+    success: bool,
+    request: Request,
+    user: User | None = None,
+    failure_reason: str | None = None,
+) -> None:
+    role_name = normalize_role_name(user.role.name) if user and user.role else None
+    community = user.organization if user else None
+    try:
+        db.add(LoginAuditLog(
+            user_id=user.id if user else None,
+            email_attempted=email_attempted.lower(),
+            user_role=role_name,
+            community_id=community.id if community else None,
+            community_name=community.name if community else None,
+            success=success,
+            failure_reason=None if success else failure_reason,
+            ip_address=_request_ip_address(request),
+            user_agent=(request.headers.get('user-agent') or None),
+            login_at=datetime.now(timezone.utc),
+        ))
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception('Failed to record login audit log.')
+
+
+def _log_login_attempt(email: str, *, success: bool, user: User | None = None, failure_reason: str | None = None) -> None:
+    if success and user:
+        role_name = normalize_role_name(user.role.name) if user.role else None
+        community_name = user.organization.name if user.organization else None
+        logger.info('LOGIN_SUCCESS email=%s role=%s community=%s', user.email, role_name, community_name)
+    else:
+        logger.info('LOGIN_FAILED email=%s reason=%s', email.lower(), failure_reason or 'invalid_credentials')
+
+
 @router.post('/admin/rulebook/upload', response_model=RulebookRead, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def upload_rulebook(file: UploadFile = File(...), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     original_filename = _validate_rulebook_upload(file)
@@ -7093,11 +7142,54 @@ def view_active_rulebook(db: Session = Depends(get_db)):
 
 
 @router.post('/auth/login', response_model=TokenResponse)
-def login(payload: LoginRequest, db: Session = Depends(get_db)):
-    user = db.query(User).join(User.role).filter(func.lower(User.email) == payload.email.lower(), User.is_active.is_(True), Role.is_active.is_(True)).first()
-    if not user or not verify_password(payload.password, user.password_hash):
+def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)):
+    email_attempted = payload.email.lower()
+    user = db.query(User).join(User.role).filter(func.lower(User.email) == email_attempted).first()
+    failure_reason = None
+    if not user:
+        failure_reason = 'missing_user'
+    elif not user.is_active or not user.role or not user.role.is_active:
+        failure_reason = 'inactive_user'
+    elif not verify_password(payload.password, user.password_hash):
+        failure_reason = 'invalid_credentials'
+
+    if failure_reason:
+        _record_login_audit(db, email_attempted=email_attempted, success=False, failure_reason=failure_reason, request=request)
+        _log_login_attempt(email_attempted, success=False, failure_reason=failure_reason)
         raise HTTPException(status_code=401, detail='Invalid credentials')
-    return _token_response(user)
+
+    response = _token_response(user)
+    _record_login_audit(db, email_attempted=email_attempted, success=True, user=user, request=request)
+    _log_login_attempt(email_attempted, success=True, user=user)
+    return response
+
+
+@router.get('/admin/login-audit', response_model=list[LoginAuditLogRead], dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
+def list_login_audit_logs(
+    email: str | None = None,
+    role: str | None = None,
+    community_id: uuid.UUID | None = None,
+    success: bool | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
+    db: Session = Depends(get_db),
+):
+    query = db.query(LoginAuditLog)
+    if email:
+        query = query.filter(func.lower(LoginAuditLog.email_attempted).contains(email.lower()))
+    if role:
+        query = query.filter(LoginAuditLog.user_role == normalize_role_name(role))
+    if community_id:
+        query = query.filter(LoginAuditLog.community_id == community_id)
+    if success is not None:
+        query = query.filter(LoginAuditLog.success.is_(success))
+    if date_from:
+        query = query.filter(LoginAuditLog.login_at >= datetime.combine(date_from, time.min, tzinfo=timezone.utc))
+    if date_to:
+        query = query.filter(LoginAuditLog.login_at < datetime.combine(date_to + timedelta(days=1), time.min, tzinfo=timezone.utc))
+    return query.order_by(LoginAuditLog.login_at.desc()).limit(limit).all()
+
 
 @router.post('/auth/refresh', response_model=TokenResponse)
 def refresh(payload: RefreshRequest, db: Session = Depends(get_db)):

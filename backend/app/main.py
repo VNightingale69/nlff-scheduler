@@ -28,6 +28,7 @@ REQUIRED_TABLES = {
     'teams': 'teams',
     'host_locations': 'host_locations',
     'rulebooks': 'rulebooks',
+    'login_audit_logs': 'login_audit_logs',
 }
 
 

@@ -49,6 +49,24 @@ class RefreshRequest(BaseModel):
     refresh_token: str
 
 
+class LoginAuditLogRead(BaseModel):
+    id: uuid.UUID
+    user_id: uuid.UUID | None
+    email_attempted: EmailStr | str
+    user_role: str | None
+    community_id: uuid.UUID | None
+    community_name: str | None
+    success: bool
+    failure_reason: str | None
+    ip_address: str | None
+    user_agent: str | None
+    login_at: datetime
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
 class TokenUser(BaseModel):
     id: uuid.UUID
     email: EmailStr

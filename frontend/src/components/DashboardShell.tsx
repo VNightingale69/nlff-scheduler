@@ -38,6 +38,7 @@ export default function DashboardShell({ children }: { children: React.ReactNode
       'scores/flagged',
       'scores/missing',
       'rulebook',
+      'login-activity',
     ];
   const communityTitles: Record<string, string> = {
     organizations: 'My Community',
@@ -61,7 +62,7 @@ export default function DashboardShell({ children }: { children: React.ReactNode
     const isAdminScores = role !== 'COMMUNITY_ADMIN' && key.startsWith('scores');
     const isCommunityScores = role === 'COMMUNITY_ADMIN' && key === 'score-entry';
     const navTitle = key === 'scores' ? 'Score Management' : key === 'scores/flagged' ? 'Flagged Scores' : key === 'scores/missing' ? 'Missing Scores' : title;
-    return <div key={key}>{key === 'host-availability-matrix' ? <div className='px-2 pt-2 text-xs font-semibold uppercase tracking-wide text-slate-400'>Scheduling</div> : null}{(key === 'scores' || isCommunityScores) ? <div className='px-2 pt-2 text-xs font-semibold uppercase tracking-wide text-slate-400'>Scores</div> : null}<Link className={`block rounded px-2 py-1 ${pathname?.includes(`/admin/${key}`) || pathname === `/organizations` ? 'bg-slate-700' : isAdminScores ? 'ml-3 hover:bg-slate-800' : 'hover:bg-slate-800'}`} href={`/admin/${key}`}>{navTitle}</Link></div>;
+    return <div key={key}>{key === 'login-activity' ? <div className='px-2 pt-2 text-xs font-semibold uppercase tracking-wide text-slate-400'>Security</div> : null}{key === 'host-availability-matrix' ? <div className='px-2 pt-2 text-xs font-semibold uppercase tracking-wide text-slate-400'>Scheduling</div> : null}{(key === 'scores' || isCommunityScores) ? <div className='px-2 pt-2 text-xs font-semibold uppercase tracking-wide text-slate-400'>Scores</div> : null}<Link className={`block rounded px-2 py-1 ${pathname?.includes(`/admin/${key}`) || pathname === `/organizations` ? 'bg-slate-700' : isAdminScores ? 'ml-3 hover:bg-slate-800' : 'hover:bg-slate-800'}`} href={`/admin/${key}`}>{navTitle}</Link></div>;
   })}
   <Link className='block rounded px-2 py-1 hover:bg-slate-800' href='/schedule'>Published Schedule</Link>
   <Link className='block rounded px-2 py-1 hover:bg-slate-800' href='/rulebook'>Public Rulebook</Link>
