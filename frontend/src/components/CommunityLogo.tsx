@@ -12,6 +12,7 @@ type Props = {
   altText?: string | null;
   size?: number;
   className?: string;
+  onLoadError?: (src: string) => void;
 };
 
 export function logoSource(src?: string | null) {
@@ -26,7 +27,7 @@ export function communityInitials(value?: string | null) {
   return (words[0]?.[0] || 'C') + (words[1]?.[0] || '');
 }
 
-export default function CommunityLogo({ src, logoUrl, name, communityName, teamName, altText, size = 24, className = '' }: Props) {
+export default function CommunityLogo({ src, logoUrl, name, communityName, teamName, altText, size = 24, className = '', onLoadError }: Props) {
   const fallbackName = communityName || name || teamName || 'Community';
   const sourceValue = logoUrl ?? src;
   const resolvedSrc = logoSource(sourceValue);
@@ -45,7 +46,7 @@ export default function CommunityLogo({ src, logoUrl, name, communityName, teamN
         alt={altText || `${fallbackName} logo`}
         className={`shrink-0 rounded bg-white object-contain ring-1 ring-slate-200 ${className}`}
         style={{ width: dimension, height: dimension }}
-        onError={() => setFailedSrc(resolvedSrc)}
+        onError={() => { setFailedSrc(resolvedSrc); onLoadError?.(resolvedSrc); }}
         data-community-logo='image'
       />
     );
