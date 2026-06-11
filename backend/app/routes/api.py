@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session, aliased
 from app.config import ADMIN_SEED_EMAIL, COMMUNITY_LOGO_MAX_SIZE_BYTES, COMMUNITY_LOGO_UPLOAD_DIR, ENABLE_SCHEDULE_QUALITY_REPORT, ENABLE_TURF_OPTIMIZATION, RULEBOOK_MAX_SIZE_BYTES, RULEBOOK_UPLOAD_DIR, UPLOAD_STORAGE_DIR
 from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN, can_manage_schedule, enforce_organization_scope, get_current_user, get_optional_current_user, is_community_admin, is_league_admin, is_scheduling_admin, normalize_role_name, require_roles, require_schedule_admin, require_schedule_publisher
 from app.database import get_db
+from app.organizations import active_organization_filter, normalize_organization_name
 from app.models import Division, Field, FieldConfigurationOption, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostPlanSelection, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Rulebook, LoginAuditLog, ScheduleChangeLog, ScoreHistory, ScoreSubmission, Season, Team, Tournament, TournamentDivision, TournamentGame, TournamentTeam, TurfWave, User, Week
 from app.schemas import (
     DivisionCreate, DivisionRead, FieldConfigurationOptionCreate, FieldConfigurationOptionRead, FieldCreate, FieldRead, GameCreate, GameRead, GameSaveResponse, ManualGameBulkEditRequest, ManualGameBulkEditResponse, ManualGameEditRequest, ManualGameEditResponse, ScheduleChangeLogRead, ScheduleEditWarning,
@@ -4037,7 +4038,34 @@ def _community_logo_browser_url(org: Organization | None) -> str | None:
 
 
 def _organization_read(org: Organization) -> OrganizationRead:
-    return OrganizationRead.model_validate(org).model_copy(update={'logo_url': _community_logo_browser_url(org)})
+    is_deleted = bool(getattr(org, 'deleted_at', None)) or not bool(getattr(org, 'is_active', False))
+    return OrganizationRead.model_validate(org).model_copy(update={
+        'logo_url': _community_logo_browser_url(org),
+        'deletion_status': 'deleted' if is_deleted else 'active',
+    })
+
+
+def _find_organization_by_normalized_name(db: Session, name: str, exclude_id: uuid.UUID | None = None) -> Organization | None:
+    normalized = normalize_organization_name(name)
+    if not normalized:
+        return None
+    q = db.query(Organization)
+    if exclude_id is not None:
+        q = q.filter(Organization.id != exclude_id)
+    for org in q.all():
+        if normalize_organization_name(org.name) == normalized:
+            return org
+    return None
+
+
+def _ensure_unique_active_organization_name(db: Session, name: str, exclude_id: uuid.UUID | None = None) -> None:
+    normalized = normalize_organization_name(name)
+    q = db.query(Organization)
+    if exclude_id is not None:
+        q = q.filter(Organization.id != exclude_id)
+    for org in q.all():
+        if normalize_organization_name(org.name) == normalized and org.is_active and not org.deleted_at:
+            raise HTTPException(status_code=409, detail='An active organization with this name already exists.')
 
 
 def _organization_page(query, page: int, page_size: int) -> PagedResponse[OrganizationRead]:
@@ -7187,6 +7215,8 @@ def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)
         failure_reason = 'missing_user'
     elif not user.is_active or not user.role or not user.role.is_active:
         failure_reason = 'inactive_user'
+    elif normalize_role_name(user.role.name) == ROLE_COMMUNITY_ADMIN and (not user.organization or not user.organization.is_active or user.organization.deleted_at is not None):
+        failure_reason = 'inactive_organization'
     elif not verify_password(payload.password, user.password_hash):
         failure_reason = 'invalid_credentials'
 
@@ -7257,14 +7287,28 @@ def create_user(payload: UserCreate, db: Session = Depends(get_db)):
 
 @router.post('/organizations', response_model=OrganizationRead, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def create_organization(payload: OrganizationCreate, db: Session = Depends(get_db)):
-    obj = Organization(**payload.model_dump()); db.add(obj); db.commit(); db.refresh(obj); return _organization_read(obj)
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail='Organization name is required')
+    existing = _find_organization_by_normalized_name(db, name)
+    if existing:
+        if existing.is_active and not existing.deleted_at:
+            raise HTTPException(status_code=409, detail='An active organization with this name already exists.')
+        raise HTTPException(status_code=409, detail='An inactive or deleted organization with this name already exists and will not be recreated automatically.')
+    obj = Organization(name=name, is_active=payload.is_active)
+    db.add(obj); db.commit(); db.refresh(obj); return _organization_read(obj)
 
 @router.get('/organizations', response_model=PagedResponse[OrganizationRead], dependencies=[Depends(get_current_user)])
-def list_organizations(search: str | None = None, is_active: bool | None = None, page: int = 1, page_size: int = 20, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def list_organizations(search: str | None = None, is_active: bool | None = None, include_deleted: bool = False, page: int = 1, page_size: int = 20, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     q = db.query(Organization)
     if is_community_admin(current_user): q = q.filter(Organization.id == current_user.organization_id)
     if search: q = q.filter(func.lower(Organization.name).like(f"%{search.lower()}%"))
-    if is_active is not None: q = q.filter(Organization.is_active == is_active)
+    if is_active is not None:
+        q = q.filter(Organization.is_active == is_active)
+        if is_active:
+            q = q.filter(Organization.deleted_at.is_(None))
+    elif not include_deleted or not (is_league_admin(current_user) or is_scheduling_admin(current_user)):
+        q = q.filter(active_organization_filter())
     return _organization_page(q.order_by(Organization.name), page, page_size)
 
 @router.get('/organizations/{org_id}', response_model=OrganizationRead, dependencies=[Depends(get_current_user)])
@@ -7283,12 +7327,24 @@ def update_organization(org_id: uuid.UUID, payload: OrganizationCreate, current_
     data = payload.model_dump()
     if is_community_admin(current_user):
         data.pop('is_active', None)
+    if 'name' in data:
+        name = data['name'].strip()
+        if not name:
+            raise HTTPException(status_code=400, detail='Organization name is required')
+        data['name'] = name
+    target_active = bool(data.get('is_active', o.is_active))
+    target_name = str(data.get('name', o.name))
+    if target_active:
+        _ensure_unique_active_organization_name(db, target_name, exclude_id=o.id)
     for k, v in data.items(): setattr(o, k, v)
+    if o.is_active and o.deleted_at is not None:
+        o.deleted_at = None
+        o.deleted_by_user_id = None
     db.commit(); db.refresh(o); return _organization_read(o)
 
 @router.post('/organizations/{org_id}/logo', response_model=OrganizationRead, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN, ROLE_COMMUNITY_ADMIN))])
 def upload_organization_logo(org_id: uuid.UUID, file: UploadFile = File(...), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    org = db.query(Organization).filter(Organization.id == org_id).first()
+    org = db.query(Organization).filter(Organization.id == org_id, active_organization_filter()).first()
     if not org:
         raise HTTPException(status_code=404, detail='Organization not found')
     enforce_organization_scope(org.id, current_user)
@@ -7327,7 +7383,7 @@ def upload_organization_logo(org_id: uuid.UUID, file: UploadFile = File(...), cu
 
 @router.delete('/organizations/{org_id}/logo', response_model=OrganizationRead, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN, ROLE_COMMUNITY_ADMIN))])
 def remove_organization_logo(org_id: uuid.UUID, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    org = db.query(Organization).filter(Organization.id == org_id).first()
+    org = db.query(Organization).filter(Organization.id == org_id, active_organization_filter()).first()
     if not org:
         raise HTTPException(status_code=404, detail='Organization not found')
     enforce_organization_scope(org.id, current_user)
@@ -7354,7 +7410,7 @@ def view_public_organization_logo(org_id: uuid.UUID, filename: str, db: Session 
     return FileResponse(path=file_path, media_type=COMMUNITY_LOGO_ALLOWED_CONTENT_TYPE, filename=org.logo_filename, content_disposition_type='inline')
 
 
-@router.get('/organizations/{org_id}/delete-check', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+@router.get('/organizations/{org_id}/delete-check', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
 def get_organization_delete_check(org_id: uuid.UUID, db: Session = Depends(get_db)):
     o = db.query(Organization).filter(Organization.id == org_id).first()
     if not o: raise HTTPException(404, 'Organization not found')
@@ -7380,11 +7436,23 @@ def get_organization_delete_check(org_id: uuid.UUID, db: Session = Depends(get_d
         'dependencies': [{'label': label, 'count': count} for label, count in dependencies],
     }
 
-@router.delete('/organizations/{org_id}', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
-def delete_organization(org_id: uuid.UUID, force: bool = Query(False), dry_run: bool = Query(False), db: Session = Depends(get_db)):
-    # `force` retained for backwards compatibility; centralized cleanup always runs in deterministic order.
+@router.delete('/organizations/{org_id}', response_model=OrganizationRead, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
+def delete_organization(org_id: uuid.UUID, force: bool = Query(False), dry_run: bool = Query(False), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    # `force` is retained for API compatibility; organization deletion is now a persisted soft delete.
     _ = force
-    return cleanup_organization_dependencies(db=db, org_id=org_id, dry_run=dry_run)
+    org = db.query(Organization).filter(Organization.id == org_id).first()
+    if not org:
+        raise HTTPException(status_code=404, detail='Organization not found')
+    if dry_run:
+        return _organization_read(org)
+    was_active = org.is_active
+    org.is_active = False
+    org.deleted_at = datetime.now(timezone.utc)
+    org.deleted_by_user_id = current_user.id
+    db.commit()
+    db.refresh(org)
+    logger.info('organization_soft_deleted organization_id=%s name=%s deleted_by_user_id=%s previous_active=%s new_active=%s', org.id, org.name, current_user.id, was_active, org.is_active)
+    return _organization_read(org)
 
 
 @router.get('/admin/debug/org-delete/{org_id}', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
@@ -7856,7 +7924,7 @@ def _build_hosting_balance_readiness(db: Session) -> list[dict[str, object]]:
         HostingAvailability.is_available.is_(True),
         HostingAvailability.active.is_(True),
         HostLocation.is_active.is_(True),
-        Organization.is_active.is_(True),
+        active_organization_filter(),
     ).all()
     available_dates_by_org: dict[uuid.UUID, set[date]] = {}
     org_names: dict[uuid.UUID, str] = {}
@@ -7975,7 +8043,7 @@ def _build_hosting_rotation_readiness(db: Session) -> list[dict[str, object]]:
         HostingAvailability.is_available.is_(True),
         HostingAvailability.active.is_(True),
         HostLocation.is_active.is_(True),
-        Organization.is_active.is_(True),
+        active_organization_filter(),
     ).all()
     if not availability_rows:
         return []
@@ -9793,7 +9861,7 @@ def _host_availability_matrix_response(db: Session, season_id: uuid.UUID) -> dic
             }
     dates = [dates_by_value[key] for key in sorted(dates_by_value)]
 
-    hosts = db.query(HostLocation, Organization).join(Organization, Organization.id == HostLocation.organization_id).filter(HostLocation.is_active.is_(True), Organization.is_active.is_(True)).order_by(Organization.name, HostLocation.name).all()
+    hosts = db.query(HostLocation, Organization).join(Organization, Organization.id == HostLocation.organization_id).filter(HostLocation.is_active.is_(True), active_organization_filter()).order_by(Organization.name, HostLocation.name).all()
     host_by_id = {str(host.id): host for host, _org in hosts}
     host_ids = [host.id for host, _org in hosts]
     week_ids = [week.id for week in weeks]
@@ -15279,7 +15347,7 @@ def manual_schedule_builder_options(db: Session = Depends(get_db)):
     host_locations = db.query(HostLocation).filter(HostLocation.id.in_(eligible_host_ids)).order_by(HostLocation.name).all()
     seasons = db.query(Season).filter(Season.is_active.is_(True)).order_by(Season.start_date.desc()).all()
     weeks = db.query(Week).order_by(Week.week_number).all()
-    organizations = db.query(Organization).filter(Organization.is_active.is_(True)).order_by(Organization.name).all()
+    organizations = db.query(Organization).filter(active_organization_filter()).order_by(Organization.name).all()
     field_instances = db.query(FieldInstance).filter(
         FieldInstance.is_active.is_(True),
         FieldInstance.host_location_id.in_(eligible_host_ids),
@@ -23883,9 +23951,9 @@ def list_public_schedule_filters(season_id: uuid.UUID | None = None, db: Session
     else:
         host_locations = db.query(HostLocation).join(HostLocation.organization).filter(
             HostLocation.is_active.is_(True),
-            Organization.is_active.is_(True),
+            active_organization_filter(),
         ).order_by(HostLocation.name).all()
-        organizations = db.query(Organization).filter(Organization.is_active.is_(True)).order_by(Organization.name).all()
+        organizations = db.query(Organization).filter(active_organization_filter()).order_by(Organization.name).all()
         divisions = db.query(Division).filter(Division.is_active.is_(True)).order_by(Division.sort_order, Division.name).all()
         weeks_query = db.query(Week).join(Week.season).filter(Season.is_active.is_(True))
         if season:
@@ -24045,7 +24113,7 @@ def _regenerate_and_validate_slots_for_weeks(
     week_by_date = {_week_game_date(week): week for week in regular_weeks if _week_game_date(week)}
     hosts = db.query(HostLocation).join(HostLocation.organization).filter(
         HostLocation.is_active.is_(True),
-        Organization.is_active.is_(True),
+        active_organization_filter(),
     ).order_by(HostLocation.name).all()
     hosts_by_id = {host.id: host for host in hosts}
     generation_results: list[dict[str, object]] = []
@@ -24334,7 +24402,7 @@ def _regenerate_and_validate_slots_for_weeks(
 
     validation_errors: list[str] = []
     validation_rows: list[dict[str, object]] = []
-    org_names_for_capacity = {org.id: org.name or str(org.id) for org in db.query(Organization).filter(Organization.is_active.is_(True)).all()}
+    org_names_for_capacity = {org.id: org.name or str(org.id) for org in db.query(Organization).filter(active_organization_filter()).all()}
     for week in weeks:
         game_date = _week_game_date(week)
         if not game_date or not _is_regular_season_week(week):
