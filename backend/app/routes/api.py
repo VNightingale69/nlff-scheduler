@@ -3979,9 +3979,23 @@ def _community_logo_browser_url(org: Organization | None) -> str | None:
         return None
     if re.match(r'^https?://', value, flags=re.IGNORECASE):
         return value
-    if re.match(r'^[A-Za-z]:[\\/]', value) or value.startswith('/app/') or value.startswith('/workspace/'):
+    if (
+        re.match(r'^[A-Za-z]:[\\/]', value)
+        or value.startswith(('blob:', 'file:', '/app/', '/workspace/'))
+        or value.startswith('\\\\')
+    ):
         return None
     return value if value.startswith('/') else f'/{value}'
+
+
+def _organization_read(org: Organization) -> OrganizationRead:
+    return OrganizationRead.model_validate(org).model_copy(update={'logo_url': _community_logo_browser_url(org)})
+
+
+def _organization_page(query, page: int, page_size: int) -> PagedResponse[OrganizationRead]:
+    total = query.count()
+    organizations = query.offset((page - 1) * page_size).limit(page_size).all()
+    return PagedResponse(items=[_organization_read(org) for org in organizations], total=total, page=page, page_size=page_size)
 
 
 def _community_logo_alt_text(org: Organization | None, fallback_name: str | None = None) -> str:
@@ -7035,7 +7049,7 @@ def create_user(payload: UserCreate, db: Session = Depends(get_db)):
 
 @router.post('/organizations', response_model=OrganizationRead, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def create_organization(payload: OrganizationCreate, db: Session = Depends(get_db)):
-    obj = Organization(**payload.model_dump()); db.add(obj); db.commit(); db.refresh(obj); return obj
+    obj = Organization(**payload.model_dump()); db.add(obj); db.commit(); db.refresh(obj); return _organization_read(obj)
 
 @router.get('/organizations', response_model=PagedResponse[OrganizationRead], dependencies=[Depends(get_current_user)])
 def list_organizations(search: str | None = None, is_active: bool | None = None, page: int = 1, page_size: int = 20, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -7043,7 +7057,7 @@ def list_organizations(search: str | None = None, is_active: bool | None = None,
     if is_community_admin(current_user): q = q.filter(Organization.id == current_user.organization_id)
     if search: q = q.filter(func.lower(Organization.name).like(f"%{search.lower()}%"))
     if is_active is not None: q = q.filter(Organization.is_active == is_active)
-    return paginate(q.order_by(Organization.name), page, page_size)
+    return _organization_page(q.order_by(Organization.name), page, page_size)
 
 @router.get('/organizations/{org_id}', response_model=OrganizationRead, dependencies=[Depends(get_current_user)])
 def get_organization(org_id: uuid.UUID, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -7051,7 +7065,7 @@ def get_organization(org_id: uuid.UUID, current_user: User = Depends(get_current
     if not org:
         raise HTTPException(status_code=404, detail='Organization not found')
     enforce_organization_scope(org.id, current_user)
-    return org
+    return _organization_read(org)
 
 @router.put('/organizations/{org_id}', response_model=OrganizationRead, dependencies=[Depends(get_current_user)])
 def update_organization(org_id: uuid.UUID, payload: OrganizationCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -7062,7 +7076,7 @@ def update_organization(org_id: uuid.UUID, payload: OrganizationCreate, current_
     if is_community_admin(current_user):
         data.pop('is_active', None)
     for k, v in data.items(): setattr(o, k, v)
-    db.commit(); db.refresh(o); return o
+    db.commit(); db.refresh(o); return _organization_read(o)
 
 @router.post('/organizations/{org_id}/logo', response_model=OrganizationRead, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN, ROLE_COMMUNITY_ADMIN))])
 def upload_organization_logo(org_id: uuid.UUID, file: UploadFile = File(...), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -7091,7 +7105,7 @@ def upload_organization_logo(org_id: uuid.UUID, file: UploadFile = File(...), cu
         if old_filename and old_filename != stored_filename:
             (storage_dir / old_filename).unlink(missing_ok=True)
         logger.info('community_logo_uploaded organization_id=%s user_id=%s filename=%s', org.id, current_user.id, stored_filename)
-        return org
+        return _organization_read(org)
     except HTTPException:
         db.rollback()
         raise
@@ -7117,7 +7131,7 @@ def remove_organization_logo(org_id: uuid.UUID, current_user: User = Depends(get
     if old_filename:
         (storage_dir / old_filename).unlink(missing_ok=True)
     logger.info('community_logo_removed organization_id=%s user_id=%s', org.id, current_user.id)
-    return org
+    return _organization_read(org)
 
 
 @router.get('/public/organizations/{org_id}/logo/{filename}')

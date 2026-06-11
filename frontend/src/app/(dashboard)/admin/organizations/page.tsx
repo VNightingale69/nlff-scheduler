@@ -144,7 +144,8 @@ export default function OrganizationsAdminPage() {
     data.append('file', file as File);
     setLogoUploadingId(organization.id);
     try {
-      await apiFetch(`/organizations/${organization.id}/logo`, { method: 'POST', body: data }, getToken());
+      const updated = await apiFetch(`/organizations/${organization.id}/logo`, { method: 'POST', body: data }, getToken());
+      setItems((current) => current.map((item) => item.id === organization.id ? updated : item));
       setMessage(`${organization.name} logo uploaded.`); setType('ok'); load();
     } catch (e: any) { setLogoErrors((current) => ({ ...current, [organization.id]: e?.message || 'Logo upload failed' })); setMessage(e?.message || 'Logo upload failed'); setType('err'); }
     finally { setLogoUploadingId(null); }
@@ -158,7 +159,8 @@ export default function OrganizationsAdminPage() {
   const removeLogo = async (organization: Organization) => {
     setLogoUploadingId(organization.id);
     try {
-      await apiFetch(`/organizations/${organization.id}/logo`, { method: 'DELETE' }, getToken());
+      const updated = await apiFetch(`/organizations/${organization.id}/logo`, { method: 'DELETE' }, getToken());
+      setItems((current) => current.map((item) => item.id === organization.id ? updated : item));
       setLogoErrors((current) => ({ ...current, [organization.id]: '' }));
       setMessage(`${organization.name} logo removed.`); setType('ok'); load();
     } catch (e: any) { setMessage(e?.message || 'Logo removal failed'); setType('err'); }
@@ -218,20 +220,25 @@ function CommunityLogoCard({ organization, isBusy, error, onFileChange, onRemove
   onDelete?: () => void;
 }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [logoLoadFailed, setLogoLoadFailed] = useState(false);
   const hasLogo = Boolean(organization.logo_url);
+  const hasLogoMetadata = Boolean(organization.logo_filename || organization.logo_content_type || organization.logo_file_size || organization.logo_width || organization.logo_height || organization.logo_uploaded_at);
   const dimensions = organization.logo_width && organization.logo_height ? `${organization.logo_width} × ${organization.logo_height}px` : '';
   const uploadedAt = formatDate(organization.logo_uploaded_at);
+
+  useEffect(() => { setLogoLoadFailed(false); }, [organization.logo_url]);
 
   return <article className='rounded border bg-white p-4 shadow-sm'>
     <div className='flex flex-col gap-4 md:flex-row md:items-start md:justify-between'>
       <div className='flex min-w-0 gap-4'>
-        <CommunityLogo src={organization.logo_url} name={organization.name} size={96} className='rounded-xl' />
+        <CommunityLogo src={organization.logo_url} name={organization.name} size={96} className='rounded-xl' onLoadError={() => setLogoLoadFailed(true)} />
         <div className='min-w-0'>
           <h3 className='text-lg font-semibold text-slate-900'>{organization.name}</h3>
           <p className='text-sm text-slate-500'>{organization.is_active ? 'Active community' : 'Inactive community'}</p>
           <div className='mt-3 text-sm text-slate-700'>
             {hasLogo ? <>
               <p className='font-medium text-slate-900'>Current logo preview</p>
+              {logoLoadFailed && <p className='mt-2 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-800'>Logo image could not be loaded. Please replace the logo or check storage configuration.</p>}
               <dl className='mt-1 grid gap-x-4 gap-y-1 text-xs sm:grid-cols-2'>
                 {organization.logo_filename && <><dt className='font-medium text-slate-500'>File name</dt><dd className='truncate'>{organization.logo_filename}</dd></>}
                 {dimensions && <><dt className='font-medium text-slate-500'>Dimensions</dt><dd>{dimensions}</dd></>}
@@ -239,7 +246,10 @@ function CommunityLogoCard({ organization, isBusy, error, onFileChange, onRemove
                 {organization.logo_file_size && <><dt className='font-medium text-slate-500'>File size</dt><dd>{formatFileSize(organization.logo_file_size)}</dd></>}
                 {uploadedAt && <><dt className='font-medium text-slate-500'>Upload date</dt><dd>{uploadedAt}</dd></>}
               </dl>
-            </> : <p>No logo uploaded. The placeholder initials shown here will be used until a PNG logo is uploaded.</p>}
+            </> : <>
+              <p>No logo uploaded. The placeholder initials shown here will be used until a PNG logo is uploaded.</p>
+              {hasLogoMetadata && <p className='mt-2 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-800'>Logo metadata exists, but the logo image URL is missing.</p>}
+            </>}
           </div>
         </div>
       </div>

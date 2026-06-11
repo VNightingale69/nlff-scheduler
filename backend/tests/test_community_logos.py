@@ -18,6 +18,13 @@ def _auth_header(user_id):
     return {'Authorization': f'Bearer {create_access_token(str(user_id))}'}
 
 
+def _assert_persisted_logo_url(value, org_id):
+    assert value.startswith(f'/api/public/organizations/{org_id}/logo/')
+    assert not value.startswith(('blob:', 'file:'))
+    assert '/app/' not in value
+    assert '/workspace/' not in value
+
+
 def _png(width=500, height=500, extra=b''):
     def chunk(kind, data):
         payload = kind + data
@@ -36,9 +43,10 @@ class TestCommunityLogos:
         league_role = Role(name=ROLE_LEAGUE_ADMIN, description='League Admin', is_active=True)
         scheduling_role = Role(name=ROLE_SCHEDULING_ADMIN, description='Scheduling Admin', is_active=True)
         community_role = Role(name=ROLE_COMMUNITY_ADMIN, description='Community Admin', is_active=True)
-        self.org_one = Organization(name='Community One', is_active=True)
-        self.org_two = Organization(name='Community Two', is_active=True)
-        self.db.add_all([league_role, scheduling_role, community_role, self.org_one, self.org_two])
+        self.org_one = Organization(name='Westosha', is_active=True)
+        self.org_two = Organization(name='Johnsburg', is_active=True)
+        self.org_three = Organization(name='Antioch', is_active=True)
+        self.db.add_all([league_role, scheduling_role, community_role, self.org_one, self.org_two, self.org_three])
         self.db.flush()
         self.scheduler = User(email='scheduler@example.com', full_name='Scheduler', password_hash=hash_password('Password123!'), role_id=scheduling_role.id, is_active=True)
         self.community_admin = User(email='community@example.com', full_name='Community Admin', password_hash=hash_password('Password123!'), role_id=community_role.id, organization_id=self.org_one.id, is_active=True)
@@ -78,7 +86,14 @@ class TestCommunityLogos:
         assert payload['logo_content_type'] == 'image/png'
         assert payload['logo_width'] == 500
         assert payload['logo_height'] == 500
-        assert payload['logo_url'].startswith(f'/api/public/organizations/{self.org_two.id}/logo/')
+        _assert_persisted_logo_url(payload['logo_url'], self.org_two.id)
+
+    def test_upload_logo_returns_persisted_logo_url_for_multiple_communities(self, tmp_path):
+        self._set_upload_dir(tmp_path)
+        for org in (self.org_one, self.org_two, self.org_three):
+            response = self._upload(org.id, self.scheduler.id, filename=f'{org.name.lower()}.png')
+            assert response.status_code == 200
+            _assert_persisted_logo_url(response.json()['logo_url'], org.id)
 
 
     def test_get_organization_includes_logo_metadata(self, tmp_path):
@@ -95,6 +110,44 @@ class TestCommunityLogos:
         assert payload['logo_width'] == 500
         assert payload['logo_height'] == 500
         assert payload['logo_uploaded_at']
+
+
+    def test_organization_list_reconstructs_canonical_logo_url_from_persisted_filename_after_reload(self, tmp_path):
+        self._set_upload_dir(tmp_path)
+        upload = self._upload(self.org_one.id, self.scheduler.id, filename='westosha.png')
+        assert upload.status_code == 200
+        uploaded = upload.json()
+
+        # Simulate older persisted records that kept metadata/filename but lost logo_url.
+        org = self.db.get(Organization, self.org_one.id)
+        org.logo_url = None
+        self.db.commit()
+
+        response = self.client.get('/api/organizations?page_size=500', headers=_auth_header(self.scheduler.id))
+        assert response.status_code == 200
+        items = {item['id']: item for item in response.json()['items']}
+        assert items[str(self.org_one.id)]['logo_filename'] == uploaded['logo_filename']
+        assert items[str(self.org_one.id)]['logo_url'] == f"/api/public/organizations/{self.org_one.id}/logo/{uploaded['logo_filename']}"
+
+    def test_get_organization_filters_temporary_or_filesystem_logo_urls(self, tmp_path):
+        self._set_upload_dir(tmp_path)
+        for bad_url in ('blob:http://localhost/logo', '/app/uploads/logo.png', r'C:\uploads\logo.png', 'file:///tmp/logo.png'):
+            org = self.db.get(Organization, self.org_three.id)
+            org.logo_url = bad_url
+            org.logo_filename = None
+            self.db.commit()
+            response = self.client.get(f'/api/organizations/{self.org_three.id}', headers=_auth_header(self.scheduler.id))
+            assert response.status_code == 200
+            assert response.json()['logo_url'] is None
+
+    def test_public_logo_endpoint_loads_without_authentication(self, tmp_path):
+        self._set_upload_dir(tmp_path)
+        upload = self._upload(self.org_two.id, self.scheduler.id, filename='johnsburg.png')
+        assert upload.status_code == 200
+        public_response = self.client.get(upload.json()['logo_url'])
+        assert public_response.status_code == 200
+        assert public_response.headers['content-type'] == 'image/png'
+        assert public_response.content.startswith(b'\x89PNG')
 
     def test_community_admin_cannot_get_another_community_logo_metadata(self, tmp_path):
         self._set_upload_dir(tmp_path)
