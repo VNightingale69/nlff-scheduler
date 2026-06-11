@@ -204,3 +204,17 @@ Expected response headers include:
 - Conflict validation is enforced for publishing games; draft games can still be saved with hard conflicts for planning.
 - No automated schedule generation or playoff logic in this MVP.
 - No dedicated seed script for full demo dataset; testers create most records manually.
+
+## Persistent rulebook uploads
+
+Uploaded rulebooks are stored as files and referenced from database metadata. In production, configure `RULEBOOK_UPLOAD_DIR` to point at persistent storage rather than an ephemeral container layer. On Railway this should be a mounted volume such as `/app/uploads/rulebooks`; alternatively, replace local storage with durable object storage.
+
+Recommended environment variables:
+
+```env
+UPLOAD_STORAGE_DIR=/app/uploads
+RULEBOOK_UPLOAD_DIR=/app/uploads/rulebooks
+RULEBOOK_MAX_SIZE_BYTES=26214400
+```
+
+The API returns stable rulebook view/download routes (for example `/api/rulebooks/{rulebook_id}/view`) instead of exposing local filesystem paths. If active rulebook metadata exists but the file is missing, administrators should re-upload the rulebook and verify the persistent storage mount.

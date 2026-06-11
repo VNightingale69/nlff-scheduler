@@ -71,6 +71,8 @@ class Rulebook(Base, TimestampMixin):
     uploaded_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     file_path: Mapped[str] = mapped_column(String(500), nullable=False)
+    storage_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    file_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
     uploaded_by = relationship('User')
     __table_args__ = (Index('ix_rulebooks_active', 'is_active'),)

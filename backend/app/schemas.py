@@ -69,6 +69,7 @@ class TokenResponse(BaseModel):
 
 class RulebookRead(BaseSchema):
     original_filename: str
+    stored_filename: str
     content_type: str
     file_size_bytes: int
     uploaded_by_user_id: uuid.UUID
@@ -76,8 +77,12 @@ class RulebookRead(BaseSchema):
     uploaded_by_email: str | None = None
     uploaded_at: datetime
     is_active: bool
+    storage_path: str | None = None
+    file_url: str | None = None
     view_url: str = '/api/public/rulebook/view'
     download_url: str = '/api/public/rulebook/download'
+    file_available: bool = True
+    storage_error: str | None = None
 
 
 class OrganizationCreate(BaseModel):

@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "test": "node tests/auth-client.test.mjs && node tests/tournament-bracket-layout.test.mjs"
+    "test": "node tests/auth-client.test.mjs && node tests/tournament-bracket-layout.test.mjs && node tests/rulebook-static.test.mjs"
   },
   "dependencies": {
     "next": "^14.2.35",
