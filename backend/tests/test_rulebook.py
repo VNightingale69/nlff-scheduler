@@ -1,3 +1,4 @@
+import logging
 import uuid
 from unittest.mock import patch
 
@@ -240,9 +241,9 @@ class TestRulebookFeature:
 
         assert admin_metadata.status_code == 200
         assert admin_metadata.json()['file_available'] is False
-        assert 'Please re-upload the rulebook' in admin_metadata.json()['storage_error']
+        assert 'UPLOAD_STORAGE_DIR is backed by persistent storage' in admin_metadata.json()['storage_error']
         assert admin_download.status_code == 404
-        assert 'Please re-upload the rulebook' in admin_download.json()['detail']
+        assert 'UPLOAD_STORAGE_DIR is backed by persistent storage' in admin_download.json()['detail']
         assert public_metadata.status_code == 404
         assert public_metadata.json()['detail'] == 'Rulebook is temporarily unavailable.'
         assert public_download.status_code == 404
@@ -275,3 +276,84 @@ class TestRulebookFeature:
         assert public.json()['original_filename'] == 'second.pdf'
         assert inactive.is_active is False
         assert active.is_active is True
+
+    def test_startup_storage_validation_creates_rulebook_directory(self, tmp_path, caplog):
+        caplog.set_level(logging.INFO, logger='app.routes.api')
+        api_routes.UPLOAD_STORAGE_DIR = str(tmp_path / 'uploads')
+        api_routes.RULEBOOK_UPLOAD_DIR = ''
+
+        diagnostics = api_routes.validate_rulebook_storage_on_startup()
+
+        assert (tmp_path / 'uploads' / 'rulebooks').is_dir()
+        assert diagnostics['rulebook_storage_writable'] is True
+        assert diagnostics['rulebook_storage_created'] is True
+        assert 'Rulebook storage directory:' in caplog.text
+        assert 'Rulebook storage status: writable' in caplog.text
+
+    def test_non_writable_storage_validation_logs_warning(self, tmp_path, monkeypatch, caplog):
+        caplog.set_level(logging.INFO, logger='app.routes.api')
+        upload_dir = tmp_path / 'rulebooks'
+        upload_dir.mkdir()
+        api_routes.RULEBOOK_UPLOAD_DIR = str(upload_dir)
+        monkeypatch.setattr(api_routes, '_check_directory_writable', lambda directory: False)
+
+        diagnostics = api_routes.validate_rulebook_storage_on_startup()
+
+        assert diagnostics['rulebook_storage_writable'] is False
+        assert 'Rulebook storage warning: directory is not writable' in caplog.text
+        assert 'Rulebook storage status: not writable' in caplog.text
+
+    def test_missing_active_rulebook_file_produces_unavailable_state(self, tmp_path):
+        self._set_upload_dir(tmp_path)
+        upload = self._upload_pdf('missing-state.pdf').json()
+        record = self.db.query(Rulebook).filter(Rulebook.id == uuid.UUID(upload['id'])).one()
+        (api_routes._rulebook_storage_dir() / record.stored_filename).unlink()
+
+        response = self.client.get('/api/rulebook', headers=_auth_header(self.league_admin.id))
+
+        assert response.status_code == 200
+        assert response.json()['file_available'] is False
+        assert 'UPLOAD_STORAGE_DIR is backed by persistent storage' in response.json()['storage_error']
+
+    def test_existing_active_rulebook_file_produces_available_state(self, tmp_path):
+        self._set_upload_dir(tmp_path)
+        self._upload_pdf('existing-state.pdf')
+
+        response = self.client.get('/api/rulebook', headers=_auth_header(self.league_admin.id))
+
+        assert response.status_code == 200
+        assert response.json()['file_available'] is True
+        assert response.json()['storage_error'] is None
+
+    def test_upload_logs_saved_file_existence_check(self, tmp_path, caplog):
+        caplog.set_level(logging.INFO, logger='app.routes.api')
+        self._set_upload_dir(tmp_path)
+
+        response = self._upload_pdf('logged.pdf', b'%PDF-1.4\nlogged')
+
+        assert response.status_code == 200
+        assert 'Rulebook upload saved:' in caplog.text
+        assert 'original_filename=logged.pdf' in caplog.text
+        assert f"stored_filename={response.json()['stored_filename']}" in caplog.text
+        assert 'file_size_bytes=15' in caplog.text
+        assert 'storage_status=writable' in caplog.text
+        assert 'saved_file_exists=True' in caplog.text
+        assert '%PDF-1.4' not in caplog.text
+
+    def test_admin_storage_diagnostics_do_not_expose_file_keys_or_contents(self, tmp_path):
+        self._set_upload_dir(tmp_path)
+        upload = self._upload_pdf('diagnostics.pdf', b'%PDF-1.4\nsecret body').json()
+        record = self.db.query(Rulebook).filter(Rulebook.id == uuid.UUID(upload['id'])).one()
+        (api_routes._rulebook_storage_dir() / record.stored_filename).unlink()
+
+        response = self.client.get('/api/admin/storage-diagnostics', headers=_auth_header(self.league_admin.id))
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload['rulebook_storage_configured'] is True
+        assert payload['rulebook_storage_writable'] is True
+        assert payload['rulebook_active_metadata_exists'] is True
+        assert payload['rulebook_active_file_exists'] is False
+        serialized = str(payload)
+        assert upload['stored_filename'] not in serialized
+        assert 'secret body' not in serialized

@@ -13,7 +13,7 @@ from app.branding import APP_API_TITLE
 from app.config import ADMIN_SEED_EMAIL, ADMIN_SEED_FULL_NAME, ADMIN_SEED_PASSWORD, CORS_ORIGINS
 from app.database import get_db
 from app.models import Organization, Role, Season, User, Week
-from app.routes.api import ensure_league_defined_divisions, router as api_router
+from app.routes.api import ensure_league_defined_divisions, router as api_router, validate_rulebook_storage_on_startup
 from app.security import hash_password, validate_password_strength
 from app.services.game_statuses import seed_required_game_statuses
 
@@ -78,6 +78,11 @@ def _auth_tables_ready(db: Session) -> bool:
 
 
 
+
+
+@app.on_event('startup')
+def validate_rulebook_upload_storage() -> None:
+    validate_rulebook_storage_on_startup()
 
 @app.on_event('startup')
 def validate_required_tables() -> None:
