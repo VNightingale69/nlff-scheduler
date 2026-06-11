@@ -40,3 +40,8 @@ assert.match(logoSource, /onError/);
 assert.match(logoSource, /setFailedSrc/);
 assert.match(logoSource, /onLoadError/);
 assert.match(logoSource, /logo fallback/);
+assert.match(organizationsSource, /const deleted = await apiFetch\(`\/organizations\/\$\{deleteTarget\.id\}`/);
+assert.match(organizationsSource, /deleted\?\.is_active !== false \|\| !deleted\?\.deleted_at/);
+assert.doesNotMatch(organizationsSource, /setItems\(\(current\) => current\.filter/);
+assert.match(organizationsSource, /canDeleteOrganizations = isLeagueAdmin \|\| isSchedulingAdmin/);
+assert.match(organizationsSource, /Historical games, scores, tournaments, and logo metadata are preserved\./);

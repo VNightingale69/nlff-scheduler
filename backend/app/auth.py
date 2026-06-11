@@ -57,6 +57,10 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
     user = db.query(User).filter(User.id == user_uuid, User.is_active.is_(True)).first()
     if not user:
         raise auth_invalid_token_exception()
+    if normalize_role_name(user.role.name) == ROLE_COMMUNITY_ADMIN:
+        organization = user.organization
+        if not organization or not organization.is_active or getattr(organization, 'deleted_at', None) is not None:
+            raise auth_invalid_token_exception()
     return user
 
 

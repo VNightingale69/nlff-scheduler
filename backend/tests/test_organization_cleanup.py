@@ -8,7 +8,7 @@ from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN
+from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN
 from app.database import Base, get_db
 from app.main import app
 from app.models import (
@@ -51,6 +51,7 @@ class OrganizationCleanupTest(unittest.TestCase):
 
         self.league_role = Role(id=uuid.uuid4(), name=ROLE_LEAGUE_ADMIN, is_active=True)
         self.community_role = Role(id=uuid.uuid4(), name=ROLE_COMMUNITY_ADMIN, is_active=True)
+        self.scheduling_role = Role(id=uuid.uuid4(), name=ROLE_SCHEDULING_ADMIN, is_active=True)
         self.org = Organization(id=uuid.uuid4(), name='Antioch Vikings', is_active=True)
         self.other_org = Organization(id=uuid.uuid4(), name='Westosha Falcons', is_active=True)
         self.division = Division(id=uuid.uuid4(), name='3rd', division_group='COED', sort_order=1, required_field_layout_type='SMALL', is_active=True)
@@ -243,11 +244,13 @@ class OrganizationDeleteEndpointPermissionsTest(unittest.TestCase):
         self.db = self.SessionLocal()
         self.league_role = Role(id=uuid.uuid4(), name=ROLE_LEAGUE_ADMIN, is_active=True)
         self.community_role = Role(id=uuid.uuid4(), name=ROLE_COMMUNITY_ADMIN, is_active=True)
+        self.scheduling_role = Role(id=uuid.uuid4(), name=ROLE_SCHEDULING_ADMIN, is_active=True)
         self.org = Organization(id=uuid.uuid4(), name='Endpoint Org', is_active=True)
         self.division = Division(id=uuid.uuid4(), name='Endpoint 3rd', division_group='COED', sort_order=1, required_field_layout_type='SMALL', is_active=True)
         self.league_user = User(id=uuid.uuid4(), email='league@example.com', full_name='League', password_hash=hash_password('Password123!'), role_id=self.league_role.id, organization_id=None, is_active=True)
+        self.scheduling_user = User(id=uuid.uuid4(), email='scheduler@example.com', full_name='Scheduler', password_hash=hash_password('Password123!'), role_id=self.scheduling_role.id, organization_id=None, is_active=True)
         self.community_user = User(id=uuid.uuid4(), email='comm@example.com', full_name='Community', password_hash=hash_password('Password123!'), role_id=self.community_role.id, organization_id=self.org.id, is_active=True)
-        self.db.add_all([self.league_role, self.community_role, self.org, self.division, self.league_user, self.community_user])
+        self.db.add_all([self.league_role, self.community_role, self.scheduling_role, self.org, self.division, self.league_user, self.scheduling_user, self.community_user])
         self.db.commit()
 
         def override_get_db():
@@ -308,9 +311,9 @@ class OrganizationDeleteEndpointPermissionsTest(unittest.TestCase):
         self.assertEqual(response.status_code, 403)
         self.assertIsNotNone(self.db.get(Organization, self.org.id))
 
-    def test_league_admin_can_delete_dependent_organizations_without_object_deleted_error(self):
+    def test_league_admin_soft_deletes_dependent_organization_without_removing_history(self):
         token = create_access_token(str(self.league_user.id))
-        for org_name, email_prefix in [('Johnsburg Skyhawks', 'johnsburg'), ('Westosha Falcons', 'westosha')]:
+        for org_name, email_prefix in [('Example Skyhawks', 'example-sky'), ('Example Falcons', 'example-falcons')]:
             org_id, expected_name = self._create_dependent_organization(org_name, email_prefix)
             response = self.client.delete(
                 f'/api/organizations/{org_id}',
@@ -318,28 +321,35 @@ class OrganizationDeleteEndpointPermissionsTest(unittest.TestCase):
             )
             self.assertEqual(response.status_code, 200, response.text)
             payload = response.json()
-            self.assertEqual(payload['organization_id'], str(org_id))
-            self.assertEqual(payload['organization_name'], expected_name)
-            self.assertEqual(payload['deleted']['organizations'], 1)
-            self.assertGreaterEqual(payload['deleted']['users'], 1)
-            self.assertGreaterEqual(payload['deleted']['teams'], 1)
-            self.assertGreaterEqual(payload['deleted']['host_locations'], 1)
-            self.assertGreaterEqual(payload['deleted']['organization_division_participations'], 1)
+            self.assertEqual(payload['id'], str(org_id))
+            self.assertEqual(payload['name'], expected_name)
+            self.assertFalse(payload['is_active'])
+            self.assertIsNotNone(payload['deleted_at'])
+            self.assertEqual(payload['deletion_status'], 'deleted')
             self.db.expire_all()
-            self.assertIsNone(self.db.get(Organization, org_id))
+            persisted = self.db.get(Organization, org_id)
+            self.assertIsNotNone(persisted)
+            self.assertFalse(persisted.is_active)
+            self.assertIsNotNone(persisted.deleted_at)
+            self.assertGreaterEqual(self.db.query(Team).filter(Team.organization_id == org_id).count(), 1)
+            self.assertGreaterEqual(self.db.query(HostLocation).filter(HostLocation.organization_id == org_id).count(), 1)
             self._assert_no_basic_org_orphans()
 
-    def test_league_admin_can_delete_unused_duplicate_safely(self):
+    def test_scheduling_admin_can_soft_delete_unused_organization(self):
         response = self.client.delete(
             f'/api/organizations/{self.org.id}',
-            headers={'Authorization': f'Bearer {create_access_token(str(self.league_user.id))}'},
+            headers={'Authorization': f'Bearer {create_access_token(str(self.scheduling_user.id))}'},
         )
         self.assertEqual(response.status_code, 200, response.text)
         payload = response.json()
-        self.assertEqual(payload['deleted']['organizations'], 1)
-        self.assertEqual(payload['counts']['organizations'], 1)
+        self.assertEqual(payload['id'], str(self.org.id))
+        self.assertFalse(payload['is_active'])
+        self.assertIsNotNone(payload['deleted_at'])
         self.db.expire_all()
-        self.assertIsNone(self.db.get(Organization, self.org.id))
+        persisted = self.db.get(Organization, self.org.id)
+        self.assertIsNotNone(persisted)
+        self.assertFalse(persisted.is_active)
+        self.assertIsNotNone(persisted.deleted_at)
 
 
 if __name__ == '__main__':

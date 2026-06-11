@@ -14,6 +14,8 @@ from app.config import ADMIN_SEED_EMAIL, ADMIN_SEED_FULL_NAME, ADMIN_SEED_PASSWO
 from app.database import get_db
 from app.models import Organization, Role, Season, User, Week
 from app.routes.api import ensure_league_defined_divisions, router as api_router, validate_rulebook_storage_on_startup
+from app.organizations import normalize_organization_name
+from app.routes.api import ensure_league_defined_divisions, router as api_router
 from app.security import hash_password, validate_password_strength
 from app.services.game_statuses import seed_required_game_statuses
 
@@ -179,12 +181,29 @@ def seed_auth_data() -> None:
                 ('Antioch', 'Nick Stafford', 'nicholasjstafford@gmail.com', 'Antioch1'),
                 ('Prairie Ridge', 'Stephanie Dycha', 'sdycha144@gmail.com', 'PrairieRidge1'),
             ]
+            organizations_by_normalized_name = {
+                normalize_organization_name(org.name): org
+                for org in db.query(Organization).all()
+            }
             for organization_name, full_name, email, password in seeded_accounts:
-                organization = db.query(Organization).filter(Organization.name == organization_name).first()
+                normalized_seed_name = normalize_organization_name(organization_name)
+                organization = organizations_by_normalized_name.get(normalized_seed_name)
+                if organization and (not organization.is_active or organization.deleted_at is not None):
+                    logger.info(
+                        'Community admin seed skipped for inactive/deleted organization name=%s organization_id=%s.',
+                        organization_name,
+                        organization.id,
+                    )
+                    normalized_email = email.strip().lower()
+                    user = db.query(User).filter(User.email.ilike(normalized_email)).first()
+                    if user and user.organization_id == organization.id:
+                        user.is_active = False
+                    continue
                 if not organization:
-                    organization = Organization(name=organization_name, is_active=True)
+                    organization = Organization(name=organization_name.strip(), is_active=True)
                     db.add(organization)
                     db.flush()
+                    organizations_by_normalized_name[normalized_seed_name] = organization
                 normalized_email = email.strip().lower()
                 user = db.query(User).filter(User.email.ilike(normalized_email)).first()
                 if not user:
