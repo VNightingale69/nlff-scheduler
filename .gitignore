@@ -3,3 +3,7 @@ frontend/node_modules/
 backups/
 uploads/
 backend/uploads/
+
+# Local database backup files
+railway_backup_before_import.sql
+railway_backup_before_local_import.sql
