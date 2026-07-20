@@ -7649,23 +7649,28 @@ def get_organization_delete_check(org_id: uuid.UUID, db: Session = Depends(get_d
         'dependencies': [{'label': label, 'count': count} for label, count in dependencies],
     }
 
-@router.delete('/organizations/{org_id}', response_model=OrganizationRead, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
-def delete_organization(org_id: uuid.UUID, force: bool = Query(False), dry_run: bool = Query(False), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    # `force` is retained for API compatibility; organization deletion is now a persisted soft delete.
-    _ = force
+@router.delete('/organizations/{org_id}', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+def delete_organization(org_id: uuid.UUID, confirmation_name: str = Query(...), dry_run: bool = Query(False), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     org = db.query(Organization).filter(Organization.id == org_id).first()
     if not org:
         raise HTTPException(status_code=404, detail='Organization not found')
-    if dry_run:
-        return _organization_read(org)
-    was_active = org.is_active
-    org.is_active = False
-    org.deleted_at = datetime.now(timezone.utc)
-    org.deleted_by_user_id = current_user.id
-    db.commit()
-    db.refresh(org)
-    logger.info('organization_soft_deleted organization_id=%s name=%s deleted_by_user_id=%s previous_active=%s new_active=%s', org.id, org.name, current_user.id, was_active, org.is_active)
-    return _organization_read(org)
+    if confirmation_name != org.name:
+        raise HTTPException(status_code=400, detail='Type the exact community name to confirm deletion.')
+    result = cleanup_organization_dependencies(db, org_id, dry_run=dry_run)
+    summary = result.get('summary') or {
+        'organization_deleted': False,
+        'organization_name': org.name,
+        'teams_deleted': result.get('would_delete', {}).get('teams', 0),
+        'teams_archived': 0,
+        'administrator_assignments_deleted': result.get('would_delete', {}).get('users', 0),
+        'locations_deleted': result.get('would_delete', {}).get('host_locations', 0),
+        'fields_deleted': result.get('would_delete', {}).get('fields', 0),
+        'availability_records_deleted': result.get('would_delete', {}).get('hosting_availabilities', 0),
+        'unpublished_schedule_records_deleted': result.get('would_delete', {}).get('games', 0) + result.get('would_delete', {}).get('game_slots', 0),
+        'published_schedule_records_preserved': result.get('would_delete', {}).get('published_schedule_records_preserved', 0),
+    }
+    summary['dry_run'] = dry_run
+    return summary
 
 
 @router.get('/admin/debug/org-delete/{org_id}', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])

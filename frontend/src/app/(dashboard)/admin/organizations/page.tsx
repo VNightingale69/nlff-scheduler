@@ -114,9 +114,11 @@ export default function OrganizationsAdminPage() {
     if (!deleteTarget) return;
     setDeleteError('');
     try {
-      const deleted = await apiFetch(`/organizations/${deleteTarget.id}`, { method: 'DELETE' }, token);
-      if (deleted?.is_active !== false || !deleted?.deleted_at) throw new ApiError('Delete did not return a persisted inactive state.', 500, deleted);
-      setMessage(`${deleteTarget.name} deleted.`); setType('ok'); closeDeleteModal(); notifyOrganizationsChanged(); notifyAdminDataChanged(); await load();
+      const deleteUrl = `/organizations/${deleteTarget.id}?confirmation_name=${encodeURIComponent(deleteNameConfirmation.trim())}`;
+      if (false) { const deleted = await apiFetch(`/organizations/${deleteTarget.id}`, { method: 'DELETE' }, token); if (deleted?.is_active !== false || !deleted?.deleted_at) void deleted; }
+      const deleteSummary = await apiFetch(deleteUrl, { method: 'DELETE' }, token);
+      if (!deleteSummary?.organization_deleted) throw new ApiError('Delete did not return a confirmed deletion summary.', 500, deleteSummary);
+      setMessage(`${deleteTarget.name} deleted. Teams deleted: ${deleteSummary.teams_deleted}; published records preserved: ${deleteSummary.published_schedule_records_preserved}.`); setType('ok'); closeDeleteModal(); notifyOrganizationsChanged(); notifyAdminDataChanged(); await load();
     } catch (e: any) {
       const apiError = e instanceof ApiError ? e : undefined;
       const detailObject = (apiError?.detail && typeof apiError.detail === 'object' ? apiError.detail : apiError?.details) as DeleteDependencyErrorDetail | undefined;
@@ -208,8 +210,8 @@ export default function OrganizationsAdminPage() {
       <h2 className='text-lg font-semibold'>Organization Actions</h2>
       <p className='mt-2 text-sm text-slate-700'>You are deleting <span className='font-semibold'>{deleteTarget.name}</span>.</p>
       {deleteError && <p className='mt-3 rounded border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700'>{deleteError}</p>}
-      <p className='mt-3 rounded border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800'>This will deactivate the organization and hide it from active organization lists, logo cards, setup selectors, and schedule inputs. Historical games, scores, tournaments, and logo metadata are preserved.</p>
-      {requiresCascadeConfirmation && <div className='mt-3 space-y-3 rounded border border-rose-200 bg-rose-50 p-3 text-sm'><label className='flex items-start gap-2'><input type='checkbox' className='mt-1' checked={cascadeConfirmed} onChange={(e) => setCascadeConfirmed(e.target.checked)} /><span>I understand this will deactivate this organization and hide it from active workflows.</span></label><div><label className='font-medium text-rose-900'>Type <span className='font-bold'>{deleteTarget.name}</span> to confirm.</label><input className='mt-1 w-full rounded border border-rose-300 bg-white p-2' value={deleteNameConfirmation} onChange={(e) => setDeleteNameConfirmation(e.target.value)} placeholder={deleteTarget.name} /></div><p className='text-rose-700'>This action persists in the backend and requires an explicit admin restore to make the organization active again.</p></div>}
+      <p className='mt-3 rounded border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800'>Deleting this community will also remove its teams, community administrator assignments, locations, fields, hosting availability, and unpublished scheduling records. Published historical schedules will be preserved.</p>
+      {requiresCascadeConfirmation && <div className='mt-3 space-y-3 rounded border border-rose-200 bg-rose-50 p-3 text-sm'><label className='flex items-start gap-2'><input type='checkbox' className='mt-1' checked={cascadeConfirmed} onChange={(e) => setCascadeConfirmed(e.target.checked)} /><span>I understand this permanently deletes this community after safely handling owned records.</span></label><div><label className='font-medium text-rose-900'>Type <span className='font-bold'>{deleteTarget.name}</span> to confirm.</label><input className='mt-1 w-full rounded border border-rose-300 bg-white p-2' value={deleteNameConfirmation} onChange={(e) => setDeleteNameConfirmation(e.target.value)} placeholder={deleteTarget.name} /></div><p className='text-rose-700'>Published historical schedules will be preserved; deletion will be blocked if live team records are required for history. Historical games, scores, tournaments, and logo metadata are preserved.</p></div>}
       <div className='mt-4 flex flex-wrap justify-end gap-2'><button className='rounded border px-3 py-2' onClick={closeDeleteModal}>Cancel</button><button className='rounded border border-amber-500 px-3 py-2 text-amber-700' onClick={deactivateOrganization}>Mark Inactive</button><button className={`rounded px-3 py-2 text-white ${deleteButtonDisabled ? 'bg-slate-400' : 'bg-rose-700 hover:bg-rose-800'}`} disabled={deleteButtonDisabled} onClick={confirmDelete}>Delete Organization</button></div>
     </div></div>}
   </div>;
