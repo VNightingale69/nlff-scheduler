@@ -16,7 +16,9 @@ from app.models import (
     FieldConfigurationOption,
     FieldInstance,
     Game,
+    GameScore,
     GameSlot,
+    GameStatus,
     HostLocation,
     HostLocationConfiguration,
     HostPlanSelection,
@@ -321,8 +323,27 @@ def collect_organization_delete_inventory(db: Session, org_id: uuid.UUID) -> dic
     }
     counts = {key: len(value) for key, value in ids_by_key.items()}
     counts['global_league_admins_preserved'] = global_league_admins_preserved
+    counts['published_schedule_records_preserved'] = published_schedule_records_preserved
     return {'organization': org, 'ids': ids_by_key, 'counts': counts}
 
+
+
+def _published_team_reference_count(db: Session, team_ids: list[uuid.UUID]) -> int:
+    if not team_ids:
+        return 0
+    published_games = (
+        db.query(Game)
+        .join(GameStatus, Game.game_status_id == GameStatus.id)
+        .filter(or_(Game.home_team_id.in_(team_ids), Game.away_team_id.in_(team_ids)), GameStatus.code.in_(['published', 'PUBLISHED']))
+        .count()
+    )
+    published_scores = (
+        db.query(GameScore)
+        .join(Game, GameScore.game_id == Game.id)
+        .filter(or_(Game.home_team_id.in_(team_ids), Game.away_team_id.in_(team_ids)), GameScore.is_published.is_(True))
+        .count()
+    )
+    return published_games + published_scores
 
 def cleanup_organization_dependencies(db: Session, org_id: uuid.UUID, dry_run: bool = False) -> dict:
     try:
@@ -342,6 +363,10 @@ def cleanup_organization_dependencies(db: Session, org_id: uuid.UUID, dry_run: b
             counts,
             dependent_foreign_keys,
         )
+        if counts.get('published_schedule_records_preserved', 0) > 0 and not dry_run:
+            db.rollback()
+            raise HTTPException(status_code=409, detail={'error': 'published_schedule_dependency', 'message': 'Organization cannot be permanently deleted because published historical schedule records still depend on live team records. Archive the community instead.', 'published_schedule_records_preserved': counts['published_schedule_records_preserved']})
+
         if dry_run:
             db.rollback()
             return {
@@ -369,7 +394,8 @@ def cleanup_organization_dependencies(db: Session, org_id: uuid.UUID, dry_run: b
         deleted['physical_field_areas'] = _delete_by_ids(db, PhysicalFieldArea, ids_by_key['physical_field_areas'])
         deleted['organization_division_participations'] = _delete_by_ids(db, OrganizationDivisionParticipation, ids_by_key['organization_division_participations'])
         deleted['teams'] = _delete_by_ids(db, Team, ids_by_key['teams'])
-        deleted['users'] = _delete_by_ids(db, User, ids_by_key['users'])
+        deleted['user_organization_assignments'] = db.query(User).filter(User.id.in_(ids_by_key['users'])).update({'organization_id': None}, synchronize_session=False) if ids_by_key['users'] else 0
+        deleted['users'] = 0
         deleted['host_locations'] = _delete_by_ids(db, HostLocation, ids_by_key['host_locations'])
         deleted['organizations'] = _delete_by_ids(db, Organization, ids_by_key['organizations'])
         deleted['global_league_admins_preserved'] = counts['global_league_admins_preserved']
@@ -382,6 +408,18 @@ def cleanup_organization_dependencies(db: Session, org_id: uuid.UUID, dry_run: b
             'organization_name': organization_name,
             'counts': counts,
             'deleted': deleted,
+            'summary': {
+                'organization_deleted': deleted.get('organizations', 0) == 1,
+                'organization_name': organization_name,
+                'teams_deleted': deleted.get('teams', 0),
+                'teams_archived': 0,
+                'administrator_assignments_deleted': deleted.get('user_organization_assignments', 0),
+                'locations_deleted': deleted.get('host_locations', 0),
+                'fields_deleted': deleted.get('fields', 0),
+                'availability_records_deleted': deleted.get('hosting_availabilities', 0),
+                'unpublished_schedule_records_deleted': deleted.get('games', 0) + deleted.get('game_slots', 0),
+                'published_schedule_records_preserved': counts.get('published_schedule_records_preserved', 0),
+            },
             'dependent_foreign_keys': dependent_foreign_keys,
         }
     except HTTPException:

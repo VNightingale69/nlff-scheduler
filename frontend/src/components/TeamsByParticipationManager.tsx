@@ -165,10 +165,11 @@ export default function TeamsByParticipationManager() {
       const div = divisionsById[team.division_id];
       if (!div) return;
       const key = `${div.id}::${team.organization_id}`;
-      if (!rowMap.has(key)) rowMap.set(key, { divisionLabel: resolveDivisionLabel(div), divisionSort: divisionSortRank(div), organizationName: orgById[team.organization_id] || 'Unknown', teamCount: 0, teamNames: [], fieldType: resolveFieldType(div) });
+      if (!rowMap.has(key)) { const missingOrg = !orgById[team.organization_id]; rowMap.set(key, { divisionLabel: resolveDivisionLabel(div), divisionSort: divisionSortRank(div), organizationName: missingOrg ? 'Data integrity error — organization missing' : orgById[team.organization_id], missingOrg, missingOrganizationId: missingOrg ? team.organization_id : null, teamCount: 0, teamNames: [], teamIds: [], fieldType: resolveFieldType(div) }); }
       const row = rowMap.get(key);
       row.teamCount += 1;
       row.teamNames.push(team.name);
+      row.teamIds.push(team.id);
     });
     return Array.from(rowMap.values()).sort((a, b) => a.divisionSort !== b.divisionSort ? a.divisionSort.localeCompare(b.divisionSort) : a.organizationName.localeCompare(b.organizationName));
   }, [divisions, activeTeams, orgs]);
@@ -311,6 +312,10 @@ export default function TeamsByParticipationManager() {
     {loading && <p className='rounded border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700'>Loading teams...</p>}
     {error && <p className='rounded border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800'>{error}</p>}
     {msg && <p className='rounded border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800'>{msg}</p>}
+    {!loading && !orgId && leagueTableRows.some((row: any) => row.missingOrg) && <div className='rounded border border-rose-300 bg-rose-50 p-3 text-sm text-rose-900'>
+      <div className='font-semibold'>League Administrator warning: team organization relationship is invalid.</div>
+      <ul className='mt-2 list-disc pl-5'>{leagueTableRows.filter((row: any) => row.missingOrg).flatMap((row: any) => row.teamNames.map((name: string, idx: number) => <li key={`${row.missingOrganizationId}-${row.teamIds[idx]}`}>Team name: {name}; Team ID: {row.teamIds[idx]}; Missing organization ID: {row.missingOrganizationId}</li>))}</ul>
+    </div>}
 
     {!loading && !orgId && <>
       <div className='grid grid-cols-1 gap-3 md:grid-cols-3 xl:grid-cols-4'>
@@ -343,7 +348,7 @@ export default function TeamsByParticipationManager() {
       <div className='overflow-x-auto rounded border bg-white'>
         <table className='w-full text-left text-sm'>
           <thead className='bg-slate-100'><tr><th className='p-2'>Division</th><th className='p-2'>Organization/Community</th><th className='p-2'>Team Count</th><th className='p-2'>Team Names</th><th className='p-2'>Field Type Requirement</th></tr></thead>
-          <tbody>{leagueTableRows.length === 0 ? <tr><td className='p-2 text-slate-500' colSpan={5}>No active teams found.</td></tr> : leagueTableRows.map((row, idx) => <tr key={`${row.divisionLabel}-${row.organizationName}-${idx}`} className='border-t'><td className='p-2'>{row.divisionLabel}</td><td className='p-2'>{row.organizationName}</td><td className='p-2'>{row.teamCount}</td><td className='p-2'>{row.teamNames.sort((a: string, b: string) => a.localeCompare(b)).join(', ')}</td><td className='p-2'>{FIELD_TYPE_LABELS[row.fieldType as FieldType]}</td></tr>)}</tbody>
+          <tbody>{leagueTableRows.length === 0 ? <tr><td className='p-2 text-slate-500' colSpan={5}>No active teams found.</td></tr> : leagueTableRows.map((row, idx) => <tr key={`${row.divisionLabel}-${row.organizationName}-${idx}`} className='border-t'><td className='p-2'>{row.divisionLabel}</td><td className={`p-2 ${row.missingOrg ? 'font-semibold text-rose-700' : ''}`}>{row.organizationName}</td><td className='p-2'>{row.teamCount}</td><td className='p-2'>{row.teamNames.sort((a: string, b: string) => a.localeCompare(b)).join(', ')}</td><td className='p-2'>{FIELD_TYPE_LABELS[row.fieldType as FieldType]}</td></tr>)}</tbody>
         </table>
       </div>
     </>}
