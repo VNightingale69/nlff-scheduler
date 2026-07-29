@@ -236,8 +236,11 @@ class Team(Base, TimestampMixin):
     coach_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     coach_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    deleted_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    superseded_by_team_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('teams.id'), nullable=True)
     organization = relationship('Organization')
     division = relationship('Division')
+    superseded_by = relationship('Team', remote_side=[id], foreign_keys=[superseded_by_team_id])
     __table_args__ = (UniqueConstraint('organization_id', 'division_id', 'name', name='uq_team_org_div_name'),)
 
 class Season(Base, TimestampMixin):

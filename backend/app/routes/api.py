@@ -36,6 +36,7 @@ from app.services.game_statuses import REQUIRED_GAME_STATUSES, ensure_required_g
 from app.services.organization_cleanup import cleanup_organization_dependencies, collect_organization_delete_inventory
 from app.services.scheduling_validation import validate_game
 from app.turf_configurations import INVALID_TURF_CONFIGURATION_MESSAGE, BACKWARD_COMPATIBLE_TURF_CONFIGURATION_ALIASES, turf_configuration_legacy_metadata
+from app.teams import eligible_team_query
 
 router = APIRouter(prefix='/api')
 logger = logging.getLogger(__name__)
@@ -12369,10 +12370,14 @@ def list_teams(search: str | None = None, organization_id: uuid.UUID | None = No
         raise HTTPException(status_code=403, detail='Only schedule administrators can include inactive teams')
 
     q = db.query(Team)
-    if active_divisions_only:
-        q = q.join(Team.division).filter(Division.is_active.is_(True))
     if not include_inactive:
-        q = q.filter(Team.is_active.is_(True))
+        # All current-team consumers (including the Admin Teams totals, grouped
+        # organization rows, and Team Names column) receive this same set.
+        q = eligible_team_query(q)
+    elif active_divisions_only:
+        q = q.join(Team.division).filter(Division.is_active.is_(True))
+    if include_inactive:
+        q = q.filter(Team.deleted_at.is_(None), Team.superseded_by_team_id.is_(None))
     if is_community_admin(current_user): q = q.filter(Team.organization_id == current_user.organization_id)
     elif organization_id: q = q.filter(Team.organization_id == organization_id)
     if division_id: q = q.filter(Team.division_id == division_id)
@@ -12427,6 +12432,7 @@ def del_team(item_id: uuid.UUID, current_user: User = Depends(get_current_user),
             detail='This team is already scheduled and cannot be deleted by a Community Admin. Contact the Scheduling Administrator.',
         )
     x.is_active = False
+    x.deleted_at = datetime.now(timezone.utc)
     db.commit()
     return {'ok': True, 'message': 'Team removed from active teams.', 'scheduled_game_count': scheduled_game_count}
 
