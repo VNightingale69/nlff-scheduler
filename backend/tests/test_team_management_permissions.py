@@ -1,6 +1,6 @@
 import unittest
 import uuid
-from datetime import date, time
+from datetime import date, datetime, time, timezone
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -140,6 +140,49 @@ class TeamManagementPermissionsTest(unittest.TestCase):
         response = self.client.get('/api/teams?page_size=500', headers=self._token(self.community_user.id))
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()['items'], [])
+
+    def test_current_team_summary_eligibility_is_consistent(self):
+        """Counts and names derive only from the current participation roster."""
+        inactive = Team(id=uuid.uuid4(), organization_id=self.org.id, division_id=self.division.id, name='Inactive', is_active=False)
+        removed = Team(id=uuid.uuid4(), organization_id=self.org.id, division_id=self.other_division.id, name='Removed From Season', is_active=True)
+        soft_deleted = Team(
+            id=uuid.uuid4(), organization_id=self.org.id, division_id=self.division.id,
+            name='Soft Deleted', is_active=True, deleted_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+        )
+        superseded = Team(
+            id=uuid.uuid4(), organization_id=self.org.id, division_id=self.division.id,
+            name='Superseded', is_active=True, superseded_by_team_id=self.own_team.id,
+        )
+        self.db.add_all([inactive, removed, soft_deleted, superseded])
+        self.db.commit()
+
+        response = self.client.get('/api/teams?page_size=500', headers=self._token(self.league_user.id))
+        self.assertEqual(response.status_code, 200, response.text)
+        items = response.json()['items']
+        names = [item['name'] for item in items]
+
+        self.assertEqual(names, ['Other Team', 'Own Team'])
+        self.assertEqual(len(items), 2)
+        organization_total = sum(1 for item in items if item['division_id'] == str(self.division.id))
+        division_total = sum(1 for item in items if item['organization_id'] in {str(self.org.id), str(self.other_org.id)})
+        self.assertEqual(division_total, organization_total)
+
+    def test_inactive_or_removed_participation_excludes_team_even_with_historical_game(self):
+        self._add_scheduled_game_for_team(self.own_team)
+        self.participation.is_participating = False
+        self.participation.team_count = 0
+        self.db.commit()
+
+        response = self.client.get('/api/teams?page_size=500', headers=self._token(self.league_user.id))
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertNotIn('Own Team', [item['name'] for item in response.json()['items']])
+
+        self.participation.is_participating = True
+        self.participation.team_count = 1
+        self.participation.is_active = False
+        self.db.commit()
+        response = self.client.get('/api/teams?page_size=500', headers=self._token(self.league_user.id))
+        self.assertNotIn('Own Team', [item['name'] for item in response.json()['items']])
 
     def test_scheduling_admin_can_include_inactive_teams(self):
         self.own_team.is_active = False
