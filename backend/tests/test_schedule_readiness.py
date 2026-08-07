@@ -172,7 +172,7 @@ class MultiLocationHostingAvailabilityTest(unittest.TestCase):
         self.assertEqual(grass_site.grass_field_capacity, 1)
         self.assertIsNotNone(turf_site.selected_turf_layout)
 
-    def test_unresolved_auto_select_uses_layout_capacity_and_is_labeled_unresolved(self):
+    def test_auto_select_results_vary_by_date_without_mutating_physical_options(self):
         from app.models import FieldInstance, GameSlot, HostLocation, HostLocationConfiguration, HostingAvailability
         from app.routes.api import _host_availability_capacity_by_size, _regenerate_generated_slots, list_saved_hosting_availability
 
@@ -180,13 +180,26 @@ class MultiLocationHostingAvailabilityTest(unittest.TestCase):
         turf_host = HostLocation(id=uuid.uuid4(), organization_id=self.org.id, name='Johnsburg Stadium', surface_type='TURF_STADIUM', is_active=True)
         three_small = HostLocationConfiguration(id=uuid.uuid4(), host_location_id=turf_host.id, configuration_name='THREE_SMALL', is_active=True)
         mixed = HostLocationConfiguration(id=uuid.uuid4(), host_location_id=turf_host.id, configuration_name='ONE_SMALL_ONE_LARGE', is_active=True)
+        other_options = [
+            HostLocationConfiguration(id=uuid.uuid4(), host_location_id=turf_host.id, configuration_name=name, is_active=True)
+            for name in ('TWO_SMALL_ONE_MEDIUM', 'TWO_MEDIUM', 'ONE_LARGE')
+        ]
         availability = HostingAvailability(
             id=uuid.uuid4(), organization_id=self.org.id, host_location_id=turf_host.id,
             selected_configuration_id=None, auto_select_turf_layout=True, lock_selected_layout=False,
             available_date=host_date, start_time=time(9, 0), end_time=time(17, 0), is_available=True,
         )
-        self.db.add_all([turf_host, three_small, mixed, availability])
+        large_demand_date = date(2026, 8, 23)
+        large_demand_availability = HostingAvailability(
+            id=uuid.uuid4(), organization_id=self.org.id, host_location_id=turf_host.id,
+            selected_configuration_id=None, auto_select_turf_layout=True, lock_selected_layout=False,
+            available_date=large_demand_date, start_time=time(9, 0), end_time=time(17, 0), is_available=True,
+        )
+        self.db.add_all([turf_host, three_small, mixed, *other_options, availability, large_demand_availability])
         self.db.commit()
+        physical_option_ids = {
+            row.id for row in self.db.query(HostLocationConfiguration).filter_by(host_location_id=turf_host.id).all()
+        }
 
         capacity = _host_availability_capacity_by_size(self.db, turf_host, availability)
         self.assertGreater(sum(capacity.values()), 0)
@@ -204,10 +217,45 @@ class MultiLocationHostingAvailabilityTest(unittest.TestCase):
         ).count()
         self.assertGreater(generated_slots, 0)
 
-        resolved = list_saved_hosting_availability(host_location_id=turf_host.id, current_user=None, db=self.db)['items'][0]
+        _regenerate_generated_slots(
+            self.db, large_demand_availability, turf_host.id,
+            demand_counts_override={'SMALL': 0, 'MEDIUM': 0, 'LARGE': 1},
+        )
+        self.db.commit()
+
+        saved_by_date = {
+            item['available_date']: item
+            for item in list_saved_hosting_availability(host_location_id=turf_host.id, current_user=None, db=self.db)['items']
+        }
+        resolved = saved_by_date[host_date]
         self.assertTrue(resolved['layout_resolved'])
-        self.assertEqual(resolved['available_layout'], 'THREE_SMALL')
-        self.assertEqual(resolved['small_field_capacity'], 3)
+        self.assertEqual(resolved['available_layout'], 'Auto Select Best Layout')
+        self.assertEqual(resolved['current_generated_layout'], 'THREE_SMALL')
+        self.assertEqual(resolved['generated_small_field_capacity'], 3)
+        large_result = saved_by_date[large_demand_date]
+        self.assertEqual(large_result['available_layout'], 'Auto Select Best Layout')
+        self.assertEqual(large_result['current_generated_layout'], 'ONE_SMALL_ONE_LARGE')
+        self.assertEqual(large_result['generated_large_field_capacity'], 1)
+
+        # Auto-select outcomes live on replaceable TurfWave records. Hosting
+        # Availability and the site's active physical options remain unchanged.
+        self.db.refresh(availability)
+        self.db.refresh(large_demand_availability)
+        self.assertIsNone(availability.selected_configuration_id)
+        self.assertIsNone(large_demand_availability.selected_configuration_id)
+        self.assertEqual(
+            {row.id for row in self.db.query(HostLocationConfiguration).filter_by(host_location_id=turf_host.id).all()},
+            physical_option_ids,
+        )
+
+        _regenerate_generated_slots(
+            self.db, availability, turf_host.id,
+            demand_counts_override={'SMALL': 0, 'MEDIUM': 0, 'LARGE': 1},
+        )
+        self.db.commit()
+        regenerated = list_saved_hosting_availability(host_location_id=turf_host.id, current_user=None, db=self.db)['items'][0]
+        self.assertEqual(regenerated['current_generated_layout'], 'ONE_SMALL_ONE_LARGE')
+        self.assertIsNone(availability.selected_configuration_id)
 
 
 class GrassFieldForecastTest(unittest.TestCase):
