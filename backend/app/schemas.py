@@ -653,12 +653,17 @@ class FieldConfigurationEfficiencyRow(BaseModel):
 
 class WeeklyFieldDemandRow(BaseModel):
     host_date: date
+    week: int | None = None
     small_games_required: int
     medium_games_required: int
     large_games_required: int
     capacity_available: int = 0
     capacity_used: int = 0
     available_capacity_by_community: list[dict] = []
+    required_by_size: dict[str, int] = {}
+    eligible_by_size: dict[str, int] = {}
+    status: str = 'READY'
+    failed_field_size_requirements: list[dict] = []
 
 
 class ScheduleReadinessResponse(BaseModel):

@@ -179,13 +179,18 @@ export default function ScheduleReadinessPage() {
       <section className='rounded border bg-white p-3'>
         <h2 className='mb-2 font-semibold'>Weekly Field Demand</h2>
         {!weeklyDemand.length ? <p className='text-sm text-slate-500'>No weekly demand or generated capacity found yet.</p> : (
-          <div className='space-y-2'>
+          <div className='space-y-3'>
+            <div className='overflow-auto'><table className='min-w-full text-sm'>
+              <thead><tr className='border-b text-left'><th className='p-2'>Week</th><th className='p-2'>Date</th><th className='p-2'>Required Small</th><th className='p-2'>Eligible Small</th><th className='p-2'>Required Medium</th><th className='p-2'>Eligible Medium</th><th className='p-2'>Required Large</th><th className='p-2'>Eligible Large</th><th className='p-2'>Status</th></tr></thead>
+              <tbody>{weeklyDemand.map((row) => <tr key={`summary-${row.host_date}`} className='border-b'><td className='p-2'>{row.week ?? '—'}</td><td className='p-2'>{row.host_date}</td><td className='p-2'>{row.required_by_size?.SMALL ?? row.small_games_required}</td><td className='p-2'>{row.eligible_by_size?.SMALL ?? 0}</td><td className='p-2'>{row.required_by_size?.MEDIUM ?? row.medium_games_required}</td><td className='p-2'>{row.eligible_by_size?.MEDIUM ?? 0}</td><td className='p-2'>{row.required_by_size?.LARGE ?? row.large_games_required}</td><td className='p-2'>{row.eligible_by_size?.LARGE ?? 0}</td><td className={`p-2 font-semibold ${row.status === 'READY' ? 'text-emerald-700' : 'text-rose-700'}`}>{row.status}</td></tr>)}</tbody>
+            </table></div>
             {weeklyDemand.map((row) => <div key={row.host_date} className='rounded border bg-slate-50 p-3 text-sm'>
               <div className='font-medium'>{row.host_date}</div>
               <div>Required: {row.small_games_required} Small / {row.medium_games_required} Medium / {row.large_games_required} Large</div>
               <div>Capacity: {row.capacity_used ?? 0} used / {row.capacity_available ?? 0} available</div>
               <div className='mt-1 text-slate-600'>Available capacity by community and host location:</div>
               <ul className='list-disc pl-5'>{(row.available_capacity_by_community || []).map((community: any) => <li key={community.community_id}>{community.community}: {community.small_capacity} Small / {community.medium_capacity} Medium / {community.large_capacity} Large{community.host_locations?.length ? ` (${community.host_locations.map((host: any) => `${host.host_location}: ${host.small_capacity}/${host.medium_capacity}/${host.large_capacity}`).join('; ')})` : ''}</li>)}</ul>
+              {(row.failed_field_size_requirements || []).map((failure: any) => <div key={`${row.host_date}-${failure.field_size}`} className='mt-2 rounded border border-rose-200 bg-rose-50 p-2 text-rose-800'><b>{failure.field_size} shortage:</b> required {failure.required_count}, generated {failure.generated_slot_count}, eligible {failure.eligible_slot_count}, shortage {failure.shortage}. Hosts: {failure.host_community} / {failure.host_location}. Turf configuration: {failure.turf_configuration}. Expected sizes: {failure.expected_field_sizes?.join(', ') || '—'}; generated sizes: {failure.field_sizes_actually_generated?.join(', ') || 'none'}. Eligibility exclusions: {JSON.stringify(failure.eligibility_exclusions || {})}.</div>)}
             </div>)}
           </div>
         )}
