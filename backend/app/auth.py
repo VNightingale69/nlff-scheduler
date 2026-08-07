@@ -22,6 +22,10 @@ ROLE_COMMUNITY_SCHEDULER = ROLE_COMMUNITY_ADMIN
 SCHEDULE_MANAGEMENT_ROLES = {ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN}
 SCORE_MANAGEMENT_ROLES = {ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN}
 SCORE_APPROVAL_ROLES = SCORE_MANAGEMENT_ROLES
+# Community and scheduling administrators already managed fields before this
+# policy was centralized; preserve that behavior while explicitly including
+# league administrators.
+FIELD_MANAGEMENT_ROLES = {ROLE_LEAGUE_ADMIN, ROLE_COMMUNITY_ADMIN, ROLE_SCHEDULING_ADMIN}
 
 _ROLE_ALIASES = {
     'ADMIN': ROLE_LEAGUE_ADMIN,
@@ -101,6 +105,18 @@ def can_manage_schedule(current_user: User | None) -> bool:
     if not current_user or not getattr(current_user, 'role', None):
         return False
     return normalize_role_name(current_user.role.name) in SCHEDULE_MANAGEMENT_ROLES
+
+
+def can_manage_fields(current_user: User | None) -> bool:
+    if not current_user or not getattr(current_user, 'role', None):
+        return False
+    return normalize_role_name(current_user.role.name) in FIELD_MANAGEMENT_ROLES
+
+
+def require_field_manager(current_user: User = Depends(get_current_user)) -> User:
+    if not can_manage_fields(current_user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Insufficient role')
+    return current_user
 
 
 def can_publish_schedule(current_user: User | None) -> bool:

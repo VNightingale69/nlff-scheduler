@@ -5,6 +5,7 @@ const apiSource = readFileSync(new URL('../src/lib/api.ts', import.meta.url), 'u
 const authSource = readFileSync(new URL('../src/lib/auth.ts', import.meta.url), 'utf8');
 const loginSource = readFileSync(new URL('../src/app/(auth)/login/page.tsx', import.meta.url), 'utf8');
 const shellSource = readFileSync(new URL('../src/components/DashboardShell.tsx', import.meta.url), 'utf8');
+const fieldsSource = readFileSync(new URL('../src/components/FieldAreaManager.tsx', import.meta.url), 'utf8');
 
 assert.match(authSource, /SESSION_EXPIRED_MESSAGE = 'Your session expired\. Please log in again\.'/);
 assert.match(authSource, /AUTH_EXPIRES_AT_KEY = 'auth_expires_at'/);
@@ -20,3 +21,11 @@ assert.match(loginSource, /SESSION_EXPIRED_MESSAGE/);
 assert.match(loginSource, /clearTokens\(\);\n      const data: any = await apiFetch\('\/auth\/login'/);
 assert.match(loginSource, /setTokens\(data\.access_token, data\.refresh_token, buildAuthUser\(data\), data\.expires_at\)/);
 assert.match(shellSource, /clearTokens\(\); router\.push\('\/login'\)/);
+assert.match(authSource, /function canManageFields/);
+assert.match(authSource, /role === 'LEAGUE_ADMIN' \|\| role === 'COMMUNITY_ADMIN' \|\| role === 'SCHEDULING_ADMIN'/);
+assert.match(fieldsSource, /canManageFields\(authUser\)/);
+assert.match(fieldsSource, /'Activate Field'/);
+assert.match(fieldsSource, /'Deactivate Field'/);
+assert.match(fieldsSource, />Edit Field</);
+assert.match(fieldsSource, />Delete Field</);
+assert.match(fieldsSource, />Add Field</);

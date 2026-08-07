@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from 'react';
 import Toast from './Toast';
 import { apiFetch } from '@/lib/api';
 import { useAuthSession } from '@/components/AuthGate';
+import { canManageFields } from '@/lib/auth';
 import { APPROVED_TURF_CONFIGURATIONS, turfAvailableFieldsLabel, turfConfigurationLabel, type TurfConfiguration } from '@/lib/turfConfigurations';
 
 const TURF_STADIUM = 'TURF_STADIUM';
@@ -109,6 +110,7 @@ const schedulingNote = (layout?: FieldAreaLayout | null): string => layout?.sche
 export default function FieldAreaManager() {
   const { accessToken: token, currentUser: authUser } = useAuthSession();
   const isCommunityAdmin = authUser?.role_name === 'COMMUNITY_ADMIN';
+  const canManageFieldDefinitions = canManageFields(authUser);
   const [message, setMessage] = useState('');
   const [type, setType] = useState<'ok' | 'err'>('ok');
   const [orgs, setOrgs] = useState<any[]>([]);
@@ -230,12 +232,13 @@ export default function FieldAreaManager() {
     } catch (e: any) { setType('err'); setMessage(e.message || 'Save failed'); }
   };
 
-  const deactivateField = async (field: any) => {
+  const setFieldActive = async (field: any, isActive: boolean) => {
     try {
-      await apiFetch(`/fields/${field.id}`, { method: 'PUT', body: JSON.stringify({ ...field, layout_type: field.layout_type, is_active: false }) }, token);
-      setType('ok'); setMessage('Field deactivated. Existing scheduled games keep this field, but inactive fields are not available for future slot generation.');
+      await apiFetch(`/fields/${field.id}`, { method: 'PUT', body: JSON.stringify({ ...field, layout_type: field.layout_type, is_active: isActive }) }, token);
+      setType('ok');
+      setMessage(isActive ? 'Field activated.' : 'Field deactivated. Existing scheduled games keep this field, but inactive fields are not available for future slot generation.');
       await loadOrgData(orgId, hostId);
-    } catch (e: any) { setType('err'); setMessage(e.message || 'Unable to deactivate field'); }
+    } catch (e: any) { setType('err'); setMessage(e.message || `Unable to ${isActive ? 'activate' : 'deactivate'} field`); }
   };
 
   const deleteField = async (field: any) => {
@@ -431,7 +434,7 @@ export default function FieldAreaManager() {
           </ul>
           <p className='mt-2 text-xs text-slate-600'>Grass field locations use active configured fields for slot generation and must have at least one active field before hosting availability can use them. Deactivate keeps existing scheduled assignments; Delete removes the field from active use and flags affected scheduled games for Scheduling Administrator review.</p>
         </div>
-        <button className='rounded border px-3 py-2 text-sm' onClick={resetFieldForm}>Add Field</button>
+        {canManageFieldDefinitions && <button className='rounded border px-3 py-2 text-sm' onClick={resetFieldForm}>Add Field</button>}
       </div>
       <p className='mt-3 text-sm font-medium text-slate-700'>Add only fields that this location can support during the same one-hour block.</p>
       <div className='mt-2 grid gap-2 md:grid-cols-4'>
@@ -441,12 +444,12 @@ export default function FieldAreaManager() {
           {FIELD_TYPES.map((fieldType) => <option key={fieldType} value={fieldType}>{fieldTypeLabel(fieldType)}</option>)}
         </select>
         <label className='flex items-center gap-2 rounded border p-2 text-sm'><input type='checkbox' checked={fieldForm.is_active} onChange={(e) => setFieldForm({ ...fieldForm, is_active: e.target.checked })} />Active</label>
-        <button className='rounded bg-emerald-700 px-4 py-2 text-white' onClick={saveField}>{editingFieldId ? 'Update Field' : 'Add Field'}</button>
+        {canManageFieldDefinitions && <button className='rounded bg-emerald-700 px-4 py-2 text-white' onClick={saveField}>{editingFieldId ? 'Update Field' : 'Add Field'}</button>}
       </div>
       <div className='mt-4 overflow-x-auto'>
         <table className='w-full text-sm'>
           <thead><tr><th className='border p-2 text-left'>Field Name</th><th className='border p-2 text-left'>Field Type</th><th className='border p-2 text-left'>Active</th><th className='border p-2 text-left'>Actions</th></tr></thead>
-          <tbody>{fieldLoadError ? <tr><td className='border p-3 text-center text-rose-700' colSpan={4}>Field configurations failed to load: {fieldLoadError}</td></tr> : selectedHostFields.length ? selectedHostFields.map((field: any) => <tr key={field.id}><td className='border p-2'>{field.name}</td><td className='border p-2'>{fieldTypeLabel(field.layout_type)}</td><td className='border p-2'>{field.is_active ? 'Active' : 'Inactive'}</td><td className='border p-2'><div className='flex gap-2'><button className='rounded border px-2 py-1 text-xs' onClick={() => { setFieldForm({ name: field.name || '', layout_type: field.layout_type || '', is_active: Boolean(field.is_active) }); setEditingFieldId(field.id); }}>Edit Field</button><button className='rounded border px-2 py-1 text-xs' disabled={!field.is_active} onClick={() => deactivateField(field)}>Deactivate Field</button><button className='rounded border border-rose-700 bg-rose-600 px-2 py-1 text-xs font-semibold text-white hover:bg-rose-700' onClick={() => deleteField(field)}>Delete Field</button></div></td></tr>) : <tr><td className='border p-3 text-center text-slate-500' colSpan={4}>No fields configured.</td></tr>}</tbody>
+          <tbody>{fieldLoadError ? <tr><td className='border p-3 text-center text-rose-700' colSpan={4}>Field configurations failed to load: {fieldLoadError}</td></tr> : selectedHostFields.length ? selectedHostFields.map((field: any) => <tr key={field.id}><td className='border p-2'>{field.name}</td><td className='border p-2'>{fieldTypeLabel(field.layout_type)}</td><td className='border p-2'>{field.is_active ? 'Active' : 'Inactive'}</td><td className='border p-2'>{canManageFieldDefinitions && <div className='flex gap-2'><button className='rounded border px-2 py-1 text-xs' onClick={() => { setFieldForm({ name: field.name || '', layout_type: field.layout_type || '', is_active: Boolean(field.is_active) }); setEditingFieldId(field.id); }}>Edit Field</button><button className='rounded border px-2 py-1 text-xs' onClick={() => setFieldActive(field, !field.is_active)}>{field.is_active ? 'Deactivate Field' : 'Activate Field'}</button><button className='rounded border border-rose-700 bg-rose-600 px-2 py-1 text-xs font-semibold text-white hover:bg-rose-700' onClick={() => deleteField(field)}>Delete Field</button></div>}</td></tr>) : <tr><td className='border p-3 text-center text-slate-500' colSpan={4}>No fields configured.</td></tr>}</tbody>
         </table>
       </div>
       <div className='mt-3 rounded bg-slate-50 p-3 text-xs text-slate-700'>
