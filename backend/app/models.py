@@ -275,6 +275,7 @@ class Week(Base, TimestampMixin):
     date_type: Mapped[str] = mapped_column(String(30), nullable=False, default='REGULAR_SEASON')
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default='draft')
+    host_assignment_pending: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     season = relationship('Season')
     __table_args__ = (UniqueConstraint('season_id', 'week_number', name='uq_week_season_number'),)
 
@@ -417,7 +418,8 @@ class Game(Base, TimestampMixin):
     field_instance_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('field_instances.id'), nullable=True)
     game_status_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('game_statuses.id'), nullable=False)
     game_date: Mapped[Date] = mapped_column(Date, nullable=False)
-    kickoff_time: Mapped[Time] = mapped_column(Time, nullable=False)
+    kickoff_time: Mapped[Time | None] = mapped_column(Time, nullable=True)
+    placement_status: Mapped[str] = mapped_column(String(20), nullable=False, default='PLACED')
     public_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     internal_admin_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_manual_edit: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

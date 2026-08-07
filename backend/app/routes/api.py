@@ -2696,6 +2696,12 @@ def _build_revised_scheduling_hierarchy_diagnostics(db: Session, season_id: uuid
 
     for g, slot, fi, host, home, away, div, org, status in rows:
         games_by_date.setdefault(g.game_date, []).append((g, slot, fi, host, home, away, div, org, status))
+        pair_key = tuple(sorted((home.id, away.id), key=str)) + (g.week_id, div.id)
+        matchup_seen[pair_key] = matchup_seen.get(pair_key, 0) + 1
+        if matchup_seen[pair_key] > 1:
+            duplicate_games.append({'game_id': str(g.id), 'division': f'{div.division_group or ""} {div.name or ""}'.strip(), 'home_team': home.name, 'away_team': away.name, 'week_id': str(g.week_id) if g.week_id else None})
+        if str(getattr(g, 'placement_status', 'PLACED')).upper() == 'TBD':
+            continue
         starts_by_date.setdefault(g.game_date, set()).add(g.kickoff_time)
         for team in (home, away):
             key = (team.id, g.game_date, g.kickoff_time)
@@ -2710,10 +2716,6 @@ def _build_revised_scheduling_hierarchy_diagnostics(db: Session, season_id: uuid
             field_time_conflicts.append({'conflicting_games': [field_time_seen[field_key], field_entry]})
         else:
             field_time_seen[field_key] = field_entry
-        pair_key = tuple(sorted((home.id, away.id), key=str)) + (g.week_id, div.id)
-        matchup_seen[pair_key] = matchup_seen.get(pair_key, 0) + 1
-        if matchup_seen[pair_key] > 1:
-            duplicate_games.append({'game_id': str(g.id), 'division': f'{div.division_group or ""} {div.name or ""}'.strip(), 'home_team': home.name, 'away_team': away.name, 'week_id': str(g.week_id) if g.week_id else None})
         required_size = _required_field_type_for_division(div)
         assigned_size = _normalize_field_size(slot.field_type if slot else (fi.field_type if fi else None))
         if assigned_size and required_size != assigned_size:
@@ -3491,6 +3493,8 @@ def _build_revised_scheduling_hierarchy_diagnostics(db: Session, season_id: uuid
     fields_used_by_start_time: dict[str, int] = {}
     late_games: list[dict[str, object]] = []
     for g, _slot, fi, host, _home, _away, div, _org, _status in rows:
+        if not g.kickoff_time:
+            continue
         key = g.kickoff_time.isoformat()
         games_by_start_time[key] = games_by_start_time.get(key, 0) + 1
         if fi:
@@ -7503,7 +7507,7 @@ def create_organization(payload: OrganizationCreate, db: Session = Depends(get_d
 
 @router.get('/organizations', response_model=PagedResponse[OrganizationRead], dependencies=[Depends(get_current_user)])
 def list_organizations(search: str | None = None, is_active: bool | None = None, include_deleted: bool = False, page: int = 1, page_size: int = 20, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    q = db.query(Organization)
+    q = db.query(Organization).filter(func.upper(func.trim(Organization.name)) != 'TBD')
     if is_community_admin(current_user): q = q.filter(Organization.id == current_user.organization_id)
     if search: q = q.filter(func.lower(Organization.name).like(f"%{search.lower()}%"))
     if is_active is not None:
@@ -8563,6 +8567,23 @@ def _build_weekly_field_demand_readiness(db: Session, season_id: uuid.UUID | Non
     rows: list[dict[str, object]] = []
     for week in weeks:
         demand = _active_division_week_demand_by_size(db, division_order, week.season_id)
+        if week.host_assignment_pending:
+            rows.append({
+                'week': week.week_number,
+                'host_date': _week_game_date(week),
+                'small_games_required': demand.get(FIELD_SIZE_SMALL, 0),
+                'medium_games_required': demand.get(FIELD_SIZE_MEDIUM, 0),
+                'large_games_required': demand.get(FIELD_SIZE_LARGE, 0),
+                'capacity_available': None,
+                'capacity_used': 0,
+                'available_capacity_by_community': [],
+                'required_by_size': demand,
+                'eligible_by_size': {},
+                'status': 'DEFERRED',
+                'readiness_message': 'Ready — Matchups can be generated; host/field/time placement deferred',
+                'failed_field_size_requirements': [],
+            })
+            continue
         eligible_slots, exclusion_reasons = _eligible_slots_for_week(db, week)
         eligible = _capacity_by_size_from_slots(eligible_slots)
         host_rows: dict[uuid.UUID, dict[str, object]] = {}
@@ -8634,7 +8655,7 @@ def get_schedule_readiness(season_id: uuid.UUID | None = None, current_user: Use
     eligible_open_slots = [
         slot
         for week in readiness_weeks
-        if _is_regular_season_week(week) and _week_game_date(week)
+        if _is_regular_season_week(week) and _week_game_date(week) and not week.host_assignment_pending
         for slot in _eligible_slots_for_week(db, week)[0]
         if str(slot.status or '').upper() == 'OPEN'
     ]
@@ -10846,7 +10867,7 @@ def create_host_location(payload: HostLocationCreate, current_user: User = Depen
 @router.get('/host-locations', response_model=PagedResponse[HostLocationRead], dependencies=[Depends(get_current_user)])
 def list_host_locations(search: str | None = None, organization_id: uuid.UUID | None = None, is_active: bool | None = None, page: int = 1, page_size: int = 20, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     role_name = normalize_role_name(current_user.role.name)
-    q = db.query(HostLocation)
+    q = db.query(HostLocation).filter(func.upper(func.trim(HostLocation.name)) != 'TBD')
     selected_organization_id = organization_id
     if is_community_admin(current_user):
         selected_organization_id = current_user.organization_id
@@ -11160,7 +11181,12 @@ def create_field(payload: FieldCreate, current_user: User = Depends(get_current_
 def list_fields(search: str | None = None, host_location_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, page: int = 1, page_size: int = 20, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     role_name = normalize_role_name(current_user.role.name)
     selected_organization_id = organization_id
-    q = db.query(Field).join(Field.host_location).filter(Field.deleted_at.is_(None))
+    q = db.query(Field).join(Field.host_location).join(Organization, Organization.id == HostLocation.organization_id).filter(
+        Field.deleted_at.is_(None),
+        func.upper(func.trim(Field.name)) != 'TBD',
+        func.upper(func.trim(HostLocation.name)) != 'TBD',
+        func.upper(func.trim(Organization.name)) != 'TBD',
+    )
     if is_community_admin(current_user):
         selected_organization_id = current_user.organization_id
         q = q.filter(HostLocation.organization_id == current_user.organization_id)
@@ -12559,6 +12585,7 @@ def _week_to_dict(week: Week, counts: dict[str, dict[uuid.UUID, int]] | None = N
         'date_type': _week_date_type(week),
         'notes': week.notes,
         'status': week.status or 'draft',
+        'host_assignment_pending': bool(getattr(week, 'host_assignment_pending', False)),
         'hosting_availability_count': counts.get('hosting_availability', {}).get(week.id, 0),
         'generated_slots_count': counts.get('generated_slots', {}).get(week.id, 0),
         'scheduled_games_count': counts.get('scheduled_games', {}).get(week.id, 0),
@@ -15522,6 +15549,7 @@ def _to_game_read(
         game_status_id=g.game_status_id,
         game_date=g.game_date,
         kickoff_time=g.kickoff_time,
+        placement_status=getattr(g, 'placement_status', 'PLACED'),
         public_notes=getattr(g, 'public_notes', None),
         internal_admin_notes=getattr(g, 'internal_admin_notes', None),
         status_code=g.status.code,
@@ -21790,6 +21818,8 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
     selected_hosts_by_date: dict[str, list[dict[str, object]]] = {}
     selected_turf_hosts_by_date: dict[str, list[dict[str, object]]] = {}
     for week in weeks:
+        if week.host_assignment_pending:
+            continue
         game_date_value = _week_game_date(week)
         if not game_date_value:
             continue
@@ -22035,6 +22065,62 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
             GameSlot.host_location_id.isnot(None),
         ).distinct().all()
         return len(rows)
+
+    def _create_deferred_games(division: Division, week: Week, required_games: int) -> list[Game]:
+        """Persist matchup commitments without inventing physical placement inventory."""
+        existing = db.query(Game).join(Team, Game.home_team_id == Team.id).join(Game.status).filter(
+            Game.season_id == season_id,
+            Game.week_id == week.id,
+            Team.division_id == division.id,
+            GameStatus.code != 'UNSCHEDULED',
+        ).all()
+        remaining = max(required_games - len(existing), 0)
+        if not remaining:
+            return []
+        teams = season_roster_query(db, season_id).filter(Team.division_id == division.id).order_by(Team.name, Team.id).all()
+        if len(teams) < 2:
+            return []
+        historical_counts: dict[tuple[uuid.UUID, uuid.UUID], int] = {}
+        for home_id, away_id in db.query(Game.home_team_id, Game.away_team_id).filter(Game.season_id == season_id).all():
+            key = tuple(sorted((home_id, away_id), key=str))
+            historical_counts[key] = historical_counts.get(key, 0) + 1
+        week_counts = {team.id: 0 for team in teams}
+        for game in existing:
+            week_counts[game.home_team_id] = week_counts.get(game.home_team_id, 0) + 1
+            week_counts[game.away_team_id] = week_counts.get(game.away_team_id, 0) + 1
+        max_games = 2 if len(teams) % 2 else 1
+        candidates = [(a, b) for index, a in enumerate(teams) for b in teams[index + 1:]]
+        created: list[Game] = []
+        status = db.query(GameStatus).filter(func.upper(GameStatus.code) == 'SCHEDULED').first()
+        if not status:
+            raise HTTPException(400, 'Scheduled game status is required for deferred matchup generation.')
+        while remaining:
+            eligible = [
+                (a, b) for a, b in candidates
+                if week_counts.get(a.id, 0) < max_games and week_counts.get(b.id, 0) < max_games
+            ]
+            if not eligible:
+                break
+            a, b = min(eligible, key=lambda pair: (
+                historical_counts.get(tuple(sorted((pair[0].id, pair[1].id), key=str)), 0),
+                week_counts[pair[0].id] + week_counts[pair[1].id],
+                pair[0].name, pair[1].name,
+            ))
+            key = tuple(sorted((a.id, b.id), key=str))
+            home, away = (a, b) if historical_counts.get(key, 0) % 2 == 0 else (b, a)
+            game = Game(
+                season_id=season_id, week_id=week.id, home_team_id=home.id, away_team_id=away.id,
+                game_status_id=status.id, game_date=_week_game_date(week), kickoff_time=None,
+                host_location_id=None, field_id=None, field_instance_id=None, placement_status='TBD',
+            )
+            db.add(game)
+            created.append(game)
+            week_counts[a.id] += 1
+            week_counts[b.id] += 1
+            historical_counts[key] = historical_counts.get(key, 0) + 1
+            remaining -= 1
+        db.flush()
+        return created
 
     def _scheduled_games_for_week(week_id: uuid.UUID) -> list[Game]:
         return db.query(Game).join(Game.status).filter(
@@ -22462,7 +22548,8 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         }
 
     turf_config_phase = _start_phase('turf wave configuration selection', records_evaluated=len(_regular_season_weeks()))
-    slot_preflight = _regenerate_and_validate_slots_for_weeks(db, _regular_season_weeks(), division_order)
+    placement_weeks = [week for week in _regular_season_weeks() if not week.host_assignment_pending]
+    slot_preflight = _regenerate_and_validate_slots_for_weeks(db, placement_weeks, division_order)
     _finish_phase(
         turf_config_phase,
         records_evaluated=len((slot_preflight or {}).get('validation_rows') or []) + len((slot_preflight or {}).get('validation_errors') or []),
@@ -22578,6 +22665,31 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
             unscheduled_teams: list[str] = []
             unresolved_conflicts: list[dict[str, object]] = []
             host_count = 0
+            if week.host_assignment_pending:
+                deferred = _create_deferred_games(division, week, required_games)
+                created_count = len(deferred)
+                division_created += created_count
+                total_games_created += created_count
+                committed_assignments_count += created_count
+                preview_games_count += created_count
+                attempted_game_groups += required_games
+                valid_assignments_found += created_count
+                progress_row['games_scheduled'] = int(progress_row.get('games_scheduled') or 0) + _actual_created_game_count_for_week(division.id, week.id)
+                division_week_diagnostics.append({
+                    'week': week.week_number,
+                    'week_date': str(week_game_date),
+                    'division_id': str(division.id),
+                    'division_name': division_label,
+                    'expected_games': required_games,
+                    'generated_game_groups': _actual_created_game_count_for_week(division.id, week.id),
+                    'scheduled_games': _actual_created_game_count_for_week(division.id, week.id),
+                    'missing_games': 0,
+                    'placement_status': 'TBD',
+                    'readiness_message': 'Ready — Matchups can be generated; host/field/time placement deferred',
+                })
+                if not dry_run:
+                    db.commit()
+                continue
             try:
                 preview = auto_fill_preview({'season_id': season_id, 'week_id': week.id, 'division_id': division.id}, db)
                 proposals = preview.get('proposals') or []
@@ -26406,7 +26518,7 @@ def _score_game_dict(row, include_history: bool = False, db: Session | None = No
     wave = slot.turf_wave if slot and slot.turf_wave_id else None
     turf_configuration_code = _normalize_configuration_name(wave.preferred_layout_code) if wave else None
     data = {
-        'id': str(g.id), 'game_id': str(g.id), 'game_date': g.game_date.isoformat(), 'kickoff_time': g.kickoff_time.isoformat(),
+        'id': str(g.id), 'game_id': str(g.id), 'game_date': g.game_date.isoformat(), 'kickoff_time': g.kickoff_time.isoformat() if g.kickoff_time else None,
         'host_location_id': str(host.id) if host else None, 'host_location_name': host.name if host else '',
         'field_id': str(fi.id) if fi else None, 'field_name': _field_export_display_label(slot, fi, db),
         'field_type': slot.field_type if slot else None, 'turf_wave_id': str(slot.turf_wave_id) if slot and slot.turf_wave_id else None,
@@ -26544,7 +26656,7 @@ def _standings_game_summary(row, *, public: bool, can_manage: bool, community_or
     return {
         'game_id': str(g.id),
         'date': g.game_date.isoformat(),
-        'time': g.kickoff_time.isoformat(),
+        'time': g.kickoff_time.isoformat() if g.kickoff_time else None,
         'division_id': str(div.id),
         'division_name': div.name,
         'division_group': div.division_group,
@@ -28199,6 +28311,7 @@ def _game_snapshot(game: Game) -> dict[str, object]:
         'game_status_id': str(game.game_status_id),
         'game_date': game.game_date.isoformat() if game.game_date else None,
         'kickoff_time': game.kickoff_time.isoformat() if game.kickoff_time else None,
+        'placement_status': getattr(game, 'placement_status', 'PLACED'),
         'public_notes': getattr(game, 'public_notes', None),
         'internal_admin_notes': getattr(game, 'internal_admin_notes', None),
     }
@@ -28562,6 +28675,7 @@ def _apply_manual_game_edit(db: Session, game: Game, payload: ManualGameEditRequ
     game.game_status_id = payload.game_status_id or game.game_status_id
     game.game_date = payload.game_date
     game.kickoff_time = payload.kickoff_time
+    game.placement_status = 'PLACED'
     game.public_notes = payload.public_notes
     game.internal_admin_notes = payload.internal_admin_notes
     game.is_manual_edit = True
@@ -28854,6 +28968,11 @@ def export_schedule_management_csv(date: date | None = None, division_id: uuid.U
 
 
 def _raise_if_invalid_scheduled_game_payload(db: Session, payload: GameCreate, *, game_id: uuid.UUID | None = None) -> None:
+    placement_status = str(payload.placement_status or 'PLACED').upper()
+    if placement_status == 'TBD':
+        if payload.host_location_id or payload.field_id or payload.field_instance_id or payload.kickoff_time:
+            raise HTTPException(status_code=400, detail={'error': 'DEFERRED_GAME_HAS_PHYSICAL_PLACEMENT'})
+        return
     status = db.query(GameStatus).filter(GameStatus.id == payload.game_status_id).first()
     if not status or not _is_scheduled_status_code(status.code):
         return

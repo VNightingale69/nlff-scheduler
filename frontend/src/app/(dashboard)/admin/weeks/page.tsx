@@ -18,6 +18,7 @@ const emptyForm = {
   date_type: 'REGULAR_SEASON',
   notes: '',
   status: 'draft',
+  host_assignment_pending: false,
 };
 
 const statusClass: Record<string, string> = {
@@ -122,6 +123,7 @@ export default function WeeksPage() {
       date_type: week.date_type || 'REGULAR_SEASON',
       notes: week.notes || '',
       status: week.status || 'draft',
+      host_assignment_pending: Boolean(week.host_assignment_pending),
     });
   };
 
@@ -137,6 +139,7 @@ export default function WeeksPage() {
       date_type: week.date_type || 'REGULAR_SEASON',
       notes: week.notes || '',
       status: 'draft',
+      host_assignment_pending: Boolean(week.host_assignment_pending),
     });
   };
 
@@ -166,6 +169,7 @@ export default function WeeksPage() {
           <label className='text-sm'>Start Date<input className='mt-1 w-full rounded border p-2' type='date' value={form.start_date} onChange={(e) => setForm({ ...form, start_date: e.target.value })} /></label>
           <label className='text-sm'>End Date<input className='mt-1 w-full rounded border p-2' type='date' value={form.end_date} onChange={(e) => setForm({ ...form, end_date: e.target.value })} /></label>
           <label className='text-sm'>Primary Game Date<input className='mt-1 w-full rounded border p-2' type='date' value={form.primary_game_date} onChange={(e) => setForm({ ...form, primary_game_date: e.target.value })} /></label>
+          <label className='flex items-center gap-2 text-sm md:col-span-2'><input type='checkbox' checked={Boolean(form.host_assignment_pending)} onChange={(e) => setForm({ ...form, host_assignment_pending: e.target.checked })} />Defer host, field, and start-time placement while generating matchups</label>
           <label className='text-sm md:col-span-4'>Notes<textarea className='mt-1 w-full rounded border p-2' rows={3} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} /></label>
         </div>
         <div className='mt-3 flex gap-2'>
