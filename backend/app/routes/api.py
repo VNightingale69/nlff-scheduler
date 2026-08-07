@@ -36,7 +36,7 @@ from app.services.game_statuses import REQUIRED_GAME_STATUSES, ensure_required_g
 from app.services.organization_cleanup import cleanup_organization_dependencies, collect_organization_delete_inventory
 from app.services.scheduling_validation import validate_game
 from app.turf_configurations import INVALID_TURF_CONFIGURATION_MESSAGE, BACKWARD_COMPATIBLE_TURF_CONFIGURATION_ALIASES, turf_configuration_legacy_metadata
-from app.teams import eligible_team_query
+from app.teams import eligible_team_query, log_schedule_roster_exclusions, season_roster, season_roster_query
 
 router = APIRouter(prefix='/api')
 logger = logging.getLogger(__name__)
@@ -8504,25 +8504,34 @@ def _build_field_configuration_efficiency_readiness(db: Session) -> list[dict[st
     return rows
 
 
-def _build_weekly_field_demand_readiness(db: Session) -> list[dict[str, object]]:
+def _build_weekly_field_demand_readiness(db: Session, season_id: uuid.UUID | None = None) -> list[dict[str, object]]:
     demand_by_date: dict[date, dict[str, int]] = {}
-    regular_game_dates = {_week_game_date(week) for week in db.query(Week).all() if _is_regular_season_week(week) and _week_game_date(week)}
+    weeks_query = db.query(Week)
+    if season_id:
+        weeks_query = weeks_query.filter(Week.season_id == season_id)
+    regular_game_dates = {_week_game_date(week) for week in weeks_query.all() if _is_regular_season_week(week) and _week_game_date(week)}
+    roster = season_roster(db, season_id)
+    teams_by_division: dict[uuid.UUID, int] = {}
+    divisions_by_id: dict[uuid.UUID, Division] = {}
+    for team in roster:
+        teams_by_division[team.division_id] = teams_by_division.get(team.division_id, 0) + 1
+        if team.division:
+            divisions_by_id[team.division_id] = team.division
     for game_date in regular_game_dates:
-        demand_by_date.setdefault(game_date, {FIELD_SIZE_SMALL: 0, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_LARGE: 0})
-    demand_query = db.query(Game.game_date, Division.required_field_layout_type, func.count(Game.id)).select_from(Game).join(
-        Team, Game.home_team_id == Team.id
-    ).join(Division, Team.division_id == Division.id).outerjoin(Week, Game.week_id == Week.id)
-    if regular_game_dates:
-        demand_query = demand_query.filter(or_(Week.date_type == REGULAR_SEASON_DATE_TYPE, and_(Game.week_id.is_(None), Game.game_date.in_(regular_game_dates))))
-    else:
-        demand_query = demand_query.filter(Week.date_type == REGULAR_SEASON_DATE_TYPE)
-    for game_date, required_size, count in demand_query.group_by(Game.game_date, Division.required_field_layout_type).all():
-        size = _normalize_field_size(required_size) or FIELD_SIZE_SMALL
-        demand_by_date.setdefault(game_date, {FIELD_SIZE_SMALL: 0, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_LARGE: 0})[size] += int(count or 0)
-    for slot_date in [row[0] for row in db.query(GameSlot.slot_date).distinct().all()]:
+        demand = demand_by_date.setdefault(game_date, _empty_field_size_counts())
+        for division_id, team_count in teams_by_division.items():
+            size = _required_field_type_for_division(divisions_by_id.get(division_id))
+            demand[size] += _division_required_games(team_count, divisions_by_id.get(division_id))
+    slots_query = db.query(GameSlot.slot_date).distinct()
+    if season_id:
+        slots_query = slots_query.filter(GameSlot.season_id == season_id)
+    for slot_date in [row[0] for row in slots_query.all()]:
         demand_by_date.setdefault(slot_date, {FIELD_SIZE_SMALL: 0, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_LARGE: 0})
     capacity: dict[date, dict[uuid.UUID, dict[str, object]]] = {}
-    for slot in db.query(GameSlot).join(GameSlot.host_location).all():
+    slot_query = db.query(GameSlot).join(GameSlot.host_location)
+    if season_id:
+        slot_query = slot_query.filter(GameSlot.season_id == season_id)
+    for slot in slot_query.all():
         host = slot.host_location
         if not host or not host.organization_id:
             continue
@@ -8576,8 +8585,16 @@ def _build_weekly_field_demand_readiness(db: Session) -> list[dict[str, object]]
 
 
 @router.get('/schedule-readiness', response_model=ScheduleReadinessResponse, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
-def get_schedule_readiness(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def get_schedule_readiness(season_id: uuid.UUID | None = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     ensure_league_defined_divisions(db)
+
+    season = db.query(Season).filter(Season.id == season_id).first() if season_id else db.query(Season).filter(Season.is_active.is_(True)).order_by(Season.start_date.desc()).first()
+    season_id = season.id if season else season_id
+    roster = season_roster(db, season_id)
+    roster_count_by_division: dict[uuid.UUID, int] = {}
+    for team in roster:
+        roster_count_by_division[team.division_id] = roster_count_by_division.get(team.division_id, 0) + 1
+    log_schedule_roster_exclusions(db, season_id)
 
     division_rows = db.query(
         Division.id.label('division_id'),
@@ -8585,26 +8602,15 @@ def get_schedule_readiness(current_user: User = Depends(get_current_user), db: S
         Division.name.label('division_name'),
         Division.sort_order,
         Division.required_field_layout_type,
-        func.count(func.distinct(Team.id)).label('team_count'),
-    ).outerjoin(
-        OrganizationDivisionParticipation,
-        OrganizationDivisionParticipation.division_id == Division.id,
-    ).outerjoin(
-        Team,
-        and_(
-            Team.division_id == Division.id,
-            Team.organization_id == OrganizationDivisionParticipation.organization_id,
-            Team.is_active.is_(True),
-        ),
     ).filter(
         Division.is_active.is_(True),
-    ).group_by(
-        Division.id, Division.division_group, Division.name, Division.sort_order, Division.required_field_layout_type
     ).order_by(Division.sort_order, Division.division_group, Division.name).all()
 
+    open_slots_query = db.query(GameSlot.field_type, func.count(GameSlot.id)).filter(GameSlot.status == 'OPEN')
+    if season_id:
+        open_slots_query = open_slots_query.filter(GameSlot.season_id == season_id)
     open_slot_counts = dict(
-        db.query(GameSlot.field_type, func.count(GameSlot.id))
-        .filter(GameSlot.status == 'OPEN')
+        open_slots_query
         .group_by(GameSlot.field_type)
         .all()
     )
@@ -8613,23 +8619,17 @@ def get_schedule_readiness(current_user: User = Depends(get_current_user), db: S
     medium_slots = int(open_slot_counts.get('MEDIUM', 0) or 0)
     large_slots = int(open_slot_counts.get('LARGE', 0) or 0)
 
-    scheduled_game_counts = dict(
-        db.query(Team.division_id, func.count(Game.id))
-        .select_from(Game)
-        .join(Team, Game.home_team_id == Team.id)
-        .group_by(Team.division_id)
-        .all()
-    )
-
     rows: list[ScheduleReadinessDivisionRow] = []
     total_teams = 0
     total_minimum_unique_matchups = 0
     total_target_scheduled_games = 0
 
+    regular_weeks = db.query(Week).filter(Week.season_id == season_id).all() if season_id else db.query(Week).all()
+    regular_week_count = sum(1 for week in regular_weeks if _is_regular_season_week(week) and _week_game_date(week))
     for row in division_rows:
-        teams = int(row.team_count or 0)
+        teams = roster_count_by_division.get(row.division_id, 0)
         minimum_unique_matchups = (teams * (teams - 1)) // 2
-        target_scheduled_games = int(scheduled_game_counts.get(row.division_id, 0) or 0)
+        target_scheduled_games = _division_required_games(teams, row) * regular_week_count
         required_field_type = _required_field_type_for_division(row)
         available_matching_slots = {
             FIELD_SIZE_SMALL: small_slots,
@@ -8750,7 +8750,7 @@ def get_schedule_readiness(current_user: User = Depends(get_current_user), db: S
         hosting_balance=_build_hosting_balance_readiness(db),
         hosting_rotation=_build_hosting_rotation_readiness(db),
         field_configuration_efficiency=_build_field_configuration_efficiency_readiness(db),
-        weekly_field_demand=_build_weekly_field_demand_readiness(db),
+        weekly_field_demand=_build_weekly_field_demand_readiness(db, season_id),
     )
 
 HOST_PLAN_SCHEDULABLE_STATUSES = {'SELECTED'}
@@ -15566,7 +15566,8 @@ def list_games(division_id:uuid.UUID|None=None, week_id:uuid.UUID|None=None, tea
 @router.get('/manual-schedule-builder/options', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
 def manual_schedule_builder_options(db: Session = Depends(get_db)):
     divisions = db.query(Division).filter(Division.is_active.is_(True)).order_by(Division.sort_order, Division.name).all()
-    teams = db.query(Team).join(Team.division).filter(Team.is_active.is_(True), Division.is_active.is_(True)).order_by(Team.name).all()
+    active_season = db.query(Season).filter(Season.is_active.is_(True)).order_by(Season.start_date.desc()).first()
+    teams = season_roster(db, active_season.id if active_season else None)
     eligible_host_ids = _eligible_host_location_ids(db)
     host_locations = db.query(HostLocation).filter(HostLocation.id.in_(eligible_host_ids)).order_by(HostLocation.name).all()
     seasons = db.query(Season).filter(Season.is_active.is_(True)).order_by(Season.start_date.desc()).all()
@@ -15604,7 +15605,7 @@ def manual_schedule_builder_recommendations(payload: dict, db: Session = Depends
     expected_field_type = _required_field_type_for_division(division)
     division_key = canonical_division_id_from_division(division)
 
-    teams_q = db.query(Team).join(Team.division).filter(Team.is_active.is_(True), Division.is_active.is_(True))
+    teams_q = season_roster_query(db, season_id)
     if division_id:
         teams_q = teams_q.filter(Team.division_id == division_id)
     teams = teams_q.order_by(Team.name).all()
@@ -15818,7 +15819,7 @@ def assign_generated_slot(payload: dict, db: Session = Depends(get_db)):
     if not season or not week:
         raise HTTPException(400, 'Please select a season and week before assigning a game.')
     status = db.query(GameStatus).filter(GameStatus.code == 'SCHEDULED').first()
-    teams = db.query(Team).filter(Team.division_id == division_id, Team.is_active.is_(True)).all()
+    teams = season_roster_query(db, season_id).filter(Team.division_id == division_id).all()
     team_ids = {t.id for t in teams}
     max_games_for_division_week = math.ceil(len(teams) / 2)
     existing_division_games = db.query(Game).join(Game.home_team).filter(
@@ -16053,7 +16054,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
         'GIRLS_6_8',
     }
     required_field_type = _required_field_type_for_division(division)
-    teams = db.query(Team).filter(Team.division_id == division_id, Team.is_active.is_(True)).order_by(Team.name).all()
+    teams = season_roster_query(db, season_id).filter(Team.division_id == division_id).order_by(Team.name).all()
     participation_count = db.query(OrganizationDivisionParticipation).filter(OrganizationDivisionParticipation.division_id == division_id).count()
     if division_group_key == 'GIRLS' and selected_division_key not in supported_girls_division_keys:
         logger.warning(
@@ -16085,7 +16086,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'compatible_slots_found': 0,
         }
     teams_by_id = {t.id: t for t in teams}
-    league_active_teams = db.query(Team).join(Division, Team.division_id == Division.id).filter(Team.is_active.is_(True)).all()
+    league_active_teams = season_roster(db, season_id)
     league_total_active_teams = len(league_active_teams)
     league_teams_by_division: dict[str, int] = {}
     league_small_field_teams = 0
@@ -20284,7 +20285,7 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         raise HTTPException(400, 'Selected week is missing a Primary Game Date')
     if not _is_regular_season_week(week):
         raise HTTPException(400, f'{_week_date_type(week)} weeks are excluded from regular-season auto-schedule')
-    teams = db.query(Team).filter(Team.division_id == division_id, Team.is_active.is_(True)).all()
+    teams = season_roster_query(db, season_id).filter(Team.division_id == division_id).all()
     division = db.query(Division).filter(Division.id == division_id).first()
     if not division:
         raise HTTPException(404, 'Selected division is invalid')
@@ -21701,7 +21702,7 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
     season = db.query(Season).filter(Season.id == season_id).first()
     if not season:
         raise HTTPException(404, 'Season not found')
-    start_teams_count = db.query(func.count(Team.id)).join(Division, Team.division_id == Division.id).filter(Division.is_active.is_(True), Team.is_active.is_(True)).scalar() or 0
+    start_teams_count = season_roster_query(db, season_id).count()
     start_divisions_count = db.query(func.count(Division.id)).filter(Division.is_active.is_(True)).scalar() or 0
     start_weeks_count = db.query(func.count(Week.id)).filter(Week.season_id == season_id).scalar() or 0
     start_selected_host_locations_count = db.query(func.count(func.distinct(HostingAvailability.host_location_id))).filter(
@@ -21737,10 +21738,7 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         )
         if not division_for_order:
             return 1
-        active_count = db.query(func.count(Team.id)).filter(
-            Team.division_id == division_for_order.id,
-            Team.is_active.is_(True),
-        ).scalar() or 0
+        active_count = season_roster_query(db, season_id).filter(Team.division_id == division_for_order.id).count()
         return 0 if active_count % 2 == 1 and _diagnostic_no_bye_doubleheaders_enabled(division_for_order, season) else 1
 
     division_order = sorted(
@@ -21808,7 +21806,7 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
             division = divisions_by_key.get(canonical_division_id(group, name)) or divisions_by_normalized_name.get(normalize_division_name(f'{group} {name}'))
             if not division or not division.is_active:
                 continue
-            active_count = db.query(Team.id).filter(Team.division_id == division.id, Team.is_active.is_(True)).count()
+            active_count = season_roster_query(db, season_id).filter(Team.division_id == division.id).count()
             for week in weeks:
                 if _is_regular_season_week(week):
                     total += _diagnostic_expected_games_for_team_count(active_count, no_bye_doubleheaders_enabled=_diagnostic_no_bye_doubleheaders_enabled(division, season))
@@ -22038,7 +22036,7 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         return counts
 
     def _active_team_count(division_id: uuid.UUID) -> int:
-        return db.query(Team.id).filter(Team.division_id == division_id, Team.is_active.is_(True)).count()
+        return season_roster_query(db, season_id).filter(Team.division_id == division_id).count()
 
     def _host_availability_count_for_week(week: Week) -> int:
         game_date = _week_game_date(week)
@@ -22165,7 +22163,7 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         generated_slots_by_field_size: dict[str, int] = {FIELD_SIZE_SMALL: 0, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_LARGE: 0}
         generated_slots_by_week: dict[str, dict[str, int]] = {}
         generated_slots_by_week_host_field_size: dict[str, list[dict[str, object]]] = {}
-        required_games_by_size = _active_division_week_demand_by_size(db, division_order)
+        required_games_by_size = _active_division_week_demand_by_size(db, division_order, season_id)
         compatible_generated_slots_total = 0
         existing_scheduled_games_total = 0
         active_teams_by_division: list[dict[str, object]] = []
@@ -22179,7 +22177,7 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
             for row in division_week_diagnostics
         }
         for division in active_divisions:
-            team_rows = db.query(Team.id, Team.name).filter(Team.division_id == division.id, Team.is_active.is_(True)).order_by(Team.name).all()
+            team_rows = season_roster_query(db, season_id).with_entities(Team.id, Team.name).filter(Team.division_id == division.id).order_by(Team.name).all()
             team_count = len(team_rows)
             active_team_count_by_division[division.id] = team_count
             active_teams_total += team_count
@@ -24230,7 +24228,7 @@ LEAGUE_DEMAND_DIVISION_KEYS = {
 }
 
 
-def _league_week_demand_summary(db: Session, division_order: list[tuple[str, str]]) -> dict[str, object]:
+def _league_week_demand_summary(db: Session, division_order: list[tuple[str, str]], season_id: uuid.UUID | str | None = None) -> dict[str, object]:
     """Build one league-wide weekly demand model before host/location slot generation.
 
     Demand intentionally counts all active teams in each active league division and
@@ -24264,7 +24262,7 @@ def _league_week_demand_summary(db: Session, division_order: list[tuple[str, str
         division_key = canonical_division_id_from_division(division)
         if not division.is_active:
             continue
-        active_team_count = db.query(Team.id).filter(Team.division_id == division.id, Team.is_active.is_(True)).count()
+        active_team_count = season_roster_query(db, season_id).filter(Team.division_id == division.id).count()
         if active_team_count <= 0:
             continue
         expected_games = _estimated_games_from_team_count(active_team_count)
@@ -24288,8 +24286,8 @@ def _league_week_demand_summary(db: Session, division_order: list[tuple[str, str
     }
 
 
-def _active_division_week_demand_by_size(db: Session, division_order: list[tuple[str, str]]) -> dict[str, int]:
-    return dict(_league_week_demand_summary(db, division_order)['league_wide_demand_by_size'])
+def _active_division_week_demand_by_size(db: Session, division_order: list[tuple[str, str]], season_id: uuid.UUID | str | None = None) -> dict[str, int]:
+    return dict(_league_week_demand_summary(db, division_order, season_id)['league_wide_demand_by_size'])
 
 
 def _availability_generation_reason(
@@ -24345,7 +24343,8 @@ def _regenerate_and_validate_slots_for_weeks(
     generation_reasons_by_date: dict[date, list[str]] = {week_date: [] for week_date in week_dates}
     selected_host_diagnostics_by_date: dict[date, list[dict[str, object]]] = {week_date: [] for week_date in week_dates}
     selected_host_diagnostic_by_availability_id: dict[uuid.UUID, dict[str, object]] = {}
-    league_demand_summary = _league_week_demand_summary(db, division_order)
+    roster_season_id = regular_weeks[0].season_id if regular_weeks else None
+    league_demand_summary = _league_week_demand_summary(db, division_order, roster_season_id)
     required_games_by_size = dict(league_demand_summary['league_wide_demand_by_size'])
     active_division_demand_rows = list(league_demand_summary['active_divisions_included'])
     demand_summary_by_date: dict[date, dict[str, object]] = {

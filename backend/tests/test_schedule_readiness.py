@@ -69,7 +69,7 @@ class ScheduleReadinessTest(unittest.TestCase):
             row = rows_by_label[f'Test {label}']
             self.assertEqual(row.minimum_unique_matchups, expected_count)
 
-    def test_target_scheduled_games_counts_existing_division_games(self):
+    def test_target_scheduled_games_comes_from_roster_and_regular_game_dates(self):
         division = self.add_division_with_teams('Scheduled', 4)
         teams = self.db.query(Team).filter(Team.division_id == division.id).order_by(Team.name).all()
         status = GameStatus(id=uuid.uuid4(), code='SCHEDULED', label='Scheduled', is_active=True)
@@ -92,7 +92,36 @@ class ScheduleReadinessTest(unittest.TestCase):
         scheduled_row = next(row for row in response.rows if row.division_id == division.id)
 
         self.assertEqual(scheduled_row.minimum_unique_matchups, 6)
-        self.assertEqual(scheduled_row.target_scheduled_games, 1)
+        # Four configured teams require two games on the configured date.  This
+        # target must not collapse to the one partially-created Game row.
+        self.assertEqual(scheduled_row.target_scheduled_games, 2)
+
+    def test_readiness_excludes_the_seven_legacy_roster_records(self):
+        division = self.add_division_with_teams('Current', 4)
+        replacement = self.db.query(Team).filter(Team.division_id == division.id).first()
+        excluded = []
+        for index in range(7):
+            team = Team(
+                id=uuid.uuid4(), organization_id=self.org.id, division_id=division.id,
+                name=f'Stale Team {index + 1}', is_active=True,
+                superseded_by_team_id=replacement.id,
+            )
+            excluded.append(team)
+        self.db.add_all(excluded)
+        self.db.commit()
+
+        response = get_schedule_readiness(current_user=None, db=self.db)
+
+        current = next(row for row in response.rows if row.division_id == division.id)
+        self.assertEqual(current.number_of_teams, 4)
+        self.assertEqual(response.totals.total_teams, 4)
+
+        from app.teams import log_schedule_roster_exclusions
+        diagnostics = log_schedule_roster_exclusions(self.db)
+        self.assertEqual({row['team_id'] for row in diagnostics}, {str(team.id) for team in excluded})
+        self.assertEqual({row['team_name'] for row in diagnostics}, {team.name for team in excluded})
+        self.assertTrue(all(row['division_name'] == 'Current' for row in diagnostics))
+        self.assertTrue(all(row['is_active'] is True for row in diagnostics))
 
 class MultiLocationHostingAvailabilityTest(unittest.TestCase):
     def setUp(self):
