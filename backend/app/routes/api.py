@@ -19,7 +19,7 @@ from sqlalchemy.exc import IntegrityError, ProgrammingError, SQLAlchemyError
 from sqlalchemy.orm import Session, aliased
 
 from app.config import ADMIN_SEED_EMAIL, COMMUNITY_LOGO_MAX_SIZE_BYTES, COMMUNITY_LOGO_UPLOAD_DIR, ENABLE_SCHEDULE_QUALITY_REPORT, ENABLE_TURF_OPTIMIZATION, RULEBOOK_MAX_SIZE_BYTES, RULEBOOK_UPLOAD_DIR, UPLOAD_STORAGE_DIR
-from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN, can_manage_schedule, enforce_organization_scope, get_current_user, get_optional_current_user, is_community_admin, is_league_admin, is_scheduling_admin, normalize_role_name, require_roles, require_schedule_admin, require_schedule_publisher
+from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN, can_manage_fields, can_manage_schedule, enforce_organization_scope, get_current_user, get_optional_current_user, is_community_admin, is_league_admin, is_scheduling_admin, normalize_role_name, require_field_manager, require_roles, require_schedule_admin, require_schedule_publisher
 from app.database import get_db
 from app.organizations import active_organization_filter, normalize_organization_name
 from app.models import Division, Field, FieldConfigurationOption, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostPlanSelection, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Rulebook, LoginAuditLog, ScheduleChangeLog, ScoreHistory, ScoreSubmission, Season, Team, Tournament, TournamentDivision, TournamentGame, TournamentTeam, TurfWave, User, Week
@@ -11117,7 +11117,7 @@ def del_field_configuration_option(item_id: uuid.UUID, current_user: User = Depe
     enforce_organization_scope(x.physical_field_area.host_location.organization_id, current_user)
     db.delete(x); db.commit(); return {'ok': True}
 
-@router.post('/fields', response_model=FieldRead, dependencies=[Depends(get_current_user)])
+@router.post('/fields', response_model=FieldRead, dependencies=[Depends(require_field_manager)])
 def create_field(payload: FieldCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     host_location = db.query(HostLocation).filter(HostLocation.id == payload.host_location_id).first()
     if not host_location: raise HTTPException(400, 'Invalid host location')
@@ -11154,7 +11154,7 @@ def list_fields(search: str | None = None, host_location_id: uuid.UUID | None = 
     )
     return page_data
 
-@router.put('/fields/{item_id}', response_model=FieldRead, dependencies=[Depends(get_current_user)])
+@router.put('/fields/{item_id}', response_model=FieldRead, dependencies=[Depends(require_field_manager)])
 def upd_field(item_id: uuid.UUID, payload: FieldCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     x = db.query(Field).filter(Field.id == item_id).first()
     if not x: raise HTTPException(404, 'Field not found')
@@ -11169,14 +11169,14 @@ def upd_field(item_id: uuid.UUID, payload: FieldCreate, current_user: User = Dep
     for k, v in {**payload.model_dump(), 'layout_type': _normalize_field_size(payload.layout_type)}.items(): setattr(x, k, v)
     db.commit(); db.refresh(x); return x
 
-@router.get('/fields/{item_id}/delete-impact', dependencies=[Depends(get_current_user)])
+@router.get('/fields/{item_id}/delete-impact', dependencies=[Depends(require_field_manager)])
 def get_field_delete_impact(item_id: uuid.UUID, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     x = db.query(Field).filter(Field.id == item_id, Field.deleted_at.is_(None)).first()
     if not x: raise HTTPException(404, 'Field not found')
     _field_delete_allowed(current_user, x.host_location)
     return _field_delete_response(x, x.host_location, _field_delete_impact_counts(db, x))
 
-@router.delete('/fields/{item_id}', dependencies=[Depends(get_current_user)])
+@router.delete('/fields/{item_id}', dependencies=[Depends(require_field_manager)])
 def del_field(item_id: uuid.UUID, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     x = db.query(Field).filter(Field.id == item_id, Field.deleted_at.is_(None)).first()
     if not x: raise HTTPException(404, 'Field not found')
@@ -11246,7 +11246,7 @@ def del_field(item_id: uuid.UUID, current_user: User = Depends(get_current_user)
 
 
 def _field_delete_allowed(current_user: User, host_location: HostLocation) -> None:
-    if is_scheduling_admin(current_user):
+    if can_manage_fields(current_user) and not is_community_admin(current_user):
         return
     if is_community_admin(current_user) and current_user.organization_id and host_location.organization_id == current_user.organization_id:
         return

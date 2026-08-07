@@ -67,6 +67,12 @@ export function canManageSchedule(user: AuthUser | null | undefined): boolean {
   return role === 'LEAGUE_ADMIN' || role === 'SCHEDULING_ADMIN';
 }
 
+export function canManageFields(user: AuthUser | null | undefined): boolean {
+  const role = normalizeRoleName(user?.role_name);
+  // Keep this aligned with FIELD_MANAGEMENT_ROLES in backend/app/auth.py.
+  return role === 'LEAGUE_ADMIN' || role === 'COMMUNITY_ADMIN' || role === 'SCHEDULING_ADMIN';
+}
+
 export function canPublishSchedule(user: AuthUser | null | undefined): boolean {
   return canManageSchedule(user);
 }

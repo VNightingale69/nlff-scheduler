@@ -7,7 +7,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_SCHEDULING_ADMIN
+from app.auth import LEGACY_ROLE_LEAGUE_ADMIN, ROLE_COMMUNITY_ADMIN, ROLE_SCHEDULING_ADMIN
 from app.database import Base, get_db
 from app.main import app
 from app.models import Division, Field, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, HostingAvailability, Organization, Role, ScoreHistory, Season, Team, User, Week
@@ -22,6 +22,7 @@ class FieldDeleteImpactTest(unittest.TestCase):
         self.db = self.SessionLocal()
 
         self.scheduling_role = Role(id=uuid.uuid4(), name=ROLE_SCHEDULING_ADMIN, is_active=True)
+        self.league_role = Role(id=uuid.uuid4(), name=LEGACY_ROLE_LEAGUE_ADMIN, is_active=True)
         self.community_role = Role(id=uuid.uuid4(), name=ROLE_COMMUNITY_ADMIN, is_active=True)
         self.home_org = Organization(id=uuid.uuid4(), name='Home Community', is_active=True)
         self.other_org = Organization(id=uuid.uuid4(), name='Other Community', is_active=True)
@@ -43,9 +44,10 @@ class FieldDeleteImpactTest(unittest.TestCase):
         self.score = GameScore(id=uuid.uuid4(), game_id=self.game.id, home_score=14, away_score=7, score_status='APPROVED')
         self.history = ScoreHistory(id=uuid.uuid4(), game_id=self.game.id, action='APPROVED', previous_home_score=14, previous_away_score=7, new_home_score=14, new_away_score=7, previous_status='SUBMITTED', new_status='APPROVED')
         self.scheduling_user = User(id=uuid.uuid4(), email='scheduler@example.com', full_name='Scheduler', password_hash=hash_password('Password123!'), role_id=self.scheduling_role.id, organization_id=None, is_active=True)
+        self.league_user = User(id=uuid.uuid4(), email='league@example.com', full_name='League Admin', password_hash=hash_password('Password123!'), role_id=self.league_role.id, organization_id=None, is_active=True)
         self.home_user = User(id=uuid.uuid4(), email='home@example.com', full_name='Home Admin', password_hash=hash_password('Password123!'), role_id=self.community_role.id, organization_id=self.home_org.id, is_active=True)
         self.other_user = User(id=uuid.uuid4(), email='other@example.com', full_name='Other Admin', password_hash=hash_password('Password123!'), role_id=self.community_role.id, organization_id=self.other_org.id, is_active=True)
-        self.db.add_all([self.scheduling_role, self.community_role, self.home_org, self.other_org, self.division, self.host, self.other_host, self.season, self.week, self.status, self.home_team, self.away_team, self.field, self.unused_field, self.other_field, self.availability, self.field_instance, self.game, self.slot, self.score, self.history, self.scheduling_user, self.home_user, self.other_user])
+        self.db.add_all([self.scheduling_role, self.league_role, self.community_role, self.home_org, self.other_org, self.division, self.host, self.other_host, self.season, self.week, self.status, self.home_team, self.away_team, self.field, self.unused_field, self.other_field, self.availability, self.field_instance, self.game, self.slot, self.score, self.history, self.scheduling_user, self.league_user, self.home_user, self.other_user])
         self.db.commit()
 
         def override_get_db():
@@ -64,12 +66,12 @@ class FieldDeleteImpactTest(unittest.TestCase):
     def _token(self, user):
         return {'Authorization': f'Bearer {create_access_token(str(user.id))}'}
 
-    def test_scheduling_admin_deletes_assigned_field_and_preserves_game_score_history(self):
-        impact = self.client.get(f'/api/fields/{self.field.id}/delete-impact', headers=self._token(self.scheduling_user))
+    def test_league_admin_deletes_assigned_field_through_review_workflow_and_preserves_history(self):
+        impact = self.client.get(f'/api/fields/{self.field.id}/delete-impact', headers=self._token(self.league_user))
         self.assertEqual(impact.status_code, 200, impact.text)
         self.assertEqual(impact.json()['affected_scheduled_games_count'], 1)
 
-        response = self.client.delete(f'/api/fields/{self.field.id}', headers=self._token(self.scheduling_user))
+        response = self.client.delete(f'/api/fields/{self.field.id}', headers=self._token(self.league_user))
         self.assertEqual(response.status_code, 200, response.text)
         payload = response.json()
         self.assertEqual(payload['affected_scheduled_games_count'], 1)
@@ -94,7 +96,7 @@ class FieldDeleteImpactTest(unittest.TestCase):
         finally:
             db.close()
 
-        fields = self.client.get(f'/api/fields?host_location_id={self.host.id}&page_size=50', headers=self._token(self.scheduling_user))
+        fields = self.client.get(f'/api/fields?host_location_id={self.host.id}&page_size=50', headers=self._token(self.league_user))
         self.assertEqual(fields.status_code, 200, fields.text)
         self.assertNotIn(str(self.field.id), [item['id'] for item in fields.json()['items']])
 
