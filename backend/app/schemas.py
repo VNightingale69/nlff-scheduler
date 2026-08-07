@@ -322,6 +322,7 @@ class WeekCreate(BaseModel):
     date_type: str = 'REGULAR_SEASON'
     notes: str | None = None
     status: str = 'draft'
+    host_assignment_pending: bool = False
 
 class WeekRead(BaseSchema, WeekCreate):
     pass
@@ -729,7 +730,8 @@ class GameCreate(BaseModel):
     field_instance_id: uuid.UUID | None = None
     game_status_id: uuid.UUID | None = None
     game_date: date
-    kickoff_time: time
+    kickoff_time: time | None = None
+    placement_status: str = 'PLACED'
     public_notes: str | None = None
     internal_admin_notes: str | None = None
 
