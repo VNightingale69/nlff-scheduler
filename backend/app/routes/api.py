@@ -8504,82 +8504,106 @@ def _build_field_configuration_efficiency_readiness(db: Session) -> list[dict[st
     return rows
 
 
+def _eligible_slots_for_week(db: Session, week: Week) -> tuple[list[GameSlot], dict[str, int]]:
+    """Return slots that satisfy the same hard host/date/setup boundary as preflight.
+
+    Aggregate season totals are deliberately not eligibility: a slot must belong to
+    this season, week and primary date, an active host/community and active generated
+    field, and a matching active Hosting Availability.  When a host plan exists, only
+    SELECTED hosts are eligible.  The reason counts make stale records diagnosable.
+    """
+    game_date = _week_game_date(week)
+    reasons: dict[str, int] = {}
+    if not game_date:
+        return [], {'missing_week_date': 1}
+    selections = _host_plan_rows_for_week_date(db, week.season_id, week.id, game_date)
+    selected_host_ids = {row.host_location_id for row in selections if str(row.status or '').upper() == 'SELECTED'}
+    enforce_selection = bool(selections)
+    candidates = db.query(GameSlot).join(GameSlot.field_instance).join(GameSlot.host_location).join(HostLocation.organization).filter(
+        GameSlot.season_id == week.season_id, GameSlot.week_id == week.id, GameSlot.slot_date == game_date,
+    ).all()
+    eligible: list[GameSlot] = []
+    for slot in candidates:
+        host = slot.host_location
+        instance = slot.field_instance
+        availability = instance.hosting_availability if instance else None
+        reason = None
+        if not host or not host.is_active or not host.organization or not host.organization.is_active:
+            reason = 'inactive_host_or_community'
+        elif enforce_selection and slot.host_location_id not in selected_host_ids:
+            reason = 'host_not_selected_or_excluded'
+        elif not instance or not instance.is_active:
+            reason = 'inactive_generated_field'
+        elif not availability or not availability.active or not availability.is_available:
+            reason = 'host_availability_not_active'
+        elif availability.season_id != week.season_id:
+            reason = 'season_association_mismatch'
+        elif availability.week_id != week.id:
+            reason = 'week_association_mismatch'
+        elif _normalize_local_date_only(availability.primary_game_date or availability.available_date) != _normalize_local_date_only(game_date):
+            reason = 'date_association_mismatch'
+        elif _normalize_field_size(slot.field_type) not in FIELD_SIZE_ORDER:
+            reason = 'invalid_field_size_classification'
+        if reason:
+            reasons[reason] = reasons.get(reason, 0) + 1
+        else:
+            eligible.append(slot)
+    return eligible, reasons
+
+
 def _build_weekly_field_demand_readiness(db: Session, season_id: uuid.UUID | None = None) -> list[dict[str, object]]:
-    demand_by_date: dict[date, dict[str, int]] = {}
     weeks_query = db.query(Week)
     if season_id:
         weeks_query = weeks_query.filter(Week.season_id == season_id)
-    regular_game_dates = {_week_game_date(week) for week in weeks_query.all() if _is_regular_season_week(week) and _week_game_date(week)}
-    roster = season_roster(db, season_id)
-    teams_by_division: dict[uuid.UUID, int] = {}
-    divisions_by_id: dict[uuid.UUID, Division] = {}
-    for team in roster:
-        teams_by_division[team.division_id] = teams_by_division.get(team.division_id, 0) + 1
-        if team.division:
-            divisions_by_id[team.division_id] = team.division
-    for game_date in regular_game_dates:
-        demand = demand_by_date.setdefault(game_date, _empty_field_size_counts())
-        for division_id, team_count in teams_by_division.items():
-            size = _required_field_type_for_division(divisions_by_id.get(division_id))
-            demand[size] += _division_required_games(team_count, divisions_by_id.get(division_id))
-    slots_query = db.query(GameSlot.slot_date).distinct()
-    if season_id:
-        slots_query = slots_query.filter(GameSlot.season_id == season_id)
-    for slot_date in [row[0] for row in slots_query.all()]:
-        demand_by_date.setdefault(slot_date, {FIELD_SIZE_SMALL: 0, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_LARGE: 0})
-    capacity: dict[date, dict[uuid.UUID, dict[str, object]]] = {}
-    slot_query = db.query(GameSlot).join(GameSlot.host_location)
-    if season_id:
-        slot_query = slot_query.filter(GameSlot.season_id == season_id)
-    for slot in slot_query.all():
-        host = slot.host_location
-        if not host or not host.organization_id:
-            continue
-        day = capacity.setdefault(slot.slot_date, {})
-        row = day.setdefault(host.organization_id, {
-            'community_id': str(host.organization_id),
-            'community': host.organization.name if host.organization else 'Unknown community',
-            'host_locations': {},
-            'small_capacity': 0,
-            'medium_capacity': 0,
-            'large_capacity': 0,
-        })
-        size = _normalize_field_size(slot.field_type)
-        if size == FIELD_SIZE_SMALL:
-            row['small_capacity'] += 1
-        elif size == FIELD_SIZE_MEDIUM:
-            row['medium_capacity'] += 1
-        elif size == FIELD_SIZE_LARGE:
-            row['large_capacity'] += 1
-        host_locations = row['host_locations']
-        loc = host_locations.setdefault(str(host.id), {'host_location': host.name, 'small_capacity': 0, 'medium_capacity': 0, 'large_capacity': 0})
-        if size == FIELD_SIZE_SMALL:
-            loc['small_capacity'] += 1
-        elif size == FIELD_SIZE_MEDIUM:
-            loc['medium_capacity'] += 1
-        elif size == FIELD_SIZE_LARGE:
-            loc['large_capacity'] += 1
-    rows = []
-    for host_date in sorted(demand_by_date):
+    weeks = sorted(
+        (week for week in weeks_query.all() if _is_regular_season_week(week) and _week_game_date(week)),
+        key=lambda week: (week.week_number, _week_game_date(week)),
+    )
+    division_order = [(division.division_group or '', division.name or '') for division in db.query(Division).filter(Division.is_active.is_(True)).all()]
+    rows: list[dict[str, object]] = []
+    for week in weeks:
+        demand = _active_division_week_demand_by_size(db, division_order, week.season_id)
+        eligible_slots, exclusion_reasons = _eligible_slots_for_week(db, week)
+        eligible = _capacity_by_size_from_slots(eligible_slots)
+        host_rows: dict[uuid.UUID, dict[str, object]] = {}
+        for slot in eligible_slots:
+            host = slot.host_location
+            row = host_rows.setdefault(host.id, {
+                'community_id': str(host.organization_id),
+                'community': host.organization.name if host.organization else 'Unknown community',
+                'host_locations': {}, 'small_capacity': 0, 'medium_capacity': 0, 'large_capacity': 0,
+            })
+            size = _normalize_field_size(slot.field_type)
+            key = f'{size.lower()}_capacity'
+            row[key] += 1
+            location = row['host_locations'].setdefault(str(host.id), {'host_location': host.name, 'small_capacity': 0, 'medium_capacity': 0, 'large_capacity': 0})
+            location[key] += 1
         day_capacity = []
-        for row in capacity.get(host_date, {}).values():
-            row = dict(row)
-            row['host_locations'] = list(row['host_locations'].values())
-            day_capacity.append(row)
-        demand = demand_by_date[host_date]
-        capacity_available = sum(
-            int(row.get('small_capacity') or 0) + int(row.get('medium_capacity') or 0) + int(row.get('large_capacity') or 0)
-            for row in day_capacity
-        )
-        capacity_used = int(demand.get(FIELD_SIZE_SMALL, 0) or 0) + int(demand.get(FIELD_SIZE_MEDIUM, 0) or 0) + int(demand.get(FIELD_SIZE_LARGE, 0) or 0)
+        for value in host_rows.values():
+            value = dict(value); value['host_locations'] = list(value['host_locations'].values()); day_capacity.append(value)
+        failed = []
+        for size in FIELD_SIZE_ORDER:
+            shortage = max(int(demand.get(size, 0)) - int(eligible.get(size, 0)), 0)
+            if not shortage:
+                continue
+            generated = db.query(GameSlot).filter(GameSlot.season_id == week.season_id, GameSlot.week_id == week.id, GameSlot.slot_date == _week_game_date(week), GameSlot.field_type == size).count()
+            failed.append({
+                'week': week.week_number, 'date': str(_week_game_date(week)), 'field_size': size,
+                'host_community': 'Selected host communities', 'host_location': 'Selected host locations',
+                'turf_configuration': 'See selected host layout/wave diagnostics',
+                'expected_field_sizes': [key for key in FIELD_SIZE_ORDER if demand.get(key, 0)],
+                'field_sizes_actually_generated': [key for key in FIELD_SIZE_ORDER if db.query(GameSlot.id).filter(GameSlot.season_id == week.season_id, GameSlot.week_id == week.id, GameSlot.slot_date == _week_game_date(week), GameSlot.field_type == key).first()],
+                'generated_slot_count': generated, 'eligible_slot_count': int(eligible.get(size, 0)),
+                'required_count': int(demand.get(size, 0)), 'shortage': shortage,
+                'eligibility_exclusions': exclusion_reasons,
+            })
         rows.append({
-            'host_date': host_date,
-            'small_games_required': demand.get(FIELD_SIZE_SMALL, 0),
-            'medium_games_required': demand.get(FIELD_SIZE_MEDIUM, 0),
-            'large_games_required': demand.get(FIELD_SIZE_LARGE, 0),
-            'capacity_available': capacity_available,
-            'capacity_used': capacity_used,
+            'week': week.week_number, 'host_date': _week_game_date(week),
+            'small_games_required': demand.get(FIELD_SIZE_SMALL, 0), 'medium_games_required': demand.get(FIELD_SIZE_MEDIUM, 0), 'large_games_required': demand.get(FIELD_SIZE_LARGE, 0),
+            'capacity_available': sum(eligible.values()), 'capacity_used': sum(demand.values()),
             'available_capacity_by_community': sorted(day_capacity, key=lambda item: item.get('community') or ''),
+            'required_by_size': demand, 'eligible_by_size': eligible,
+            'status': 'SHORT' if failed else 'READY', 'failed_field_size_requirements': failed,
         })
     return rows
 
@@ -8606,25 +8630,26 @@ def get_schedule_readiness(season_id: uuid.UUID | None = None, current_user: Use
         Division.is_active.is_(True),
     ).order_by(Division.sort_order, Division.division_group, Division.name).all()
 
-    open_slots_query = db.query(GameSlot.field_type, func.count(GameSlot.id)).filter(GameSlot.status == 'OPEN')
-    if season_id:
-        open_slots_query = open_slots_query.filter(GameSlot.season_id == season_id)
-    open_slot_counts = dict(
-        open_slots_query
-        .group_by(GameSlot.field_type)
-        .all()
-    )
+    readiness_weeks = db.query(Week).filter(Week.season_id == season_id).all() if season_id else db.query(Week).all()
+    eligible_open_slots = [
+        slot
+        for week in readiness_weeks
+        if _is_regular_season_week(week) and _week_game_date(week)
+        for slot in _eligible_slots_for_week(db, week)[0]
+        if str(slot.status or '').upper() == 'OPEN'
+    ]
+    open_slot_counts = _capacity_by_size_from_slots(eligible_open_slots)
 
-    small_slots = int(open_slot_counts.get('SMALL', 0) or 0)
-    medium_slots = int(open_slot_counts.get('MEDIUM', 0) or 0)
-    large_slots = int(open_slot_counts.get('LARGE', 0) or 0)
+    small_slots = int(open_slot_counts.get(FIELD_SIZE_SMALL, 0) or 0)
+    medium_slots = int(open_slot_counts.get(FIELD_SIZE_MEDIUM, 0) or 0)
+    large_slots = int(open_slot_counts.get(FIELD_SIZE_LARGE, 0) or 0)
 
     rows: list[ScheduleReadinessDivisionRow] = []
     total_teams = 0
     total_minimum_unique_matchups = 0
     total_target_scheduled_games = 0
 
-    regular_weeks = db.query(Week).filter(Week.season_id == season_id).all() if season_id else db.query(Week).all()
+    regular_weeks = readiness_weeks
     regular_week_count = sum(1 for week in regular_weeks if _is_regular_season_week(week) and _week_game_date(week))
     for row in division_rows:
         teams = roster_count_by_division.get(row.division_id, 0)
@@ -22460,7 +22485,7 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         })
         return {
             'status': 'VALIDATION_FAILED',
-            'message': 'Generated slot capacity is insufficient for required field-size demand before placement.',
+            'message': slot_preflight_errors[0],
             'dry_run': dry_run,
             'preview_games_count': 0,
             'committed_games_count': 0,
@@ -22469,8 +22494,17 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
             'root_cause_categories': [
                 'REQUIRED_FIELD_SIZE_CAPACITY_SHORTAGE',
                 'GENERATED_SLOT_COVERAGE_INSUFFICIENT',
+            ] + ([
                 'TURF_CONFIGURATION_DID_NOT_GENERATE_REQUIRED_FIELD_SIZE',
-            ],
+            ] if any(
+                wave.get('selected_configuration') and any(
+                    int((row.get('missing_games_by_field_size') or {}).get(size, 0) or 0) > 0
+                    and int((wave.get('components_by_field_size') or {}).get(size, 0) or 0) == 0
+                    for size in FIELD_SIZE_ORDER
+                )
+                for row in (slot_preflight.get('validation_rows') or [])
+                for wave in ((row.get('Required Field-Size Demand vs Generated Capacity Diagnostics') or {}).get('selected_turf_field_wave_diagnostics') or [])
+            ) else []),
             'auto_schedule_diagnostics': slot_capacity_diagnostics,
             'slot_capacity_validation': slot_preflight,
             'games_skipped': 0,
@@ -24630,15 +24664,8 @@ def _regenerate_and_validate_slots_for_weeks(
         game_date = _week_game_date(week)
         if not game_date or not _is_regular_season_week(week):
             continue
-        slot_counts = {FIELD_SIZE_SMALL: 0, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_LARGE: 0}
-        for field_type, count in db.query(GameSlot.field_type, func.count(GameSlot.id)).filter(
-            GameSlot.season_id == week.season_id,
-            GameSlot.week_id == week.id,
-            GameSlot.slot_date == game_date,
-        ).group_by(GameSlot.field_type).all():
-            size = _normalize_field_size(field_type)
-            if size in slot_counts:
-                slot_counts[size] += int(count or 0)
+        eligible_slots, eligibility_exclusion_reasons = _eligible_slots_for_week(db, week)
+        slot_counts = _capacity_by_size_from_slots(eligible_slots)
         missing_sizes = [
             size for size in FIELD_SIZE_ORDER
             if int(required_games_by_size.get(size, 0) or 0) > int(slot_counts.get(size, 0) or 0)
@@ -24742,6 +24769,8 @@ def _regenerate_and_validate_slots_for_weeks(
             'league_wide_demand_by_size': dict(required_games_by_size),
             'active_divisions_included': active_division_demand_rows,
             'generated_slots_by_size': dict(slot_counts),
+            'eligible_slots_by_size': dict(slot_counts),
+            'eligibility_exclusion_reasons': eligibility_exclusion_reasons,
             'scheduled_games_by_field_size': dict(scheduled_games_by_size),
             'remaining_slots_by_field_size': dict(remaining_slots_by_size),
             'missing_games_by_field_size': dict(missing_games_by_size),
@@ -24762,9 +24791,11 @@ def _regenerate_and_validate_slots_for_weeks(
         validation_rows.append(row)
         for size in missing_sizes:
             validation_errors.append(
-                f'REQUIRED_FIELD_SIZE_CAPACITY_SHORTAGE: Week {week.week_number} ({game_date}) requires {required_games_by_size[size]} {size} game(s) but generated {slot_counts.get(size, 0)} {size} slot(s). '
+                f'Week {week.week_number} — {game_date}: {size.title()} fields require {required_games_by_size[size]} game slots; '
+                f'{slot_counts.get(size, 0)} eligible slots were generated. Shortage: {missing_games_by_size[size]}. '
                 f'Host locations evaluated: {", ".join(row["host_locations_evaluated"]) or "none"}. '
-                f'Reasons: {" | ".join(row["generation_reasons"]) or "No hosting availability was evaluated for this week."}'
+                f'Eligibility exclusions: {eligibility_exclusion_reasons or "none"}. '
+                f'REQUIRED_FIELD_SIZE_CAPACITY_SHORTAGE / GENERATED_SLOT_COVERAGE_INSUFFICIENT.'
             )
     return {
         'generation_results': generation_results,
