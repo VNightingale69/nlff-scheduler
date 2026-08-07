@@ -6654,10 +6654,12 @@ def _regenerate_generated_slots(
             }
             for index, (layout, hours) in enumerate(turf_layout_blocks, start=1)
         ]
-        if selected_configuration and availability.selected_configuration_id != selected_configuration.id:
-            availability.selected_configuration_id = selected_configuration.id
+        # Auto-select is generation state, not Hosting Availability configuration.
+        # TurfWave rows are recreated on every run and are the durable record of
+        # the layouts selected for this particular generated result.  Only a
+        # manually selected/locked availability may retain a configuration id.
+        if selected_configuration and not availability.auto_select_turf_layout:
             host_configuration = selected_configuration
-            logger.info('Selected turf layout %s for availability_id=%s host_location_id=%s', selected_configuration.configuration_name, availability.id, host_location_id)
         if not turf_layout_blocks:
             templates = []
     elif host and surface_type == 'GRASS_FIELD' and availability.host_location_id:
@@ -8046,7 +8048,9 @@ def _build_host_date_readiness(db: Session) -> list[ScheduleReadinessHostDateRow
         if field_instance.field_type in site['field_counts'] and field_instance.field_name not in site.get('counted_fields', set()):
             site.setdefault('counted_fields', set()).add(field_instance.field_name)
             site['field_counts'][field_instance.field_type] += 1
-        if availability and availability.selected_configuration:
+        if slot.turf_wave:
+            site['layouts'].add(slot.turf_wave.preferred_layout_code)
+        elif availability and not availability.auto_select_turf_layout and availability.selected_configuration:
             site['layouts'].add(availability.selected_configuration.configuration_name)
         date_row = date_data.setdefault(date_key, {'generated_slots': 0, 'games_assigned': 0, 'field_counts': {FIELD_SIZE_SMALL: 0, FIELD_SIZE_MEDIUM: 0, FIELD_SIZE_LARGE: 0}, 'site_ids': set()})
         date_row['generated_slots'] += 1
@@ -11632,6 +11636,32 @@ def list_saved_hosting_availability(season_id: uuid.UUID | None = None, organiza
         q = q.filter(func.cast(HostingAvailability.available_date, str) == available_date)
 
     rows = q.order_by(HostingAvailability.available_date, HostLocation.name, PhysicalFieldArea.name, HostingAvailability.start_time).all()
+
+    def _generated_layout_result(availability_id: uuid.UUID) -> dict[str, object]:
+        """Return only the current, replaceable Generated Slots layout result."""
+        waves = db.query(TurfWave).filter(
+            TurfWave.hosting_availability_id == availability_id,
+        ).order_by(TurfWave.sequence_number, TurfWave.start_time).all()
+        layouts = list(dict.fromkeys(
+            _normalize_configuration_name(wave.preferred_layout_code)
+            for wave in waves
+            if wave.preferred_layout_code
+        ))
+        capacity = _empty_field_size_counts()
+        for layout_name in layouts:
+            metadata = _turf_configuration_metadata(layout_name)
+            if not metadata:
+                continue
+            for size in FIELD_SIZE_ORDER:
+                # Capacity means the physical fields available concurrently in
+                # a generated wave, rather than summing capacity across hours.
+                capacity[size] = max(capacity[size], int(metadata['counts'].get(size, 0) or 0))
+        return {
+            'current_generated_layout': ', '.join(layouts) if layouts else None,
+            'generated_small_field_capacity': capacity[FIELD_SIZE_SMALL],
+            'generated_medium_field_capacity': capacity[FIELD_SIZE_MEDIUM],
+            'generated_large_field_capacity': capacity[FIELD_SIZE_LARGE],
+        }
     host_ids = {row.physical_field_area.host_location.id for row in rows if row.physical_field_area and row.physical_field_area.host_location}
     def _normalize_field_type(raw_layout_type: str | None) -> str | None:
         normalized = str(raw_layout_type or '').strip().lower()
@@ -11750,8 +11780,9 @@ def list_saved_hosting_availability(season_id: uuid.UUID | None = None, organiza
         host = row.host_location
         config = row.selected_configuration
         if (host.surface_type or 'GRASS_FIELD') == 'TURF_STADIUM':
-            layout_name = config.configuration_name if config else 'Auto Select Best Layout'
-            templates = _configuration_field_templates(config.configuration_name if config else None, None)
+            is_auto_select = bool(getattr(row, 'auto_select_turf_layout', True))
+            layout_name = 'Auto Select Best Layout' if is_auto_select else (config.configuration_name if config else 'No Layout Selected')
+            templates = [] if is_auto_select else _configuration_field_templates(config.configuration_name if config else None, None)
         else:
             layout_name = 'Active Grass Fields'
             templates = _grass_field_templates_for_host(db, host.id)
@@ -11860,6 +11891,12 @@ def list_saved_hosting_availability(season_id: uuid.UUID | None = None, organiza
                     start = hour
                 prev = hour
             ranges.append({'start_time': time(start, 0), 'end_time': time(prev + 1, 0)})
+        generated_result = _generated_layout_result(data['id']) if data.get('auto_select_turf_layout', True) else {
+            'current_generated_layout': None,
+            'generated_small_field_capacity': 0,
+            'generated_medium_field_capacity': 0,
+            'generated_large_field_capacity': 0,
+        }
         items.append({
             'id': data['id'],
             'season_id': data.get('season_id'),
@@ -11891,7 +11928,10 @@ def list_saved_hosting_availability(season_id: uuid.UUID | None = None, organiza
             'fields': data['fields'],
             'auto_select_turf_layout': data.get('auto_select_turf_layout', True),
             'lock_selected_layout': data.get('lock_selected_layout', False),
-            'layout_resolved': data.get('layout_resolved', not data.get('auto_select_turf_layout', True)),
+            # For auto-select, resolution is derived exclusively from the
+            # current TurfWave result, never selected_configuration_id.
+            'layout_resolved': bool(generated_result['current_generated_layout']) if data.get('auto_select_turf_layout', True) else True,
+            **generated_result,
         })
     items.sort(key=lambda x: (x['available_date'], x['host_location_name']))
     return {'items': items}

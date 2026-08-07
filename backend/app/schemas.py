@@ -460,6 +460,10 @@ class SavedAvailabilityEntry(BaseModel):
     auto_select_turf_layout: bool = True
     lock_selected_layout: bool = False
     layout_resolved: bool = False
+    current_generated_layout: str | None = None
+    generated_small_field_capacity: int = 0
+    generated_medium_field_capacity: int = 0
+    generated_large_field_capacity: int = 0
     time_ranges: list[SavedAvailabilityRange]
 
 
