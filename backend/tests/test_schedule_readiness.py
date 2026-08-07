@@ -172,6 +172,43 @@ class MultiLocationHostingAvailabilityTest(unittest.TestCase):
         self.assertEqual(grass_site.grass_field_capacity, 1)
         self.assertIsNotNone(turf_site.selected_turf_layout)
 
+    def test_unresolved_auto_select_uses_layout_capacity_and_is_labeled_unresolved(self):
+        from app.models import FieldInstance, GameSlot, HostLocation, HostLocationConfiguration, HostingAvailability
+        from app.routes.api import _host_availability_capacity_by_size, _regenerate_generated_slots, list_saved_hosting_availability
+
+        host_date = date(2026, 8, 16)
+        turf_host = HostLocation(id=uuid.uuid4(), organization_id=self.org.id, name='Johnsburg Stadium', surface_type='TURF_STADIUM', is_active=True)
+        three_small = HostLocationConfiguration(id=uuid.uuid4(), host_location_id=turf_host.id, configuration_name='THREE_SMALL', is_active=True)
+        mixed = HostLocationConfiguration(id=uuid.uuid4(), host_location_id=turf_host.id, configuration_name='ONE_SMALL_ONE_LARGE', is_active=True)
+        availability = HostingAvailability(
+            id=uuid.uuid4(), organization_id=self.org.id, host_location_id=turf_host.id,
+            selected_configuration_id=None, auto_select_turf_layout=True, lock_selected_layout=False,
+            available_date=host_date, start_time=time(9, 0), end_time=time(17, 0), is_available=True,
+        )
+        self.db.add_all([turf_host, three_small, mixed, availability])
+        self.db.commit()
+
+        capacity = _host_availability_capacity_by_size(self.db, turf_host, availability)
+        self.assertGreater(sum(capacity.values()), 0)
+
+        response = list_saved_hosting_availability(host_location_id=turf_host.id, current_user=None, db=self.db)
+        saved = response['items'][0]
+        self.assertEqual(saved['available_layout'], 'Auto Select Best Layout')
+        self.assertTrue(saved['auto_select_turf_layout'])
+        self.assertFalse(saved['layout_resolved'])
+
+        _regenerate_generated_slots(self.db, availability, turf_host.id, demand_counts_override={'SMALL': 3, 'MEDIUM': 0, 'LARGE': 0})
+        self.db.commit()
+        generated_slots = self.db.query(GameSlot).join(GameSlot.field_instance).filter(
+            FieldInstance.hosting_availability_id == availability.id,
+        ).count()
+        self.assertGreater(generated_slots, 0)
+
+        resolved = list_saved_hosting_availability(host_location_id=turf_host.id, current_user=None, db=self.db)['items'][0]
+        self.assertTrue(resolved['layout_resolved'])
+        self.assertEqual(resolved['available_layout'], 'THREE_SMALL')
+        self.assertEqual(resolved['small_field_capacity'], 3)
+
 
 class GrassFieldForecastTest(unittest.TestCase):
     def setUp(self):

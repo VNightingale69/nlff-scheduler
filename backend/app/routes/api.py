@@ -11789,6 +11789,7 @@ def list_saved_hosting_availability(season_id: uuid.UUID | None = None, organiza
                 ],
                 'auto_select_turf_layout': bool(getattr(row, 'auto_select_turf_layout', True)),
                 'lock_selected_layout': bool(getattr(row, 'lock_selected_layout', False)),
+                'layout_resolved': bool(config),
                 'hours': [],
             }
         grouped[key]['hours'].extend(range(row.start_time.hour, row.end_time.hour))
@@ -11890,6 +11891,7 @@ def list_saved_hosting_availability(season_id: uuid.UUID | None = None, organiza
             'fields': data['fields'],
             'auto_select_turf_layout': data.get('auto_select_turf_layout', True),
             'lock_selected_layout': data.get('lock_selected_layout', False),
+            'layout_resolved': data.get('layout_resolved', not data.get('auto_select_turf_layout', True)),
         })
     items.sort(key=lambda x: (x['available_date'], x['host_location_name']))
     return {'items': items}
