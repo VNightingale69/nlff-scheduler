@@ -457,6 +457,9 @@ class SavedAvailabilityEntry(BaseModel):
     inactive_field_count: int = 0
     unmatched_field_records: int = 0
     has_field_inventory_mismatch: bool = False
+    auto_select_turf_layout: bool = True
+    lock_selected_layout: bool = False
+    layout_resolved: bool = False
     time_ranges: list[SavedAvailabilityRange]
 
 
