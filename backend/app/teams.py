@@ -1,13 +1,106 @@
 """Canonical eligibility rules for teams in the current season configuration."""
 
 import logging
+import re
 import uuid
+from dataclasses import dataclass
 
 from sqlalchemy.orm import Query
 
 from app.models import Division, Game, Organization, OrganizationDivisionParticipation, Season, Team
 
 logger = logging.getLogger(__name__)
+
+
+def normalize_team_identity(value: object) -> str:
+    """Normalize harmless formatting differences without fuzzy matching."""
+    return re.sub(r'[^a-z0-9]', '', str(value or '').strip().casefold())
+
+
+def canonical_division_name(division: Division) -> str:
+    return f'{division.division_group or ""} {division.name}'.strip()
+
+
+def canonical_team_display_name(team: Team) -> str:
+    """Build the spreadsheet-facing name from canonical relationships."""
+    return f'{team.organization.name} {canonical_division_name(team.division)} {team_specific_name(team)}'.strip()
+
+
+def _identity_tokens(value: object) -> list[str]:
+    return re.findall(r'[a-z0-9]+', str(value or '').strip().casefold())
+
+
+def _suffix_after(tokens: list[str], prefix: list[str]) -> list[str] | None:
+    if tokens[:len(prefix)] == prefix:
+        return tokens[len(prefix):]
+    return None
+
+
+def team_specific_name(team: Team) -> str:
+    """Return the team-specific portion of either short or legacy display names.
+
+    Most records store a color (for example ``Black``).  Some legacy records
+    store an already-rendered name such as ``J’Burg Coed K-1 Black``.  Division
+    is a canonical relationship, so the text following its token sequence is
+    the stable team-specific identifier in both representations.
+    """
+    tokens = _identity_tokens(team.name)
+    division_tokens = _identity_tokens(canonical_division_name(team.division))
+    for index in range(len(tokens) - len(division_tokens) + 1):
+        if tokens[index:index + len(division_tokens)] == division_tokens:
+            suffix = tokens[index + len(division_tokens):]
+            if suffix:
+                return ' '.join(suffix)
+    return team.name.strip()
+
+
+@dataclass(frozen=True)
+class TeamResolution:
+    team: Team | None
+    community: str | None
+    team_name: str | None
+    candidate_count: int = 0
+
+
+def resolve_roster_team(teams: list[Team], division: Division | None, imported_name: object) -> TeamResolution:
+    """Resolve one active roster record by display name, then structured identity."""
+    if division is None:
+        return TeamResolution(None, None, None)
+    value_key = normalize_team_identity(imported_name)
+    division_teams = [team for team in teams if team.division_id == division.id]
+
+    exact = [team for team in division_teams
+             if value_key in {normalize_team_identity(team.name),
+                              normalize_team_identity(canonical_team_display_name(team))}]
+    if len(exact) == 1:
+        return TeamResolution(exact[0], exact[0].organization.name, team_specific_name(exact[0]), 1)
+    if len(exact) > 1:
+        return TeamResolution(None, None, None, len(exact))
+
+    imported_tokens = _identity_tokens(imported_name)
+    division_tokens = _identity_tokens(canonical_division_name(division))
+    parsed = []
+    for team in division_teams:
+        community_tokens = _identity_tokens(team.organization.name)
+        remainder = _suffix_after(imported_tokens, community_tokens)
+        if remainder is None:
+            continue
+        specific_tokens = _suffix_after(remainder, division_tokens)
+        if not specific_tokens:
+            continue
+        parsed.append((team.organization, ' '.join(specific_tokens)))
+
+    parsed_identities = {(organization.id, normalize_team_identity(specific))
+                         for organization, specific in parsed}
+    if len(parsed_identities) != 1:
+        return TeamResolution(None, None, None)
+    organization_id, specific_key = parsed_identities.pop()
+    community = next(organization.name for organization, _ in parsed if organization.id == organization_id)
+    specific = next(specific for organization, specific in parsed if organization.id == organization_id)
+    matches = [team for team in division_teams
+               if team.organization_id == organization_id
+               and normalize_team_identity(team_specific_name(team)) == specific_key]
+    return TeamResolution(matches[0] if len(matches) == 1 else None, community, specific, len(matches))
 
 
 def eligible_team_query(query: Query) -> Query:

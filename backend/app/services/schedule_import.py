@@ -8,7 +8,7 @@ from openpyxl import load_workbook
 
 from app.models import (Division, Field, FieldInstance, Game, HostLocation,
                         HostLocationConfiguration, Season, Week)
-from app.teams import season_roster
+from app.teams import resolve_roster_team, season_roster
 from app.facility_layouts import johnsburg_field_templates
 
 REQUIRED = ('week', 'date', 'kickoff', 'site', 'field', 'fieldtype', 'division', 'hometeam', 'awayteam')
@@ -155,21 +155,25 @@ def build_preview(db, season_id, raw_rows):
         if not division:
             errors.append(f'Division "{_text(raw.get("division"))}" could not be found.')
 
-        def team_named(value):
-            matches = []
-            for team in teams:
-                division_name = f'{team.division.division_group or ""} {team.division.name}'.strip()
-                displayed_names = {team.name, f'{team.organization.name} {division_name} {team.name}'}
-                if team.division_id == getattr(division, 'id', None) and _normalized_name(value) in {_normalized_name(x) for x in displayed_names}:
-                    matches.append(team)
-            return matches[0] if len(matches) == 1 else None
-
-        home, away = team_named(raw.get('hometeam')), team_named(raw.get('awayteam'))
+        home_resolution = resolve_roster_team(teams, division, raw.get('hometeam'))
+        away_resolution = resolve_roster_team(teams, division, raw.get('awayteam'))
+        home, away = home_resolution.team, away_resolution.team
         season_name = season.name if season else 'selected'
+        def resolution_error(side, value, resolution):
+            imported = _text(value)
+            if resolution.candidate_count > 1:
+                return (f'Multiple active teams match "{imported}". '
+                        'Import cannot continue until the team data is unambiguous.')
+            parsed_community = resolution.community or 'Not recognized'
+            parsed_team = resolution.team_name or 'Not recognized'
+            return (f'Unable to resolve {side.lower()} team "{imported}". Parsed: '
+                    f'Community: {parsed_community}; Division: {_text(raw.get("division"))}; '
+                    f'Team: {parsed_team}; Season: {season_name}. '
+                    'No matching active team was found.')
         if not home:
-            errors.append(f'Home team "{_text(raw.get("hometeam"))}" could not be found as an active team in division "{_text(raw.get("division"))}" for the {season_name} season.')
+            errors.append(resolution_error('Home', raw.get('hometeam'), home_resolution))
         if not away:
-            errors.append(f'Away team "{_text(raw.get("awayteam"))}" could not be found as an active team in division "{_text(raw.get("division"))}" for the {season_name} season.')
+            errors.append(resolution_error('Away', raw.get('awayteam'), away_resolution))
         if home and away and home.id == away.id:
             errors.append('Home Team and Away Team cannot be the same.')
 
