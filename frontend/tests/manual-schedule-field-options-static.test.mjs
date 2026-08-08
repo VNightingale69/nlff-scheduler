@@ -11,5 +11,6 @@ assert.match(page, /value=\{field\.field_id \|\| field\.id\}/, 'option values ar
 assert.match(page, /host_location_id: e\.target\.value, field_id: '', field_instance_id: ''/, 'changing host clears an invalid field immediately');
 assert.match(page, /pendingEdit\?\.field_id && !values\.some/, 'the current persisted assignment remains represented');
 assert.doesNotMatch(page, /required_field_type[^\n]+\.filter/, 'field type compatibility does not remove physical fields');
+assert.match(page, /setPendingGameEdits\(Object\.fromEntries\(games\.map/, 'global edit mode initializes every existing row immediately');
 
 console.log('manual schedule canonical field option checks passed');
