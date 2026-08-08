@@ -16090,11 +16090,23 @@ def manual_schedule_builder_options(db: Session = Depends(get_db)):
         FieldInstance.is_active.is_(True),
         FieldInstance.host_location_id.in_(eligible_host_ids),
     ).order_by(FieldInstance.host_location_id, FieldInstance.instance_date, FieldInstance.field_type, FieldInstance.field_name).all()
+    fields = db.query(Field).filter(
+        Field.is_active.is_(True),
+        Field.deleted_at.is_(None),
+        Field.host_location_id.in_(eligible_host_ids),
+    ).order_by(Field.host_location_id, Field.name).all()
+
+    def field_display_name(field: Field) -> str:
+        # Canonical grass field names commonly carry community, facility, and
+        # size prefixes.  The final segment is the administrator-facing name.
+        segments = [segment.strip() for segment in (field.name or '').split(' - ') if segment.strip()]
+        return segments[-1] if len(segments) > 1 else field.name
     return {
         'divisions': [{'id': d.id, 'name': d.name, 'division_group': d.division_group, 'sort_order': d.sort_order, 'required_field_layout_type': d.required_field_layout_type, 'required_field_type': 'LARGE' if '53' in (d.required_field_layout_type or '') else 'SMALL'} for d in divisions],
         'teams': [{'id': t.id, 'name': t.name, 'division_id': t.division_id, 'is_active': t.is_active} for t in teams],
         'host_locations': [{'id': h.id, 'name': h.name, 'surface_type': h.surface_type} for h in host_locations],
-        'field_instances': [{'id': fi.id, 'field_instance_id': fi.id, 'host_location_id': fi.host_location_id, 'field_instance_name': _field_export_display_label(None, fi, db), 'field_name': _field_export_display_label(None, fi, db), 'field_type': fi.field_type, 'field_size': fi.field_type, 'instance_date': fi.instance_date, 'game_date': fi.instance_date, 'available_date': fi.instance_date, 'is_active': fi.is_active} for fi in field_instances],
+        'fields': [{'id': f.id, 'field_id': f.id, 'host_location_id': f.host_location_id, 'name': f.name, 'display_name': field_display_name(f), 'field_type': f.layout_type, 'is_active': f.is_active} for f in fields],
+        'field_instances': [{'id': fi.id, 'field_instance_id': fi.id, 'field_id': getattr(fi.hosting_availability, 'field_id', None), 'host_location_id': fi.host_location_id, 'field_instance_name': _field_export_display_label(None, fi, db), 'field_name': _field_export_display_label(None, fi, db), 'field_type': fi.field_type, 'field_size': fi.field_type, 'instance_date': fi.instance_date, 'game_date': fi.instance_date, 'available_date': fi.instance_date, 'is_active': fi.is_active} for fi in field_instances],
         'seasons': [{'id': s.id, 'name': s.name, 'start_date': s.start_date, 'end_date': s.end_date, 'is_active': s.is_active} for s in seasons],
         'weeks': [{'id': w.id, 'season_id': w.season_id, 'week_number': w.week_number, 'label': w.label or f'Week {w.week_number}', 'start_date': w.start_date, 'end_date': w.end_date, 'primary_game_date': w.primary_game_date or w.start_date, 'status': w.status} for w in weeks],
         'organizations': [{'id': o.id, 'name': o.name} for o in organizations],
@@ -28899,13 +28911,13 @@ def _manual_game_edit_warnings(db: Session, game: Game, payload: ManualGameEditR
         ).first()
         if team_conflict:
             warnings.append(ScheduleEditWarning(code='TEAM_TIME_CONFLICT', message='One of these teams is already scheduled at the selected date and time.'))
-        if payload.field_instance_id:
+        if payload.field_id or payload.field_instance_id:
             field_conflict = db.query(Game.id).join(Game.status).filter(
                 Game.id != game.id,
                 Game.season_id == payload.season_id,
                 Game.game_date == payload.game_date,
                 Game.kickoff_time == payload.kickoff_time,
-                Game.field_instance_id == payload.field_instance_id,
+                (Game.field_id == payload.field_id) if payload.field_id else (Game.field_instance_id == payload.field_instance_id),
                 func.upper(GameStatus.code).in_(active_statuses),
             ).first()
             slot_field_conflict = db.query(GameSlot.id).join(Game, GameSlot.assigned_game_id == Game.id).join(Game.status).filter(
@@ -28915,12 +28927,14 @@ def _manual_game_edit_warnings(db: Session, game: Game, payload: ManualGameEditR
                 Game.kickoff_time == payload.kickoff_time,
                 GameSlot.field_instance_id == payload.field_instance_id,
                 func.upper(GameStatus.code).in_(active_statuses),
-            ).first()
+            ).first() if payload.field_instance_id else None
             if field_conflict or slot_field_conflict:
                 warnings.append(ScheduleEditWarning(code='FIELD_TIME_CONFLICT', message='The selected field is already assigned at the selected date and time.'))
     division = db.get(Division, payload.division_id) if payload.division_id else None
     fi = db.get(FieldInstance, payload.field_instance_id) if payload.field_instance_id else None
-    if fi and division and _normalize_field_size(fi.field_type) != _required_field_type_for_division(division):
+    canonical_field = db.get(Field, payload.field_id) if payload.field_id else None
+    selected_field_type = getattr(fi, 'field_type', None) or getattr(canonical_field, 'layout_type', None)
+    if selected_field_type and division and _normalize_field_size(selected_field_type) != _required_field_type_for_division(division):
         warnings.append(ScheduleEditWarning(code='FIELD_SIZE_MISMATCH', message='Manual override: selected field type does not match division default.'))
     if payload.field_instance_id:
         matching_slot = db.query(GameSlot.id).filter(
@@ -29133,7 +29147,7 @@ def _raise_if_invalid_manual_game_edit(db: Session, game: Game, payload: ManualG
     if payload.game_status_id is None:
         payload.game_status_id = game.game_status_id
     missing = []
-    for name in ['division_id', 'home_team_id', 'away_team_id', 'host_location_id', 'field_instance_id', 'game_date', 'kickoff_time']:
+    for name in ['division_id', 'home_team_id', 'away_team_id', 'host_location_id', 'field_id', 'game_date', 'kickoff_time']:
         if getattr(payload, name) in (None, ''):
             missing.append(name)
     if missing:
@@ -29159,11 +29173,23 @@ def _raise_if_invalid_manual_game_edit(db: Session, game: Game, payload: ManualG
     host = db.get(HostLocation, payload.host_location_id) if payload.host_location_id else None
     if not host or not host.is_active:
         raise HTTPException(status_code=400, detail={'error': 'INVALID_HOST_LOCATION'})
+    field = db.query(Field).filter(
+        Field.id == payload.field_id,
+        Field.is_active.is_(True),
+        Field.deleted_at.is_(None),
+    ).first() if payload.field_id else None
+    if payload.field_id and not field:
+        raise HTTPException(status_code=400, detail={'error': 'INVALID_FIELD'})
+    if field and field.host_location_id != payload.host_location_id:
+        raise HTTPException(status_code=400, detail={'error': 'INVALID_FIELD_LOCATION_RELATIONSHIP'})
     fi = db.get(FieldInstance, payload.field_instance_id) if payload.field_instance_id else None
     if payload.field_instance_id and not fi:
         raise HTTPException(status_code=400, detail={'error': 'INVALID_FIELD'})
     if fi and payload.host_location_id and fi.host_location_id != payload.host_location_id:
         raise HTTPException(status_code=400, detail={'error': 'INVALID_FIELD_LOCATION_RELATIONSHIP'})
+    instance_field_id = getattr(getattr(fi, 'hosting_availability', None), 'field_id', None) if fi else None
+    if instance_field_id and payload.field_id and instance_field_id != payload.field_id:
+        raise HTTPException(status_code=400, detail={'error': 'INVALID_FIELD'})
     _validate_turf_explicit_field_slot_combination(
         db,
         host_location_id=payload.host_location_id,
@@ -29192,10 +29218,12 @@ def _apply_manual_game_edit(db: Session, game: Game, payload: ManualGameEditRequ
     if new_slot:
         new_slot.status = 'ASSIGNED'
         new_slot.assigned_game_id = game.id
-        game.field_id = getattr(new_slot.field_instance, 'field_id', None)
+        game.field_id = payload.field_id or getattr(getattr(new_slot.field_instance, 'hosting_availability', None), 'field_id', None)
     elif payload.field_instance_id:
         selected_field_instance = db.get(FieldInstance, payload.field_instance_id)
-        game.field_id = getattr(selected_field_instance, 'field_id', None)
+        game.field_id = payload.field_id or getattr(getattr(selected_field_instance, 'hosting_availability', None), 'field_id', None)
+    else:
+        game.field_id = payload.field_id
     game.season_id = payload.season_id
     game.week_id = payload.week_id
     game.home_team_id = payload.home_team_id
