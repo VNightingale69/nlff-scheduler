@@ -209,6 +209,23 @@ class MultiLocationHostingAvailabilityTest(unittest.TestCase):
         self.assertEqual(saved['available_layout'], 'Auto Select Best Layout')
         self.assertTrue(saved['auto_select_turf_layout'])
         self.assertFalse(saved['layout_resolved'])
+        self.assertGreater(saved['total_fields_found'], 0)
+        self.assertFalse(saved['has_field_inventory_mismatch'])
+        self.assertEqual(saved['capacity_diagnostics']['availability_id'], str(availability.id))
+        self.assertEqual(saved['capacity_diagnostics']['host_location_id'], str(turf_host.id))
+        self.assertCountEqual(
+            saved['capacity_diagnostics']['eligible_layouts'],
+            ['THREE_SMALL', 'TWO_SMALL_ONE_MEDIUM', 'TWO_MEDIUM', 'ONE_SMALL_ONE_LARGE', 'ONE_LARGE'],
+        )
+        self.assertEqual(saved['capacity_diagnostics']['generated_wave_count'], 0)
+        self.assertEqual(saved['capacity_diagnostics']['generated_slots'], 0)
+        self.assertIsNone(saved['capacity_diagnostics']['zero_inventory_reason'])
+
+        # The identical auto-select inventory on the second date must not be
+        # reported as zero merely because neither date has generated rows yet.
+        saved_other_date = response['items'][1]
+        self.assertGreater(saved_other_date['total_fields_found'], 0)
+        self.assertFalse(saved_other_date['has_field_inventory_mismatch'])
 
         _regenerate_generated_slots(self.db, availability, turf_host.id, demand_counts_override={'SMALL': 3, 'MEDIUM': 0, 'LARGE': 0})
         self.db.commit()
