@@ -96,6 +96,34 @@ class ScheduleReadinessTest(unittest.TestCase):
         # target must not collapse to the one partially-created Game row.
         self.assertEqual(scheduled_row.target_scheduled_games, 2)
 
+    def test_active_season_readiness_serializes_deferred_week_and_unplaced_game(self):
+        division = self.add_division_with_teams('Deferred', 2)
+        teams = self.db.query(Team).filter(Team.division_id == division.id).order_by(Team.name).all()
+        status = GameStatus(id=uuid.uuid4(), code='SCHEDULED', label='Scheduled', is_active=True)
+        season = Season(id=uuid.uuid4(), name='Active Fall', start_date=date(2026, 8, 1), end_date=date(2026, 11, 1), is_active=True)
+        week = Week(
+            id=uuid.uuid4(), season_id=season.id, week_number=4,
+            start_date=date(2026, 9, 13), end_date=date(2026, 9, 19),
+            primary_game_date=date(2026, 9, 13), host_assignment_pending=True,
+        )
+        game = Game(
+            id=uuid.uuid4(), season_id=season.id, week_id=week.id,
+            home_team_id=teams[0].id, away_team_id=teams[1].id,
+            game_status_id=status.id, game_date=week.primary_game_date,
+            kickoff_time=None, host_location_id=None, field_id=None,
+            field_instance_id=None, placement_status='TBD',
+        )
+        self.db.add_all([status, season, week, game])
+        self.db.commit()
+
+        response = get_schedule_readiness(current_user=None, db=self.db)
+
+        deferred = next(row for row in response.weekly_field_demand if row.week == 4)
+        self.assertEqual(deferred.status, 'DEFERRED')
+        self.assertIsNone(deferred.capacity_available)
+        self.assertIn('placement deferred', deferred.readiness_message)
+        self.assertGreater(response.totals.total_teams, 0)
+
     def test_readiness_excludes_the_seven_legacy_roster_records(self):
         division = self.add_division_with_teams('Current', 4)
         replacement = self.db.query(Team).filter(Team.division_id == division.id).first()
