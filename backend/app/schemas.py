@@ -798,6 +798,7 @@ class ManualGameEditRequest(BaseModel):
     home_team_id: uuid.UUID
     away_team_id: uuid.UUID
     host_location_id: uuid.UUID | None = None
+    field_id: uuid.UUID | None = None
     field_instance_id: uuid.UUID | None = None
     game_status_id: uuid.UUID | None = None
     game_date: date
