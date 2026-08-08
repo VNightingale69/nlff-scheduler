@@ -12,7 +12,7 @@ from sqlalchemy.pool import StaticPool
 from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN
 from app.database import Base, get_db
 from app.main import app
-from app.models import Division, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, Organization, Role, ScheduleChangeLog, Season, Team, User, Week
+from app.models import Division, Field, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, Organization, Role, ScheduleChangeLog, Season, Team, User, Week
 from app.security import create_access_token, hash_password
 
 
@@ -34,6 +34,10 @@ class ManualScheduleEditPermissionsTest(unittest.TestCase):
         self.home_org = Organization(id=uuid.uuid4(), name='Home Community', is_active=True)
         self.away_org = Organization(id=uuid.uuid4(), name='Away Community', is_active=True)
         self.host = HostLocation(id=uuid.uuid4(), organization_id=self.home_org.id, name='Main Park', is_active=True)
+        self.other_host = HostLocation(id=uuid.uuid4(), organization_id=self.home_org.id, name='Other Park', is_active=True)
+        self.canonical_field = Field(id=uuid.uuid4(), host_location_id=self.host.id, name='Field 1', layout_type='LARGE', is_active=True)
+        self.other_field = Field(id=uuid.uuid4(), host_location_id=self.host.id, name='Field 3', layout_type='SMALL', is_active=True)
+        self.wrong_host_field = Field(id=uuid.uuid4(), host_location_id=self.other_host.id, name='Wrong Park Field', layout_type='SMALL', is_active=True)
         self.division = Division(id=uuid.uuid4(), name='2-3', division_group='COED', sort_order=1, required_field_layout_type='THIRTY_YARD_WIDTH', is_active=True)
         self.season = Season(id=uuid.uuid4(), name='Fall 2026', start_date=date(2026, 8, 1), end_date=date(2026, 11, 1), is_active=True, schedule_status='published')
         self.week = Week(id=uuid.uuid4(), season_id=self.season.id, week_number=1, label='Week 1', start_date=date(2026, 8, 8), end_date=date(2026, 8, 14), primary_game_date=date(2026, 8, 9))
@@ -51,7 +55,8 @@ class ManualScheduleEditPermissionsTest(unittest.TestCase):
         self.scheduling_user = User(id=uuid.uuid4(), email='scheduler@example.com', full_name='Scheduling Admin', password_hash=hash_password('Password123!'), role_id=self.scheduling_role.id, is_active=True)
         self.community_user = User(id=uuid.uuid4(), email='community@example.com', full_name='Community Admin', password_hash=hash_password('Password123!'), role_id=self.community_role.id, organization_id=self.home_org.id, is_active=True)
         self.db.add_all([
-            self.league_role, self.community_role, self.scheduling_role, self.home_org, self.away_org, self.host, self.division,
+            self.league_role, self.community_role, self.scheduling_role, self.home_org, self.away_org, self.host, self.other_host,
+            self.canonical_field, self.other_field, self.wrong_host_field, self.division,
             self.season, self.week, self.status, self.cancelled, self.home_team, self.away_team, self.other_team,
             self.field, self.game, self.slot, self.league_user, self.dev_admin_user, self.scheduling_user, self.community_user,
         ])
@@ -82,6 +87,7 @@ class ManualScheduleEditPermissionsTest(unittest.TestCase):
             'home_team_id': str(self.home_team.id),
             'away_team_id': str(self.other_team.id),
             'host_location_id': str(self.host.id),
+            'field_id': str(self.canonical_field.id),
             'field_instance_id': str(self.field.id),
             'game_status_id': str(self.status.id),
             'game_date': '2026-08-09',
@@ -269,6 +275,50 @@ class ManualScheduleEditPermissionsTest(unittest.TestCase):
         self.db.expire_all()
         self.assertEqual(self.db.get(Game, self.game.id).away_team_id, self.other_team.id)
         self.assertEqual(self.db.get(Game, second_game.id).away_team_id, self.away_team.id)
+
+    def test_bulk_edit_persists_canonical_fields_and_clears_missing_state(self):
+        self.game.field_id = None
+        self.game.field_instance_id = None
+        self.game.missing_field_assignment = True
+        second_game = Game(id=uuid.uuid4(), season_id=self.season.id, week_id=self.week.id, home_team_id=self.away_team.id, away_team_id=self.other_team.id, host_location_id=self.host.id, field_id=None, game_status_id=self.status.id, game_date=date(2026, 8, 9), kickoff_time=time(9, 0), missing_field_assignment=True)
+        self.db.add(second_game)
+        self.db.commit()
+
+        response = self.client.patch(
+            '/api/schedule-management/games/manual-edit/bulk',
+            headers=self._token(self.scheduling_user.id),
+            json={'overrideWarnings': True, 'changes': [
+                dict(self._payload(field_id=str(self.canonical_field.id), field_instance_id=None), game_id=str(self.game.id)),
+                dict(self._payload(home_team_id=str(self.away_team.id), away_team_id=str(self.other_team.id), field_id=str(self.other_field.id), field_instance_id=None), game_id=str(second_game.id)),
+            ]},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        returned = {row['id']: row for row in response.json()['games']}
+        self.assertEqual(returned[str(self.game.id)]['field_id'], str(self.canonical_field.id))
+        self.assertEqual(returned[str(second_game.id)]['field_id'], str(self.other_field.id))
+        self.db.expire_all()
+        for game_id, expected_field_id in [(self.game.id, self.canonical_field.id), (second_game.id, self.other_field.id)]:
+            saved = self.db.get(Game, game_id)
+            self.assertEqual(saved.field_id, expected_field_id)
+            self.assertFalse(saved.missing_field_assignment)
+
+    def test_bulk_edit_rejects_field_from_different_host_without_partial_save(self):
+        original_notes = self.game.internal_admin_notes
+        second_game = Game(id=uuid.uuid4(), season_id=self.season.id, week_id=self.week.id, home_team_id=self.away_team.id, away_team_id=self.other_team.id, host_location_id=self.host.id, field_id=self.other_field.id, game_status_id=self.status.id, game_date=date(2026, 8, 9), kickoff_time=time(9, 0))
+        self.db.add(second_game)
+        self.db.commit()
+        response = self.client.patch(
+            '/api/schedule-management/games/manual-edit/bulk',
+            headers=self._token(self.scheduling_user.id),
+            json={'overrideWarnings': True, 'changes': [
+                dict(self._payload(internal_admin_notes='must roll back'), game_id=str(self.game.id)),
+                dict(self._payload(home_team_id=str(self.away_team.id), away_team_id=str(self.other_team.id), field_id=str(self.wrong_host_field.id), field_instance_id=None), game_id=str(second_game.id)),
+            ]},
+        )
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(response.json()['detail']['errors'][str(second_game.id)]['error'], 'INVALID_FIELD_LOCATION_RELATIONSHIP')
+        self.db.expire_all()
+        self.assertEqual(self.db.get(Game, self.game.id).internal_admin_notes, original_notes)
 
 
     def test_scheduling_admin_can_save_generated_game_without_status_payload_and_status_is_preserved(self):

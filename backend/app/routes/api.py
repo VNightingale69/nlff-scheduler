@@ -15994,6 +15994,8 @@ def _to_game_read(
             )
     if field_instance_name is None and getattr(g, 'field_instance', None):
         field_instance_name = _clean_explicit_field_slot_label(g.field_instance.field_name, getattr(g.field_instance, 'field_type', None))
+    if field_instance_name is None and getattr(g, 'field', None):
+        field_instance_name = _clean_explicit_field_slot_label(g.field.name, getattr(g.field, 'layout_type', None))
     if host_location_name is None and getattr(g, 'host_location', None):
         host_location_name = g.host_location.name
     return GameRead(
@@ -29298,7 +29300,7 @@ def _apply_manual_game_edit(db: Session, game: Game, payload: ManualGameEditRequ
     game.away_team_id = payload.away_team_id
     game.host_location_id = payload.host_location_id
     game.field_instance_id = payload.field_instance_id
-    if payload.field_instance_id:
+    if payload.field_id or payload.field_instance_id:
         game.missing_field_assignment = False
         game.needs_schedule_review = False
         game.field_deleted_from_game = False
@@ -29406,6 +29408,21 @@ def bulk_manual_edit_generated_games(payload: ManualGameBulkEditRequest, current
             game = games_by_id[change.game_id]
             game_warnings = warnings_by_game.get(str(change.game_id), [])
             changed_logs.extend(_apply_manual_game_edit(db, game, change, current_user, game_warnings))
+        db.flush()
+        integrity_errors: dict[str, object] = {}
+        for change in payload.changes:
+            game = games_by_id[change.game_id]
+            if change.field_id is not None and game.field_id != change.field_id:
+                integrity_errors[str(change.game_id)] = {
+                    'error': 'FIELD_ASSIGNMENT_NOT_PERSISTED',
+                    'requested_field_id': str(change.field_id),
+                    'saved_field_id': str(game.field_id) if game.field_id else None,
+                }
+        if integrity_errors:
+            raise HTTPException(status_code=500, detail={
+                'error': 'BULK_MANUAL_EDIT_INTEGRITY_FAILED',
+                'errors': integrity_errors,
+            })
         db.commit()
     except Exception:
         db.rollback()
