@@ -131,6 +131,7 @@ def confirm_schedule_import(
                 canonical_field = db.query(Field).filter(
                     Field.id == resolved_field_id,
                     Field.host_location_id == site_id,
+                    Field.is_active.is_(True),
                     Field.deleted_at.is_(None),
                 ).first()
                 if not canonical_field:

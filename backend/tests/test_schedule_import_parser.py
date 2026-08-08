@@ -12,6 +12,7 @@ from app.models import (Base, Division, Field, Game, GameStatus, HostLocation,
                         HostLocationConfiguration, Organization,
                         OrganizationDivisionParticipation, ScheduleImport, Season, Team, Week)
 from app.routes.api import confirm_schedule_import
+from app.services.field_resolution import resolve_active_field
 from app.services.schedule_import import build_preview, parse_schedule_file, _date, _time, _week_number
 
 
@@ -137,6 +138,96 @@ def _hiller_row(kickoff, field, field_type, home, away):
             'division': 'Girls 6-8',
             'hometeam': f'{home_community} Girls 6-8 {home.name}',
             'awayteam': f'{away_community} Girls 6-8 {away.name}'}
+
+
+def _canonical_hiller_park_context():
+    db, season, teams = _hiller_import_context()
+    site = db.query(HostLocation).filter_by(name='Hiller Stadium').one()
+    site.name = 'Hiller Park'
+    db.query(Field).delete()
+    fields = [
+        Field(host_location_id=site.id, name=f'Johnsburg - Hiller - Small - {identifier}',
+              layout_type='SMALL', is_active=True)
+        for identifier in ('SW', 'SE', 'North', 'NE', 'Middle')
+    ]
+    db.add_all(fields)
+    db.commit()
+    return db, season, teams, site, fields
+
+
+@pytest.mark.parametrize('imported', ['SW', 'SE', 'North', 'NE', 'Middle'])
+def test_hiller_park_short_field_names_resolve_to_canonical_active_fields(imported):
+    db, season, teams, site, _fields = _canonical_hiller_park_context()
+    row = _hiller_row('9:00 AM', imported, 'Small', teams[0], teams[1])
+    row['site'] = site.name
+
+    preview, staged = build_preview(db, season.id, [row])
+
+    expected = db.query(Field).filter(Field.name.endswith(f' - {imported}')).one()
+    assert preview['rows'][0]['status'] == 'VALID'
+    assert preview['rows'][0]['message'] == 'Ready to import.'
+    assert preview['blocking_errors'] == 0
+    assert staged[0]['imported_field_name'] == imported
+    assert staged[0]['resolved_field_id'] == str(expected.id)
+
+
+@pytest.mark.parametrize('imported', ['sw', 'SW', 'Sw', '  sw  '])
+def test_short_field_resolution_normalizes_case_and_whitespace(imported):
+    db, _season, _teams, site, _fields = _canonical_hiller_park_context()
+
+    resolved = resolve_active_field(db, site, imported)
+
+    assert resolved.name == 'Johnsburg - Hiller - Small - SW'
+
+
+def test_short_field_resolution_is_site_scoped_and_requires_unique_match():
+    db, _season, _teams, hiller, _fields = _canonical_hiller_park_context()
+    organization = db.query(Organization).filter_by(name='Johnsburg').one()
+    other_site = HostLocation(organization_id=organization.id, name='Other Park', is_active=True)
+    db.add(other_site); db.flush()
+    other_sw = Field(host_location_id=other_site.id, name='Other - Small - SW',
+                     layout_type='SMALL', is_active=True)
+    db.add(other_sw); db.commit()
+
+    resolved = resolve_active_field(db, hiller, 'SW')
+
+    assert resolved.host_location_id == hiller.id
+    assert resolved.name == 'Johnsburg - Hiller - Small - SW'
+
+
+def test_unknown_hiller_park_short_field_remains_blocking():
+    db, season, teams, site, _fields = _canonical_hiller_park_context()
+    row = _hiller_row('9:00 AM', 'Field 99', 'Small', teams[0], teams[1])
+    row['site'] = site.name
+
+    preview, staged = build_preview(db, season.id, [row])
+
+    assert staged == []
+    assert preview['rows'][0]['status'] == 'ERROR'
+    assert preview['rows'][0]['message'] == (
+        'Field "Field 99" could not be found at site "Hiller Park".')
+
+
+def test_confirm_persists_field_id_resolved_from_short_name():
+    db, season, teams, site, _fields = _canonical_hiller_park_context()
+    row = _hiller_row('9:00 AM', 'SW', 'Small', teams[0], teams[1])
+    row['site'] = site.name
+    preview, staged = build_preview(db, season.id, [row])
+    canonical = db.query(Field).filter(Field.name.endswith(' - SW')).one()
+    user_id = uuid.uuid4()
+    record = ScheduleImport(
+        season_id=season.id, imported_by_user_id=user_id, source_filename='short-fields.csv',
+        weeks_replaced=json.dumps(preview['weeks']), status='PREVIEW',
+        staged_rows=json.dumps(staged), preview_summary=json.dumps(preview),
+    )
+    db.add(record); db.commit()
+
+    confirm_schedule_import(record.id, {'confirmation': 'Replace Existing Schedule Games'},
+                            db, SimpleNamespace(id=user_id))
+
+    game = db.query(Game).filter_by(season_id=season.id).one()
+    assert game.field_id == canonical.id
+    assert game.missing_field_assignment is False
 
 
 def test_hiller_large_reconfiguration_is_warning_and_records_selected_layout():
