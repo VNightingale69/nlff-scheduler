@@ -13,6 +13,17 @@ INVALID_TURF_CONFIGURATION_MESSAGE = (
 
 APPROVED_TURF_CONFIGURATIONS: tuple[dict[str, object], ...] = (
     {
+        'code': 'FOUR_SMALL',
+        'displayName': 'Four Small Fields',
+        'availableFields': (FIELD_SIZE_SMALL,) * 4,
+        'supportedFieldSizes': (FIELD_SIZE_SMALL,),
+        'supportedDivisions': ('Coed K-1', 'Coed 2-3', 'Girls K-2'),
+        'maxFieldsPerWave': 4,
+        'schedulingNote': 'Tim Osmond Sports Complex four-small-field arrangement.',
+        'spaceUsedYards': 120,
+        'remainingYards': 0,
+    },
+    {
         'code': 'THREE_SMALL',
         'displayName': 'Three Small Fields',
         'availableFields': (FIELD_SIZE_SMALL, FIELD_SIZE_SMALL, FIELD_SIZE_SMALL),
@@ -57,6 +68,17 @@ APPROVED_TURF_CONFIGURATIONS: tuple[dict[str, object], ...] = (
         'remainingYards': 30,
     },
 
+    {
+        'code': 'ONE_LARGE_ONE_MEDIUM',
+        'displayName': 'One Large Field + One Medium Field',
+        'availableFields': (FIELD_SIZE_MEDIUM, FIELD_SIZE_LARGE),
+        'supportedFieldSizes': (FIELD_SIZE_MEDIUM, FIELD_SIZE_LARGE),
+        'supportedDivisions': ('Coed 4-5', 'Girls 3-5', 'Coed 6-7', 'Coed 8', 'Girls 6-8'),
+        'maxFieldsPerWave': 2,
+        'schedulingNote': 'Tim Osmond Sports Complex mixed medium- and large-field arrangement.',
+        'spaceUsedYards': 120,
+        'remainingYards': 0,
+    },
     {
         'code': 'ONE_LARGE',
         'displayName': 'One Large Field',

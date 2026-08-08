@@ -9,6 +9,14 @@ export type TurfConfiguration = {
 
 export const APPROVED_TURF_CONFIGURATIONS: TurfConfiguration[] = [
   {
+    code: 'FOUR_SMALL',
+    displayName: 'Four Small Fields',
+    availableFields: ['SMALL', 'SMALL', 'SMALL', 'SMALL'],
+    supportedDivisions: ['Coed K-1', 'Coed 2-3', 'Girls K-2'],
+    maxFieldsPerWave: 4,
+    schedulingNote: 'Tim Osmond Sports Complex four-small-field arrangement.',
+  },
+  {
     code: 'THREE_SMALL',
     displayName: 'Three Small Fields',
     availableFields: ['SMALL', 'SMALL', 'SMALL'],
@@ -42,6 +50,14 @@ export const APPROVED_TURF_CONFIGURATIONS: TurfConfiguration[] = [
   },
 
   {
+    code: 'ONE_LARGE_ONE_MEDIUM',
+    displayName: 'One Large Field + One Medium Field',
+    availableFields: ['MEDIUM', 'LARGE'],
+    supportedDivisions: ['Coed 4-5', 'Girls 3-5', 'Coed 6-7', 'Coed 8', 'Girls 6-8'],
+    maxFieldsPerWave: 2,
+    schedulingNote: 'Tim Osmond Sports Complex mixed medium- and large-field arrangement.',
+  },
+  {
     code: 'ONE_LARGE',
     displayName: 'One Large Field',
     availableFields: ['LARGE'],
@@ -52,6 +68,16 @@ export const APPROVED_TURF_CONFIGURATIONS: TurfConfiguration[] = [
 ];
 
 export const APPROVED_TURF_CONFIGURATION_CODES = APPROVED_TURF_CONFIGURATIONS.map((config) => config.code);
+
+export const STANDARD_TURF_CONFIGURATION_CODES = ['THREE_SMALL', 'TWO_SMALL_ONE_MEDIUM', 'TWO_MEDIUM', 'ONE_SMALL_ONE_LARGE', 'ONE_LARGE'];
+export const TIM_OSMOND_CONFIGURATION_CODES = ['FOUR_SMALL', 'TWO_SMALL_ONE_MEDIUM', 'ONE_LARGE_ONE_MEDIUM'];
+
+export const turfConfigurationsForHost = (hostName?: string | null) => {
+  const codes = hostName?.trim().toUpperCase() === 'TIM OSMOND SPORTS COMPLEX'
+    ? TIM_OSMOND_CONFIGURATION_CODES
+    : STANDARD_TURF_CONFIGURATION_CODES;
+  return APPROVED_TURF_CONFIGURATIONS.filter((config) => codes.includes(config.code));
+};
 
 export const isApprovedTurfConfigurationCode = (code?: string | null) => Boolean(code && APPROVED_TURF_CONFIGURATION_CODES.includes(code));
 
