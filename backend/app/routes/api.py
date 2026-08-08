@@ -38,7 +38,7 @@ from app.services.organization_cleanup import cleanup_organization_dependencies,
 from app.services.scheduling_validation import validate_game
 from app.turf_configurations import INVALID_TURF_CONFIGURATION_MESSAGE, BACKWARD_COMPATIBLE_TURF_CONFIGURATION_ALIASES, turf_configuration_legacy_metadata
 from app.teams import eligible_team_query, log_schedule_roster_exclusions, season_roster, season_roster_query
-from app.facility_layouts import (JOHNSBURG_APPROVED_LAYOUT_CODES_BY_LOCATION, JOHNSBURG_FIELD_TEMPLATES_BY_LOCATION, JOHNSBURG_ORGANIZATION_NAMES, johnsburg_location_name)
+from app.facility_layouts import (JOHNSBURG_APPROVED_LAYOUT_CODES_BY_LOCATION, JOHNSBURG_FIELD_TEMPLATES_BY_LOCATION, JOHNSBURG_ORGANIZATION_NAMES, johnsburg_field_templates, johnsburg_location_name)
 
 router = APIRouter(prefix='/api')
 logger = logging.getLogger(__name__)
@@ -4790,7 +4790,7 @@ def _configuration_field_templates_for_host(host: HostLocation, configuration_na
     """Return schedulable physical positions, omitting unavailable field numbers."""
     johnsburg_location = _johnsburg_location_name(host)
     if johnsburg_location and _normalize_configuration_name(configuration_name) in JOHNSBURG_APPROVED_LAYOUT_CODES_BY_LOCATION[johnsburg_location]:
-        return list(JOHNSBURG_FIELD_TEMPLATES_BY_LOCATION[johnsburg_location])
+        return johnsburg_field_templates(host, configuration_name) or []
     return _configuration_field_templates(configuration_name)
 
 

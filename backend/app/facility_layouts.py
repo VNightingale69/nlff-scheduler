@@ -4,12 +4,27 @@ JOHNSBURG_ORGANIZATION_NAMES = frozenset({'JOHNSBURG', 'JOHNSBURG SKYHAWKS'})
 JOHNSBURG_APPROVED_LAYOUT_CODES_BY_LOCATION = {
     'JOHNSBURG STADIUM': frozenset({'ONE_LARGE_ONE_MEDIUM'}),
     'HILLER PARK': frozenset({'FOUR_SMALL'}),
-    'HILLER STADIUM': frozenset({'TWO_MEDIUM'}),
+    # Hiller's two medium-field positions occupy the same physical footprint as
+    # its one large field.  The layout is selected for each scheduling wave.
+    'HILLER STADIUM': frozenset({'TWO_MEDIUM', 'ONE_LARGE'}),
 }
+JOHNSBURG_FIELD_TEMPLATES_BY_LOCATION_AND_LAYOUT = {
+    ('JOHNSBURG STADIUM', 'ONE_LARGE_ONE_MEDIUM'): [('Field 1', 'LARGE'), ('Field 3', 'MEDIUM')],
+    ('HILLER PARK', 'FOUR_SMALL'): [(f'Field {index}', 'SMALL') for index in range(1, 5)],
+    # The legacy administration label for the second position is Field 3;
+    # imports may also call that adjacent physical position Field 2.
+    ('HILLER STADIUM', 'TWO_MEDIUM'): [('Field 1', 'MEDIUM'), ('Field 3', 'MEDIUM')],
+    ('HILLER STADIUM', 'ONE_LARGE'): [('Field 1', 'LARGE')],
+}
+
+# Backwards-compatible aggregate used by administration/read models.  Layout
+# validation must use the layout-specific mapping above instead.
 JOHNSBURG_FIELD_TEMPLATES_BY_LOCATION = {
-    'JOHNSBURG STADIUM': [('Field 1', 'LARGE'), ('Field 3', 'MEDIUM')],
-    'HILLER PARK': [(f'Field {index}', 'SMALL') for index in range(1, 5)],
-    'HILLER STADIUM': [('Field 1', 'MEDIUM'), ('Field 3', 'MEDIUM')],
+    location: list(dict.fromkeys(
+        field for (candidate, _layout), fields in JOHNSBURG_FIELD_TEMPLATES_BY_LOCATION_AND_LAYOUT.items()
+        if candidate == location for field in fields
+    ))
+    for location in JOHNSBURG_APPROVED_LAYOUT_CODES_BY_LOCATION
 }
 
 
@@ -29,5 +44,7 @@ def johnsburg_field_templates(host, configuration_name) -> list[tuple[str, str]]
     """Return a configured Johnsburg layout, or None for a non-Johnsburg host/layout."""
     location = johnsburg_location_name(host)
     if location and normalized_layout_code(configuration_name) in JOHNSBURG_APPROVED_LAYOUT_CODES_BY_LOCATION[location]:
-        return list(JOHNSBURG_FIELD_TEMPLATES_BY_LOCATION[location])
+        return list(JOHNSBURG_FIELD_TEMPLATES_BY_LOCATION_AND_LAYOUT.get(
+            (location, normalized_layout_code(configuration_name)), []
+        ))
     return None
