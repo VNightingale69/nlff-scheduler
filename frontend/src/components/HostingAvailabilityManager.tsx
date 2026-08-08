@@ -412,7 +412,7 @@ export default function HostingAvailabilityManager() {
   };
 
   const summaryRows = useMemo(() => {
-    const rows = savedAvailability.map((entry: any) => {
+    const capacityRows = savedAvailability.map((entry: any) => {
       const week = entry.week_number || weekForDate(entry.available_date);
       const smallFieldCount = entry.smallFieldCount ?? entry.small_field_count ?? entry.small_field_capacity ?? 0;
       const largeFieldCount = entry.largeFieldCount ?? entry.large_field_count ?? entry.large_field_capacity ?? 0;
@@ -420,15 +420,33 @@ export default function HostingAvailabilityManager() {
       const ends = (entry.time_ranges || []).map((r: any) => Number(r.end_time.slice(0, 2)));
       const firstStart = starts.length ? Math.min(...starts) : 99;
       const lastEnd = ends.length ? Math.max(...ends) : 0;
-      const indicators: string[] = [];
       const totalSlotHours = (entry.time_ranges || []).reduce((n: number, r: any) => n + (Number(r.end_time.slice(0, 2)) - Number(r.start_time.slice(0, 2))), 0);
       const requirements = WEEKLY_CAPACITY_REQUIREMENTS[week] || { projectedSmallGames: 0, projectedLargeGames: 0, projectedTotalSlots: 0 };
-      const smallFieldSlots = smallFieldCount * totalSlotHours;
-      const largeFieldSlots = largeFieldCount * totalSlotHours;
-      const projectedGames = requirements.projectedSmallGames + requirements.projectedLargeGames;
+      const smallFieldSlots = entry.auto_select_turf_layout ? Number(entry.generated_slots_by_size?.SMALL || 0) : smallFieldCount * totalSlotHours;
+      const largeFieldSlots = entry.auto_select_turf_layout ? Number(entry.generated_slots_by_size?.LARGE || 0) : largeFieldCount * totalSlotHours;
+      return { ...entry, week, requirements, smallFieldCount, largeFieldCount, smallFieldSlots, largeFieldSlots, firstStart, lastEnd };
+    });
+    const totalsByDate = new Map<string, { small: number; large: number }>();
+    capacityRows.forEach((row: any) => {
+      const total = totalsByDate.get(row.available_date) || { small: 0, large: 0 };
+      total.small += row.smallFieldSlots;
+      total.large += row.largeFieldSlots;
+      totalsByDate.set(row.available_date, total);
+    });
+    const rows = capacityRows.map((entry: any) => {
+      const indicators: string[] = [];
+      const { week, requirements, smallFieldCount, largeFieldCount, smallFieldSlots, largeFieldSlots, firstStart, lastEnd } = entry;
+      const dateTotals = totalsByDate.get(entry.available_date) || { small: 0, large: 0 };
+      const projectedSmallGames = Number(entry.games_assigned || 0) > 0
+        ? 0
+        : (dateTotals.small > 0 ? requirements.projectedSmallGames * smallFieldSlots / dateTotals.small : 0);
+      const projectedLargeGames = Number(entry.games_assigned || 0) > 0
+        ? 0
+        : (dateTotals.large > 0 ? requirements.projectedLargeGames * largeFieldSlots / dateTotals.large : 0);
+      const projectedGames = Number(entry.games_assigned || 0) || projectedSmallGames + projectedLargeGames;
       const compatibleAvailableSlots = smallFieldSlots + largeFieldSlots;
-      const smallFieldUtilizationPct = smallFieldSlots > 0 ? (requirements.projectedSmallGames / smallFieldSlots) * 100 : 0;
-      const largeFieldUtilizationPct = largeFieldSlots > 0 ? (requirements.projectedLargeGames / largeFieldSlots) * 100 : 0;
+      const smallFieldUtilizationPct = smallFieldSlots > 0 ? (projectedSmallGames / smallFieldSlots) * 100 : 0;
+      const largeFieldUtilizationPct = largeFieldSlots > 0 ? (projectedLargeGames / largeFieldSlots) * 100 : 0;
       const overallUtilizationPct = compatibleAvailableSlots > 0 ? (projectedGames / compatibleAvailableSlots) * 100 : 0;
       const needsSmallField = requirements.projectedSmallGames > 0;
       const needsLargeField = requirements.projectedLargeGames > 0;
@@ -444,8 +462,8 @@ export default function HostingAvailabilityManager() {
       if (hasInventoryMismatch) indicators.push('field inventory mismatch');
       if (!hasInventoryMismatch && needsLargeField && largeFieldCount < 1) indicators.push('no large field available');
       if (!hasInventoryMismatch && needsSmallField && smallFieldCount < 1) indicators.push('no small field available');
-      if (!hasInventoryMismatch && requirements.projectedSmallGames > smallFieldSlots) indicators.push('insufficient small field slots');
-      if (!hasInventoryMismatch && requirements.projectedLargeGames > largeFieldSlots) indicators.push('insufficient large field slots');
+      if (!hasInventoryMismatch && projectedSmallGames > smallFieldSlots) indicators.push('insufficient small field slots');
+      if (!hasInventoryMismatch && projectedLargeGames > largeFieldSlots) indicators.push('insufficient large field slots');
       if (compatibleAvailableSlots < projectedGames) indicators.push('insufficient total slots');
       if (lastEnd > 0 && lastEnd < 14) indicators.push('scheduling window too short');
       const hasOverlap = (entry.time_ranges || []).some((r: any, i: number, arr: any[]) => {
@@ -624,7 +642,7 @@ export default function HostingAvailabilityManager() {
               <tbody>
                 {summaryRows.map((row: any, i: number) => (
                   <tr key={`${row.available_date}-${row.host_location_name}-${i}`} className='border-b'>
-                    <td className='p-2'>Week {row.week}</td><td className='p-2'>{formatDateLabel(row.available_date)}</td><td className='p-2'>{resolveCommunityName(row.organization_id, row.organization_name)}</td><td className='p-2'>{row.host_location_name}</td><td className='p-2'>{row.smallFieldCount ?? row.small_field_count ?? row.small_field_capacity ?? 0}</td><td className='p-2'>{row.largeFieldCount ?? row.large_field_count ?? row.large_field_capacity ?? 0}</td><td className='p-2'>{supportedDivisionsLabel(row.smallFieldCount ?? row.small_field_count ?? row.small_field_capacity ?? 0, row.largeFieldCount ?? row.large_field_count ?? row.large_field_capacity ?? 0)}</td><td className='p-2'>{row.smallFieldSlots}</td><td className='p-2'>{row.largeFieldSlots}</td><td className='p-2'>{row.projectedGames}</td><td className='p-2'>{row.smallFieldUtilizationPct.toFixed(1)}%</td><td className='p-2'>{row.largeFieldUtilizationPct.toFixed(1)}%</td><td className='p-2'>{row.overallUtilizationPct.toFixed(1)}%</td><td className='p-2'>{row.firstStart === 99 ? '—' : displayHour(row.firstStart)}</td><td className='p-2'>{row.lastEnd === 0 ? '—' : displayHour(row.lastEnd)}</td><td className='p-2'><span title={READINESS_DEFINITIONS[row.readiness]} className={`cursor-help rounded px-2 py-1 text-xs font-medium ${row.readiness === 'READY' ? 'bg-emerald-100 text-emerald-800' : row.readiness === 'PARTIAL' ? 'bg-amber-100 text-amber-800' : 'bg-rose-100 text-rose-800'}`}>{row.readiness}</span></td><td className='p-2'>{row.indicators.length ? <ul className='space-y-1'>{row.indicators.map((indicator: string) => <li key={`${row.available_date}-${row.host_location_name}-${indicator}`} title={INDICATOR_DEFINITIONS[indicator]} className='cursor-help underline decoration-dotted'>• {indicator}</li>)}</ul> : 'None'}</td>
+                    <td className='p-2'>Week {row.week}</td><td className='p-2'>{formatDateLabel(row.available_date)}</td><td className='p-2'>{resolveCommunityName(row.organization_id, row.organization_name)}</td><td className='p-2'>{row.host_location_name}</td><td className='p-2'>{row.smallFieldCount ?? row.small_field_count ?? row.small_field_capacity ?? 0}</td><td className='p-2'>{row.largeFieldCount ?? row.large_field_count ?? row.large_field_capacity ?? 0}</td><td className='p-2'>{supportedDivisionsLabel(row.smallFieldCount ?? row.small_field_count ?? row.small_field_capacity ?? 0, row.largeFieldCount ?? row.large_field_count ?? row.large_field_capacity ?? 0)}</td><td className='p-2'>{row.smallFieldSlots}</td><td className='p-2'>{row.largeFieldSlots}</td><td className='p-2'>{row.projectedGames.toFixed(1)}</td><td className='p-2'>{row.smallFieldUtilizationPct.toFixed(1)}%</td><td className='p-2'>{row.largeFieldUtilizationPct.toFixed(1)}%</td><td className='p-2'>{row.overallUtilizationPct.toFixed(1)}%</td><td className='p-2'>{row.firstStart === 99 ? '—' : displayHour(row.firstStart)}</td><td className='p-2'>{row.lastEnd === 0 ? '—' : displayHour(row.lastEnd)}</td><td className='p-2'><span title={READINESS_DEFINITIONS[row.readiness]} className={`cursor-help rounded px-2 py-1 text-xs font-medium ${row.readiness === 'READY' ? 'bg-emerald-100 text-emerald-800' : row.readiness === 'PARTIAL' ? 'bg-amber-100 text-amber-800' : 'bg-rose-100 text-rose-800'}`}>{row.readiness}</span></td><td className='p-2'>{row.indicators.length ? <ul className='space-y-1'>{row.indicators.map((indicator: string) => <li key={`${row.available_date}-${row.host_location_name}-${indicator}`} title={INDICATOR_DEFINITIONS[indicator]} className='cursor-help underline decoration-dotted'>• {indicator}</li>)}</ul> : 'None'}{row.capacity_diagnostics ? <details className='mt-2'><summary className='cursor-pointer'>Capacity diagnostics</summary><div>Location: {row.capacity_diagnostics.location || '—'}</div><div>Configured fields: {row.capacity_diagnostics.configured_fields?.join(', ') || 'none'}</div><div>Field sizes: {row.capacity_diagnostics.field_sizes?.join(', ') || 'none'}</div><div>Applicable layout: {row.capacity_diagnostics.applicable_layout || 'none'}</div><div>Generated slots: {row.capacity_diagnostics.generated_slots || 0}</div><div>Exclusion reason: {row.capacity_diagnostics.exclusion_reason || 'none'}</div></details> : null}</td>
                   </tr>
                 ))}
               </tbody>

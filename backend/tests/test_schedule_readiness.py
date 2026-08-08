@@ -232,10 +232,15 @@ class MultiLocationHostingAvailabilityTest(unittest.TestCase):
         self.assertEqual(resolved['available_layout'], 'Auto Select Best Layout')
         self.assertEqual(resolved['current_generated_layout'], 'THREE_SMALL')
         self.assertEqual(resolved['generated_small_field_capacity'], 3)
+        self.assertEqual(resolved['small_field_capacity'], 3)
+        self.assertGreater(resolved['generated_slots'], 0)
+        self.assertEqual(resolved['capacity_diagnostics']['location'], 'Johnsburg Stadium')
+        self.assertEqual(resolved['capacity_diagnostics']['exclusion_reason'], None)
         large_result = saved_by_date[large_demand_date]
         self.assertEqual(large_result['available_layout'], 'Auto Select Best Layout')
         self.assertEqual(large_result['current_generated_layout'], 'ONE_SMALL_ONE_LARGE')
         self.assertEqual(large_result['generated_large_field_capacity'], 1)
+        self.assertEqual(large_result['large_field_capacity'], 1)
 
         # Auto-select outcomes live on replaceable TurfWave records. Hosting
         # Availability and the site's active physical options remain unchanged.

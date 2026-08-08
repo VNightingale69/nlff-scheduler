@@ -465,6 +465,10 @@ class SavedAvailabilityEntry(BaseModel):
     generated_small_field_capacity: int = 0
     generated_medium_field_capacity: int = 0
     generated_large_field_capacity: int = 0
+    generated_slots: int = 0
+    generated_slots_by_size: dict[str, int] = {}
+    games_assigned: int = 0
+    capacity_diagnostics: dict = {}
     time_ranges: list[SavedAvailabilityRange]
 
 
