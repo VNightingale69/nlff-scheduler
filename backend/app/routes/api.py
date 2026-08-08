@@ -11990,7 +11990,7 @@ def delete_saved_hosting_availability(item_id: str, current_user: User = Depends
             host_location_id,
             date_value,
         )
-        raise HTTPException(409, TURF_WAVE_DELETE_BLOCKED_MESSAGE) from exc
+        raise HTTPException(409, 'This availability could not be deleted because a non-generated record still references it.') from exc
     except SQLAlchemyError as exc:
         db.rollback()
         logger.exception(
@@ -11999,7 +11999,7 @@ def delete_saved_hosting_availability(item_id: str, current_user: User = Depends
             host_location_id,
             date_value,
         )
-        raise HTTPException(400, TURF_WAVE_DELETE_BLOCKED_MESSAGE) from exc
+        raise HTTPException(400, 'This availability could not be deleted. No changes were saved.') from exc
 
     logger.info(
         'Availability delete complete availability_ids=%s host_location_id=%s date=%s deleted_availability_count=%s outcome=success',
@@ -12024,17 +12024,41 @@ def _delete_availability_with_generated_slots_guard(db: Session, availability_id
             GameSlot.turf_wave_id.in_(turf_wave_ids),
         )
     ).count()
-    scheduled_slot_game_count = db.query(GameSlot).filter(
-        or_(
-            GameSlot.field_instance_id.in_(availability_field_instance_ids),
-            GameSlot.turf_wave_id.in_(turf_wave_ids),
-        ),
-        GameSlot.assigned_game_id.isnot(None),
-    ).count()
-    scheduled_field_instance_game_count = db.query(Game).filter(
-        Game.field_instance_id.in_(availability_field_instance_ids)
-    ).count()
-    scheduled_game_count = scheduled_slot_game_count + scheduled_field_instance_game_count
+    scheduled_slot_game_ids = {
+        game_id
+        for (game_id,) in db.query(GameSlot.assigned_game_id).filter(
+            or_(
+                GameSlot.field_instance_id.in_(availability_field_instance_ids),
+                GameSlot.turf_wave_id.in_(turf_wave_ids),
+            ),
+            GameSlot.assigned_game_id.isnot(None),
+        ).all()
+        if game_id is not None
+    }
+    scheduled_field_instance_game_ids = {
+        game_id
+        for (game_id,) in db.query(Game.id).filter(Game.field_instance_id.in_(availability_field_instance_ids)).all()
+    }
+
+    # Include legacy placements which predate field-instance/slot associations but
+    # still occupy this availability's host/date/time window.
+    availability_rows = db.query(HostingAvailability.start_time, HostingAvailability.end_time).filter(
+        HostingAvailability.id.in_(availability_ids)
+    ).all()
+    placement_game_ids: set[uuid.UUID] = set()
+    for start_time_value, end_time_value in availability_rows:
+        placement_game_ids.update(
+            game_id
+            for (game_id,) in db.query(Game.id).filter(
+                Game.host_location_id == host_location_id,
+                Game.game_date == available_date,
+                Game.kickoff_time.isnot(None),
+                Game.kickoff_time >= start_time_value,
+                Game.kickoff_time < end_time_value,
+            ).all()
+        )
+    scheduled_game_ids = scheduled_slot_game_ids | scheduled_field_instance_game_ids | placement_game_ids
+    scheduled_game_count = len(scheduled_game_ids)
 
     logger.info(
         'Availability delete request availability_ids=%s host_location_id=%s date=%s generated_slot_count=%s scheduled_game_count=%s',
@@ -12046,6 +12070,11 @@ def _delete_availability_with_generated_slots_guard(db: Session, availability_id
     )
 
     if scheduled_game_count > 0:
+        affected_games = db.query(Game).filter(Game.id.in_(scheduled_game_ids)).order_by(Game.kickoff_time, Game.id).all()
+        affected_labels = [
+            f'{game.game_date.isoformat()} {game.kickoff_time.strftime("%H:%M") if game.kickoff_time else "time TBD"} (game {game.id})'
+            for game in affected_games
+        ]
         logger.info(
             'Availability delete blocked availability_ids=%s host_location_id=%s date=%s generated_slot_count=%s scheduled_game_count=%s outcome=blocked_scheduled_games',
             availability_ids,
@@ -12056,7 +12085,9 @@ def _delete_availability_with_generated_slots_guard(db: Session, availability_id
         )
         raise HTTPException(
             409,
-            'Cannot delete this availability because scheduled games exist for this location/date. Unschedule or move those games first.',
+            f'This availability cannot be deleted because {scheduled_game_count} scheduled game'
+            f'{"s" if scheduled_game_count != 1 else ""} use fields generated from it. '
+            f'Move or remove those games first. Affected games: {"; ".join(affected_labels)}',
         )
 
     deleted_slots = db.query(GameSlot).filter(
@@ -12071,6 +12102,12 @@ def _delete_availability_with_generated_slots_guard(db: Session, availability_id
     deleted_field_instances = db.query(FieldInstance).filter(
         FieldInstance.hosting_availability_id.in_(availability_ids)
     ).delete(synchronize_session=False)
+    # A host-plan row is an association used to drive generation. Preserve the
+    # selected host plan itself, but detach it from its now-deleted availability.
+    db.query(HostPlanSelection).filter(HostPlanSelection.availability_id.in_(availability_ids)).update(
+        {HostPlanSelection.availability_id: None},
+        synchronize_session=False,
+    )
     logger.info(
         'Availability dependents removed availability_ids=%s host_location_id=%s date=%s generated_slot_count=%s scheduled_game_count=%s deleted_slots=%s deleted_turf_waves=%s deleted_field_instances=%s outcome=dependents_deleted',
         availability_ids,
@@ -12185,9 +12222,6 @@ def list_generated_game_slots(host_location_id: uuid.UUID | None = None, availab
 
 
 GENERATED_SLOTS_CLEAR_WARNING = 'Some field instances were preserved because scheduled games reference them.'
-TURF_WAVE_DELETE_BLOCKED_MESSAGE = 'Cannot delete this hosting availability because generated turf wave records still exist. Clear generated slots/waves first or use force delete if no games are scheduled.'
-
-
 @router.delete('/generated-game-slots', response_model=GeneratedSlotsClearResponse, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_COMMUNITY_ADMIN))])
 def clear_generated_game_slots(host_location_id: uuid.UUID = Query(...), current_user: User = Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_COMMUNITY_ADMIN)), db: Session = Depends(get_db)):
     host = db.query(HostLocation).filter(HostLocation.id == host_location_id).first()
@@ -12226,6 +12260,15 @@ def clear_generated_game_slots(host_location_id: uuid.UUID = Query(...), current
     slots_deleted = db.query(GameSlot).filter(
         GameSlot.host_location_id == host_location_id,
         GameSlot.assigned_game_id.is_(None),
+    ).delete(synchronize_session=False)
+
+    # Turf waves are generated layout/capacity results, not independent schedule
+    # records. Remove every wave that no remaining slot uses so clearing slots also
+    # clears the saved availability's generated-layout display state.
+    referenced_wave_ids = select(GameSlot.turf_wave_id).filter(GameSlot.turf_wave_id.isnot(None))
+    db.query(TurfWave).filter(
+        TurfWave.host_location_id == host_location_id,
+        ~TurfWave.id.in_(referenced_wave_ids),
     ).delete(synchronize_session=False)
 
     remaining_slot_field_instance_ids = set()
