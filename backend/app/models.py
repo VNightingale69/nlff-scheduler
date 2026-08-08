@@ -276,6 +276,7 @@ class Week(Base, TimestampMixin):
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default='draft')
     host_assignment_pending: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    host_assignment_locked: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     season = relationship('Season')
     __table_args__ = (UniqueConstraint('season_id', 'week_number', name='uq_week_season_number'),)
 

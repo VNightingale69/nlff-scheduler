@@ -17,6 +17,8 @@ type MatrixDate = {
   is_postseason: boolean;
   status: string | null;
   date_type?: string | null;
+  host_assignment_pending?: boolean;
+  host_assignment_locked?: boolean;
 };
 
 type MatrixCell = {
@@ -84,6 +86,9 @@ type WeeklySummary = MatrixDate & {
   target_game_split: Record<string, number>;
   validation_warnings: string[];
   weekly_host_plan_decision_summary?: WeeklyHostPlanDecisionSummary;
+  hosting_status?: string;
+  physical_capacity_validation?: string;
+  field_capacity_message?: string | null;
 };
 
 type MatrixResponse = {
@@ -109,6 +114,7 @@ const LABELS: Record<string, string> = {
   BLOCKED_CAPACITY: 'BC',
   BLOCKED_ROTATION: 'BR',
   BLOCKED_FIELD_SIZE: 'BF',
+  DEFERRED: 'TBD',
 };
 
 const CELL_CLASSES: Record<string, string> = {
@@ -123,6 +129,7 @@ const CELL_CLASSES: Record<string, string> = {
   BLOCKED_CAPACITY: 'bg-rose-100 text-rose-700',
   BLOCKED_ROTATION: 'bg-orange-100 text-orange-700',
   BLOCKED_FIELD_SIZE: 'bg-purple-100 text-purple-700',
+  DEFERRED: 'bg-amber-100 text-amber-900 ring-1 ring-amber-300',
 };
 
 const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -383,7 +390,7 @@ export default function HostAvailabilityMatrix() {
     }
   };
 
-  const runAction = async (action: 'generate' | 'lock' | 'unlock' | 'clear' | 'auto' | 'repair') => {
+  const runAction = async (action: 'generate' | 'lock' | 'unlock' | 'clear' | 'auto' | 'repair' | 'defer' | 'resolve') => {
     if (!canModifyMatrix) {
       setMessage(HOST_PLAN_SELECTION_PERMISSION_MESSAGE);
       return;
@@ -392,7 +399,10 @@ export default function HostAvailabilityMatrix() {
     setError('');
     setMessage('');
     try {
-      if (action === 'generate') {
+      if (action === 'defer' || action === 'resolve') {
+        await apiFetch('/host-availability-matrix/hosting-status', { method: 'POST', body: JSON.stringify({ season_id: seasonId, game_date: selectedDate, deferred: action === 'defer' }) }, token);
+        setMessage(action === 'defer' ? 'Hosting marked TBD / Deferred. Matchups may be generated without physical placement.' : 'TBD Hosting resolved. Assign a legitimate host and generate slots; existing matchups do not need regeneration.');
+      } else if (action === 'generate') {
         const result: any = await apiFetch('/host-availability-matrix/generate-suggested-plan', { method: 'POST', body: JSON.stringify({ season_id: seasonId, game_date: selectedDate }) }, token);
         setMessage(result?.decision_message || 'Generated a suggested host plan for the selected week.');
       } else if (action === 'lock' || action === 'unlock') {
@@ -446,6 +456,9 @@ export default function HostAvailabilityMatrix() {
         </div>
       </div>
       <div className='mt-4 flex flex-wrap gap-2'>
+        {selectedSummary?.host_assignment_pending
+          ? <button className='rounded bg-amber-700 px-3 py-2 text-sm font-semibold text-white disabled:bg-slate-300' disabled={!canModifyMatrix || !selectedDate || Boolean(selectedSummary.host_assignment_locked)} onClick={() => runAction('resolve')}>Resolve TBD Hosting</button>
+          : <button className='rounded bg-amber-600 px-3 py-2 text-sm font-semibold text-white disabled:bg-slate-300' disabled={!canModifyMatrix || !selectedDate || selectedSummary?.date_type !== 'REGULAR_SEASON'} onClick={() => runAction('defer')}>Mark Hosting TBD</button>}
         <button className='rounded bg-indigo-600 px-3 py-2 text-sm font-semibold text-white disabled:bg-slate-300' disabled={!canModifyMatrix || !selectedDate} onClick={() => runAction('generate')}>Generate Suggested Host Plan</button>
         <button className='rounded bg-emerald-700 px-3 py-2 text-sm font-semibold text-white disabled:bg-slate-300' disabled={!canModifyMatrix || saving || !Object.keys(dirtyCells).length} onClick={saveChanges}>Save Matrix Changes</button>
         <button className='rounded bg-blue-700 px-3 py-2 text-sm font-semibold text-white disabled:bg-slate-300' disabled={!canModifyMatrix || !selectedDate} onClick={() => runAction('lock')}>Lock Selected Week</button>
@@ -468,8 +481,8 @@ export default function HostAvailabilityMatrix() {
             <tr>
               <th className='sticky left-0 z-20 border-b bg-slate-100 px-3 py-2 text-left'>Community</th>
               <th className='sticky left-36 z-20 border-b bg-slate-100 px-3 py-2 text-left'>Host Location</th>
-              {filteredDates.map((date) => <th key={date.game_date} className={`border-b px-2 py-2 text-center ${date.is_postseason ? 'bg-amber-100 font-bold text-amber-900' : ''}`}>
-                <button className='min-w-16' onClick={() => setSelectedDate(date.game_date)}>{date.date_type === 'BLACKOUT' ? 'B ' : date.is_postseason ? 'P ' : ''}{formatDate(date.game_date)}</button>
+              {filteredDates.map((date) => <th key={date.game_date} className={`border-b px-2 py-2 text-center ${date.host_assignment_pending ? 'bg-amber-200 font-bold text-amber-950' : date.is_postseason ? 'bg-amber-100 font-bold text-amber-900' : ''}`}>
+                <button className='min-w-16' onClick={() => setSelectedDate(date.game_date)}>{date.date_type === 'BLACKOUT' ? 'B ' : date.is_postseason ? 'P ' : ''}{formatDate(date.game_date)}{date.host_assignment_pending ? <span className='block text-xs'>TBD{date.host_assignment_locked ? ' · Locked' : ''}</span> : null}</button>
               </th>)}
             </tr>
           </thead>
@@ -481,14 +494,14 @@ export default function HostAvailabilityMatrix() {
                 const cell = getCell(row, date);
                 const status = cell.locked ? 'LOCKED' : cell.status;
                 const classes = CELL_CLASSES[status] || CELL_CLASSES.AVAILABLE;
-                return <td key={date.game_date} className='px-1 py-1 text-center'>
+                return <td key={date.game_date} className={`px-1 py-1 text-center ${date.host_assignment_pending ? 'bg-amber-50' : ''}`}>
                   <button
                     title={!canModifyMatrix ? HOST_PLAN_SELECTION_PERMISSION_MESSAGE : cell.has_saved_availability ? `${status}${cell.reason ? `: ${cell.reason}` : ''}` : HOST_PLAN_MISSING_AVAILABILITY_MESSAGE}
                     className={`h-9 w-12 rounded border text-sm font-semibold ${classes} ${selectedDate === date.game_date ? 'outline outline-2 outline-offset-1 outline-indigo-400' : ''} ${canModifyMatrix ? '' : 'cursor-not-allowed opacity-80'}`}
-                    disabled={!canModifyMatrix}
+                    disabled={!canModifyMatrix || Boolean(date.host_assignment_pending)}
                     onClick={(event) => handleCellClick(row, date, event)}
                     onContextMenu={(event) => handleCellMenu(row, date, event)}
-                  >{LABELS[status] ?? status.slice(0, 1)}</button>
+                  >{date.host_assignment_pending ? 'TBD' : (LABELS[status] ?? status.slice(0, 1))}</button>
                 </td>;
               })}
             </tr>))}
@@ -504,6 +517,16 @@ export default function HostAvailabilityMatrix() {
             <div className='font-semibold'>Week {selectedSummary.week_number ?? '—'}, {formatDate(selectedSummary.game_date)}</div>
             <div className='text-slate-500'>{selectedSummary.label} • {(selectedSummary.date_type || 'REGULAR_SEASON').replace('_', ' ')}{selectedSummary.is_postseason ? ' • Playoff/Championship' : ''}</div>
           </div>
+          {selectedSummary.host_assignment_pending ? <div className='rounded border border-amber-300 bg-amber-50 p-3 text-amber-950'>
+            <div><b>Hosting status:</b> TBD / Deferred{selectedSummary.host_assignment_locked ? ' · Locked' : ''}</div>
+            <div><b>Required games:</b> {selectedSummary.total_games_required}</div>
+            <div><b>Selected communities:</b> 0</div>
+            <div><b>Selected locations:</b> 0</div>
+            <div><b>Physical capacity validation:</b> Not required — placement deferred</div>
+            <div><b>Field capacity:</b> Deferred until host assignment</div>
+            <div className='mt-2 font-medium text-emerald-800'>Ready — matchups can be generated; host/field/time assignment deferred.</div>
+          </div> : null}
+          {!selectedSummary.host_assignment_pending ? <>
           <div className='grid grid-cols-2 gap-2'>
             <div className='rounded bg-slate-50 p-2'><div className='text-xs text-slate-500'>Available communities</div><div className='text-lg font-bold'>{selectedSummaryDetails?.availableCommunities.length ?? selectedSummary.available_communities?.length ?? 0}</div></div>
             <div className='rounded bg-slate-50 p-2'><div className='text-xs text-slate-500'>Available locations</div><div className='text-lg font-bold'>{selectedSummaryDetails?.availableLocations.length ?? selectedSummary.available_locations?.length ?? 0}</div></div>
@@ -586,6 +609,7 @@ export default function HostAvailabilityMatrix() {
             {selectedSummary.validation_warnings.length ? <ul className='mt-1 list-disc pl-5 text-rose-700'>{selectedSummary.validation_warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul> : <p className='mt-1 text-emerald-700'>Selected capacity supports the estimated week demand.</p>}
             <p className='mt-2 text-xs text-slate-500'>Odd-team doubleheader adjacency is enforced by the auto-scheduler; add an overflow field if adjacent same-location slots are unavailable.</p>
           </section>
+          </> : null}
         </div> : <p className='mt-2 text-sm text-slate-500'>Select a date column to view capacity, selected fields, excluded fields, and validation.</p>}
       </aside>
     </div>
