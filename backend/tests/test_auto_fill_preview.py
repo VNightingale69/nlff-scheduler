@@ -10,7 +10,17 @@ from fastapi import HTTPException
 
 from app.database import Base
 from app.models import Division, FieldInstance, Game, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostPlanSelection, HostingAvailability, Organization, Season, Team, TurfWave, Week
-from app.routes.api import TURF_SLOT_SAFE_FAILURE_MESSAGE, TurfSlotCreationError, _build_host_location_vs_home_team_verification, _build_revised_scheduling_hierarchy_diagnostics, _build_turf_stadium_utilization_diagnostics, _classify_host_for_date, _normalize_field_size, _regenerate_generated_slots, _diagnostic_active_teams_expected_to_play, _diagnostic_expected_games_for_team_count, _diagnostic_field_size_diff, _host_availability_matrix_response, _run_manual_optimization_workflow, _run_turf_wave_compaction_pass, _renumber_turf_waves_for_host_date, auto_fill_apply, auto_fill_preview, auto_schedule_entire_season, generate_suggested_host_plan, get_or_create_game_slot, run_post_schedule_repair_pass
+from app.routes.api import TURF_SLOT_SAFE_FAILURE_MESSAGE, TurfSlotCreationError, _auto_schedule_deadline_exceeded, _build_host_location_vs_home_team_verification, _build_revised_scheduling_hierarchy_diagnostics, _build_turf_stadium_utilization_diagnostics, _classify_host_for_date, _normalize_field_size, _regenerate_generated_slots, _diagnostic_active_teams_expected_to_play, _diagnostic_expected_games_for_team_count, _diagnostic_field_size_diff, _host_availability_matrix_response, _run_manual_optimization_workflow, _run_turf_wave_compaction_pass, _renumber_turf_waves_for_host_date, auto_fill_apply, auto_fill_preview, auto_schedule_entire_season, generate_suggested_host_plan, get_or_create_game_slot, run_post_schedule_repair_pass
+
+
+class AutoScheduleDeadlineTest(unittest.TestCase):
+    def test_zero_second_deadline_expires_instead_of_disabling_safeguard(self):
+        self.assertTrue(_auto_schedule_deadline_exceeded(0.0, 0))
+
+    @patch('app.routes.api.perf_counter', side_effect=[100.0, 105.1])
+    def test_elapsed_deadline_is_monotonic_and_bounded(self, _clock):
+        started = __import__('app.routes.api', fromlist=['perf_counter']).perf_counter()
+        self.assertTrue(_auto_schedule_deadline_exceeded(started, 5))
 
 
 class AutoFillPreviewTest(unittest.TestCase):

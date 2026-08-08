@@ -64,6 +64,11 @@ AUTO_SCHEDULE_MOVE_ATTEMPT_LIMIT_PER_SCHEDULE = 10_000
 AUTO_SCHEDULE_REPEATED_MOVE_WARN_THRESHOLD = 3
 
 
+def _auto_schedule_deadline_exceeded(started_perf: float, limit_seconds: int) -> bool:
+    """Check the cooperative deadline used by CPU-bound scheduling loops."""
+    return (perf_counter() - started_perf) >= max(0, limit_seconds)
+
+
 
 def _bounded_int_env(name: str, default: int, minimum: int = 1) -> int:
     try:
@@ -21519,7 +21524,9 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
         host_plan_allowed_ids = _host_plan_allowed_host_ids_for_week(db, season_id, week_id, db.query(Week.primary_game_date).filter(Week.id == week_id).scalar())
         if host_plan_allowed_ids is not None:
             open_slots = [slot for slot in open_slots if slot.host_location_id in host_plan_allowed_ids]
-        while remaining_needed > 0:
+        recovery_attempts = 0
+        recovery_attempt_limit = AUTO_SCHEDULE_CANDIDATE_EVALUATION_LIMIT_PER_DATE
+        while remaining_needed > 0 and recovery_attempts < recovery_attempt_limit:
             placed = False
             candidate_teams = sorted(
                 division_team_ids,
@@ -21546,6 +21553,9 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
                         ),
                     )
                     for slot in preferred_slots:
+                        recovery_attempts += 1
+                        if recovery_attempts >= recovery_attempt_limit:
+                            break
                         slot_owner_org = host_org_by_location_id.get(str(slot.host_location_id)) if slot.host_location_id else None
                         oriented = _home_away_for_owned_host(home_tid, away_tid, slot_owner_org) if slot_owner_org in active_home_host_orgs else None
                         placement_home_tid, placement_away_tid = oriented if oriented else (home_tid, away_tid)
@@ -21584,6 +21594,11 @@ def auto_fill_apply(payload: dict, db: Session = Depends(get_db)):
                     break
             if not placed:
                 break
+        if remaining_needed > 0 and recovery_attempts >= recovery_attempt_limit:
+            _add_skipped(
+                f'PLACEMENT_SEARCH_LIMIT_REACHED: stopped after {recovery_attempt_limit} recovery attempts; '
+                'the remaining games require manual resolution.'
+            )
         total_created_for_week = existing_games_count + created_games
         if total_created_for_week < required_games_for_division_week:
             unscheduled_ids = [tid for tid in division_team_ids if week_team_game_counts.get(uuid.UUID(tid), 0) == 0]
@@ -22010,6 +22025,42 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         'max_total_move_attempts_per_schedule': _runtime_limit('max_total_move_attempts_per_schedule', AUTO_SCHEDULE_MOVE_ATTEMPT_LIMIT_PER_SCHEDULE),
         'max_repeated_rejections_per_candidate': _runtime_limit('max_repeated_rejections_per_candidate', AUTO_SCHEDULE_REPEATED_MOVE_WARN_THRESHOLD),
     }
+
+    def _stage(event: str, **counts: object) -> None:
+        logger.info(
+            'auto_schedule_stage run_id=%s event=%s elapsed_ms=%s counts=%s',
+            auto_schedule_run_id, event,
+            int((perf_counter() - auto_schedule_started_perf) * 1000), counts,
+        )
+
+    def _deadline_expired() -> bool:
+        return _auto_schedule_deadline_exceeded(auto_schedule_started_perf, runtime_limits['max_total_runtime_seconds'])
+
+    def _timeout_failure(phase: str) -> dict[str, object]:
+        elapsed_ms = int((perf_counter() - auto_schedule_started_perf) * 1000)
+        db.rollback()
+        diagnostics = _ensure_auto_schedule_diagnostics()
+        diagnostics.update({
+            'phase_metrics': phase_metrics, 'timeout_triggered': True,
+            'timeout_phase': phase, 'total_runtime_ms': elapsed_ms,
+            'search_limits': dict(runtime_limits),
+        })
+        _stage('response returned', status='TIMEOUT', phase=phase)
+        logger.warning('auto_schedule_timeout run_id=%s phase=%s elapsed_ms=%s', auto_schedule_run_id, phase, elapsed_ms)
+        return {
+            'status': 'TIMEOUT',
+            'message': f'Auto-schedule stopped during {phase} after reaching its runtime limit.',
+            'schedule_complete': False,
+            'diagnostic_failure': {
+                'code': 'AUTO_SCHEDULE_TIMEOUT', 'phase': phase,
+                'elapsed_ms': elapsed_ms,
+                'limit_seconds': runtime_limits['max_total_runtime_seconds'],
+                'retryable': True,
+            },
+            'auto_schedule_diagnostics': diagnostics,
+        }
+
+    _stage('request received', season_id=season_id, clear_existing=clear_existing, dry_run=dry_run)
     logger.info(
         'auto_schedule_post_start season_id=%s clear_existing=%s dry_run=%s start_timestamp=%s',
         season_id,
@@ -22023,6 +22074,7 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
     season = db.query(Season).filter(Season.id == season_id).first()
     if not season:
         raise HTTPException(404, 'Season not found')
+    _stage('season loaded', seasons=1)
     start_teams_count = season_roster_query(db, season_id).count()
     start_divisions_count = db.query(func.count(Division.id)).filter(Division.is_active.is_(True)).scalar() or 0
     start_weeks_count = db.query(func.count(Week.id)).filter(Week.season_id == season_id).scalar() or 0
@@ -22031,6 +22083,7 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         HostingAvailability.is_available.is_(True),
     ).scalar() or 0
     start_generated_slots_count = db.query(func.count(GameSlot.id)).filter(GameSlot.season_id == season_id).scalar() or 0
+    _stage('active teams loaded', teams=start_teams_count, divisions=start_divisions_count)
     logger.info(
         'AUTO_SCHEDULE_START season_id=%s timestamp=%s teams_count=%s divisions_count=%s weeks_count=%s required_games_count=%s selected_host_locations_count=%s generated_slots_count=%s runtime_limits=%s',
         season_id,
@@ -22112,6 +22165,7 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
             and (str(host.surface_type or '').upper() == 'TURF_STADIUM' or _classify_host_for_date(db, host) in {HOST_ROLE_TURF_STADIUM, HOST_ROLE_PRIMARY_TURF, HOST_ROLE_SECONDARY_TURF})
         ]
     _finish_phase(build_selected_host_phase, records_evaluated=sum(len(rows) for rows in selected_hosts_by_date.values()))
+    _stage('hosting plan loaded', weeks=len(selected_hosts_by_date), hosts=sum(len(rows) for rows in selected_hosts_by_date.values()))
 
     build_slots_phase = _start_phase('build generated slot map')
     generated_slots_by_date_host: dict[str, dict[str, int]] = {}
@@ -22122,6 +22176,7 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         host_key = str(host_id) if host_id else 'unknown_host'
         generated_slots_by_date_host.setdefault(date_key, {})[host_key] = int(count or 0)
     _finish_phase(build_slots_phase, records_evaluated=sum(sum(row.values()) for row in generated_slots_by_date_host.values()))
+    _stage('generated slots loaded', slots=sum(sum(row.values()) for row in generated_slots_by_date_host.values()))
 
     def _expected_games_for_start_log() -> int:
         total = 0
@@ -22138,6 +22193,8 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
     build_required_games_phase = _start_phase('build required games')
     games_to_schedule_count = _expected_games_for_start_log()
     _finish_phase(build_required_games_phase, records_evaluated=games_to_schedule_count)
+    _stage('weekly demand calculated', games=games_to_schedule_count, weeks=len(weeks))
+    _stage('deferred/TBD weeks identified', weeks=sum(1 for week in weeks if week.host_assignment_pending))
     logger.info(
         'AUTO_SCHEDULE_START_COUNTS season_id=%s timestamp=%s teams_count=%s divisions_count=%s weeks_count=%s required_games_count=%s selected_host_locations_count=%s generated_slots_count=%s',
         season_id,
@@ -22888,9 +22945,13 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         }
 
     initial_placement_phase = _start_phase('initial placement')
+    _stage('matchup generation started', divisions=len(division_order), weeks=len(_regular_season_weeks()))
+    _stage('field placement started', placement_weeks=len(placement_weeks))
     week_progress_started_at: dict[str, float] = {}
     week_progress: dict[str, dict[str, object]] = {}
     for group, name in division_order:
+        if _deadline_expired():
+            return _timeout_failure('matchup generation')
         requested_label = f'{group} {name}'
         requested_normalized = normalize_division_name(requested_label)
         division = divisions_by_key.get(canonical_division_id(group, name)) or divisions_by_normalized_name.get(requested_normalized)
@@ -22907,6 +22968,8 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         division_created = 0
         division_unresolved = False
         for week in _regular_season_weeks():
+            if _deadline_expired():
+                return _timeout_failure('field placement')
             week_game_date = _week_game_date(week)
             if not week_game_date:
                 warnings.append(f'Week {week.week_number} skipped: missing Primary Game Date.')
@@ -22934,6 +22997,8 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
             unresolved_conflicts: list[dict[str, object]] = []
             host_count = 0
             if week.host_assignment_pending:
+                # Deferred weeks generate matchup commitments only and never
+                # enter slot regeneration or physical placement retries.
                 deferred = _create_deferred_games(division, week, required_games)
                 created_count = len(deferred)
                 division_created += created_count
@@ -23300,8 +23365,13 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         moves_accepted=preview_assignments_count if dry_run else committed_assignments_count,
         moves_rejected=sum(skipped_attempts_by_reason.values()) + failed_validation_count,
     )
+    _stage('matchup generation completed', attempted_groups=attempted_game_groups, valid_assignments=valid_assignments_found)
+    _stage('field placement completed', games=committed_assignments_count, rejected=sum(skipped_attempts_by_reason.values()))
 
     doubleheader_repair_phase = _start_phase('mandatory doubleheader repair')
+    if _deadline_expired():
+        return _timeout_failure('doubleheader assignment')
+    _stage('doubleheader assignment started')
     doubleheader_repair_diagnostics = _run_global_doubleheader_repair(db, season_id, dry_run=dry_run)
     if auto_schedule_diagnostics is None:
         auto_schedule_diagnostics = {}
@@ -23337,6 +23407,7 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         moves_accepted=int(doubleheader_repair_diagnostics.get('doubleheader_repair_success_count') or 0),
         moves_rejected=int(doubleheader_repair_diagnostics.get('doubleheader_repair_failure_count') or 0),
     )
+    _stage('doubleheader assignment completed', failures=doubleheader_repair_failure_count)
 
     generated_slot_integrity_phase = _start_phase('generated slot integrity repair')
     generated_slot_integrity_diagnostics = _run_generated_slot_integrity_validation_and_repair(db, season_id, repair=not dry_run)
@@ -23354,6 +23425,9 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         validation_errors.append('Generated slot integrity repair left unresolved hard-rule failures.')
 
     hard_validation: list[dict[str, object]] = []
+    if _deadline_expired():
+        return _timeout_failure('validation')
+    _stage('validation started')
     doubleheader_phase = _start_phase('doubleheader validation')
     final_validation_phase = _start_phase('final validation')
     for week in _regular_season_weeks():
@@ -23498,6 +23572,7 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         records_evaluated=len(hard_validation),
         moves_rejected=len(validation_errors),
     )
+    _stage('validation completed', weeks=len(hard_validation), failures=len(validation_errors))
 
     diagnostics_phase = _start_phase('diagnostics build')
     auto_schedule_diagnostics = _ensure_auto_schedule_diagnostics()
@@ -23754,11 +23829,14 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         validation_warnings.append({'code': 'turf_wave_compaction_rollback', 'message': rollback_warning})
 
     commit_phase = _start_phase('database commit')
+    _stage('database write started', games=total_games_created)
     if dry_run:
         db.rollback()
     else:
         db.commit()
     _finish_phase(commit_phase, records_evaluated=total_games_created, moves_accepted=0 if dry_run else total_games_created)
+    _stage('database write completed', games=total_games_created)
+    _stage('transaction committed', committed=not dry_run)
 
     host_location_verification = _build_host_location_vs_home_team_verification(db, season_id)
     auto_schedule_diagnostics['selected_host_enforcement_diagnostics'] = selected_host_enforcement_diagnostics
@@ -23959,6 +24037,8 @@ def auto_schedule_entire_season(payload: dict, current_user: User = Depends(requ
         total_elapsed_ms,
         phase_metrics,
     )
+
+    _stage('response returned', status=final_status, games=total_games_created)
 
     return {
         'status': final_status,
