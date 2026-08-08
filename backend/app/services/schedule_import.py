@@ -29,6 +29,12 @@ def _normalized_name(value):
     return _text(value).casefold()
 
 
+def _normalized_field_type(value):
+    """Return a canonical individual field type, independent of layout labels."""
+    normalized = _text(value).casefold()
+    return normalized.upper() if normalized in {'small', 'medium', 'large'} else None
+
+
 def _week_number(value):
     """Parse spreadsheet numbers and human-readable labels such as ``Week 1``."""
     if isinstance(value, bool):
@@ -177,45 +183,31 @@ def build_preview(db, season_id, raw_rows):
             if not field and not field_instance and not configuration_candidates:
                 errors.append(f'Field "{_text(raw.get("field"))}" could not be found at site "{_text(raw.get("site"))}".')
 
-        field_type = _text(raw.get('fieldtype')).upper()
+        field_type = _normalized_field_type(raw.get('fieldtype'))
         configured_field_type = None
-        if field_type not in {'SMALL', 'MEDIUM', 'LARGE'}:
+        if not field_type:
             errors.append('Field Type must be Small, Medium, or Large.')
         else:
-            resolved_type = (field_instance.field_type if field_instance else None) or (field.layout_type if field else None)
-            configured_field_type = _text(resolved_type).title() or None
-            active_layouts = db.query(HostLocationConfiguration).filter_by(
-                host_location_id=site.id, is_active=True).all() if site else []
-            has_configured_layouts = any(
-                johnsburg_field_templates(site, layout.configuration_name) is not None
-                for layout in active_layouts
-            )
-            type_mismatch = bool(
-                resolved_type and not _key(resolved_type).startswith(_key(field_type))
-            )
+            # ``Field.layout_type`` is the configured type of the canonical
+            # field resolved above.  A dated instance can reflect a generated
+            # layout, so it is only authoritative when no canonical Field was
+            # resolved.  Site configuration names (for example FOUR_SMALL)
+            # are deliberately not individual field types.
+            resolved_type = (field.layout_type if field else None) or (
+                field_instance.field_type if field_instance else None)
+            canonical_field_type = _normalized_field_type(resolved_type)
+            configured_field_type = canonical_field_type.title() if canonical_field_type else None
+            type_mismatch = bool(canonical_field_type and canonical_field_type != field_type)
             # A field can be deliberately reconfigured for one timeslot.  Keep
             # this advisory separate from errors so it never prevents staging.
             if type_mismatch:
-                if configuration_candidates:
-                    warnings.append(
-                        f'Field "{_text(raw.get("field"))}" is being used as a '
-                        f'{_text(raw.get("fieldtype")).title()} field at '
-                        f'{_text(raw.get("site"))} for this timeslot. Verify the site '
-                        'will be reconfigured appropriately before game day.'
-                    )
-                else:
+                if canonical_field_type:
                     warnings.append(
                         f'Field "{_text(raw.get("field"))}" is normally configured as '
-                        f'"{_text(resolved_type).title()}", but the import requests '
-                        f'"{_text(raw.get("fieldtype")).title()}". Verify the field will be '
+                        f'"{canonical_field_type.title()}", but the import requests '
+                        f'"{field_type.title()}". Verify the field will be '
                         'reconfigured for this timeslot.'
                     )
-            elif has_configured_layouts and not configuration_candidates and (field or field_instance):
-                warnings.append(
-                    f'Imported Field Type "{_text(raw.get("fieldtype")).title()}" does not '
-                    'match the current field configuration. Verify the field configuration '
-                    'before game day.'
-                )
 
         division = divisions.get(_key(raw.get('division')))
         if not division:

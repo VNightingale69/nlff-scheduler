@@ -242,8 +242,8 @@ def test_hiller_large_reconfiguration_is_warning_and_records_selected_layout():
     assert preview['blocking_errors'] == 0
     assert preview['rows'][0]['status'] == 'WARNING'
     assert preview['rows'][0]['message'].startswith(
-        'Field "Field 1" is being used as a Large field at Hiller Stadium for this '
-        'timeslot. Verify the site will be reconfigured appropriately before game day.')
+        'Field "Field 1" is normally configured as "Medium", but the import requests '
+        '"Large". Verify the field will be reconfigured for this timeslot.')
     assert staged[0]['configuration_name'] == 'ONE_LARGE'
     assert staged[0]['configuration_id'] is None
     assert 'will use its One Large configuration' in preview['rows'][0]['message']
@@ -399,6 +399,50 @@ def test_exact_configured_field_type_match_remains_valid():
     assert preview['rows'][0]['status'] == 'VALID'
     assert preview['warning_count'] == 0
     assert preview['blocking_errors'] == 0
+
+
+@pytest.mark.parametrize('imported_type', ['Small', 'small', ' SMALL '])
+def test_canonical_field_type_comparison_normalizes_case_and_whitespace(imported_type):
+    db, season, teams, site, _fields = _canonical_hiller_park_context()
+    row = _hiller_row('12:00 PM', 'SW', imported_type, teams[0], teams[1])
+    row['site'] = site.name
+
+    preview, staged = build_preview(db, season.id, [row])
+
+    assert len(staged) == 1
+    assert preview['rows'][0]['configured_field_type'] == 'Small'
+    assert preview['rows'][0]['status'] == 'VALID'
+    assert preview['warning_count'] == 0
+
+
+@pytest.mark.parametrize(('site_name', 'canonical_name', 'imported_name', 'field_type'), [
+    ('Hiller Stadium', 'Johnsburg - Hiller - Medium - Medium Field 1',
+     'Medium Field 1', 'Medium'),
+    ('Hiller Stadium', 'Johnsburg - Hiller - Medium - Medium Field 2',
+     'Medium Field 2', 'Medium'),
+    ('Johnsburg Stadium', 'Johnsburg - Stadium - Large - Large Field 1',
+     'Large Field 1', 'Large'),
+    ('Johnsburg Stadium', 'Johnsburg - Stadium - Medium - Medium Field 1',
+     'Medium Field 1', 'Medium'),
+])
+def test_canonical_named_fields_use_their_own_configured_type(
+        site_name, canonical_name, imported_name, field_type):
+    db, season, teams = _hiller_import_context()
+    site = db.query(HostLocation).filter_by(name='Hiller Stadium').one()
+    site.name = site_name
+    db.query(Field).delete()
+    canonical = Field(host_location_id=site.id, name=canonical_name,
+                      layout_type=field_type.upper(), is_active=True)
+    db.add(canonical); db.commit()
+    row = _hiller_row('12:00 PM', imported_name, field_type, teams[0], teams[1])
+    row['site'] = site_name
+
+    preview, staged = build_preview(db, season.id, [row])
+
+    assert preview['rows'][0]['status'] == 'VALID'
+    assert preview['rows'][0]['message'] == 'Ready to import.'
+    assert preview['warning_count'] == 0
+    assert staged[0]['resolved_field_id'] == str(canonical.id)
 
 
 def test_unknown_hiller_field_remains_a_blocking_error():
