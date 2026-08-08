@@ -11694,6 +11694,24 @@ def list_saved_hosting_availability(season_id: uuid.UUID | None = None, organiza
 
     def _generated_layout_result(availability: HostingAvailability) -> dict[str, object]:
         """Return only the current, replaceable Generated Slots layout result."""
+        host = availability.host_location
+        active_fields = []
+        eligible_layouts: list[str] = []
+        if host:
+            active_fields = db.query(Field).filter(
+                Field.host_location_id == host.id,
+                Field.is_active.is_(True),
+                Field.deleted_at.is_(None),
+            ).order_by(Field.name).all()
+            if (host.surface_type or 'GRASS_FIELD') == 'TURF_STADIUM':
+                _ensure_approved_turf_configurations(db, host)
+                db.flush()
+                eligible_layouts = _available_turf_configuration_names(
+                    db.query(HostLocationConfiguration).filter(
+                        HostLocationConfiguration.host_location_id == host.id,
+                        HostLocationConfiguration.is_active.is_(True),
+                    ).all()
+                )
         waves = db.query(TurfWave).filter(
             TurfWave.hosting_availability_id == availability.id,
             TurfWave.host_location_id == availability.host_location_id,
@@ -11721,6 +11739,7 @@ def list_saved_hosting_availability(season_id: uuid.UUID | None = None, organiza
         if availability.week_id:
             slot_query = slot_query.filter(GameSlot.week_id == availability.week_id)
         slots = slot_query.all()
+        effective_layouts = layouts if slots else []
         capacity = _empty_field_size_counts()
         slot_counts = _empty_field_size_counts()
         concurrent_counts: dict[tuple[time, time], dict[str, int]] = {}
@@ -11738,11 +11757,24 @@ def list_saved_hosting_availability(season_id: uuid.UUID | None = None, organiza
             exclusion_reasons.append('No active generated field instances match this availability, host location, and date.')
         if instances and not slots:
             exclusion_reasons.append('Generated fields exist, but no slots match this availability\'s season, week, host location, and date.')
-        if bool(getattr(availability, 'auto_select_turf_layout', True)) and not layouts:
+        if waves and not slots:
+            exclusion_reasons.append('Stale turf wave/layout rows exist without matching generated slots; regenerate this availability.')
+        if bool(getattr(availability, 'auto_select_turf_layout', True)) and not effective_layouts:
             exclusion_reasons.append('No current turf wave/layout is mapped to this availability and date.')
         configured_layout = availability.selected_configuration.configuration_name if availability.selected_configuration else availability.layout_type
+        selected_or_generated_layout = ', '.join(effective_layouts) if effective_layouts else configured_layout
+        if not selected_or_generated_layout and host and eligible_layouts:
+            selected = _select_best_turf_configuration(db, availability, host)
+            selected_or_generated_layout = selected.configuration_name if selected else None
+        zero_inventory_reason = None
+        if not host:
+            zero_inventory_reason = 'Availability is not related to a host location.'
+        elif (host.surface_type or 'GRASS_FIELD') == 'TURF_STADIUM' and not eligible_layouts:
+            zero_inventory_reason = 'No active approved layouts are configured for this turf stadium.'
+        elif (host.surface_type or 'GRASS_FIELD') != 'TURF_STADIUM' and not active_fields:
+            zero_inventory_reason = 'No active fields are related to this host location.'
         return {
-            'current_generated_layout': ', '.join(layouts) if layouts else None,
+            'current_generated_layout': ', '.join(effective_layouts) if effective_layouts else None,
             'generated_small_field_capacity': capacity[FIELD_SIZE_SMALL],
             'generated_medium_field_capacity': capacity[FIELD_SIZE_MEDIUM],
             'generated_large_field_capacity': capacity[FIELD_SIZE_LARGE],
@@ -11750,11 +11782,19 @@ def list_saved_hosting_availability(season_id: uuid.UUID | None = None, organiza
             'generated_slots_by_size': slot_counts,
             'games_assigned': sum(1 for slot in slots if slot.assigned_game_id),
             'capacity_diagnostics': {
-                'location': availability.host_location.name if availability.host_location else None,
+                'availability_id': str(availability.id),
+                'host_location_id': str(availability.host_location_id) if availability.host_location_id else None,
+                'location': host.name if host else None,
+                'active_fields_found': len(active_fields),
+                'active_fields': [field.name for field in active_fields],
                 'configured_fields': [instance.field_name for instance in instances],
-                'field_sizes': [instance.field_type for instance in instances],
-                'applicable_layout': ', '.join(layouts) if layouts else configured_layout or ('Active Grass Fields' if (availability.host_location.surface_type or 'GRASS_FIELD') != 'TURF_STADIUM' else None),
+                'field_sizes': sorted({_normalize_field_size(field.layout_type) for field in active_fields if _normalize_field_size(field.layout_type)}),
+                'eligible_layouts': eligible_layouts,
+                'selected_generated_layout': selected_or_generated_layout,
+                'applicable_layout': selected_or_generated_layout or ('Active Grass Fields' if host and (host.surface_type or 'GRASS_FIELD') != 'TURF_STADIUM' else None),
+                'generated_wave_count': len(waves),
                 'generated_slots': len(slots),
+                'zero_inventory_reason': zero_inventory_reason,
                 'exclusion_reason': '; '.join(exclusion_reasons) if exclusion_reasons else None,
             },
         }
@@ -11798,6 +11838,15 @@ def list_saved_hosting_availability(season_id: uuid.UUID | None = None, organiza
             continue
         area = row.physical_field_area
         host = area.host_location
+        # Older availability rows could point at a field area without carrying
+        # the equivalent location FK. Repair that relationship instead of
+        # making generation/readiness interpret the site as having no fields.
+        if host and row.host_location_id != host.id:
+            logger.warning(
+                'Repairing availability-to-host relationship availability_id=%s old_host_location_id=%s host_location_id=%s',
+                row.id, row.host_location_id, host.id,
+            )
+            row.host_location_id = host.id
         option = row.field_configuration_option
         layout_name = option.name if option else 'Custom Layout'
         host_id = str(host.id)
@@ -12006,11 +12055,24 @@ def list_saved_hosting_availability(season_id: uuid.UUID | None = None, organiza
             },
         }
         if data.get('auto_select_turf_layout', True):
-            data['small_field_capacity'] = generated_result['generated_small_field_capacity']
-            data['medium_field_capacity'] = generated_result['generated_medium_field_capacity']
-            data['large_field_capacity'] = generated_result['generated_large_field_capacity']
+            # Generated rows are replaceable output, not physical inventory.
+            # A missing/stale generation must never turn a valid auto-select
+            # stadium into a zero-field site. Resolve the best eligible layout
+            # as the inventory fallback until slots are regenerated.
+            has_generated_layout = bool(generated_result['current_generated_layout'])
+            if has_generated_layout:
+                data['small_field_capacity'] = generated_result['generated_small_field_capacity']
+                data['medium_field_capacity'] = generated_result['generated_medium_field_capacity']
+                data['large_field_capacity'] = generated_result['generated_large_field_capacity']
+            elif availability and availability.host_location and (availability.host_location.surface_type or 'GRASS_FIELD') == 'TURF_STADIUM':
+                selected = _select_best_turf_configuration(db, availability, availability.host_location)
+                metadata = _turf_configuration_metadata(selected.configuration_name) if selected else None
+                if metadata:
+                    for size in FIELD_SIZE_ORDER:
+                        data[f'{size.lower()}_field_capacity'] = int(metadata['counts'].get(size, 0) or 0)
             data['total_fields_found'] = sum(data[f'{size.lower()}_field_capacity'] for size in FIELD_SIZE_ORDER)
             data['has_field_inventory_mismatch'] = data['total_fields_found'] == 0
+        logger.info('Hosting availability capacity diagnostics=%s', generated_result['capacity_diagnostics'])
         items.append({
             'id': data['id'],
             'season_id': data.get('season_id'),
@@ -12048,6 +12110,8 @@ def list_saved_hosting_availability(season_id: uuid.UUID | None = None, organiza
             **generated_result,
         })
     items.sort(key=lambda x: (x['available_date'], x['host_location_name']))
+    if db.new or db.dirty:
+        db.commit()
     return {'items': items}
 
 
