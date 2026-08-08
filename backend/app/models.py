@@ -1,4 +1,5 @@
 import uuid
+from datetime import datetime, timezone
 
 from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Index, Integer, String, Text, Time, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import UUID
@@ -449,6 +450,25 @@ class Game(Base, TimestampMixin):
     score_submissions = relationship('ScoreSubmission', back_populates='game', cascade='all, delete-orphan')
     score_history = relationship('ScoreHistory', back_populates='game', cascade='all, delete-orphan')
     change_logs = relationship('ScheduleChangeLog', back_populates='game', cascade='all, delete-orphan')
+
+
+class ScheduleImport(Base):
+    """Durable staging area and audit record for a schedule import."""
+    __tablename__ = 'schedule_imports'
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    season_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('seasons.id'), nullable=False, index=True)
+    imported_by_user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('users.id'), nullable=False)
+    imported_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    source_filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    weeks_replaced: Mapped[str] = mapped_column(Text, nullable=False)
+    existing_games_removed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    games_imported: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    validation_warning_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default='PREVIEW')
+    staged_rows: Mapped[str] = mapped_column(Text, nullable=False)
+    preview_summary: Mapped[str] = mapped_column(Text, nullable=False)
+    season = relationship('Season')
+    imported_by = relationship('User')
 
 
 class Tournament(Base, TimestampMixin):

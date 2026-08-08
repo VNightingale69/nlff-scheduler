@@ -27,6 +27,7 @@ export default function DashboardShell({ children, user }: { children: React.Rea
       'schedule-readiness',
       'manual-schedule-builder',
       'schedule-management',
+      'schedule-import',
       'standings',
       'tournaments',
       'scores',
