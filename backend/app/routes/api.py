@@ -10127,6 +10127,8 @@ def _host_availability_matrix_response(db: Session, season_id: uuid.UUID) -> dic
                 'date_type': _week_date_type(week),
                 'is_postseason': _is_playoff_or_championship_week(week),
                 'status': week.status,
+                'host_assignment_pending': bool(week.host_assignment_pending),
+                'host_assignment_locked': bool(week.host_assignment_locked),
             }
     dates = [dates_by_value[key] for key in sorted(dates_by_value)]
 
@@ -10194,7 +10196,10 @@ def _host_availability_matrix_response(db: Session, season_id: uuid.UUID) -> dic
                 availability_list = []
             selection = selection_by_host_date.get((host.id, game_date))
             has_valid_availability = bool(selected_availability)
-            if selection is None:
+            if week and week.host_assignment_pending:
+                status = 'DEFERRED'
+                locked = bool(week.host_assignment_locked)
+            elif selection is None:
                 status = 'AVAILABLE' if has_valid_availability else 'NOT_AVAILABLE'
                 locked = False
             else:
@@ -10239,6 +10244,7 @@ def _host_availability_matrix_response(db: Session, season_id: uuid.UUID) -> dic
     summaries = []
     for date_info in dates:
         game_date = date.fromisoformat(date_info['game_date'])
+        hosting_deferred = bool(date_info.get('host_assignment_pending'))
         required_by_size = regular_required_by_size if date_info.get('date_type') == REGULAR_SEASON_DATE_TYPE else empty_required_by_size
         selected_rows = []
         excluded_rows = []
@@ -10278,9 +10284,9 @@ def _host_availability_matrix_response(db: Session, season_id: uuid.UUID) -> dic
         total_selected_capacity = sum(capacity.values())
         total_required = sum(required_by_size.values())
         for size, required in required_by_size.items():
-            if capacity.get(size, 0) < required:
+            if not hosting_deferred and capacity.get(size, 0) < required:
                 warnings.append(f'{size.title()} capacity short by {required - capacity.get(size, 0)}. Add an overflow field or select more fields.')
-        if total_selected_capacity < total_required:
+        if not hosting_deferred and total_selected_capacity < total_required:
             warnings.append(f'Total selected capacity short by {total_required - total_selected_capacity}. Add an overflow field.')
         for detail in selected_capacity_source_summary:
             if detail.get('zero_capacity_reason'):
@@ -10320,6 +10326,9 @@ def _host_availability_matrix_response(db: Session, season_id: uuid.UUID) -> dic
             'estimated_capacity_by_field_size': capacity,
             'target_game_split': _balanced_target_game_split(total_required, selected_community_names),
             'validation_warnings': warnings,
+            'hosting_status': 'TBD / Deferred' if hosting_deferred else 'HOST_ASSIGNMENT_REQUIRED',
+            'physical_capacity_validation': 'Not required — placement deferred' if hosting_deferred else 'Required',
+            'field_capacity_message': 'Deferred until host assignment' if hosting_deferred else None,
             'weekly_host_plan_decision_summary': {
                 'diagnostic_label': 'Weekly Host Plan Decision Summary',
                 'selected_communities': selected_community_names,
@@ -10478,6 +10487,11 @@ def generate_suggested_host_plan(payload: dict, current_user: User = Depends(req
         raise HTTPException(400, 'game_date must match a Season Week Primary Game Date')
     if _week_date_type(week) == BLACKOUT_DATE_TYPE:
         raise HTTPException(400, 'Blackout dates are visible but excluded from scheduling plans')
+    if week.host_assignment_pending:
+        response = _host_availability_matrix_response(db, uuid.UUID(str(season_id)))
+        response['generated_selected_count'] = 0
+        response['decision_message'] = 'Skipped — Hosting is TBD / Deferred for this week. Resolve TBD Hosting before generating a suggested host plan.'
+        return response
 
     required = _weekly_required_games_by_size(db, season_id)
     total_required = sum(int(value or 0) for value in required.values())
@@ -10706,9 +10720,50 @@ def set_host_plan_week_lock(payload: dict, current_user: User = Depends(require_
     if not season_id or not game_date_value:
         raise HTTPException(400, 'season_id and game_date are required')
     game_date = date.fromisoformat(str(game_date_value))
+    week = db.query(Week).filter(Week.season_id == season_id, Week.primary_game_date == game_date).first()
+    if not week:
+        raise HTTPException(404, 'Season week not found')
+    if week.host_assignment_pending:
+        week.host_assignment_locked = locked
     count = db.query(HostPlanSelection).filter(HostPlanSelection.season_id == season_id, HostPlanSelection.game_date == game_date).update({'locked': locked}, synchronize_session=False)
     db.commit()
-    return {'updated': count, 'locked': locked}
+    return {'updated': count, 'locked': locked, 'hosting_tbd_locked': bool(week.host_assignment_locked)}
+
+
+@router.post('/host-availability-matrix/hosting-status')
+def set_host_plan_hosting_status(payload: dict, current_user: User = Depends(require_roles(ROLE_LEAGUE_ADMIN)), db: Session = Depends(get_db)):
+    """Set or resolve a week-level deferred placement state without fake host inventory."""
+    _enforce_host_plan_selection_admin(current_user)
+    season_id = payload.get('season_id')
+    game_date_value = payload.get('game_date')
+    if not season_id or not game_date_value:
+        raise HTTPException(400, 'season_id and game_date are required')
+    game_date = date.fromisoformat(str(game_date_value))
+    week = db.query(Week).filter(Week.season_id == season_id, Week.primary_game_date == game_date).first()
+    if not week or not _is_regular_season_week(week):
+        raise HTTPException(400, 'Hosting TBD is available only for a regular-season week')
+    deferred = bool(payload.get('deferred', True))
+    if week.host_assignment_locked and not deferred:
+        raise HTTPException(409, 'Unlock the selected week before resolving TBD Hosting')
+    week.host_assignment_pending = deferred
+    if deferred:
+        # Host selections are configuration for physical placement and cannot remain
+        # selected while the week explicitly has no host assignment.
+        db.query(HostPlanSelection).filter(
+            HostPlanSelection.season_id == season_id,
+            HostPlanSelection.game_date == game_date,
+        ).delete(synchronize_session=False)
+    else:
+        week.host_assignment_locked = False
+    db.commit()
+    return {
+        'week_id': str(week.id),
+        'game_date': str(game_date),
+        'hosting_status': 'TBD / Deferred' if deferred else 'HOST_ASSIGNMENT_REQUIRED',
+        'host_assignment_pending': deferred,
+        'host_assignment_locked': bool(week.host_assignment_locked),
+        'readiness_message': 'Ready — matchups can be generated; host/field/time assignment deferred.' if deferred else 'Host assignment is required.',
+    }
 
 
 @router.delete('/host-availability-matrix/selections')
@@ -12653,6 +12708,8 @@ def _normalize_week_payload(payload: dict, db: Session, week_id: uuid.UUID | Non
         'date_type': date_type,
         'notes': payload.get('notes') or None,
         'status': status,
+        'host_assignment_pending': bool(payload.get('host_assignment_pending', False)),
+        'host_assignment_locked': bool(payload.get('host_assignment_locked', False)),
     }
 
 
@@ -12671,6 +12728,7 @@ def _week_to_dict(week: Week, counts: dict[str, dict[uuid.UUID, int]] | None = N
         'notes': week.notes,
         'status': week.status or 'draft',
         'host_assignment_pending': bool(getattr(week, 'host_assignment_pending', False)),
+        'host_assignment_locked': bool(getattr(week, 'host_assignment_locked', False)),
         'hosting_availability_count': counts.get('hosting_availability', {}).get(week.id, 0),
         'generated_slots_count': counts.get('generated_slots', {}).get(week.id, 0),
         'scheduled_games_count': counts.get('scheduled_games', {}).get(week.id, 0),
@@ -15562,6 +15620,8 @@ def update_week(week_id: uuid.UUID, payload: dict, db: Session = Depends(get_db)
         'date_type': payload.get('date_type', _week_date_type(week)),
         'notes': payload.get('notes', week.notes),
         'status': payload.get('status', week.status),
+        'host_assignment_pending': payload.get('host_assignment_pending', week.host_assignment_pending),
+        'host_assignment_locked': payload.get('host_assignment_locked', week.host_assignment_locked),
     }, db, week_id)
     old_primary_game_date = week.primary_game_date
     for key, value in data.items():

@@ -323,6 +323,7 @@ class WeekCreate(BaseModel):
     notes: str | None = None
     status: str = 'draft'
     host_assignment_pending: bool = False
+    host_assignment_locked: bool = False
 
 class WeekRead(BaseSchema, WeekCreate):
     pass
