@@ -12,6 +12,7 @@ from app.teams import resolve_roster_team, season_roster
 from app.facility_layouts import (JOHNSBURG_APPROVED_LAYOUT_CODES_BY_LOCATION,
                                   johnsburg_field_templates,
                                   johnsburg_location_name)
+from app.services.field_resolution import resolve_active_field
 
 REQUIRED = ('week', 'date', 'kickoff', 'site', 'field', 'fieldtype', 'division', 'hometeam', 'awayteam')
 
@@ -157,8 +158,7 @@ def build_preview(db, season_id, raw_rows):
         field = field_instance = None
         configuration_candidates = []
         if site:
-            fields = db.query(Field).filter(Field.host_location_id == site.id, Field.is_active.is_(True), Field.deleted_at.is_(None)).all()
-            field = next((x for x in fields if _normalized_name(x.name) == _normalized_name(raw.get('field'))), None)
+            field = resolve_active_field(db, site, raw.get('field'))
             instances = db.query(FieldInstance).filter(FieldInstance.host_location_id == site.id, FieldInstance.is_active.is_(True)).all()
             field_instance = next((x for x in instances if _normalized_name(x.field_name) == _normalized_name(raw.get('field')) and (not game_date or x.instance_date == game_date)), None)
             # Generated/manual scheduling persists the dated field instance as
