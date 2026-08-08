@@ -670,12 +670,15 @@ class WeeklyFieldDemandRow(BaseModel):
     small_games_required: int
     medium_games_required: int
     large_games_required: int
-    capacity_available: int = 0
+    # Deferred-host weeks have no physical capacity to measure yet. ``None``
+    # distinguishes that state from a measured capacity of zero.
+    capacity_available: int | None = 0
     capacity_used: int = 0
     available_capacity_by_community: list[dict] = []
     required_by_size: dict[str, int] = {}
     eligible_by_size: dict[str, int] = {}
     status: str = 'READY'
+    readiness_message: str | None = None
     failed_field_size_requirements: list[dict] = []
 
 

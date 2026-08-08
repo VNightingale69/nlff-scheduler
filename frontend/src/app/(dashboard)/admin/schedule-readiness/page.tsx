@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
-import { apiFetch } from '@/lib/api';
+import { apiFetch, ApiError, API_URL } from '@/lib/api';
 import { useAuthSession } from '@/components/AuthGate';
 
 type ReadinessRow = {
@@ -94,6 +94,9 @@ export default function ScheduleReadinessPage() {
   const [rows, setRows] = useState<ReadinessRow[]>([]);
   const [totals, setTotals] = useState<ReadinessTotals | null>(null);
   const [error, setError] = useState('');
+  const [errorStatus, setErrorStatus] = useState<number | null>(null);
+  const [errorDetails, setErrorDetails] = useState<unknown>(null);
+  const [loaded, setLoaded] = useState(false);
   const [warnings, setWarnings] = useState<string[]>([]);
   const [hostDates, setHostDates] = useState<HostDateReadiness[]>([]);
   const [hostingBalance, setHostingBalance] = useState<any[]>([]);
@@ -105,6 +108,9 @@ export default function ScheduleReadinessPage() {
     (async () => {
       try {
         const data: any = await apiFetch('/schedule-readiness', {}, token);
+        if (!data || !Array.isArray(data.rows) || !data.totals) {
+          throw new ApiError('The server returned an invalid Schedule Readiness response.', 200, data);
+        }
         setRows(data?.rows || []);
         setTotals(data?.totals || null);
         setWarnings(data?.warnings || []);
@@ -115,6 +121,10 @@ export default function ScheduleReadinessPage() {
         setWeeklyDemand(data?.weekly_field_demand || []);
       } catch (e: any) {
         setError(e?.message || 'Failed to load schedule readiness report');
+        setErrorStatus(typeof e?.status === 'number' ? e.status : 0);
+        setErrorDetails(e?.details ?? null);
+      } finally {
+        setLoaded(true);
       }
     })();
   }, []);
@@ -129,7 +139,22 @@ export default function ScheduleReadinessPage() {
     <div className='space-y-4'>
       <h1 className='text-2xl font-bold'>Schedule Readiness</h1>
       <p className='text-sm text-slate-600'>Diagnostic capacity validation only. Use <Link className='text-blue-700 underline' href='/admin/host-availability-matrix'>Host Availability Matrix</Link> to select, exclude, or lock hosts for scheduling.</p>
-      {error ? <div className='rounded border border-red-200 bg-red-50 p-2 text-sm text-red-700'>{error}</div> : null}
+      {error ? (
+        <div className='rounded border border-red-200 bg-red-50 p-3 text-sm text-red-800' role='alert'>
+          <div className='font-semibold'>Schedule Readiness data could not be loaded. Existing scheduling data has not been changed.</div>
+          <details className='mt-2'>
+            <summary className='cursor-pointer font-medium'>Administrator diagnostics</summary>
+            <dl className='mt-2 grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 break-all'>
+              <dt>Endpoint</dt><dd>{API_URL}/schedule-readiness</dd>
+              <dt>HTTP status</dt><dd>{errorStatus === 0 ? 'Network error / no HTTP response' : errorStatus}</dd>
+              <dt>Error</dt><dd>{error}</dd>
+              {errorDetails ? <><dt>Response</dt><dd><pre className='whitespace-pre-wrap'>{JSON.stringify(errorDetails, null, 2)}</pre></dd></> : null}
+            </dl>
+          </details>
+        </div>
+      ) : null}
+      {!loaded ? <p className='text-sm text-slate-500'>Loading Schedule Readiness data…</p> : null}
+      {!error && loaded ? <>
       {warnings.length ? <div className='rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800'><div className='font-semibold'>Validation warnings</div><ul className='list-disc pl-5'>{warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul></div> : null}
       {totals ? (
         <div className='grid gap-3 rounded border bg-white p-3 text-sm md:grid-cols-7'>
@@ -310,6 +335,7 @@ export default function ScheduleReadinessPage() {
           </tbody>
         </table>
       </div>
+      </> : null}
     </div>
   );
 }
