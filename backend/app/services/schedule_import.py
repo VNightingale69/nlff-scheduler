@@ -9,7 +9,9 @@ from openpyxl import load_workbook
 from app.models import (Division, Field, FieldInstance, Game, HostLocation,
                         HostLocationConfiguration, Season, Week)
 from app.teams import resolve_roster_team, season_roster
-from app.facility_layouts import johnsburg_field_templates
+from app.facility_layouts import (JOHNSBURG_APPROVED_LAYOUT_CODES_BY_LOCATION,
+                                  johnsburg_field_templates,
+                                  johnsburg_location_name)
 
 REQUIRED = ('week', 'date', 'kickoff', 'site', 'field', 'fieldtype', 'division', 'hometeam', 'awayteam')
 
@@ -87,22 +89,35 @@ def _time(value):
 
 
 def _configuration_candidates(db, site, field_name, field_type):
-    """Return active canonical layouts containing this position and size."""
+    """Return supported layouts containing this logical position and size.
+
+    A supported facility layout is scheduling metadata in its own right.  It
+    must remain usable by imports even when the corresponding layout is not the
+    site's active/default ``HostLocationConfiguration`` (the import may be the
+    reason the facility is reconfigured for that wave).
+    """
     active = db.query(HostLocationConfiguration).filter_by(
         host_location_id=site.id, is_active=True,
     ).all()
-    candidates = []
+    configured_by_code = {
+        configuration.configuration_name.strip().upper().replace('-', '_').replace(' ', '_'): configuration
+        for configuration in active
+    }
+    location = johnsburg_location_name(site)
+    layout_codes = (JOHNSBURG_APPROVED_LAYOUT_CODES_BY_LOCATION.get(location, ())
+                    if location else configured_by_code)
+    candidates = {}
     requested_name = _normalized_name(field_name)
     if _normalized_name(getattr(site, 'name', '')) == 'hiller stadium' and requested_name == 'field 2':
         requested_name = 'field 3'
-    for configuration in active:
-        templates = johnsburg_field_templates(site, configuration.configuration_name)
+    for layout_code in layout_codes:
+        templates = johnsburg_field_templates(site, layout_code)
         if templates and any(
             _normalized_name(name) == requested_name
             and _key(template_type).startswith(_key(field_type))
             for name, template_type in templates
         ):
-            candidates.append(configuration)
+            candidates[layout_code] = configured_by_code.get(layout_code)
     return candidates
 
 
@@ -171,12 +186,20 @@ def build_preview(db, season_id, raw_rows):
             # A field can be deliberately reconfigured for one timeslot.  Keep
             # this advisory separate from errors so it never prevents staging.
             if type_mismatch:
-                warnings.append(
-                    f'Field "{_text(raw.get("field"))}" is normally configured as '
-                    f'"{_text(resolved_type).title()}", but the import requests '
-                    f'"{_text(raw.get("fieldtype")).title()}". Verify the field will be '
-                    'reconfigured for this timeslot.'
-                )
+                if configuration_candidates:
+                    warnings.append(
+                        f'Field "{_text(raw.get("field"))}" is being used as a '
+                        f'{_text(raw.get("fieldtype")).title()} field at '
+                        f'{_text(raw.get("site"))} for this timeslot. Verify the site '
+                        'will be reconfigured appropriately before game day.'
+                    )
+                else:
+                    warnings.append(
+                        f'Field "{_text(raw.get("field"))}" is normally configured as '
+                        f'"{_text(resolved_type).title()}", but the import requests '
+                        f'"{_text(raw.get("fieldtype")).title()}". Verify the field will be '
+                        'reconfigured for this timeslot.'
+                    )
             elif has_configured_layouts and not configuration_candidates and (field or field_instance):
                 warnings.append(
                     f'Imported Field Type "{_text(raw.get("fieldtype")).title()}" does not '
@@ -244,7 +267,7 @@ def build_preview(db, season_id, raw_rows):
             if configuration_candidates and game_date and kickoff:
                 key = (site.id, game_date, kickoff)
                 timeslot_rows.setdefault(key, []).append((
-                    row, staged_row, {str(candidate.id): candidate for candidate in configuration_candidates}
+                    row, staged_row, configuration_candidates
                 ))
 
     # A layout is a property of the complete site/date/kickoff wave, not of an
@@ -264,12 +287,12 @@ def build_preview(db, season_id, raw_rows):
                 row['status'] = 'ERROR'; row['message'] = message
                 invalid_staged_ids.add(id(staged_row))
         else:
-            selected_id = sorted(common_ids)[0]
-            selected = grouped[0][2][selected_id]
-            layout = selected.configuration_name.replace('_', ' ').title()
+            selected_code = sorted(common_ids)[0]
+            selected = grouped[0][2][selected_code]
+            layout = selected_code.replace('_', ' ').title()
             for row, staged_row, _candidates in grouped:
-                staged_row['configuration_id'] = selected_id
-                staged_row['configuration_name'] = selected.configuration_name
+                staged_row['configuration_id'] = str(selected.id) if selected else None
+                staged_row['configuration_name'] = selected_code
                 layout_message = f'{row["site"]} will use its {layout} configuration for this timeslot.'
                 row['message'] = (f'{row["message"]} {layout_message}' if row['status'] == 'WARNING'
                                   else f'Ready to import. {layout_message}')
