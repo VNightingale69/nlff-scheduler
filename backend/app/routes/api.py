@@ -118,15 +118,81 @@ def confirm_schedule_import(
         raise HTTPException(409, 'Unpublish the active schedule before importing a replacement.')
     week_ids=[uuid.UUID(x['week_id']) for x in staged]
     try:
+        # Resolve and validate every staged canonical field before removing the
+        # old schedule.  Older PREVIEW records used ``field_id``; new previews
+        # make the distinction explicit with ``resolved_field_id``.
+        resolved_rows = []
+        for row in staged:
+            resolved_field_value = row.get('resolved_field_id') or row.get('field_id')
+            resolved_field_id = uuid.UUID(resolved_field_value) if resolved_field_value else None
+            resolved_instance_id = uuid.UUID(row['field_instance_id']) if row.get('field_instance_id') else None
+            site_id = uuid.UUID(row['site_id'])
+            if resolved_field_id:
+                canonical_field = db.query(Field).filter(
+                    Field.id == resolved_field_id,
+                    Field.host_location_id == site_id,
+                    Field.deleted_at.is_(None),
+                ).first()
+                if not canonical_field:
+                    raise ValueError(
+                        f'Canonical field assignment is no longer valid for imported row {row.get("row")}.'
+                    )
+            if resolved_instance_id:
+                canonical_instance = db.query(FieldInstance).filter(
+                    FieldInstance.id == resolved_instance_id,
+                    FieldInstance.host_location_id == site_id,
+                    FieldInstance.is_active.is_(True),
+                ).first()
+                if not canonical_instance:
+                    raise ValueError(
+                        f'Canonical field instance is no longer valid for imported row {row.get("row")}.'
+                    )
+            if (row.get('resolved_field_id') or row.get('field_id')) and not resolved_field_id:
+                raise ValueError(f'Imported row {row.get("row")} lost its resolved field assignment.')
+            resolved_slot_id = uuid.UUID(row['game_slot_id']) if row.get('game_slot_id') else None
+            if resolved_slot_id:
+                canonical_slot = db.query(GameSlot).filter(
+                    GameSlot.id == resolved_slot_id,
+                    GameSlot.field_instance_id == resolved_instance_id,
+                    GameSlot.host_location_id == site_id,
+                ).first()
+                if not canonical_slot:
+                    raise ValueError(f'Canonical game slot is no longer valid for imported row {row.get("row")}.')
+            resolved_rows.append((row, resolved_field_id, resolved_instance_id, resolved_slot_id))
+
         existing=db.query(Game).filter(Game.season_id==record.season_id, Game.week_id.in_(set(week_ids))).all()
         existing_ids=[g.id for g in existing]
         if existing_ids:
             db.query(GameSlot).filter(GameSlot.assigned_game_id.in_(existing_ids)).update({GameSlot.assigned_game_id:None, GameSlot.status:'OPEN'}, synchronize_session=False)
             for game in existing: db.delete(game)
             db.flush()
-        for row in staged:
-            db.add(Game(season_id=record.season_id, week_id=uuid.UUID(row['week_id']), home_team_id=uuid.UUID(row['home_team_id']), away_team_id=uuid.UUID(row['away_team_id']), field_id=uuid.UUID(row['field_id']) if row.get('field_id') else None, field_instance_id=uuid.UUID(row['field_instance_id']) if row.get('field_instance_id') else None, host_location_id=uuid.UUID(row['site_id']), game_status_id=uuid.UUID(row['game_status_id']), game_date=date.fromisoformat(row['date']), kickoff_time=time.fromisoformat(row['kickoff']), internal_admin_notes=row.get('notes'), is_manual_edit=True, manual_updated_by_user_id=current_user.id, manual_updated_at=datetime.now(timezone.utc)))
+        created_games = []
+        for row, resolved_field_id, resolved_instance_id, resolved_slot_id in resolved_rows:
+            game = Game(season_id=record.season_id, week_id=uuid.UUID(row['week_id']), home_team_id=uuid.UUID(row['home_team_id']), away_team_id=uuid.UUID(row['away_team_id']), field_id=resolved_field_id, field_instance_id=resolved_instance_id, host_location_id=uuid.UUID(row['site_id']), game_status_id=uuid.UUID(row['game_status_id']), game_date=date.fromisoformat(row['date']), kickoff_time=time.fromisoformat(row['kickoff']), internal_admin_notes=row.get('notes'), is_manual_edit=True, manual_updated_by_user_id=current_user.id, manual_updated_at=datetime.now(timezone.utc))
+            db.add(game)
+            created_games.append((row, game, resolved_field_id, resolved_instance_id, resolved_slot_id))
         db.flush()
+        for row, game, _resolved_field_id, _resolved_instance_id, resolved_slot_id in created_games:
+            if resolved_slot_id:
+                slot = db.get(GameSlot, resolved_slot_id)
+                if slot.assigned_game_id and slot.assigned_game_id != game.id:
+                    raise RuntimeError(f'Game slot is already assigned for imported row {row.get("row")}.')
+                slot.assigned_game_id = game.id
+                slot.status = 'ASSIGNED'
+        db.flush()
+        # A successful validation result is a persistence contract.  Checking
+        # the flushed Game objects here makes a lost relationship abort and
+        # roll back the replacement rather than producing "Missing Field".
+        for row, game, resolved_field_id, resolved_instance_id, resolved_slot_id in created_games:
+            db.expire(game, ['field_id', 'field_instance_id'])
+            if resolved_field_id is not None and game.field_id != resolved_field_id:
+                raise RuntimeError(f'Field assignment failed to persist for imported row {row.get("row")}.')
+            if resolved_instance_id is not None and game.field_instance_id != resolved_instance_id:
+                raise RuntimeError(f'Field instance assignment failed to persist for imported row {row.get("row")}.')
+            if resolved_slot_id is not None:
+                db.expire(db.get(GameSlot, resolved_slot_id), ['assigned_game_id'])
+                if db.get(GameSlot, resolved_slot_id).assigned_game_id != game.id:
+                    raise RuntimeError(f'Game slot assignment failed to persist for imported row {row.get("row")}.')
         record.existing_games_removed=len(existing); record.games_imported=len(staged); record.status='COMPLETED'
         if season: season.schedule_modified_after_publish = bool(season.last_published_at)
         db.commit()
