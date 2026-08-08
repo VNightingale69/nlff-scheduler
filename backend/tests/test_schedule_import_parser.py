@@ -5,7 +5,7 @@ from openpyxl import Workbook
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.models import (Base, Division, GameStatus, HostLocation,
+from app.models import (Base, Division, Field, GameStatus, HostLocation,
                         HostLocationConfiguration, Organization,
                         OrganizationDivisionParticipation, Season, Team, Week)
 from app.services.schedule_import import build_preview, parse_schedule_file, _date, _time, _week_number
@@ -106,6 +106,10 @@ def _hiller_import_context():
     site = HostLocation(organization_id=home_org.id, name='Hiller Stadium',
                         surface_type='TURF_STADIUM', is_active=True)
     db.add(site); db.flush()
+    db.add_all([
+        Field(host_location_id=site.id, name='Field 1', layout_type='MEDIUM', is_active=True),
+        Field(host_location_id=site.id, name='Field 2', layout_type='MEDIUM', is_active=True),
+    ])
     medium = HostLocationConfiguration(host_location_id=site.id,
                                        configuration_name='TWO_MEDIUM', is_active=True)
     large = HostLocationConfiguration(host_location_id=site.id,
@@ -131,15 +135,25 @@ def _hiller_row(kickoff, field, field_type, home, away):
             'awayteam': f'{away_community} Girls 6-8 {away.name}'}
 
 
-def test_hiller_large_reconfiguration_is_valid_and_records_selected_layout():
+def test_hiller_large_reconfiguration_is_warning_and_records_selected_layout():
     db, season, teams = _hiller_import_context()
     preview, staged = build_preview(db, season.id, [
         _hiller_row('12:00 PM', 'Field 1', 'Large', teams[0], teams[1])])
 
     assert preview['valid_games'] == 1
-    assert preview['rows'][0]['status'] == 'VALID'
+    assert preview['importable_games'] == 1
+    assert preview['invalid_rows'] == 0
+    assert preview['warning_count'] == 1
+    assert preview['blocking_errors'] == 0
+    assert preview['rows'][0]['status'] == 'WARNING'
+    assert preview['rows'][0]['message'].startswith(
+        'Field "Field 1" is normally configured as "Medium", but the import requests '
+        '"Large". Verify the field will be reconfigured for this timeslot.')
     assert staged[0]['configuration_name'] == 'ONE_LARGE'
     assert 'will use its One Large configuration' in preview['rows'][0]['message']
+    assert preview['diagnostics'][0]['category'] == 'Scheduling Integrity'
+    assert preview['diagnostics'][0]['check'] == 'Field configuration mismatch'
+    assert preview['diagnostics'][0]['blocking'] is False
 
 
 def test_hiller_large_layout_rejects_overlapping_adjacent_medium_assignment():
@@ -169,14 +183,26 @@ def test_hiller_layout_is_selected_independently_for_each_kickoff():
         'TWO_MEDIUM', 'TWO_MEDIUM', 'ONE_LARGE']
 
 
-def test_hiller_unsupported_field_layout_is_an_error():
+def test_hiller_field_type_mismatch_without_determined_layout_is_warning():
     db, season, teams = _hiller_import_context()
     preview, staged = build_preview(db, season.id, [
         _hiller_row('12:00 PM', 'Field 2', 'Large', teams[0], teams[1])])
 
-    assert not staged
-    assert preview['rows'][0]['status'] == 'ERROR'
-    assert 'every configured site layout' in preview['rows'][0]['message']
+    assert len(staged) == 1
+    assert preview['rows'][0]['status'] == 'WARNING'
+    assert preview['blocking_errors'] == 0
+    assert preview['invalid_rows'] == 0
+
+
+def test_exact_configured_field_type_match_remains_valid():
+    db, season, teams = _hiller_import_context()
+    preview, staged = build_preview(db, season.id, [
+        _hiller_row('12:00 PM', 'Field 1', 'Medium', teams[0], teams[1])])
+
+    assert len(staged) == 1
+    assert preview['rows'][0]['status'] == 'VALID'
+    assert preview['warning_count'] == 0
+    assert preview['blocking_errors'] == 0
 
 
 @pytest.mark.parametrize(('community', 'division_group', 'division_name', 'color', 'stored_name'), [
