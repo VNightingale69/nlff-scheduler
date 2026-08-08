@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.auth import ROLE_LEAGUE_ADMIN
 from app.database import Base
-from app.models import Division, FieldInstance, Game, GameSlot, GameStatus, HostLocation, HostPlanSelection, HostingAvailability, Organization, Role, Season, Team, Week
+from app.models import Division, FieldInstance, Game, GameSlot, GameStatus, HostLocation, HostPlanSelection, HostingAvailability, Organization, Role, Season, Team, TurfWave, Week
 from app.routes.api import GENERATED_SLOTS_CLEAR_WARNING, clear_generated_game_slots, _regenerate_and_validate_slots_for_weeks
 
 
@@ -60,6 +60,16 @@ class GeneratedSlotsClearTest(unittest.TestCase):
         self.assertFalse(self.db.get(FieldInstance, self.scheduled_instance.id).is_active)
         self.assertIsNotNone(self.db.get(GameSlot, self.other_slot.id))
         self.assertIsNotNone(self.db.get(FieldInstance, self.other_instance.id))
+
+    def test_clear_removes_obsolete_turf_waves(self):
+        wave = TurfWave(id=uuid.uuid4(), host_location_id=self.host.id, hosting_availability_id=self.availability.id, host_date=date(2026, 6, 6), sequence_number=1, wave_intent='SMALL_FIELDS', preferred_layout_code='THREE_SMALL', start_time=time(9, 0), end_time=time(10, 0))
+        self.open_slot.turf_wave_id = wave.id
+        self.db.add(wave)
+        self.db.commit()
+
+        clear_generated_game_slots(host_location_id=self.host.id, current_user=self.current_user, db=self.db)
+
+        self.assertIsNone(self.db.get(TurfWave, wave.id))
 
 
 class HostPlanGeneratedSlotsTest(unittest.TestCase):
