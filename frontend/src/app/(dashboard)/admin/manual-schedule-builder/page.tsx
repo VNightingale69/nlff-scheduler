@@ -514,10 +514,10 @@ export default function ManualScheduleBuilderPage() {
   const applyScheduledGameUpdate = (updatedGame: any) => {
     setGames((prev) => prev.map((game: any) => game.id === updatedGame.id ? { ...game, ...updatedGame, game_status_code: updatedGame.status_code } : game));
   };
-  const buildBulkPayload = (overrideWarnings: boolean) => ({
+  const buildBulkPayload = (edits: any[], overrideWarnings: boolean) => ({
     overrideWarnings,
     override_warnings: overrideWarnings,
-    changes: dirtyPendingEdits.map((pendingEdit: any) => ({
+    changes: edits.map((pendingEdit: any) => ({
       game_id: pendingEdit.id,
       gameId: pendingEdit.id,
       season_id: pendingEdit.season_id,
@@ -567,7 +567,7 @@ export default function ManualScheduleBuilderPage() {
       const game: any = gamesById.get(String(edit.id));
       return `${game?.home_team_name || 'Unknown home team'} vs ${game?.away_team_name || 'Unknown away team'}`;
     }).join(', ');
-    return `Could not save ${edits.length} schedule ${edits.length === 1 ? 'change' : 'changes'}. Game${edits.length === 1 ? '' : 's'}: ${affected}. Reason: ${reason}`;
+    return `Unable to save schedule changes. ${edits.length} ${edits.length === 1 ? 'game could' : 'games could'} not be updated. Game${edits.length === 1 ? '' : 's'}: ${affected}. Reason: ${reason}`;
   };
   const saveBulkInlineEdits = async (overrideWarnings = false) => {
     if (!canBulkInlineEditScheduledGames || !hasPendingBulkEdits || bulkSaveLoading) return;
@@ -575,29 +575,40 @@ export default function ManualScheduleBuilderPage() {
     setError('');
     setBulkSaveLoading(true);
     try {
-      const res: any = await apiFetch('/schedule-management/games/manual-edit/bulk', { method: 'PATCH', body: JSON.stringify(buildBulkPayload(overrideWarnings)) }, token);
+      let saveWithWarningOverride = overrideWarnings;
+      let res: any;
+      while (true) {
+        try {
+          const payload = buildBulkPayload(editsToSave, saveWithWarningOverride);
+          res = await apiFetch('/schedule-management/games/manual-edit/bulk', { method: 'PATCH', body: JSON.stringify(payload) }, token);
+          break;
+        } catch (e: unknown) {
+          if (!(e instanceof ApiError) || e.status !== 409 || saveWithWarningOverride) throw e;
+          const warnings = (e.details as any)?.detail?.warnings || {};
+          const confirmed = window.confirm(`Manual Override Warnings\n\n${summarizeWarnings(warnings)}\n\nThese edits create schedule warnings and may require manual rebalancing of turf time slots or field configurations. As Scheduling Administrator, you may override and save these changes.\n\nSave Anyway?`);
+          if (!confirmed) return;
+          // Retry in this invocation. Calling saveBulkInlineEdits recursively used
+          // to hit the bulkSaveLoading guard above and silently skip the request.
+          saveWithWarningOverride = true;
+        }
+      }
       const returnedGames = Array.isArray(res.games) ? res.games : [];
       const returnedById = new Map(returnedGames.map((game: any) => [String(game.id), game]));
       const verificationFailures = editsToSave.filter((edit: any) => {
         const saved: any = returnedById.get(String(edit.id));
-        return !saved || String(saved.field_id || '') !== String(edit.field_id || '');
+        return !saved || Object.entries(editableGameSnapshot(edit)).some(([fieldName, requested]) => (
+          String(editableGameSnapshot(saved)[fieldName] ?? '') !== String(requested ?? '')
+        ));
       });
-      if (verificationFailures.length) throw new Error(`The server response did not confirm the requested field assignment for ${verificationFailures.length} game(s).`);
+      if (verificationFailures.length) throw new Error(`The server response did not confirm all requested values for ${verificationFailures.length} game(s).`);
       returnedGames.forEach(applyScheduledGameUpdate);
       const savedIds = new Set(editsToSave.map((edit: any) => String(edit.id)));
       setPendingGameEdits((current) => Object.fromEntries(Object.entries(current).filter(([gameId]) => !savedIds.has(String(gameId)))));
-      setIsBulkEditMode(false);
-      await load(); await loadRecommendations(); setManualScheduleBannerFromValidation(overrideWarnings ? 'Schedule changes saved with warning override.' : 'Schedule changes saved.', await loadFinalScheduleValidation());
+      await load(); await loadRecommendations(); setManualScheduleBannerFromValidation(saveWithWarningOverride ? 'Schedule changes saved with warning override.' : 'Schedule changes saved.', await loadFinalScheduleValidation());
     } catch (e: unknown) {
       if (e instanceof ApiError && e.status === 400) {
         const bulkErrors = (e.details as any)?.detail?.errors;
         if (bulkErrors) { setError(bulkSaveFailureMessage(editsToSave, summarizeBulkHardErrors(bulkErrors))); return; }
-      }
-      if (e instanceof ApiError && e.status === 409) {
-        const warnings = (e.details as any)?.detail?.warnings || {};
-        const confirmed = window.confirm(`Manual Override Warnings\n\n${summarizeWarnings(warnings)}\n\nThese edits create schedule warnings and may require manual rebalancing of turf time slots or field configurations. As Scheduling Administrator, you may override and save these changes.\n\nSave Anyway?`);
-        if (confirmed) await saveBulkInlineEdits(true);
-        return;
       }
       setError(bulkSaveFailureMessage(editsToSave, extractError(e)));
     } finally {

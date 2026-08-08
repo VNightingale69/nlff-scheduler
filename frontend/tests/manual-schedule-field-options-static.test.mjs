@@ -17,8 +17,12 @@ assert.match(page, /game_id: pendingEdit\.id,[\s\S]*field_id: pendingEdit\.field
 assert.match(page, /apiFetch\('\/schedule-management\/games\/manual-edit\/bulk'/, 'Save Changes invokes the bulk API');
 assert.match(page, /type='button'[\s\S]*disabled=\{!hasPendingBulkEdits \|\| bulkSaveLoading\}/, 'Save Changes is a non-submit button and valid dirty rows are not silently blocked by advisory state');
 assert.doesNotMatch(page, /if \(hasInvalidPendingEdits\)[^{]*\{[^}]*return/, 'client-side advisory state cannot prevent the bulk API attempt');
-assert.match(page, /String\(saved\.field_id \|\| ''\) !== String\(edit\.field_id \|\| ''\)/, 'success is verified against canonical field IDs returned by the server');
-assert.match(page, /Could not save \$\{edits\.length\} schedule/, 'bulk failures remain visible with affected-game context');
+assert.match(page, /buildBulkPayload\(editsToSave, saveWithWarningOverride\)/, 'the request is built from the exact dirty-row snapshot captured by the click handler');
+assert.match(page, /while \(true\)[\s\S]*saveWithWarningOverride = true/, 'warning confirmation retries the request inside the active save invocation');
+assert.doesNotMatch(page, /await saveBulkInlineEdits\(true\)/, 'warning retry cannot be discarded by recursively hitting the loading guard');
+assert.match(page, /Object\.entries\(editableGameSnapshot\(edit\)\)/, 'success verifies every editable canonical value, including fields and notes, returned by the server');
+assert.match(page, /Unable to save schedule changes\. \$\{edits\.length\}/, 'bulk failures remain visible with affected-game context and the backend reason');
+assert.doesNotMatch(page, /setIsBulkEditMode\(false\);\s*await load/, 'successful saves leave global edit mode active');
 assert.doesNotMatch(page, /required_field_type[^\n]+\.filter/, 'field type compatibility does not remove physical fields');
 assert.match(page, /setPendingGameEdits\(Object\.fromEntries\(games\.map/, 'global edit mode initializes every existing row immediately');
 
