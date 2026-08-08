@@ -800,7 +800,7 @@ export default function ManualScheduleBuilderPage() {
         </div>
         {canBulkInlineEditScheduledGames ? <div className='mb-3 flex flex-wrap items-center gap-3 rounded border border-blue-100 bg-blue-50 p-3' aria-label='Scheduling Administrator bulk edit toolbar'>
           {!isBulkEditMode ? <>
-            <button className='rounded bg-blue-600 px-3 py-2 text-sm text-white' onClick={() => { setError(''); setSuccess(''); setIsBulkEditMode(true); }}>Modify Schedule</button>
+            <button className='rounded bg-blue-600 px-3 py-2 text-sm text-white' onClick={() => { setError(''); setSuccess(''); setPendingGameEdits(Object.fromEntries(games.map((game: any) => [game.id, buildEditableGame(game)]))); setIsBulkEditMode(true); }}>Modify Schedule</button>
             <span className='text-sm text-slate-600'>Enable global inline editing to update multiple scheduled games before saving once.</span>
           </> : <>
             <span className={`text-sm font-semibold ${hasPendingBulkEdits ? 'text-blue-900' : 'text-slate-600'}`}>{hasPendingBulkEdits ? pendingChangesLabel : '0 unsaved changes across 0 games'}</span>

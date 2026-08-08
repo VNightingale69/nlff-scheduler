@@ -3,7 +3,7 @@ import uuid
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.models import Base, Field, HostLocation, Organization
+from app.models import Base, Field, HostLocation, HostLocationConfiguration, Organization
 from app.routes.api import manual_schedule_builder_options
 
 
@@ -57,4 +57,36 @@ def test_manual_builder_uses_active_canonical_fields_by_host_with_short_labels()
         assert all(field['id'] == field['field_id'] for field in by_host[host_name])
         assert all(field['host_location_id'] == hosts[host_name].id for field in by_host[host_name])
     assert 'Inactive' not in {field['display_name'] for field in result['fields']}
+    db.close()
+
+
+def test_manual_builder_materializes_turf_layout_positions_without_generated_slots():
+    engine = create_engine('sqlite+pysqlite:///:memory:', future=True)
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    organization = Organization(id=uuid.uuid4(), name='Johnsburg', is_active=True)
+    stadium = HostLocation(
+        id=uuid.uuid4(), organization_id=organization.id, name='Johnsburg Stadium',
+        surface_type='TURF_STADIUM', is_active=True,
+    )
+    db.add_all([organization, stadium])
+    db.flush()
+    db.add(HostLocationConfiguration(
+        host_location_id=stadium.id, configuration_name='ONE_LARGE_ONE_MEDIUM',
+        surface_type='TURF_STADIUM', is_active=True,
+    ))
+    db.commit()
+
+    result = manual_schedule_builder_options(db)
+    stadium_fields = [
+        field for field in result['fields']
+        if field['host_location_id'] == stadium.id
+    ]
+
+    assert {field['display_name'] for field in stadium_fields} == {'Field 1', 'Field 3'}
+    assert all(field['field_id'] for field in stadium_fields)
+    assert db.query(Field).filter_by(host_location_id=stadium.id, is_active=True).count() == 2
+    # Repeated option loads reuse the stable canonical records and IDs.
+    second = manual_schedule_builder_options(db)
+    assert {field['field_id'] for field in second['fields']} == {field['field_id'] for field in stadium_fields}
     db.close()

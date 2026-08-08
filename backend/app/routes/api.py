@@ -16090,11 +16090,7 @@ def manual_schedule_builder_options(db: Session = Depends(get_db)):
         FieldInstance.is_active.is_(True),
         FieldInstance.host_location_id.in_(eligible_host_ids),
     ).order_by(FieldInstance.host_location_id, FieldInstance.instance_date, FieldInstance.field_type, FieldInstance.field_name).all()
-    fields = db.query(Field).filter(
-        Field.is_active.is_(True),
-        Field.deleted_at.is_(None),
-        Field.host_location_id.in_(eligible_host_ids),
-    ).order_by(Field.host_location_id, Field.name).all()
+    fields = get_active_fields_for_host_locations(db, eligible_host_ids)
 
     def field_display_name(field: Field) -> str:
         # Canonical grass field names commonly carry community, facility, and
@@ -16111,6 +16107,78 @@ def manual_schedule_builder_options(db: Session = Depends(get_db)):
         'weeks': [{'id': w.id, 'season_id': w.season_id, 'week_number': w.week_number, 'label': w.label or f'Week {w.week_number}', 'start_date': w.start_date, 'end_date': w.end_date, 'primary_game_date': w.primary_game_date or w.start_date, 'status': w.status} for w in weeks],
         'organizations': [{'id': o.id, 'name': o.name} for o in organizations],
     }
+
+
+def get_active_fields_for_host_locations(
+    db: Session,
+    host_location_ids: set[uuid.UUID] | list[uuid.UUID],
+) -> list[Field]:
+    """Return canonical selectable fields for the requested active facilities.
+
+    Grass facilities already store their logical positions directly in ``Field``.
+    Turf facilities historically stored only a layout configuration and created
+    dated ``FieldInstance`` rows later.  Materialize missing layout positions as
+    canonical ``Field`` rows so every scheduling workflow can use stable field IDs
+    without deriving choices from generated slots or scheduled games.
+    """
+    requested_ids = set(host_location_ids)
+    if not requested_ids:
+        return []
+
+    hosts = db.query(HostLocation).filter(
+        HostLocation.id.in_(requested_ids),
+        HostLocation.is_active.is_(True),
+    ).all()
+    existing = db.query(Field).filter(
+        Field.host_location_id.in_(requested_ids),
+        Field.is_active.is_(True),
+        Field.deleted_at.is_(None),
+    ).all()
+    fields_by_host: dict[uuid.UUID, list[Field]] = {}
+    for field in existing:
+        fields_by_host.setdefault(field.host_location_id, []).append(field)
+
+    changed = False
+    for host in hosts:
+        if (host.surface_type or 'GRASS_FIELD') != 'TURF_STADIUM':
+            continue
+        # Existing canonical records remain authoritative. This also preserves
+        # administrator labels that predate the layout configuration model.
+        if fields_by_host.get(host.id):
+            continue
+        _ensure_approved_turf_configurations(db, host)
+        active_configs = db.query(HostLocationConfiguration).filter(
+            HostLocationConfiguration.host_location_id == host.id,
+            HostLocationConfiguration.is_active.is_(True),
+        ).all()
+        templates = {
+            (label, _normalize_field_size(field_type) or field_type)
+            for config in active_configs
+            for label, field_type in _configuration_field_templates_for_host(host, config.configuration_name)
+        }
+        types_by_label: dict[str, set[str]] = {}
+        for label, field_type in templates:
+            types_by_label.setdefault(label, set()).add(field_type)
+        for label, field_type in sorted(templates):
+            display_label = label
+            if len(types_by_label[label]) > 1:
+                display_label = f'{field_type.title()} {label}'
+            field = Field(
+                host_location_id=host.id,
+                name=display_label,
+                layout_type=field_type,
+                is_active=True,
+            )
+            db.add(field)
+            fields_by_host.setdefault(host.id, []).append(field)
+            changed = True
+    if changed:
+        db.commit()
+
+    return sorted(
+        (field for values in fields_by_host.values() for field in values),
+        key=lambda field: (str(field.host_location_id), field.name),
+    )
 
 
 
