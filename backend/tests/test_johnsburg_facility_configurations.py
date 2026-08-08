@@ -48,14 +48,16 @@ class JohnsburgFacilityConfigurationTest(unittest.TestCase):
         expected = {
             'Johnsburg Stadium': ({'ONE_LARGE_ONE_MEDIUM': (0, 1, 1)}, [('Field 1', 'LARGE'), ('Field 3', 'MEDIUM')]),
             'Hiller Park': ({'FOUR_SMALL': (4, 0, 0)}, [(f'Field {index}', 'SMALL') for index in range(1, 5)]),
-            'Hiller Stadium': ({'TWO_MEDIUM': (0, 2, 0)}, [('Field 1', 'MEDIUM'), ('Field 3', 'MEDIUM')]),
+            'Hiller Stadium': ({'TWO_MEDIUM': (0, 2, 0), 'ONE_LARGE': (0, 0, 1)}, [('Field 1', 'MEDIUM'), ('Field 3', 'MEDIUM')]),
         }
         for name, (mix, fields) in expected.items():
             with self.subTest(facility=name):
                 host = self.hosts[name]
                 self.assertEqual(self._active_mixes(host), mix)
-                code = next(iter(mix))
+                code = 'TWO_MEDIUM' if name == 'Hiller Stadium' else next(iter(mix))
                 self.assertEqual(_configuration_field_templates_for_host(host, code), fields)
+                if name == 'Hiller Stadium':
+                    self.assertEqual(_configuration_field_templates_for_host(host, 'ONE_LARGE'), [('Field 1', 'LARGE')])
                 if name != 'Hiller Park':
                     self.assertNotIn('Field 2', dict(fields))
                     self.assertNotIn('Field 4', dict(fields))
@@ -90,9 +92,9 @@ class JohnsburgFacilityConfigurationTest(unittest.TestCase):
             with self.subTest(facility=name):
                 host = self.hosts[name]
                 codes = _approved_layout_codes_for_host(host)
-                code = next(iter(codes))
+                code = 'TWO_MEDIUM' if name == 'Hiller Stadium' else next(iter(codes))
                 self.assertEqual(_turf_wave_layout_counts(code), counts)
-                blocks = _plan_turf_layout_blocks({'SMALL': 99, 'MEDIUM': 99, 'LARGE': 99}, 3, set(codes))
+                blocks = _plan_turf_layout_blocks({'SMALL': 99, 'MEDIUM': 99, 'LARGE': 99}, 3, {code})
                 self.assertEqual(blocks, [(code, 1)] * 3)
                 self.assertLessEqual(sum(counts.values()), maximum)
 

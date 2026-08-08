@@ -90,6 +90,95 @@ def test_week_one_scenario_resolves_canonical_teams_and_facility_layout(site_nam
     db.close()
 
 
+def _hiller_import_context():
+    engine = create_engine('sqlite+pysqlite:///:memory:', future=True)
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    home_org = Organization(name='Johnsburg', is_active=True)
+    away_org = Organization(name='Antioch', is_active=True)
+    division = Division(division_group='Girls', name='6-8', is_active=True,
+                        required_field_layout_type='LARGE')
+    season = Season(name='2026', start_date=_date('2026-08-01'),
+                    end_date=_date('2026-11-01'), is_active=True)
+    db.add_all([home_org, away_org, division, season]); db.flush()
+    db.add(Week(season_id=season.id, week_number=1, start_date=_date('2026-08-16'),
+                end_date=_date('2026-08-16'), primary_game_date=_date('2026-08-16')))
+    site = HostLocation(organization_id=home_org.id, name='Hiller Stadium',
+                        surface_type='TURF_STADIUM', is_active=True)
+    db.add(site); db.flush()
+    medium = HostLocationConfiguration(host_location_id=site.id,
+                                       configuration_name='TWO_MEDIUM', is_active=True)
+    large = HostLocationConfiguration(host_location_id=site.id,
+                                      configuration_name='ONE_LARGE', is_active=True)
+    db.add_all([medium, large])
+    teams = []
+    for index in range(1, 7):
+        organization = home_org if index % 2 else away_org
+        teams.append(Team(organization_id=organization.id, division_id=division.id,
+                          name=f'Team {index}', is_active=True))
+    db.add_all(teams + [GameStatus(code='SCHEDULED', label='Scheduled', is_active=True)])
+    db.commit()
+    return db, season, teams
+
+
+def _hiller_row(kickoff, field, field_type, home, away):
+    home_community = 'Johnsburg' if home.name in {'Team 1', 'Team 3', 'Team 5'} else 'Antioch'
+    away_community = 'Johnsburg' if away.name in {'Team 1', 'Team 3', 'Team 5'} else 'Antioch'
+    return {'week': 1, 'date': '2026-08-16', 'kickoff': kickoff,
+            'site': 'Hiller Stadium', 'field': field, 'fieldtype': field_type,
+            'division': 'Girls 6-8',
+            'hometeam': f'{home_community} Girls 6-8 {home.name}',
+            'awayteam': f'{away_community} Girls 6-8 {away.name}'}
+
+
+def test_hiller_large_reconfiguration_is_valid_and_records_selected_layout():
+    db, season, teams = _hiller_import_context()
+    preview, staged = build_preview(db, season.id, [
+        _hiller_row('12:00 PM', 'Field 1', 'Large', teams[0], teams[1])])
+
+    assert preview['valid_games'] == 1
+    assert preview['rows'][0]['status'] == 'VALID'
+    assert staged[0]['configuration_name'] == 'ONE_LARGE'
+    assert 'will use its One Large configuration' in preview['rows'][0]['message']
+
+
+def test_hiller_large_layout_rejects_overlapping_adjacent_medium_assignment():
+    db, season, teams = _hiller_import_context()
+    preview, staged = build_preview(db, season.id, [
+        _hiller_row('12:00 PM', 'Field 1', 'Large', teams[0], teams[1]),
+        _hiller_row('12:00 PM', 'Field 2', 'Medium', teams[2], teams[3]),
+    ])
+
+    assert not staged
+    assert preview['invalid_rows'] == 2
+    assert all(row['status'] == 'ERROR' for row in preview['rows'])
+    assert 'cannot be supported by any configured field layout' in preview['rows'][0]['message']
+
+
+def test_hiller_layout_is_selected_independently_for_each_kickoff():
+    db, season, teams = _hiller_import_context()
+    preview, staged = build_preview(db, season.id, [
+        _hiller_row('11:00 AM', 'Field 1', 'Medium', teams[0], teams[1]),
+        _hiller_row('11:00 AM', 'Field 2', 'Medium', teams[2], teams[3]),
+        _hiller_row('12:00 PM', 'Field 1', 'Large', teams[4], teams[5]),
+    ])
+
+    assert preview['valid_games'] == 3
+    assert preview['invalid_rows'] == 0
+    assert [row['configuration_name'] for row in staged] == [
+        'TWO_MEDIUM', 'TWO_MEDIUM', 'ONE_LARGE']
+
+
+def test_hiller_unsupported_field_layout_is_an_error():
+    db, season, teams = _hiller_import_context()
+    preview, staged = build_preview(db, season.id, [
+        _hiller_row('12:00 PM', 'Field 2', 'Large', teams[0], teams[1])])
+
+    assert not staged
+    assert preview['rows'][0]['status'] == 'ERROR'
+    assert 'every configured site layout' in preview['rows'][0]['message']
+
+
 @pytest.mark.parametrize(('community', 'division_group', 'division_name', 'color', 'stored_name'), [
     ('Johnsburg', 'Coed', 'K-1', 'Black', 'J’Burg Coed K-1 Black'),
     ('Johnsburg', 'Coed', 'K-1', 'Blue', 'J’Burg Coed K-1 Blue'),

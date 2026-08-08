@@ -86,19 +86,24 @@ def _time(value):
     return None
 
 
-def _configured_field_type(db, site, field_name):
-    """Resolve a position from the canonical active facility layout."""
+def _configuration_candidates(db, site, field_name, field_type):
+    """Return active canonical layouts containing this position and size."""
     active = db.query(HostLocationConfiguration).filter_by(
         host_location_id=site.id, is_active=True,
     ).all()
+    candidates = []
+    requested_name = _normalized_name(field_name)
+    if _normalized_name(getattr(site, 'name', '')) == 'hiller stadium' and requested_name == 'field 2':
+        requested_name = 'field 3'
     for configuration in active:
         templates = johnsburg_field_templates(site, configuration.configuration_name)
-        if templates:
-            match = next((field_type for name, field_type in templates
-                          if _normalized_name(name) == _normalized_name(field_name)), None)
-            if match:
-                return match
-    return None
+        if templates and any(
+            _normalized_name(name) == requested_name
+            and _key(template_type).startswith(_key(field_type))
+            for name, template_type in templates
+        ):
+            candidates.append(configuration)
+    return candidates
 
 
 def build_preview(db, season_id, raw_rows):
@@ -112,6 +117,7 @@ def build_preview(db, season_id, raw_rows):
     status_model = __import__('app.models', fromlist=['GameStatus']).GameStatus
     scheduled_status = db.query(status_model).filter_by(code='SCHEDULED').first()
     results, staged, game_keys, field_keys, team_keys = [], [], set(), set(), set()
+    timeslot_rows = {}
 
     for number, raw in enumerate(raw_rows, 2):
         errors = []
@@ -133,22 +139,32 @@ def build_preview(db, season_id, raw_rows):
         if not site:
             errors.append(f'Site "{_text(raw.get("site"))}" could not be found.')
         field = field_instance = None
-        configured_type = None
+        configuration_candidates = []
         if site:
             fields = db.query(Field).filter(Field.host_location_id == site.id, Field.is_active.is_(True), Field.deleted_at.is_(None)).all()
             field = next((x for x in fields if _normalized_name(x.name) == _normalized_name(raw.get('field'))), None)
             instances = db.query(FieldInstance).filter(FieldInstance.host_location_id == site.id, FieldInstance.is_active.is_(True)).all()
             field_instance = next((x for x in instances if _normalized_name(x.field_name) == _normalized_name(raw.get('field')) and (not game_date or x.instance_date == game_date)), None)
-            configured_type = _configured_field_type(db, site, raw.get('field'))
-            if not field and not field_instance and not configured_type:
+            # A dynamic position may exist only in a supported site layout.
+            configuration_candidates = _configuration_candidates(
+                db, site, raw.get('field'), raw.get('fieldtype'))
+            if not field and not field_instance and not configuration_candidates:
                 errors.append(f'Field "{_text(raw.get("field"))}" could not be found at site "{_text(raw.get("site"))}".')
 
         field_type = _text(raw.get('fieldtype')).upper()
         if field_type not in {'SMALL', 'MEDIUM', 'LARGE'}:
             errors.append('Field Type must be Small, Medium, or Large.')
         else:
-            resolved_type = configured_type or (field_instance.field_type if field_instance else None) or (field.layout_type if field else None)
-            if resolved_type and not _key(resolved_type).startswith(_key(field_type)):
+            resolved_type = (field_instance.field_type if field_instance else None) or (field.layout_type if field else None)
+            active_layouts = db.query(HostLocationConfiguration).filter_by(
+                host_location_id=site.id, is_active=True).all() if site else []
+            has_configured_layouts = any(
+                johnsburg_field_templates(site, layout.configuration_name) is not None
+                for layout in active_layouts
+            )
+            if has_configured_layouts and not configuration_candidates:
+                errors.append(f'Field "{_text(raw.get("field"))}" is incompatible with Field Type "{_text(raw.get("fieldtype"))}" in every configured site layout.')
+            elif not has_configured_layouts and resolved_type and not _key(resolved_type).startswith(_key(field_type)):
                 errors.append(f'Field "{_text(raw.get("field"))}" is incompatible with Field Type "{_text(raw.get("fieldtype"))}".')
 
         division = divisions.get(_key(raw.get('division')))
@@ -177,7 +193,7 @@ def build_preview(db, season_id, raw_rows):
         if home and away and home.id == away.id:
             errors.append('Home Team and Away Team cannot be the same.')
 
-        if week and game_date and kickoff and site and (field or field_instance or configured_type) and home and away:
+        if week and game_date and kickoff and site and (field or field_instance or configuration_candidates) and home and away:
             identity = field.id if field else (field_instance.id if field_instance else _normalized_name(raw.get('field')))
             game_key = (week.id, game_date, kickoff, site.id, identity, home.id, away.id)
             field_key = (game_date, kickoff, site.id, identity)
@@ -199,11 +215,43 @@ def build_preview(db, season_id, raw_rows):
                'status': 'ERROR' if errors else 'VALID', 'message': ' '.join(errors) or 'Ready to import.'}
         results.append(row)
         if not errors:
-            staged.append({**row, 'week_number': week_number, 'week_id': str(week.id), 'site_id': str(site.id),
+            staged_row = {**row, 'week_number': week_number, 'week_id': str(week.id), 'site_id': str(site.id),
                            'field_id': str(field.id) if field else None,
                            'field_instance_id': str(field_instance.id) if field_instance else None,
                            'home_team_id': str(home.id), 'away_team_id': str(away.id),
-                           'game_status_id': str(scheduled_status.id) if scheduled_status else None})
+                           'game_status_id': str(scheduled_status.id) if scheduled_status else None}
+            staged.append(staged_row)
+            if configuration_candidates and game_date and kickoff:
+                key = (site.id, game_date, kickoff)
+                timeslot_rows.setdefault(key, []).append((
+                    row, staged_row, {str(candidate.id): candidate for candidate in configuration_candidates}
+                ))
+
+    # A layout is a property of the complete site/date/kickoff wave, not of an
+    # individual field record. Intersecting candidates rejects combinations
+    # whose physical footprints overlap (for example Hiller Field 1 / Large and
+    # Field 2 / Medium), even though each assignment is possible by itself.
+    invalid_staged_ids = set()
+    for (_site_id, _game_date, kickoff), grouped in timeslot_rows.items():
+        common_ids = set(grouped[0][2])
+        for _row, _staged_row, candidates in grouped[1:]:
+            common_ids.intersection_update(candidates)
+        if not common_ids:
+            site_name = grouped[0][0]['site']
+            message = (f'Imported assignments at {site_name} at {kickoff.strftime("%-I:%M %p")} '
+                       'cannot be supported by any configured field layout.')
+            for row, staged_row, _candidates in grouped:
+                row['status'] = 'ERROR'; row['message'] = message
+                invalid_staged_ids.add(id(staged_row))
+        else:
+            selected_id = sorted(common_ids)[0]
+            selected = grouped[0][2][selected_id]
+            layout = selected.configuration_name.replace('_', ' ').title()
+            for row, staged_row, _candidates in grouped:
+                staged_row['configuration_id'] = selected_id
+                staged_row['configuration_name'] = selected.configuration_name
+                row['message'] = f'Ready to import. {row["site"]} will use its {layout} configuration for this timeslot.'
+    staged = [row for row in staged if id(row) not in invalid_staged_ids]
 
     affected = sorted({x['week_number'] for x in staged})
     existing = db.query(Game).join(Week, Game.week_id == Week.id).filter(
