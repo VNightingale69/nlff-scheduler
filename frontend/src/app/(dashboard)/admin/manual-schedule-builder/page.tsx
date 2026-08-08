@@ -268,6 +268,7 @@ export default function ManualScheduleBuilderPage() {
   const [autoScheduleDiagnostics, setAutoScheduleDiagnostics] = useState<AutoScheduleDiagnosticsSummary | null>(null);
   const [scheduledGamesFilters, setScheduledGamesFilters] = useState<ScheduledGamesFilters>(emptyScheduledGamesFilters);
   const [isBulkEditMode, setIsBulkEditMode] = useState(false);
+  const [bulkSaveLoading, setBulkSaveLoading] = useState(false);
 
 
   useEffect(() => {
@@ -560,20 +561,37 @@ export default function ManualScheduleBuilderPage() {
       return `${gameId}: ${code}${fields}`;
     }).join('; ');
   };
+  const bulkSaveFailureMessage = (edits: any[], reason: string) => {
+    const gamesById = new Map(games.map((game: any) => [String(game.id), game]));
+    const affected = edits.map((edit: any) => {
+      const game: any = gamesById.get(String(edit.id));
+      return `${game?.home_team_name || 'Unknown home team'} vs ${game?.away_team_name || 'Unknown away team'}`;
+    }).join(', ');
+    return `Could not save ${edits.length} schedule ${edits.length === 1 ? 'change' : 'changes'}. Game${edits.length === 1 ? '' : 's'}: ${affected}. Reason: ${reason}`;
+  };
   const saveBulkInlineEdits = async (overrideWarnings = false) => {
-    if (!canBulkInlineEditScheduledGames || !hasPendingBulkEdits) return;
+    if (!canBulkInlineEditScheduledGames || !hasPendingBulkEdits || bulkSaveLoading) return;
+    const editsToSave = [...dirtyPendingEdits];
     setError('');
-    if (hasInvalidPendingEdits) { setError('Select a valid date, time, division, two different division teams, host location, and configured field for every changed row before saving.'); return; }
+    setBulkSaveLoading(true);
     try {
       const res: any = await apiFetch('/schedule-management/games/manual-edit/bulk', { method: 'PATCH', body: JSON.stringify(buildBulkPayload(overrideWarnings)) }, token);
-      (res.games || []).forEach(applyScheduledGameUpdate);
-      setPendingGameEdits({});
+      const returnedGames = Array.isArray(res.games) ? res.games : [];
+      const returnedById = new Map(returnedGames.map((game: any) => [String(game.id), game]));
+      const verificationFailures = editsToSave.filter((edit: any) => {
+        const saved: any = returnedById.get(String(edit.id));
+        return !saved || String(saved.field_id || '') !== String(edit.field_id || '');
+      });
+      if (verificationFailures.length) throw new Error(`The server response did not confirm the requested field assignment for ${verificationFailures.length} game(s).`);
+      returnedGames.forEach(applyScheduledGameUpdate);
+      const savedIds = new Set(editsToSave.map((edit: any) => String(edit.id)));
+      setPendingGameEdits((current) => Object.fromEntries(Object.entries(current).filter(([gameId]) => !savedIds.has(String(gameId)))));
       setIsBulkEditMode(false);
       await load(); await loadRecommendations(); setManualScheduleBannerFromValidation(overrideWarnings ? 'Schedule changes saved with warning override.' : 'Schedule changes saved.', await loadFinalScheduleValidation());
     } catch (e: unknown) {
       if (e instanceof ApiError && e.status === 400) {
         const bulkErrors = (e.details as any)?.detail?.errors;
-        if (bulkErrors) { setError(`Unable to save bulk schedule changes: ${summarizeBulkHardErrors(bulkErrors)}`); return; }
+        if (bulkErrors) { setError(bulkSaveFailureMessage(editsToSave, summarizeBulkHardErrors(bulkErrors))); return; }
       }
       if (e instanceof ApiError && e.status === 409) {
         const warnings = (e.details as any)?.detail?.warnings || {};
@@ -581,7 +599,9 @@ export default function ManualScheduleBuilderPage() {
         if (confirmed) await saveBulkInlineEdits(true);
         return;
       }
-      setError(extractError(e));
+      setError(bulkSaveFailureMessage(editsToSave, extractError(e)));
+    } finally {
+      setBulkSaveLoading(false);
     }
   };
 
@@ -808,10 +828,10 @@ export default function ManualScheduleBuilderPage() {
             <span className='text-sm text-slate-600'>Enable global inline editing to update multiple scheduled games before saving once.</span>
           </> : <>
             <span className={`text-sm font-semibold ${hasPendingBulkEdits ? 'text-blue-900' : 'text-slate-600'}`}>{hasPendingBulkEdits ? pendingChangesLabel : '0 unsaved changes across 0 games'}</span>
-            <button className='rounded bg-blue-600 px-3 py-2 text-sm text-white disabled:cursor-not-allowed disabled:bg-slate-300' disabled={!hasPendingBulkEdits || hasInvalidPendingEdits} onClick={() => saveBulkInlineEdits(false)}>Save Changes</button>
+            <button type='button' className='rounded bg-blue-600 px-3 py-2 text-sm text-white disabled:cursor-not-allowed disabled:bg-slate-300' disabled={!hasPendingBulkEdits || bulkSaveLoading} onClick={() => saveBulkInlineEdits(false)}>{bulkSaveLoading ? 'Saving...' : 'Save Changes'}</button>
             <button className='rounded border bg-white px-3 py-2 text-sm disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400' disabled={!hasPendingBulkEdits} onClick={() => setPendingGameEdits({})}>Discard Changes</button>
             <button className='rounded border bg-white px-3 py-2 text-sm' onClick={() => { if (!confirmDiscardBulkEdits()) return; setPendingGameEdits({}); setIsBulkEditMode(false); }}>Exit Edit Mode</button>
-            {hasInvalidPendingEdits ? <span className='text-sm text-red-700'>Fix invalid changed rows before saving.</span> : null}
+            {hasInvalidPendingEdits ? <span className='text-sm text-amber-700'>One or more changed rows may require review; Save Changes will show the server validation result.</span> : null}
           </>}
         </div> : null}
         {games.length > 0 && filteredGames.length === 0 ? <div className='rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800'>No scheduled games match the selected filters.</div> : null}
