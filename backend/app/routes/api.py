@@ -22,7 +22,8 @@ from app.config import ADMIN_SEED_EMAIL, COMMUNITY_LOGO_MAX_SIZE_BYTES, COMMUNIT
 from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN, can_manage_fields, can_manage_schedule, enforce_organization_scope, get_current_user, get_optional_current_user, is_community_admin, is_league_admin, is_scheduling_admin, normalize_role_name, require_field_manager, require_roles, require_schedule_admin, require_schedule_publisher
 from app.database import get_db
 from app.organizations import active_organization_filter, normalize_organization_name
-from app.models import Division, Field, FieldConfigurationOption, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostPlanSelection, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Rulebook, LoginAuditLog, ScheduleChangeLog, ScoreHistory, ScoreSubmission, Season, Team, Tournament, TournamentDivision, TournamentGame, TournamentTeam, TurfWave, User, Week
+from app.models import Division, Field, FieldConfigurationOption, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostPlanSelection, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Rulebook, LoginAuditLog, ScheduleChangeLog, ScheduleImport, ScoreHistory, ScoreSubmission, Season, Team, Tournament, TournamentDivision, TournamentGame, TournamentTeam, TurfWave, User, Week
+from app.services.schedule_import import build_preview, parse_schedule_file
 from app.schemas import (
     DivisionCreate, DivisionRead, FieldConfigurationOptionCreate, FieldConfigurationOptionRead, FieldCreate, FieldRead, GameCreate, GameRead, GameSaveResponse, ManualGameBulkEditRequest, ManualGameBulkEditResponse, ManualGameEditRequest, ManualGameEditResponse, ScheduleChangeLogRead, ScheduleEditWarning,
     OrganizationDivisionParticipationBulkUpsertRequest, OrganizationDivisionParticipationRead,
@@ -62,6 +63,84 @@ AUTO_SCHEDULE_PULL_FORWARD_ATTEMPT_LIMIT_PER_DATE = 500
 AUTO_SCHEDULE_MOVE_ATTEMPT_LIMIT_PER_DATE = 2_000
 AUTO_SCHEDULE_MOVE_ATTEMPT_LIMIT_PER_SCHEDULE = 10_000
 AUTO_SCHEDULE_REPEATED_MOVE_WARN_THRESHOLD = 3
+
+
+@router.post('/schedule-imports/preview', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
+async def preview_schedule_import(
+    season_id: uuid.UUID,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Parse and stage an import without changing any schedule games."""
+    season = db.get(Season, season_id)
+    if not season:
+        raise HTTPException(404, 'Season not found.')
+    try:
+        raw_rows = parse_schedule_file(file.filename or '', await file.read())
+        preview, staged = build_preview(db, season_id, raw_rows)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    record = ScheduleImport(
+        season_id=season_id, imported_by_user_id=current_user.id,
+        source_filename=(file.filename or 'schedule')[:255],
+        weeks_replaced=json.dumps(preview['weeks']), status='PREVIEW',
+        staged_rows=json.dumps(staged), preview_summary=json.dumps(preview),
+        validation_warning_count=preview['warning_count'],
+    )
+    db.add(record); db.commit(); db.refresh(record)
+    return {'import_id': str(record.id), **preview,
+            'replacement_required': preview['existing_games_to_replace'] > 0,
+            'confirmation_phrase': 'Replace Existing Schedule Games'}
+
+
+@router.post('/schedule-imports/{import_id}/confirm', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
+def confirm_schedule_import(
+    import_id: uuid.UUID,
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Atomically replace exactly the week IDs in a previously valid preview."""
+    record = db.get(ScheduleImport, import_id)
+    if not record or record.imported_by_user_id != current_user.id:
+        raise HTTPException(404, 'Schedule import preview not found.')
+    if record.status != 'PREVIEW':
+        raise HTTPException(409, 'This schedule import is no longer awaiting confirmation.')
+    preview=json.loads(record.preview_summary); staged=json.loads(record.staged_rows)
+    if preview['blocking_errors']:
+        raise HTTPException(409, 'Blocking validation errors must be corrected before import.')
+    if payload.get('confirmation') != 'Replace Existing Schedule Games':
+        raise HTTPException(400, 'Explicit schedule replacement confirmation is required.')
+    season=db.get(Season, record.season_id)
+    if season and str(season.schedule_status).lower() == 'published':
+        raise HTTPException(409, 'Unpublish the active schedule before importing a replacement.')
+    week_ids=[uuid.UUID(x['week_id']) for x in staged]
+    try:
+        existing=db.query(Game).filter(Game.season_id==record.season_id, Game.week_id.in_(set(week_ids))).all()
+        existing_ids=[g.id for g in existing]
+        if existing_ids:
+            db.query(GameSlot).filter(GameSlot.assigned_game_id.in_(existing_ids)).update({GameSlot.assigned_game_id:None, GameSlot.status:'OPEN'}, synchronize_session=False)
+            for game in existing: db.delete(game)
+            db.flush()
+        for row in staged:
+            db.add(Game(season_id=record.season_id, week_id=uuid.UUID(row['week_id']), home_team_id=uuid.UUID(row['home_team_id']), away_team_id=uuid.UUID(row['away_team_id']), field_id=uuid.UUID(row['field_id']), host_location_id=uuid.UUID(row['site_id']), game_status_id=uuid.UUID(row['game_status_id']), game_date=date.fromisoformat(row['date']), kickoff_time=time.fromisoformat(row['kickoff']), internal_admin_notes=row.get('notes'), is_manual_edit=True, manual_updated_by_user_id=current_user.id, manual_updated_at=datetime.now(timezone.utc)))
+        db.flush()
+        record.existing_games_removed=len(existing); record.games_imported=len(staged); record.status='COMPLETED'
+        if season: season.schedule_modified_after_publish = bool(season.last_published_at)
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception('Schedule import transaction rolled back (import_id=%s)', import_id)
+        raise HTTPException(500, 'Schedule import failed and all schedule changes were rolled back.')
+    return {'import_id':str(record.id),'status':'COMPLETED','weeks_replaced':preview['weeks'],'existing_games_removed':len(existing),'games_imported':len(staged),'warning_count':preview['warning_count']}
+
+
+@router.get('/schedule-imports', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
+def schedule_import_history(season_id: uuid.UUID | None = None, db: Session = Depends(get_db)):
+    query=db.query(ScheduleImport)
+    if season_id: query=query.filter(ScheduleImport.season_id==season_id)
+    return [{'id':str(x.id),'season_id':str(x.season_id),'imported_by_user_id':str(x.imported_by_user_id),'imported_at':x.imported_at,'source_filename':x.source_filename,'weeks_replaced':json.loads(x.weeks_replaced),'existing_games_removed':x.existing_games_removed,'games_imported':x.games_imported,'validation_warning_count':x.validation_warning_count,'status':x.status} for x in query.order_by(ScheduleImport.imported_at.desc()).limit(100)]
 
 
 def _auto_schedule_deadline_exceeded(started_perf: float, limit_seconds: int) -> bool:
