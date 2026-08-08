@@ -29275,6 +29275,16 @@ def _manual_edit_warning_payload(warnings: list[ScheduleEditWarning]) -> list[di
     return [w.model_dump() for w in warnings]
 
 
+def _warnings_requiring_manual_override(warnings: list[ScheduleEditWarning]) -> list[ScheduleEditWarning]:
+    """Return warnings that require an explicit scheduling-admin override.
+
+    A division's preferred field size is guidance, not a structural scheduling
+    constraint.  Preserve it in the response/audit trail without turning an
+    otherwise valid canonical field assignment into a failed save.
+    """
+    return [warning for warning in warnings if warning.code != 'FIELD_SIZE_MISMATCH']
+
+
 def _apply_manual_game_edit(db: Session, game: Game, payload: ManualGameEditRequest, current_user: User, warnings: list[ScheduleEditWarning]) -> list[ScheduleChangeLog]:
     if not getattr(game, 'original_game_snapshot', None):
         game.original_game_snapshot = json.dumps(_game_snapshot(game), sort_keys=True)
@@ -29344,9 +29354,10 @@ def manual_edit_generated_game(game_id: uuid.UUID, payload: ManualGameEditReques
         raise HTTPException(404, 'Game not found')
     _raise_if_invalid_manual_game_edit(db, game, payload)
     warnings = _manual_game_edit_warnings(db, game, payload)
-    if any(w.code == 'SCORED_GAME_CHANGE' for w in warnings) and not payload.score_change_confirmed:
+    override_warnings = _warnings_requiring_manual_override(warnings)
+    if any(w.code == 'SCORED_GAME_CHANGE' for w in override_warnings) and not payload.score_change_confirmed:
         raise HTTPException(status_code=409, detail={'error': 'SCORED_GAME_CHANGE_REQUIRES_CONFIRMATION', 'warnings': _manual_edit_warning_payload(warnings)})
-    if warnings and not payload.override_warnings:
+    if override_warnings and not payload.override_warnings:
         raise HTTPException(status_code=409, detail={'error': 'SCHEDULE_WARNINGS_REQUIRE_OVERRIDE', 'warnings': _manual_edit_warning_payload(warnings)})
 
     changed_logs = _apply_manual_game_edit(db, game, payload, current_user, warnings)
@@ -29395,10 +29406,15 @@ def bulk_manual_edit_generated_games(payload: ManualGameBulkEditRequest, current
 
     if hard_errors:
         raise HTTPException(status_code=400, detail={'error': 'BULK_MANUAL_EDIT_VALIDATION_FAILED', 'errors': hard_errors})
-    if warnings_by_game and not payload.override_warnings:
+    override_warnings_by_game = {
+        game_id: blocking
+        for game_id, warnings in warnings_by_game.items()
+        if (blocking := _warnings_requiring_manual_override(warnings))
+    }
+    if override_warnings_by_game and not payload.override_warnings:
         raise HTTPException(status_code=409, detail={
             'error': 'SCHEDULE_WARNINGS_REQUIRE_OVERRIDE',
-            'warnings': {game_id: _manual_edit_warning_payload(warnings) for game_id, warnings in warnings_by_game.items()},
+            'warnings': {game_id: _manual_edit_warning_payload(warnings) for game_id, warnings in override_warnings_by_game.items()},
         })
 
     changed_logs: list[ScheduleChangeLog] = []
