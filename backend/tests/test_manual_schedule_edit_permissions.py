@@ -14,6 +14,7 @@ from app.database import Base, get_db
 from app.main import app
 from app.models import Division, Field, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, Organization, Role, ScheduleChangeLog, Season, Team, User, Week
 from app.security import create_access_token, hash_password
+from app.schemas import ManualGameBulkEditRequest
 
 
 class ManualScheduleEditPermissionsTest(unittest.TestCase):
@@ -301,6 +302,72 @@ class ManualScheduleEditPermissionsTest(unittest.TestCase):
             saved = self.db.get(Game, game_id)
             self.assertEqual(saved.field_id, expected_field_id)
             self.assertFalse(saved.missing_field_assignment)
+
+        # The Manual Schedule Builder refetches this endpoint after a successful
+        # global save.  Assert that serialization reads the committed canonical
+        # Game.field_id values rather than stale generated-slot identifiers.
+        refetched = self.client.get(
+            '/api/games?page_size=300',
+            headers=self._token(self.scheduling_user.id),
+        )
+        self.assertEqual(refetched.status_code, 200, refetched.text)
+        refetched_by_id = {row['id']: row for row in refetched.json()['items']}
+        self.assertEqual(refetched_by_id[str(self.game.id)]['field_id'], str(self.canonical_field.id))
+        self.assertEqual(refetched_by_id[str(second_game.id)]['field_id'], str(self.other_field.id))
+
+    def test_bulk_request_schema_preserves_canonical_field_id(self):
+        parsed = ManualGameBulkEditRequest.model_validate({
+            'overrideWarnings': True,
+            'changes': [dict(
+                self._payload(field_id=str(self.canonical_field.id), field_instance_id=None),
+                game_id=str(self.game.id),
+            )],
+        })
+
+        self.assertEqual(parsed.changes[0].field_id, self.canonical_field.id)
+        self.assertIn('field_id', parsed.changes[0].model_fields_set)
+
+    def test_advisory_field_size_mismatch_saves_without_override_and_refetches(self):
+        self.game.field_id = None
+        self.game.field_instance_id = None
+        original_home_team_id = self.game.home_team_id
+        original_game_date = self.game.game_date
+        self.db.commit()
+        change = dict(
+            self._payload(
+                away_team_id=str(self.away_team.id),
+                field_id=str(self.canonical_field.id),
+                field_instance_id=None,
+                public_notes=None,
+                internal_admin_notes=None,
+            ),
+            game_id=str(self.game.id),
+        )
+
+        saved_response = self.client.patch(
+            '/api/schedule-management/games/manual-edit/bulk',
+            headers=self._token(self.scheduling_user.id),
+            json={'changes': [change]},
+        )
+        self.assertEqual(saved_response.status_code, 200, saved_response.text)
+        warning_codes = {
+            warning['code']
+            for warnings in saved_response.json()['warnings'].values()
+            for warning in warnings
+        }
+        self.assertIn('FIELD_SIZE_MISMATCH', warning_codes)
+        self.assertEqual(saved_response.json()['games'][0]['field_id'], str(self.canonical_field.id))
+
+        self.db.expire_all()
+        saved = self.db.get(Game, self.game.id)
+        self.assertEqual(saved.field_id, self.canonical_field.id)
+        self.assertEqual(saved.home_team_id, original_home_team_id)
+        self.assertEqual(saved.game_date, original_game_date)
+
+        refetched = self.client.get('/api/games?page_size=300', headers=self._token(self.scheduling_user.id))
+        self.assertEqual(refetched.status_code, 200, refetched.text)
+        refetched_game = next(row for row in refetched.json()['items'] if row['id'] == str(self.game.id))
+        self.assertEqual(refetched_game['field_id'], str(self.canonical_field.id))
 
     def test_bulk_edit_rejects_field_from_different_host_without_partial_save(self):
         original_notes = self.game.internal_admin_notes
