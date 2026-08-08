@@ -38,6 +38,7 @@ from app.services.organization_cleanup import cleanup_organization_dependencies,
 from app.services.scheduling_validation import validate_game
 from app.turf_configurations import INVALID_TURF_CONFIGURATION_MESSAGE, BACKWARD_COMPATIBLE_TURF_CONFIGURATION_ALIASES, turf_configuration_legacy_metadata
 from app.teams import eligible_team_query, log_schedule_roster_exclusions, season_roster, season_roster_query
+from app.facility_layouts import (JOHNSBURG_APPROVED_LAYOUT_CODES_BY_LOCATION, JOHNSBURG_FIELD_TEMPLATES_BY_LOCATION, JOHNSBURG_ORGANIZATION_NAMES, johnsburg_location_name)
 
 router = APIRouter(prefix='/api')
 logger = logging.getLogger(__name__)
@@ -124,7 +125,7 @@ def confirm_schedule_import(
             for game in existing: db.delete(game)
             db.flush()
         for row in staged:
-            db.add(Game(season_id=record.season_id, week_id=uuid.UUID(row['week_id']), home_team_id=uuid.UUID(row['home_team_id']), away_team_id=uuid.UUID(row['away_team_id']), field_id=uuid.UUID(row['field_id']), host_location_id=uuid.UUID(row['site_id']), game_status_id=uuid.UUID(row['game_status_id']), game_date=date.fromisoformat(row['date']), kickoff_time=time.fromisoformat(row['kickoff']), internal_admin_notes=row.get('notes'), is_manual_edit=True, manual_updated_by_user_id=current_user.id, manual_updated_at=datetime.now(timezone.utc)))
+            db.add(Game(season_id=record.season_id, week_id=uuid.UUID(row['week_id']), home_team_id=uuid.UUID(row['home_team_id']), away_team_id=uuid.UUID(row['away_team_id']), field_id=uuid.UUID(row['field_id']) if row.get('field_id') else None, field_instance_id=uuid.UUID(row['field_instance_id']) if row.get('field_instance_id') else None, host_location_id=uuid.UUID(row['site_id']), game_status_id=uuid.UUID(row['game_status_id']), game_date=date.fromisoformat(row['date']), kickoff_time=time.fromisoformat(row['kickoff']), internal_admin_notes=row.get('notes'), is_manual_edit=True, manual_updated_by_user_id=current_user.id, manual_updated_at=datetime.now(timezone.utc)))
         db.flush()
         record.existing_games_removed=len(existing); record.games_imported=len(staged); record.status='COMPLETED'
         if season: season.schedule_modified_after_publish = bool(season.last_published_at)
@@ -4652,25 +4653,8 @@ STANDARD_APPROVED_LAYOUT_CODES = frozenset({
     'ONE_SMALL_ONE_LARGE', 'ONE_LARGE',
 })
 
-JOHNSBURG_ORGANIZATION_NAMES = frozenset({'JOHNSBURG', 'JOHNSBURG SKYHAWKS'})
-JOHNSBURG_APPROVED_LAYOUT_CODES_BY_LOCATION = {
-    'JOHNSBURG STADIUM': frozenset({'ONE_LARGE_ONE_MEDIUM'}),
-    'HILLER PARK': frozenset({'FOUR_SMALL'}),
-    'HILLER STADIUM': frozenset({'TWO_MEDIUM'}),
-}
-JOHNSBURG_FIELD_TEMPLATES_BY_LOCATION = {
-    'JOHNSBURG STADIUM': [('Field 1', FIELD_SIZE_LARGE), ('Field 3', FIELD_SIZE_MEDIUM)],
-    'HILLER PARK': [(f'Field {index}', FIELD_SIZE_SMALL) for index in range(1, 5)],
-    'HILLER STADIUM': [('Field 1', FIELD_SIZE_MEDIUM), ('Field 3', FIELD_SIZE_MEDIUM)],
-}
-
-
 def _johnsburg_location_name(host: HostLocation) -> str | None:
-    organization_name = str(getattr(getattr(host, 'organization', None), 'name', '') or '').strip().upper()
-    location_name = str(host.name or '').strip().upper()
-    if organization_name in JOHNSBURG_ORGANIZATION_NAMES and location_name in JOHNSBURG_APPROVED_LAYOUT_CODES_BY_LOCATION:
-        return location_name
-    return None
+    return johnsburg_location_name(host)
 
 
 def _approved_layout_codes_for_host(host: HostLocation) -> frozenset[str]:
