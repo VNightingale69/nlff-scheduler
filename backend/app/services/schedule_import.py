@@ -121,6 +121,7 @@ def build_preview(db, season_id, raw_rows):
 
     for number, raw in enumerate(raw_rows, 2):
         errors = []
+        warnings = []
         source_week = _text(raw.get('week'))
         week_number = _week_number(raw.get('week'))
         week = weeks.get(week_number)
@@ -152,20 +153,36 @@ def build_preview(db, season_id, raw_rows):
                 errors.append(f'Field "{_text(raw.get("field"))}" could not be found at site "{_text(raw.get("site"))}".')
 
         field_type = _text(raw.get('fieldtype')).upper()
+        configured_field_type = None
         if field_type not in {'SMALL', 'MEDIUM', 'LARGE'}:
             errors.append('Field Type must be Small, Medium, or Large.')
         else:
             resolved_type = (field_instance.field_type if field_instance else None) or (field.layout_type if field else None)
+            configured_field_type = _text(resolved_type).title() or None
             active_layouts = db.query(HostLocationConfiguration).filter_by(
                 host_location_id=site.id, is_active=True).all() if site else []
             has_configured_layouts = any(
                 johnsburg_field_templates(site, layout.configuration_name) is not None
                 for layout in active_layouts
             )
-            if has_configured_layouts and not configuration_candidates:
-                errors.append(f'Field "{_text(raw.get("field"))}" is incompatible with Field Type "{_text(raw.get("fieldtype"))}" in every configured site layout.')
-            elif not has_configured_layouts and resolved_type and not _key(resolved_type).startswith(_key(field_type)):
-                errors.append(f'Field "{_text(raw.get("field"))}" is incompatible with Field Type "{_text(raw.get("fieldtype"))}".')
+            type_mismatch = bool(
+                resolved_type and not _key(resolved_type).startswith(_key(field_type))
+            )
+            # A field can be deliberately reconfigured for one timeslot.  Keep
+            # this advisory separate from errors so it never prevents staging.
+            if type_mismatch:
+                warnings.append(
+                    f'Field "{_text(raw.get("field"))}" is normally configured as '
+                    f'"{_text(resolved_type).title()}", but the import requests '
+                    f'"{_text(raw.get("fieldtype")).title()}". Verify the field will be '
+                    'reconfigured for this timeslot.'
+                )
+            elif has_configured_layouts and not configuration_candidates and (field or field_instance):
+                warnings.append(
+                    f'Imported Field Type "{_text(raw.get("fieldtype")).title()}" does not '
+                    'match the current field configuration. Verify the field configuration '
+                    'before game day.'
+                )
 
         division = divisions.get(_key(raw.get('division')))
         if not division:
@@ -210,9 +227,12 @@ def build_preview(db, season_id, raw_rows):
                'date': game_date.isoformat() if game_date else _text(raw.get('date')),
                'kickoff': kickoff.strftime('%H:%M') if kickoff else _text(raw.get('kickoff')),
                'site': _text(raw.get('site')), 'field': _text(raw.get('field')),
+               'configured_field_type': configured_field_type,
+               'imported_field_type': _text(raw.get('fieldtype')).title(),
                'division': _text(raw.get('division')), 'home_team': _text(raw.get('hometeam')),
                'away_team': _text(raw.get('awayteam')), 'notes': _text(raw.get('notes')) or None,
-               'status': 'ERROR' if errors else 'VALID', 'message': ' '.join(errors) or 'Ready to import.'}
+               'status': 'ERROR' if errors else ('WARNING' if warnings else 'VALID'),
+               'message': ' '.join(errors + warnings) or 'Ready to import.'}
         results.append(row)
         if not errors:
             staged_row = {**row, 'week_number': week_number, 'week_id': str(week.id), 'site_id': str(site.id),
@@ -250,7 +270,9 @@ def build_preview(db, season_id, raw_rows):
             for row, staged_row, _candidates in grouped:
                 staged_row['configuration_id'] = selected_id
                 staged_row['configuration_name'] = selected.configuration_name
-                row['message'] = f'Ready to import. {row["site"]} will use its {layout} configuration for this timeslot.'
+                layout_message = f'{row["site"]} will use its {layout} configuration for this timeslot.'
+                row['message'] = (f'{row["message"]} {layout_message}' if row['status'] == 'WARNING'
+                                  else f'Ready to import. {layout_message}')
     staged = [row for row in staged if id(row) not in invalid_staged_ids]
 
     affected = sorted({x['week_number'] for x in staged})
@@ -258,10 +280,26 @@ def build_preview(db, season_id, raw_rows):
         Game.season_id == season_id, Week.week_number.in_(affected)).count() if affected else 0
     regular = {w.week_number for w in weeks.values() if w.date_type == 'REGULAR_SEASON'}
     dates = [_date(x['date']) for x in staged]
-    return {'rows_uploaded': len(raw_rows), 'valid_games': len(staged), 'invalid_rows': len(results) - len(staged),
+    warning_rows = [row for row in results if row['status'] == 'WARNING']
+    diagnostics = [{
+        'category': 'Scheduling Integrity',
+        'check': 'Field configuration mismatch',
+        'status': 'WARNING',
+        'advisory': True,
+        'blocking': False,
+        'detail': {
+            'site': row['site'], 'kickoff': row['kickoff'], 'field': row['field'],
+            'configured_default_type': row['configured_field_type'],
+            'imported_type': row['imported_field_type'],
+            'message': row['message'],
+        },
+    } for row in warning_rows]
+    return {'rows_uploaded': len(raw_rows), 'valid_games': len(staged),
+            'importable_games': len(staged), 'invalid_rows': len(results) - len(staged),
             'weeks': affected, 'earliest_date': min(dates).isoformat() if dates else None,
             'latest_date': max(dates).isoformat() if dates else None, 'sites': sorted({x['site'] for x in staged}),
             'divisions': sorted({x['division'] for x in staged}), 'games_to_add': len(staged),
-            'existing_games_to_replace': existing, 'warning_count': 0,
+            'existing_games_to_replace': existing, 'warning_count': len(warning_rows),
             'blocking_errors': len(results) - len(staged),
-            'is_full_regular_season': bool(regular) and set(affected) == regular, 'rows': results}, staged
+            'is_full_regular_season': bool(regular) and set(affected) == regular,
+            'diagnostics': diagnostics, 'rows': results}, staged
