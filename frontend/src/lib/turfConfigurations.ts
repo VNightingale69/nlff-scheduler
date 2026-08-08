@@ -71,11 +71,21 @@ export const APPROVED_TURF_CONFIGURATION_CODES = APPROVED_TURF_CONFIGURATIONS.ma
 
 export const STANDARD_TURF_CONFIGURATION_CODES = ['THREE_SMALL', 'TWO_SMALL_ONE_MEDIUM', 'TWO_MEDIUM', 'ONE_SMALL_ONE_LARGE', 'ONE_LARGE'];
 export const TIM_OSMOND_CONFIGURATION_CODES = ['FOUR_SMALL', 'TWO_SMALL_ONE_MEDIUM', 'ONE_LARGE_ONE_MEDIUM'];
+export const JOHNSBURG_CONFIGURATION_CODES_BY_HOST: Record<string, string[]> = {
+  'JOHNSBURG STADIUM': ['ONE_LARGE_ONE_MEDIUM'],
+  'HILLER PARK': ['FOUR_SMALL'],
+  'HILLER STADIUM': ['TWO_MEDIUM'],
+};
 
-export const turfConfigurationsForHost = (hostName?: string | null) => {
-  const codes = hostName?.trim().toUpperCase() === 'TIM OSMOND SPORTS COMPLEX'
+export const turfConfigurationsForHost = (hostName?: string | null, organizationName?: string | null) => {
+  const normalizedHost = hostName?.trim().toUpperCase() || '';
+  const normalizedOrganization = organizationName?.trim().toUpperCase() || '';
+  const johnsburgCodes = ['JOHNSBURG', 'JOHNSBURG SKYHAWKS'].includes(normalizedOrganization)
+    ? JOHNSBURG_CONFIGURATION_CODES_BY_HOST[normalizedHost]
+    : undefined;
+  const codes = johnsburgCodes || (normalizedHost === 'TIM OSMOND SPORTS COMPLEX'
     ? TIM_OSMOND_CONFIGURATION_CODES
-    : STANDARD_TURF_CONFIGURATION_CODES;
+    : STANDARD_TURF_CONFIGURATION_CODES);
   return APPROVED_TURF_CONFIGURATIONS.filter((config) => codes.includes(config.code));
 };
 

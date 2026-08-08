@@ -4573,9 +4573,32 @@ STANDARD_APPROVED_LAYOUT_CODES = frozenset({
     'ONE_SMALL_ONE_LARGE', 'ONE_LARGE',
 })
 
+JOHNSBURG_ORGANIZATION_NAMES = frozenset({'JOHNSBURG', 'JOHNSBURG SKYHAWKS'})
+JOHNSBURG_APPROVED_LAYOUT_CODES_BY_LOCATION = {
+    'JOHNSBURG STADIUM': frozenset({'ONE_LARGE_ONE_MEDIUM'}),
+    'HILLER PARK': frozenset({'FOUR_SMALL'}),
+    'HILLER STADIUM': frozenset({'TWO_MEDIUM'}),
+}
+JOHNSBURG_FIELD_TEMPLATES_BY_LOCATION = {
+    'JOHNSBURG STADIUM': [('Field 1', FIELD_SIZE_LARGE), ('Field 3', FIELD_SIZE_MEDIUM)],
+    'HILLER PARK': [(f'Field {index}', FIELD_SIZE_SMALL) for index in range(1, 5)],
+    'HILLER STADIUM': [('Field 1', FIELD_SIZE_MEDIUM), ('Field 3', FIELD_SIZE_MEDIUM)],
+}
+
+
+def _johnsburg_location_name(host: HostLocation) -> str | None:
+    organization_name = str(getattr(getattr(host, 'organization', None), 'name', '') or '').strip().upper()
+    location_name = str(host.name or '').strip().upper()
+    if organization_name in JOHNSBURG_ORGANIZATION_NAMES and location_name in JOHNSBURG_APPROVED_LAYOUT_CODES_BY_LOCATION:
+        return location_name
+    return None
+
 
 def _approved_layout_codes_for_host(host: HostLocation) -> frozenset[str]:
     """Return the physical layouts approved for this particular stadium."""
+    johnsburg_location = _johnsburg_location_name(host)
+    if johnsburg_location:
+        return JOHNSBURG_APPROVED_LAYOUT_CODES_BY_LOCATION[johnsburg_location]
     if str(host.name or '').strip().upper() == TIM_OSMOND_LOCATION_NAME:
         return TIM_OSMOND_APPROVED_LAYOUT_CODES
     return STANDARD_APPROVED_LAYOUT_CODES
@@ -4698,6 +4721,14 @@ def _configuration_field_templates(configuration_name: str | None, option: Field
                 fields.append((f'{field_type.title()} Field {index}', field_type))
         return fields
     return CONFIGURATION_FIELD_TEMPLATES.get(_normalize_configuration_name(configuration_name), [])
+
+
+def _configuration_field_templates_for_host(host: HostLocation, configuration_name: str | None) -> list[tuple[str, str]]:
+    """Return schedulable physical positions, omitting unavailable field numbers."""
+    johnsburg_location = _johnsburg_location_name(host)
+    if johnsburg_location and _normalize_configuration_name(configuration_name) in JOHNSBURG_APPROVED_LAYOUT_CODES_BY_LOCATION[johnsburg_location]:
+        return list(JOHNSBURG_FIELD_TEMPLATES_BY_LOCATION[johnsburg_location])
+    return _configuration_field_templates(configuration_name)
 
 
 def _capacity_for_layout(layout_name: str | None, option: FieldConfigurationOption | None) -> tuple[int, int, int]:
@@ -5370,7 +5401,10 @@ def _ensure_approved_turf_configurations(db: Session, host: HostLocation) -> boo
     return changed
 
 def _attach_configuration_instances(config: HostLocationConfiguration) -> HostLocationConfiguration:
-    config.field_instances = [field_name for field_name, _field_type in _configuration_field_templates(config.configuration_name)]
+    config.field_instances = [
+        field_name
+        for field_name, _field_type in _configuration_field_templates_for_host(config.host_location, config.configuration_name)
+    ]
     return config
 
 
@@ -6773,7 +6807,7 @@ def _regenerate_generated_slots(
             db.add(wave)
             block_instances: list[FieldInstance] = []
             component_counts = {size: 0 for size in FIELD_SIZE_ORDER}
-            for component_label, field_type in _configuration_field_templates(normalized_layout):
+            for component_label, field_type in _configuration_field_templates_for_host(host, normalized_layout):
                 size = _normalize_field_size(field_type)
                 component_counts[size] = int(component_counts.get(size, 0) or 0) + 1
                 component_index = component_counts[size]

@@ -4,7 +4,7 @@ import Toast from './Toast';
 import { apiFetch } from '@/lib/api';
 import { useAuthSession } from '@/components/AuthGate';
 import { canManageFields } from '@/lib/auth';
-import { APPROVED_TURF_CONFIGURATIONS, turfAvailableFieldsLabel, turfConfigurationLabel, type TurfConfiguration } from '@/lib/turfConfigurations';
+import { APPROVED_TURF_CONFIGURATIONS, turfAvailableFieldsLabel, turfConfigurationLabel, turfConfigurationsForHost, type TurfConfiguration } from '@/lib/turfConfigurations';
 
 const TURF_STADIUM = 'TURF_STADIUM';
 const GRASS_FIELD = 'GRASS_FIELD';
@@ -187,6 +187,10 @@ export default function FieldAreaManager() {
 
   const hostOptions = useMemo(() => hosts.filter((h: any) => !orgId || h.organization_id === orgId), [hosts, orgId]);
   const selectedHost = useMemo(() => hosts.find((h: any) => h.id === hostId), [hosts, hostId]);
+  const selectedOrganization = orgs.find((org: any) => org.id === orgId);
+  const selectedTurfLayouts = turfConfigurationsForHost(selectedHost?.name, selectedOrganization?.name).map((config) => (
+    TURF_LAYOUTS.find((layout) => layout.name === config.code)!
+  )).filter(Boolean);
   const fieldsByHost = useMemo(() => fields.reduce((map: any, field: any) => ({ ...map, [field.host_location_id]: [...(map[field.host_location_id] || []), field] }), {}), [fields]);
   const hostConfigsByHost = useMemo(() => hostConfigs.reduce((map: any, config: any) => ({ ...map, [config.host_location_id]: [...(map[config.host_location_id] || []), config] }), {}), [hostConfigs]);
   const facilityTypeForHost = (host: any) => {
@@ -335,7 +339,8 @@ export default function FieldAreaManager() {
         medium: activeFields.filter((field: any) => field.layout_type === 'MEDIUM').length,
         small: activeFields.filter((field: any) => field.layout_type === 'SMALL').length,
       };
-      const maxFieldsPerWave = surfaceType === TURF_STADIUM ? Math.max(...TURF_LAYOUTS.map((layout) => fieldTypesForLayout(layout).length)) : 0;
+      const hostLayouts = turfConfigurationsForHost(host.name, orgNameById[host.organization_id]);
+      const maxFieldsPerWave = surfaceType === TURF_STADIUM ? Math.max(0, ...hostLayouts.map((layout) => layout.availableFields.length)) : 0;
       const isReady = surfaceType === TURF_STADIUM ? Boolean(host.is_active) : activeFields.length > 0;
       if (isCommunityAdmin) {
         return <tr key={host.id}>
@@ -405,7 +410,7 @@ export default function FieldAreaManager() {
       <h2 className='font-semibold'>Approved Turf Stadium Layouts</h2>
       <p className='text-sm text-slate-600'>Only league-approved turf configurations are supported. The scheduler assigns one approved configuration code per turf field per one-hour wave and then fills as many compatible game slots as practical.</p>
       <div className='mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-3'>
-        {TURF_LAYOUTS.map((layout) => <article key={layout.name} className='rounded border bg-slate-50 p-3 text-left'>
+        {selectedTurfLayouts.map((layout) => <article key={layout.name} className='rounded border bg-slate-50 p-3 text-left'>
           <p className='text-xs font-semibold uppercase text-slate-500'>Configuration Code</p>
           <p className='font-semibold'>{layout.name}</p>
           <p className='mt-2 text-xs font-semibold uppercase text-slate-500'>Display Name</p>
@@ -418,7 +423,7 @@ export default function FieldAreaManager() {
           <p className='text-sm'>{schedulingNote(layout)}</p>
         </article>)}
       </div>
-      <p className='mt-3 rounded bg-emerald-50 p-3 text-sm text-emerald-900'>This turf location supports the four approved league turf configurations. During scheduling, each one-hour wave will be assigned one approved configuration code. Unused field slots are allowed when there are not enough compatible games to fill the selected layout.</p>
+      <p className='mt-3 rounded bg-emerald-50 p-3 text-sm text-emerald-900'>This turf location supports {selectedTurfLayouts.length} approved physical layout{selectedTurfLayouts.length === 1 ? '' : 's'}. During scheduling, each one-hour wave will use one configured layout. Unused field slots are not inferred as additional fields.</p>
     </section>}
 
     {selectedHost?.surface_type === GRASS_FIELD && <section className='rounded border p-4'>
