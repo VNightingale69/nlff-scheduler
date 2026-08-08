@@ -4555,12 +4555,30 @@ STANDARD_TURF_FIELD_SLOT_LABELS = (
 )
 STANDARD_TURF_FIELD_SLOT_SET = frozenset(STANDARD_TURF_FIELD_SLOT_LABELS)
 APPROVED_TURF_FIELD_SLOT_SETS = {
+    'FOUR_SMALL': frozenset({'Small Field 1', 'Small Field 2', 'Small Field 3', 'Small Field 4'}),
     'THREE_SMALL': frozenset({'Small Field 1', 'Small Field 2', 'Small Field 3'}),
     'TWO_SMALL_ONE_MEDIUM': frozenset({'Small Field 1', 'Small Field 2', 'Medium Field 1'}),
     'TWO_MEDIUM': frozenset({'Medium Field 1', 'Medium Field 2'}),
     'ONE_SMALL_ONE_LARGE': frozenset({'Small Field 1', 'Large Field 1'}),
     'ONE_LARGE': frozenset({'Large Field 1'}),
+    'ONE_LARGE_ONE_MEDIUM': frozenset({'Medium Field 1', 'Large Field 1'}),
 }
+
+TIM_OSMOND_LOCATION_NAME = 'TIM OSMOND SPORTS COMPLEX'
+TIM_OSMOND_APPROVED_LAYOUT_CODES = frozenset({
+    'FOUR_SMALL', 'TWO_SMALL_ONE_MEDIUM', 'ONE_LARGE_ONE_MEDIUM',
+})
+STANDARD_APPROVED_LAYOUT_CODES = frozenset({
+    'THREE_SMALL', 'TWO_SMALL_ONE_MEDIUM', 'TWO_MEDIUM',
+    'ONE_SMALL_ONE_LARGE', 'ONE_LARGE',
+})
+
+
+def _approved_layout_codes_for_host(host: HostLocation) -> frozenset[str]:
+    """Return the physical layouts approved for this particular stadium."""
+    if str(host.name or '').strip().upper() == TIM_OSMOND_LOCATION_NAME:
+        return TIM_OSMOND_APPROVED_LAYOUT_CODES
+    return STANDARD_APPROVED_LAYOUT_CODES
 
 
 def _turf_layout_code_for_counts(counts: dict[str, int]) -> str | None:
@@ -5194,11 +5212,13 @@ def _simulate_turf_layout_sequence(
 
 
 TURF_WAVE_CONFIGURATION_PRIORITY = {
+    'FOUR_SMALL': 60,
     'THREE_SMALL': 50,
     'TWO_SMALL_ONE_MEDIUM': 40,
     'TWO_MEDIUM': 30,
     'ONE_SMALL_ONE_LARGE': 20,
     'ONE_LARGE': 10,
+    'ONE_LARGE_ONE_MEDIUM': 25,
 }
 
 
@@ -5311,6 +5331,7 @@ def _apply_turf_configuration_metadata(obj, configuration_name: str) -> None:
 def _ensure_approved_turf_configurations(db: Session, host: HostLocation) -> bool:
     if not _is_turf_stadium_host(host):
         return False
+    approved_codes = _approved_layout_codes_for_host(host)
     existing = {
         _normalize_configuration_name(config.configuration_name): config
         for config in db.query(HostLocationConfiguration).filter(HostLocationConfiguration.host_location_id == host.id).all()
@@ -5318,7 +5339,7 @@ def _ensure_approved_turf_configurations(db: Session, host: HostLocation) -> boo
     changed = False
     invalid_config_ids = []
     for config_name, config in existing.items():
-        if config_name not in TURF_STADIUM_CONFIGURATIONS:
+        if config_name not in approved_codes:
             invalid_config_ids.append(config.id)
             if config.is_active:
                 config.is_active = False
@@ -5333,7 +5354,7 @@ def _ensure_approved_turf_configurations(db: Session, host: HostLocation) -> boo
             availability.auto_select_turf_layout = True
             availability.lock_selected_layout = False
             changed = True
-    for config_name in TURF_STADIUM_CONFIGURATIONS:
+    for config_name in approved_codes:
         config = existing.get(config_name)
         if not config:
             config = HostLocationConfiguration(host_location_id=host.id, configuration_name=config_name, is_active=True)
@@ -10993,6 +11014,8 @@ def create_host_location_configuration(payload: HostLocationConfigurationCreate,
     if (host.surface_type or 'GRASS_FIELD') != 'TURF_STADIUM':
         raise HTTPException(400, 'Host location configurations are only available for turf stadium locations')
     config_name = _normalize_configuration_name(payload.configuration_name)
+    if config_name not in _approved_layout_codes_for_host(host):
+        raise HTTPException(400, f'{config_name} is not an approved physical layout for {host.name}')
     x = HostLocationConfiguration(host_location_id=payload.host_location_id, configuration_name=config_name, is_active=payload.is_active)
     _apply_turf_configuration_metadata(x, config_name)
     db.add(x); db.commit(); db.refresh(x); return _attach_configuration_instances(x)
