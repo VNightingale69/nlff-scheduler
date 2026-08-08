@@ -112,11 +112,11 @@ def _hiller_import_context():
     ])
     medium = HostLocationConfiguration(host_location_id=site.id,
                                        configuration_name='TWO_MEDIUM', is_active=True)
-    large = HostLocationConfiguration(host_location_id=site.id,
-                                      configuration_name='ONE_LARGE', is_active=True)
-    db.add_all([medium, large])
+    # ONE_LARGE is intentionally not persisted: it is a supported alternate
+    # facility layout, not a duplicate permanent field/configuration record.
+    db.add(medium)
     teams = []
-    for index in range(1, 7):
+    for index in range(1, 43):
         organization = home_org if index % 2 else away_org
         teams.append(Team(organization_id=organization.id, division_id=division.id,
                           name=f'Team {index}', is_active=True))
@@ -126,8 +126,8 @@ def _hiller_import_context():
 
 
 def _hiller_row(kickoff, field, field_type, home, away):
-    home_community = 'Johnsburg' if home.name in {'Team 1', 'Team 3', 'Team 5'} else 'Antioch'
-    away_community = 'Johnsburg' if away.name in {'Team 1', 'Team 3', 'Team 5'} else 'Antioch'
+    home_community = 'Johnsburg' if int(home.name.rsplit(' ', 1)[1]) % 2 else 'Antioch'
+    away_community = 'Johnsburg' if int(away.name.rsplit(' ', 1)[1]) % 2 else 'Antioch'
     return {'week': 1, 'date': '2026-08-16', 'kickoff': kickoff,
             'site': 'Hiller Stadium', 'field': field, 'fieldtype': field_type,
             'division': 'Girls 6-8',
@@ -147,9 +147,10 @@ def test_hiller_large_reconfiguration_is_warning_and_records_selected_layout():
     assert preview['blocking_errors'] == 0
     assert preview['rows'][0]['status'] == 'WARNING'
     assert preview['rows'][0]['message'].startswith(
-        'Field "Field 1" is normally configured as "Medium", but the import requests '
-        '"Large". Verify the field will be reconfigured for this timeslot.')
+        'Field "Field 1" is being used as a Large field at Hiller Stadium for this '
+        'timeslot. Verify the site will be reconfigured appropriately before game day.')
     assert staged[0]['configuration_name'] == 'ONE_LARGE'
+    assert staged[0]['configuration_id'] is None
     assert 'will use its One Large configuration' in preview['rows'][0]['message']
     assert preview['diagnostics'][0]['category'] == 'Scheduling Integrity'
     assert preview['diagnostics'][0]['check'] == 'Field configuration mismatch'
@@ -203,6 +204,40 @@ def test_exact_configured_field_type_match_remains_valid():
     assert preview['rows'][0]['status'] == 'VALID'
     assert preview['warning_count'] == 0
     assert preview['blocking_errors'] == 0
+
+
+def test_unknown_hiller_field_remains_a_blocking_error():
+    db, season, teams = _hiller_import_context()
+    preview, staged = build_preview(db, season.id, [
+        _hiller_row('12:00 PM', 'Field 99', 'Large', teams[0], teams[1])])
+
+    assert staged == []
+    assert preview['importable_games'] == 0
+    assert preview['invalid_rows'] == 1
+    assert preview['blocking_errors'] == 1
+    assert preview['rows'][0]['status'] == 'ERROR'
+    assert preview['rows'][0]['message'] == (
+        'Field "Field 99" could not be found at site "Hiller Stadium".')
+
+
+def test_week_one_summary_counts_warning_as_importable():
+    db, season, teams = _hiller_import_context()
+    rows = [
+        _hiller_row(f'{hour:02d}:00', 'Field 1', 'Medium',
+                    teams[hour * 2], teams[hour * 2 + 1])
+        for hour in range(20)
+    ]
+    rows.append(_hiller_row('20:00', 'Field 1', 'Large', teams[40], teams[41]))
+
+    preview, staged = build_preview(db, season.id, rows)
+
+    assert preview['rows_uploaded'] == 21
+    assert preview['importable_games'] == 21
+    assert preview['games_to_add'] == 21
+    assert preview['warning_count'] == 1
+    assert preview['blocking_errors'] == 0
+    assert preview['invalid_rows'] == 0
+    assert len(staged) == 21
 
 
 @pytest.mark.parametrize(('community', 'division_group', 'division_name', 'color', 'stored_name'), [
