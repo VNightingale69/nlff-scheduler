@@ -6,7 +6,7 @@ from datetime import date, datetime, time, timedelta
 
 from openpyxl import load_workbook
 
-from app.models import (Division, Field, FieldInstance, Game, HostLocation,
+from app.models import (Division, Field, FieldInstance, Game, GameSlot, HostLocation,
                         HostLocationConfiguration, Season, Week)
 from app.teams import resolve_roster_team, season_roster
 from app.facility_layouts import (JOHNSBURG_APPROVED_LAYOUT_CODES_BY_LOCATION,
@@ -161,6 +161,16 @@ def build_preview(db, season_id, raw_rows):
             field = next((x for x in fields if _normalized_name(x.name) == _normalized_name(raw.get('field'))), None)
             instances = db.query(FieldInstance).filter(FieldInstance.host_location_id == site.id, FieldInstance.is_active.is_(True)).all()
             field_instance = next((x for x in instances if _normalized_name(x.field_name) == _normalized_name(raw.get('field')) and (not game_date or x.instance_date == game_date)), None)
+            # Generated/manual scheduling persists the dated field instance as
+            # the playable assignment.  Its display name can include layout
+            # terms, so prefer its canonical availability -> Field relationship
+            # over trying to match that generated label to spreadsheet text.
+            if field and not field_instance:
+                field_instance = next((
+                    x for x in instances
+                    if (not game_date or x.instance_date == game_date)
+                    and getattr(x.hosting_availability, 'field_id', None) == field.id
+                ), None)
             # A dynamic position may exist only in a supported site layout.
             configuration_candidates = _configuration_candidates(
                 db, site, raw.get('field'), raw.get('fieldtype'))
@@ -258,9 +268,23 @@ def build_preview(db, season_id, raw_rows):
                'message': ' '.join(errors + warnings) or 'Ready to import.'}
         results.append(row)
         if not errors:
+            resolved_slot = None
+            if field_instance and game_date and kickoff:
+                resolved_slot = db.query(GameSlot).filter(
+                    GameSlot.field_instance_id == field_instance.id,
+                    GameSlot.slot_date == game_date,
+                    GameSlot.start_time == kickoff,
+                ).first()
             staged_row = {**row, 'week_number': week_number, 'week_id': str(week.id), 'site_id': str(site.id),
+                           # Keep the source label for audit/preview, and keep the
+                           # canonical relationship separately for confirmation.
+                           # Confirmation must never need to resolve a name after
+                           # the schedule being replaced has been deleted.
+                           'imported_field_name': _text(raw.get('field')),
+                           'resolved_field_id': str(field.id) if field else None,
                            'field_id': str(field.id) if field else None,
                            'field_instance_id': str(field_instance.id) if field_instance else None,
+                           'game_slot_id': str(resolved_slot.id) if resolved_slot else None,
                            'home_team_id': str(home.id), 'away_team_id': str(away.id),
                            'game_status_id': str(scheduled_status.id) if scheduled_status else None}
             staged.append(staged_row)

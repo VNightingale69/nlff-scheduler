@@ -1,13 +1,17 @@
 import io
+import json
+import uuid
+from types import SimpleNamespace
 
 import pytest
 from openpyxl import Workbook
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.models import (Base, Division, Field, GameStatus, HostLocation,
+from app.models import (Base, Division, Field, Game, GameStatus, HostLocation,
                         HostLocationConfiguration, Organization,
-                        OrganizationDivisionParticipation, Season, Team, Week)
+                        OrganizationDivisionParticipation, ScheduleImport, Season, Team, Week)
+from app.routes.api import confirm_schedule_import
 from app.services.schedule_import import build_preview, parse_schedule_file, _date, _time, _week_number
 
 
@@ -155,6 +159,106 @@ def test_hiller_large_reconfiguration_is_warning_and_records_selected_layout():
     assert preview['diagnostics'][0]['category'] == 'Scheduling Integrity'
     assert preview['diagnostics'][0]['check'] == 'Field configuration mismatch'
     assert preview['diagnostics'][0]['blocking'] is False
+    assert staged[0]['imported_field_name'] == 'Field 1'
+    assert staged[0]['resolved_field_id'] == staged[0]['field_id']
+
+
+@pytest.mark.parametrize(('site_name', 'field_names'), [
+    ('Hiller Park', ('Field 1', 'Field 2', 'Field 3', 'Field 4')),
+    ('Johnsburg Stadium', ('Field 1', 'Field 3')),
+    ('Hiller Stadium', ('Field 1', 'Field 3')),
+])
+def test_preview_retains_original_and_canonical_field_references(site_name, field_names):
+    db, season, teams = _hiller_import_context()
+    site = db.query(HostLocation).filter_by(name='Hiller Stadium').one()
+    site.name = site_name
+    db.query(Field).delete()
+    db.add_all([Field(host_location_id=site.id, name=name, layout_type='MEDIUM', is_active=True)
+                for name in field_names])
+    db.commit()
+    rows = [_hiller_row(f'{10 + index}:00', name, 'Medium', teams[index * 2], teams[index * 2 + 1])
+            for index, name in enumerate(field_names)]
+    for row in rows:
+        row['site'] = site_name
+
+    preview, staged = build_preview(db, season.id, rows)
+
+    assert preview['blocking_errors'] == 0
+    assert [row['imported_field_name'] for row in staged] == list(field_names)
+    assert all(row['resolved_field_id'] == row['field_id'] for row in staged)
+    assert all(row['resolved_field_id'] for row in staged)
+
+
+def test_confirm_persists_warning_field_and_replacement_assignments():
+    db, season, teams = _hiller_import_context()
+    week = db.query(Week).filter_by(season_id=season.id, week_number=1).one()
+    site = db.query(HostLocation).filter_by(name='Hiller Stadium').one()
+    fields = db.query(Field).order_by(Field.name).all()
+    status = db.query(GameStatus).filter_by(code='SCHEDULED').one()
+    old = Game(season_id=season.id, week_id=week.id, home_team_id=teams[4].id,
+               away_team_id=teams[5].id, game_status_id=status.id,
+               game_date=week.primary_game_date, kickoff_time=_time('9:00 AM'))
+    db.add(old); db.flush()
+    user_id = uuid.uuid4()
+    staged = []
+    for index, field in enumerate(fields):
+        staged.append({
+            'row': index + 2, 'status': 'WARNING' if index == 0 else 'VALID',
+            'week_id': str(week.id), 'site_id': str(site.id),
+            'imported_field_name': field.name, 'resolved_field_id': str(field.id),
+            'field_id': str(field.id), 'field_instance_id': None,
+            'home_team_id': str(teams[index * 2].id),
+            'away_team_id': str(teams[index * 2 + 1].id),
+            'game_status_id': str(status.id), 'date': week.primary_game_date.isoformat(),
+            'kickoff': f'{10 + index}:00', 'notes': None,
+        })
+    record = ScheduleImport(
+        season_id=season.id, imported_by_user_id=user_id, source_filename='test.csv',
+        weeks_replaced='[1]', status='PREVIEW', staged_rows=json.dumps(staged),
+        preview_summary=json.dumps({'blocking_errors': 0, 'weeks': [1], 'warning_count': 1}),
+    )
+    db.add(record); db.commit()
+
+    result = confirm_schedule_import(record.id, {'confirmation': 'Replace Existing Schedule Games'},
+                                     db, SimpleNamespace(id=user_id))
+
+    games = db.query(Game).filter_by(season_id=season.id, week_id=week.id).order_by(Game.kickoff_time).all()
+    assert result['existing_games_removed'] == 1
+    assert [game.field_id for game in games] == [field.id for field in fields]
+    assert all(not game.missing_field_assignment for game in games)
+
+
+def test_confirm_rolls_back_replacement_when_canonical_field_is_invalid():
+    db, season, teams = _hiller_import_context()
+    week = db.query(Week).filter_by(season_id=season.id, week_number=1).one()
+    site = db.query(HostLocation).filter_by(name='Hiller Stadium').one()
+    status = db.query(GameStatus).filter_by(code='SCHEDULED').one()
+    old = Game(season_id=season.id, week_id=week.id, home_team_id=teams[0].id,
+               away_team_id=teams[1].id, game_status_id=status.id,
+               game_date=week.primary_game_date, kickoff_time=_time('9:00 AM'))
+    db.add(old); db.flush()
+    old_id = old.id
+    user_id = uuid.uuid4()
+    staged = [{
+        'row': 2, 'week_id': str(week.id), 'site_id': str(site.id),
+        'imported_field_name': 'Field 1', 'resolved_field_id': str(uuid.uuid4()),
+        'home_team_id': str(teams[2].id), 'away_team_id': str(teams[3].id),
+        'game_status_id': str(status.id), 'date': week.primary_game_date.isoformat(),
+        'kickoff': '10:00', 'notes': None,
+    }]
+    record = ScheduleImport(
+        season_id=season.id, imported_by_user_id=user_id, source_filename='test.csv',
+        weeks_replaced='[1]', status='PREVIEW', staged_rows=json.dumps(staged),
+        preview_summary=json.dumps({'blocking_errors': 0, 'weeks': [1], 'warning_count': 0}),
+    )
+    db.add(record); db.commit()
+
+    with pytest.raises(Exception, match='Schedule import failed'):
+        confirm_schedule_import(record.id, {'confirmation': 'Replace Existing Schedule Games'},
+                                db, SimpleNamespace(id=user_id))
+
+    assert db.get(Game, old_id) is not None
+    assert db.query(Game).filter_by(season_id=season.id, week_id=week.id).count() == 1
 
 
 def test_hiller_large_layout_rejects_overlapping_adjacent_medium_assignment():
