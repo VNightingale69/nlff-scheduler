@@ -228,6 +228,21 @@ class FieldConfigurationOption(Base, TimestampMixin):
     physical_field_area = relationship('PhysicalFieldArea')
     __table_args__ = (UniqueConstraint('physical_field_area_id', 'name', name='uq_field_config_option_area_name'),)
 
+class TimeslotFieldConfiguration(Base, TimestampMixin):
+    """The authoritative physical layout for one facility kickoff wave."""
+    __tablename__ = 'timeslot_field_configurations'
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    host_location_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('host_locations.id'), nullable=False)
+    configuration_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('host_location_configurations.id'), nullable=False)
+    configuration_date: Mapped[Date] = mapped_column(Date, nullable=False)
+    kickoff_time: Mapped[Time] = mapped_column(Time, nullable=False)
+    host_location = relationship('HostLocation')
+    configuration = relationship('HostLocationConfiguration')
+    __table_args__ = (
+        UniqueConstraint('host_location_id', 'configuration_date', 'kickoff_time', name='uq_timeslot_field_configuration'),
+        Index('ix_timeslot_field_configuration_lookup', 'host_location_id', 'configuration_date', 'kickoff_time'),
+    )
+
 class Team(Base, TimestampMixin):
     __tablename__ = 'teams'
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -438,6 +453,7 @@ class Game(Base, TimestampMixin):
     host_location_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('host_locations.id'), nullable=True)
     field_instance_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('field_instances.id'), nullable=True)
     field_layout_type_override: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    timeslot_configuration_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('timeslot_field_configurations.id'), nullable=True)
     game_status_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('game_statuses.id'), nullable=False)
     game_date: Mapped[Date] = mapped_column(Date, nullable=False)
     kickoff_time: Mapped[Time | None] = mapped_column(Time, nullable=True)
@@ -462,6 +478,7 @@ class Game(Base, TimestampMixin):
     field = relationship('Field')
     host_location = relationship('HostLocation')
     field_instance = relationship('FieldInstance')
+    timeslot_configuration = relationship('TimeslotFieldConfiguration')
     status = relationship('GameStatus')
     home_team = relationship('Team', foreign_keys=[home_team_id])
     away_team = relationship('Team', foreign_keys=[away_team_id])

@@ -6,7 +6,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import Base
-from app.models import Division, Field, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, Organization, Season, Team, Week
+from app.models import Division, Field, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, Organization, Season, Team, Week
 from app.routes.api import _build_final_schedule_validation_result, _build_global_doubleheader_validation, _raise_if_single_doubleheader_manual_move, _run_generated_slot_integrity_validation_and_repair, _run_global_doubleheader_repair, build_publish_final_validation, build_schedule_quality_report, publish_schedule
 
 
@@ -375,18 +375,22 @@ class PublishQualityConsistencyTest(unittest.TestCase):
         away = Team(id=uuid.uuid4(), organization_id=self.org.id, division_id=division.id, name='Westosha Girls 6-8 Maroon', is_active=True)
         host = HostLocation(id=uuid.uuid4(), organization_id=self.org.id, name='Hiller Stadium', is_active=True)
         field = Field(id=uuid.uuid4(), host_location_id=host.id, name='Medium Field 1', layout_type='MEDIUM', is_active=True)
+        default_layout = HostLocationConfiguration(host_location_id=host.id, configuration_name='TWO_MEDIUM',
+                                                   medium_field_count=2, is_active=True)
+        large_layout = HostLocationConfiguration(host_location_id=host.id, configuration_name='ONE_LARGE',
+                                                 large_field_count=1, is_active=True)
         game = Game(season_id=self.season.id, week_id=self.week.id, home_team_id=home.id,
                     away_team_id=away.id, host_location_id=host.id, field_id=field.id,
                     field_layout_type_override='LARGE', game_status_id=self.status.id,
                     game_date=self.week.start_date, kickoff_time=time(12, 0))
-        self.db.add_all([division, home, away, host, field, game])
+        self.db.add_all([division, home, away, host, field, default_layout, large_layout, game])
         self.db.commit()
 
         validation = build_publish_final_validation(self.db, self.season.id)
 
         self.assertFalse(any(failure['code'] == 'FIELD_TYPE_MISMATCH' for failure in validation['hard_rule_failures']))
         self.assertEqual(validation['validation_warning_count'], 1)
-        self.assertEqual(validation['validation_warnings'][0]['code'], 'FIELD_RECONFIGURATION')
+        self.assertEqual(validation['validation_warnings'][0]['code'], 'FIELD_LAYOUT_RECONFIGURATION')
         self.assertFalse(validation['validation_warnings'][0]['blocking'])
 
     def test_publish_validation_does_not_mutate_scheduled_games_or_scores(self):
