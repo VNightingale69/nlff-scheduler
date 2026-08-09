@@ -15861,9 +15861,24 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
     field_times: dict[tuple, uuid.UUID] = {}
     matchups: set[tuple] = set()
     layout_groups: dict[tuple, list[tuple]] = {}
-    for game, _slot, field, _host, home, away, division, _org, _status in rows:
+    for game, _slot, field_instance, host, home, away, division, _org, _status in rows:
+        canonical_field = getattr(game, 'field', None)
         def error(code: str, message: str):
-            errors.append({'issue_code': code, 'scheduled_game_id': str(game.id), 'summary': message})
+            errors.append({
+                'issue_code': code,
+                'scheduled_game_id': str(game.id),
+                'scheduled_game_display_name': _format_scheduled_game_display_name(
+                    getattr(home, 'name', None), getattr(away, 'name', None)),
+                'home_team_name': getattr(home, 'name', None),
+                'away_team_name': getattr(away, 'name', None),
+                'team': getattr(home, 'name', None),
+                'date': game.game_date.isoformat() if game.game_date else None,
+                'time': game.kickoff_time.isoformat() if game.kickoff_time else None,
+                'location': getattr(host, 'name', None),
+                'field': getattr(canonical_field, 'name', None) or getattr(field_instance, 'field_name', None) or 'Not Assigned',
+                'recommended_action': 'Assign a field in Manual Schedule Builder.' if code == 'MISSING_FIELD' else 'Correct the game in Manual Schedule Builder.',
+                'summary': message,
+            })
         if not home or not away: error('INVALID_TEAM', 'Both teams must exist.')
         elif not home.is_active or not away.is_active: error('INACTIVE_TEAM', 'Both teams must be active.')
         elif home.id == away.id: error('SAME_TEAM', 'A team cannot play itself.')
@@ -15871,7 +15886,10 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
             error('INVALID_DIVISION', 'Both teams must belong to the game division.')
         if not game.game_date: error('INVALID_DATE', 'A game date is required.')
         if not game.kickoff_time: error('INVALID_KICKOFF', 'A kickoff time is required.')
-        if not game.field_instance_id or not field: error('MISSING_FIELD', 'A field assignment is required.')
+        # Game.field_id is the canonical saved relationship. Imported and
+        # manually assigned logical fields do not require a generated instance.
+        if not game.field_id or not canonical_field:
+            error('MISSING_FIELD', 'A canonical field assignment is required.')
         matchup = (game.week_id, game.home_team_id, game.away_team_id, game.game_date, game.kickoff_time)
         reverse = (game.week_id, game.away_team_id, game.home_team_id, game.game_date, game.kickoff_time)
         if matchup in matchups or reverse in matchups: error('DUPLICATE_GAME', 'This matchup is duplicated.')
@@ -15880,13 +15898,14 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
             key = (team_id, game.game_date, game.kickoff_time)
             if key in team_times: error('SIMULTANEOUS_TEAM_CONFLICT', 'A team has simultaneous games.')
             team_times[key] = game.id
-        key = (game.field_instance_id, game.game_date, game.kickoff_time)
-        if game.field_instance_id and key in field_times: error('FIELD_DOUBLE_BOOKING', 'A field has simultaneous games.')
+        field_identity = game.field_id or game.field_instance_id
+        key = (field_identity, game.game_date, game.kickoff_time)
+        if field_identity and key in field_times: error('FIELD_DOUBLE_BOOKING', 'A field has simultaneous games.')
         field_times[key] = game.id
-        canonical_type = _normalize_field_size(getattr(getattr(game, 'field', None), 'layout_type', None) or getattr(field, 'field_type', None))
+        canonical_type = _normalize_field_size(getattr(canonical_field, 'layout_type', None) or getattr(field_instance, 'field_type', None))
         required_type = _required_field_type_for_division(division)
         if canonical_type and required_type and canonical_type != required_type:
-            layout_groups.setdefault((game.host_location_id, game.game_date, game.kickoff_time), []).append((game, required_type, canonical_type, _host))
+            layout_groups.setdefault((game.host_location_id, game.game_date, game.kickoff_time), []).append((game, required_type, canonical_type, host))
     for (host_id, game_date, kickoff), mismatched in layout_groups.items():
         all_wave = [row for row in rows if row[0].host_location_id == host_id and row[0].game_date == game_date and row[0].kickoff_time == kickoff]
         required = [_required_field_type_for_division(row[6]) for row in all_wave]
@@ -28895,6 +28914,21 @@ def schedule_publish_diagnostics(season_id: uuid.UUID | None = None, week_ids: l
     archived = int(counts.get('archived', 0))
     authoritative_rows = get_scheduled_games_for_season(db, season.id)
     total = len(authoritative_rows)
+    scoped_authoritative_rows = [row for row in authoritative_rows if row[0].week_id in {week.id for week in weeks}]
+    saved_game_diagnostics = []
+    for game, _slot, field_instance, host, home, away, _division, _organization, _status in scoped_authoritative_rows:
+        canonical_field = getattr(game, 'field', None)
+        saved_game_diagnostics.append({
+            'scheduled_game_id': str(game.id),
+            'home_team': getattr(home, 'name', None),
+            'away_team': getattr(away, 'name', None),
+            'date': game.game_date.isoformat() if game.game_date else None,
+            'kickoff': game.kickoff_time.isoformat() if game.kickoff_time else None,
+            'host_location': getattr(host, 'name', None),
+            'field_id': str(game.field_id) if game.field_id else None,
+            'resolved_field_name': getattr(canonical_field, 'name', None),
+            'field_type': getattr(canonical_field, 'layout_type', None) or getattr(field_instance, 'field_type', None),
+        })
     game_display_by_id = {
         str(game.id): {
             'home_team_name': getattr(home_team, 'name', None),
@@ -28920,7 +28954,10 @@ def schedule_publish_diagnostics(season_id: uuid.UUID | None = None, week_ids: l
         'season_name': season.name,
         'schedule_status': 'saved',
         'total_scheduled_games': total,
-        'saved_games': total,
+        'saved_games': len(scoped_authoritative_rows) if week_ids is not None else total,
+        'saved_game_field_diagnostics': saved_game_diagnostics,
+        'games_with_field_id': sum(game.field_id is not None for game, *_rest in scoped_authoritative_rows),
+        'games_without_field_id': sum(game.field_id is None for game, *_rest in scoped_authoritative_rows),
         'archived_games': archived,
         **_schedule_publication_status(season),
         'publish_eligibility_source': 'CURRENT_SAVED_SCHEDULE_FINAL_VALIDATION',
@@ -29123,6 +29160,7 @@ def schedule_management_games(season_id: uuid.UUID | None = None, date: date | N
     items = []
     for g, slot, fi, host, home, away, div, org, status in rows:
         wave = slot.turf_wave if slot and slot.turf_wave_id else None
+        canonical_field = getattr(g, 'field', None)
         turf_configuration_code = _normalize_configuration_name(wave.preferred_layout_code) if wave else None
         items.append({
             'id': str(g.id), 'date': g.game_date.isoformat(), 'time': g.kickoff_time.strftime('%H:%M:%S'), 'division_id': str(div.id), 'division_name': div.name,
@@ -29130,7 +29168,11 @@ def schedule_management_games(season_id: uuid.UUID | None = None, date: date | N
             'home_team_coach_name': getattr(home, 'coach_name', None), 'home_team_coach_email': getattr(home, 'coach_email', None),
             'away_team_coach_name': getattr(away, 'coach_name', None), 'away_team_coach_email': getattr(away, 'coach_email', None),
             'organization_id': str(org.id), 'organization_name': org.name, 'host_location_id': (str(host.id) if host else None), 'host_location_name': (host.name if host else None),
-            'field_id': (str(fi.id) if fi else None), 'field': _field_export_display_label(slot, fi, db), 'field_type': ((slot.field_type if slot else None) or (fi.field_type if fi else None)), 'status': status.code, 'slot_id': (str(slot.id) if slot else None), 'is_slot_active': (fi.is_active if fi else False),
+            'field_id': str(g.field_id) if g.field_id else None,
+            'field': getattr(canonical_field, 'name', None) or _field_export_display_label(slot, fi, db),
+            'field_type': getattr(canonical_field, 'layout_type', None) or ((slot.field_type if slot else None) or (fi.field_type if fi else None)),
+            'status': status.code, 'slot_id': (str(slot.id) if slot else None),
+            'is_slot_active': bool(getattr(canonical_field, 'is_active', False) or (fi.is_active if fi else False)),
             'turf_wave_id': str(slot.turf_wave_id) if slot and slot.turf_wave_id else None,
             'turf_wave_start_time': wave.start_time.isoformat() if wave else None,
             'turf_configuration_code': turf_configuration_code if turf_configuration_code in TURF_APPROVED_LAYOUT_CODES else None,
@@ -29142,7 +29184,7 @@ def schedule_management_games(season_id: uuid.UUID | None = None, date: date | N
             'manual_updated_by_name': g.manual_updated_by.full_name if getattr(g, 'manual_updated_by', None) else None,
             'public_notes': getattr(g, 'public_notes', None),
             'internal_admin_notes': getattr(g, 'internal_admin_notes', None),
-            'missing_field_assignment': bool(getattr(g, 'missing_field_assignment', False) or not getattr(g, 'field_instance_id', None)),
+            'missing_field_assignment': bool(getattr(g, 'missing_field_assignment', False) or not getattr(g, 'field_id', None)),
             'needs_schedule_review': bool(getattr(g, 'needs_schedule_review', False)),
             'field_deleted_from_game': bool(getattr(g, 'field_deleted_from_game', False)),
             'field_assignment_status': getattr(g, 'field_assignment_status', None),
