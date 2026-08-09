@@ -11,7 +11,7 @@ from sqlalchemy.pool import StaticPool
 from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN
 from app.database import Base, get_db
 from app.main import app
-from app.models import Division, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, Organization, Role, ScoreHistory, ScoreSubmission, Season, Team, User, Week
+from app.models import Division, Field, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, Organization, Role, ScoreHistory, ScoreSubmission, Season, Team, User, Week
 from app.security import create_access_token, hash_password
 
 
@@ -37,9 +37,11 @@ class ScoreTrackingTest(unittest.TestCase):
         self.away_team = Team(id=uuid.uuid4(), organization_id=self.away_org.id, division_id=self.division.id, name='Lake 1', is_active=True)
         self.field = FieldInstance(id=uuid.uuid4(), host_location_id=self.host.id, hosting_availability_id=uuid.uuid4(), instance_date=date(2026, 5, 2), field_name='Small Field 1', field_type='SMALL', is_active=True)
         self.other_field = FieldInstance(id=uuid.uuid4(), host_location_id=self.host.id, hosting_availability_id=uuid.uuid4(), instance_date=date(2026, 5, 2), field_name='Small Field 2', field_type='SMALL', is_active=True)
+        self.canonical_field = Field(id=uuid.uuid4(), host_location_id=self.host.id, name='Small Field 1', layout_type='SMALL', is_active=True)
+        self.other_canonical_field = Field(id=uuid.uuid4(), host_location_id=self.host.id, name='Small Field 2', layout_type='SMALL', is_active=True)
         self.other_team = Team(id=uuid.uuid4(), organization_id=self.other_org.id, division_id=self.division.id, name='Other 1', is_active=True)
-        self.game = Game(id=uuid.uuid4(), season_id=self.season.id, week_id=self.week.id, home_team_id=self.home_team.id, away_team_id=self.away_team.id, host_location_id=self.host.id, field_instance_id=self.field.id, game_status_id=self.status.id, game_date=date(2026, 5, 2), kickoff_time=time(9, 0))
-        self.other_game = Game(id=uuid.uuid4(), season_id=self.season.id, week_id=self.week.id, home_team_id=self.other_team.id, away_team_id=self.away_team.id, host_location_id=self.host.id, field_instance_id=self.other_field.id, game_status_id=self.status.id, game_date=date(2026, 5, 2), kickoff_time=time(10, 0))
+        self.game = Game(id=uuid.uuid4(), season_id=self.season.id, week_id=self.week.id, home_team_id=self.home_team.id, away_team_id=self.away_team.id, host_location_id=self.host.id, field_id=self.canonical_field.id, field_instance_id=self.field.id, game_status_id=self.status.id, game_date=date(2026, 5, 2), kickoff_time=time(9, 0))
+        self.other_game = Game(id=uuid.uuid4(), season_id=self.season.id, week_id=self.week.id, home_team_id=self.other_team.id, away_team_id=self.away_team.id, host_location_id=self.host.id, field_id=self.other_canonical_field.id, field_instance_id=self.other_field.id, game_status_id=self.status.id, game_date=date(2026, 5, 2), kickoff_time=time(10, 0))
         self.slot = GameSlot(id=uuid.uuid4(), field_instance_id=self.field.id, host_location_id=self.host.id, season_id=self.season.id, week_id=self.week.id, slot_date=date(2026, 5, 2), start_time=time(9, 0), end_time=time(10, 0), field_type='SMALL', status='ASSIGNED', assigned_game_id=self.game.id)
         self.other_slot = GameSlot(id=uuid.uuid4(), field_instance_id=self.other_field.id, host_location_id=self.host.id, season_id=self.season.id, week_id=self.week.id, slot_date=date(2026, 5, 2), start_time=time(10, 0), end_time=time(11, 0), field_type='SMALL', status='ASSIGNED', assigned_game_id=self.other_game.id)
         self.league_user = User(id=uuid.uuid4(), email='league@example.com', full_name='League Admin', password_hash=hash_password('Password123!'), role_id=self.league_role.id, organization_id=None, is_active=True)
@@ -47,7 +49,7 @@ class ScoreTrackingTest(unittest.TestCase):
         self.home_user = User(id=uuid.uuid4(), email='home@example.com', full_name='Home Admin', password_hash=hash_password('Password123!'), role_id=self.community_role.id, organization_id=self.home_org.id, is_active=True)
         self.away_user = User(id=uuid.uuid4(), email='away@example.com', full_name='Away Admin', password_hash=hash_password('Password123!'), role_id=self.community_role.id, organization_id=self.away_org.id, is_active=True)
         self.other_user = User(id=uuid.uuid4(), email='other@example.com', full_name='Other Admin', password_hash=hash_password('Password123!'), role_id=self.community_role.id, organization_id=self.other_org.id, is_active=True)
-        self.db.add_all([self.league_role, self.scheduling_role, self.community_role, self.home_org, self.away_org, self.other_org, self.division, self.host, self.season, self.week, self.status, self.home_team, self.away_team, self.field, self.other_field, self.other_team, self.game, self.other_game, self.slot, self.other_slot, self.league_user, self.scheduling_user, self.home_user, self.away_user, self.other_user])
+        self.db.add_all([self.league_role, self.scheduling_role, self.community_role, self.home_org, self.away_org, self.other_org, self.division, self.host, self.season, self.week, self.status, self.home_team, self.away_team, self.field, self.other_field, self.canonical_field, self.other_canonical_field, self.other_team, self.game, self.other_game, self.slot, self.other_slot, self.league_user, self.scheduling_user, self.home_user, self.away_user, self.other_user])
         self.db.commit()
 
         def override_get_db():
@@ -68,6 +70,62 @@ class ScoreTrackingTest(unittest.TestCase):
 
     def _submit(self, user, game=None, home=20, away=12):
         return self.client.patch(f'/api/scores/{game or self.game.id}/submit', headers=self._token(user.id), json={'home_score': home, 'away_score': away})
+
+    def test_public_schedule_uses_saved_canonical_field_not_stale_slot_field(self):
+        self.game.public_notes = 'Use the south entrance.'
+        self.game.game_type = 'REGULAR_SEASON'
+        self.db.commit()
+        expected_labels = [
+            'Johnsburg - Hiller - Small - SE',
+            'Field 3',
+            'Field 1',
+            'Large Field 1',
+        ]
+        for label in expected_labels:
+            saved_field = Field(
+                id=uuid.uuid4(), host_location_id=self.host.id, name=label,
+                layout_type='LARGE' if label == 'Large Field 1' else 'SMALL', is_active=True,
+            )
+            self.db.add(saved_field)
+            self.game.field_id = saved_field.id
+            self.db.commit()
+
+            response = self.client.get(f'/api/public/schedule?season_id={self.season.id}&page_size=100')
+            self.assertEqual(response.status_code, 200, response.text)
+            item = next(row for row in response.json()['items'] if row['id'] == str(self.game.id))
+            self.assertEqual(item['field_id'], str(saved_field.id))
+            self.assertEqual(item['field_name'], label)
+            self.assertEqual(item['public_notes'], 'Use the south entrance.')
+            self.assertEqual(item['game_type'], 'REGULAR_SEASON')
+            # The generated slot deliberately remains attached to "Small Field 1".
+            self.assertNotEqual(item['field_id'], str(self.slot.field_instance_id))
+
+    def test_republish_after_field_correction_is_immediately_public(self):
+        corrected = Field(id=uuid.uuid4(), host_location_id=self.host.id, name='Field 1', layout_type='SMALL', is_active=True)
+        self.db.add(corrected)
+        self.game.field_id = corrected.id
+        self.db.commit()
+
+        republish = self.client.post(
+            f'/api/seasons/{self.season.id}/publish-schedule',
+            headers=self._token(self.scheduling_user.id),
+            json={'week_ids': [str(self.week.id)]},
+        )
+        self.assertEqual(republish.status_code, 200, republish.text)
+        self.assertIn('Republished', republish.json()['message'])
+
+        public = self.client.get(f'/api/public/schedule?season_id={self.season.id}&page_size=100')
+        item = next(row for row in public.json()['items'] if row['id'] == str(self.game.id))
+        self.assertEqual(item['field_id'], str(corrected.id))
+        self.assertEqual(item['field_name'], 'Field 1')
+
+    def test_public_schedule_only_shows_not_assigned_for_saved_null_field(self):
+        self.game.field_id = None
+        self.db.commit()
+        response = self.client.get(f'/api/public/schedule?season_id={self.season.id}&page_size=100')
+        item = next(row for row in response.json()['items'] if row['id'] == str(self.game.id))
+        self.assertIsNone(item['field_id'])
+        self.assertEqual(item['field_name'], 'Field Not Assigned')
 
     def test_missing_score_summary_scopes_to_community_and_clears_after_submit(self):
         home_summary = self.client.get('/api/scores/missing-summary', headers=self._token(self.home_user.id))

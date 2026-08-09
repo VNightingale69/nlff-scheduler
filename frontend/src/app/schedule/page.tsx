@@ -35,6 +35,8 @@ type Game = {
   away_team_coach_email?: string | null;
   coach_contacts_visible?: boolean;
   game_status_label: string;
+  game_type: string;
+  public_notes?: string | null;
   public_score_status?: string | null;
   home_score?: number | string | null;
   away_score?: number | string | null;
@@ -173,6 +175,7 @@ function PublicScheduleContent() {
                 <th className='p-2'>Away team</th>
                 <th className='p-2'>Game type</th>
                 <th className='p-2'>Game status</th>
+                <th className='p-2'>Notes</th>
                 <th className='p-2'>Coach Contacts</th>
                 <th className='p-2'>Score</th>
               </tr>
@@ -187,8 +190,9 @@ function PublicScheduleContent() {
                   <td className='p-2'>{g.division_name}</td>
                   <td className='p-2'><span className='flex items-center gap-2'><CommunityLogo src={g.home_team_logo_url} name={g.home_team_community_name || g.home_team_name} altText={g.home_team_logo_alt_text} size={24} />{g.home_team_name}</span></td>
                   <td className='p-2'><span className='flex items-center gap-2'><CommunityLogo src={g.away_team_logo_url} name={g.away_team_community_name || g.away_team_name} altText={g.away_team_logo_alt_text} size={24} />{g.away_team_name}</span></td>
-                  <td className='p-2'>{g.date_type === 'PLAYOFF' ? 'PLAYOFF' : g.week_label || 'Regular Season'}</td>
+                  <td className='p-2'>{g.game_type === 'REGULAR_SEASON' ? 'Regular Season' : g.game_type.replaceAll('_', ' ')}</td>
                   <td className='p-2'>{g.game_status_label}</td>
+                  <td className='p-2'>{g.public_notes || ''}</td>
                   <td className='p-2 text-xs'>
                     <div><span className='font-semibold'>Home Coach:</span> {g.home_team_coach_name || 'Not provided'}{g.home_team_coach_email ? <> &lt;<a className='text-sky-700 underline' href={`mailto:${g.home_team_coach_email}`}>{g.home_team_coach_email}</a>&gt;</> : null}</div>
                     <div><span className='font-semibold'>Away Coach:</span> {g.away_team_coach_name || 'Not provided'}{g.away_team_coach_email ? <> &lt;<a className='text-sky-700 underline' href={`mailto:${g.away_team_coach_email}`}>{g.away_team_coach_email}</a>&gt;</> : null}</div>
