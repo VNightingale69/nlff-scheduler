@@ -24,6 +24,7 @@ from app.database import get_db
 from app.organizations import active_organization_filter, normalize_organization_name
 from app.models import Division, Field, FieldConfigurationOption, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostPlanSelection, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Rulebook, LoginAuditLog, ScheduleChangeLog, ScheduleImport, SchedulePublicationEvent, ScoreHistory, ScoreSubmission, Season, Team, TimeslotFieldConfiguration, Tournament, TournamentDivision, TournamentGame, TournamentTeam, TurfWave, User, Week
 from app.services.facility_layout_validation import layout_label, select_supported_layout
+from app.services.division_field_types import required_field_type_for_division
 from app.services.schedule_import import build_preview, parse_schedule_file
 from app.schemas import (
     DivisionCreate, DivisionRead, FieldConfigurationOptionCreate, FieldConfigurationOptionRead, FieldCreate, FieldRead, GameCreate, GameRead, GameSaveResponse, ManualGameBulkEditRequest, ManualGameBulkEditResponse, ManualGameEditRequest, ManualGameEditResponse, ScheduleChangeLogRead, ScheduleEditWarning,
@@ -1689,11 +1690,16 @@ def _build_final_schedule_validation_result(
                                  getattr(canonical_field, 'layout_type', None))
         required_field_type = _required_field_type_for_division(div)
         decision = layout_decisions.get((g.host_location_id, g.game_date, g.kickoff_time))
+        selected_override = _normalize_field_size(getattr(g, 'field_layout_type_override', None))
         supported_reconfiguration = bool(
             decision and decision[2] and configured_field_type
             and _normalize_field_size(configured_field_type) != required_field_type
+            and (decision[0] or getattr(g, 'timeslot_configuration_id', None) or selected_override == required_field_type)
         )
-        field_type = required_field_type if supported_reconfiguration else (getattr(g, 'field_layout_type_override', None) or configured_field_type)
+        # A saved override is evidence of intent, not physical capacity.  It can
+        # replace the canonical field type only after the facility configuration
+        # service confirms that the entire kickoff wave fits.
+        field_type = required_field_type if supported_reconfiguration else configured_field_type
         has_saved_field = bool(getattr(g, 'field_id', None) or getattr(g, 'field_instance_id', None))
         if not has_saved_field or getattr(g, 'missing_field_assignment', False) or getattr(g, 'field_assignment_status', None) == 'MISSING_FIELD':
             saved_missing_field_failures.append({
@@ -1719,6 +1725,10 @@ def _build_final_schedule_validation_result(
                 **_final_validation_game_detail(g, slot, fi, host, home, away, div, failure_code='FIELD_TYPE_MISMATCH', failure_category='game', specific_reason='Scheduled game field type does not match division required field layout type.'),
                 'actual_field_type': field_type,
                 'required_field_type': _required_field_type_for_division(div),
+                'canonical_field_type': _normalize_field_size(configured_field_type),
+                'selected_layout': layout_label(decision[1]) if decision else None,
+                'field_layout_type_override': getattr(g, 'field_layout_type_override', None),
+                'timeslot_configuration_id': str(getattr(g, 'timeslot_configuration_id', None) or '') or None,
             })
         if g.game_date:
             allowed_hosts = _host_plan_allowed_host_ids_for_week(db, season_id, g.week_id, g.game_date)
@@ -15910,15 +15920,34 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
         all_wave = [row for row in rows if row[0].host_location_id == host_id and row[0].game_date == game_date and row[0].kickoff_time == kickoff]
         required = [_required_field_type_for_division(row[6]) for row in all_wave]
         override, configuration, valid = select_supported_layout(db, host_id, game_date, kickoff, required)
-        if not valid:
-            for game, required_type, _canonical, _host in mismatched:
-                errors.append({'issue_code': 'FIELD_TYPE_MISMATCH', 'scheduled_game_id': str(game.id),
-                               'summary': f'No supported facility layout provides the required {required_type.title()} field without overlap.'})
-            continue
         for game, required_type, canonical_type, host in mismatched:
-            warnings.append({'issue_code': 'FIELD_LAYOUT_RECONFIGURATION', 'severity': 'WARNING', 'blocking': False,
-                             'scheduled_game_id': str(game.id), 'field_layout': layout_label(configuration),
-                             'summary': f'{getattr(host, "name", "Host location")} is normally configured for {canonical_type.title()} play. This game requires the supported {layout_label(configuration)} configuration at kickoff. Verify the field is reconfigured before game day.'})
+            row = next(candidate for candidate in all_wave if candidate[0].id == game.id)
+            _game, _slot, field_instance, _host, home, away, division, _org, _status = row
+            canonical_field = getattr(game, 'field', None)
+            selected_override = _normalize_field_size(getattr(game, 'field_layout_type_override', None))
+            has_saved_override = bool(override or getattr(game, 'timeslot_configuration_id', None) or selected_override == required_type)
+            detail = {
+                'scheduled_game_id': str(game.id),
+                'scheduled_game_display_name': _format_scheduled_game_display_name(getattr(home, 'name', None), getattr(away, 'name', None)),
+                'home_team_name': getattr(home, 'name', None), 'away_team_name': getattr(away, 'name', None),
+                'team': getattr(home, 'name', None), 'division': f'{getattr(division, "division_group", "") or ""} {getattr(division, "name", "") or ""}'.strip(),
+                'date': game.game_date.isoformat() if game.game_date else None,
+                'time': game.kickoff_time.isoformat() if game.kickoff_time else None,
+                'location': getattr(host, 'name', None),
+                'field': getattr(canonical_field, 'name', None) or getattr(field_instance, 'field_name', None) or 'Not Assigned',
+                'canonical_field_type': canonical_type, 'required_field_type': required_type,
+                'selected_layout': layout_label(configuration), 'field_layout_type_override': getattr(game, 'field_layout_type_override', None),
+                'timeslot_configuration_id': str(getattr(game, 'timeslot_configuration_id', None) or getattr(override, 'id', None) or '') or None,
+            }
+            if not valid or not has_saved_override:
+                errors.append({**detail, 'issue_code': 'FIELD_TYPE_MISMATCH',
+                               'recommended_action': f'Verify/use the supported {layout_label(configuration)} {getattr(host, "name", "facility")} configuration for this timeslot.' if valid else 'Assign a field or supported facility layout that satisfies the division requirement.',
+                               'summary': f'No saved supported facility layout provides the required {required_type.title()} field without overlap.'})
+                continue
+            warnings.append({**detail, 'issue_code': 'FIELD_LAYOUT_RECONFIGURATION', 'severity': 'WARNING', 'blocking': False,
+                             'field_layout': layout_label(configuration),
+                             'recommended_action': 'Verify field reconfiguration before kickoff.',
+                             'summary': f'{getattr(host, "name", "Host location")} normally uses two Medium fields. This {game.kickoff_time.strftime("%I:%M %p").lstrip("0")} {detail["division"]} game uses the supported {layout_label(configuration)} configuration. Verify field reconfiguration before kickoff.'})
     return {'games': len(rows), 'blocking_errors': errors, 'warnings': warnings,
             'status': 'Blocked' if errors else 'Ready to Publish'}
 
@@ -16371,7 +16400,7 @@ def manual_schedule_builder_options(db: Session = Depends(get_db)):
         segments = [segment.strip() for segment in (field.name or '').split(' - ') if segment.strip()]
         return segments[-1] if len(segments) > 1 else field.name
     return {
-        'divisions': [{'id': d.id, 'name': d.name, 'division_group': d.division_group, 'sort_order': d.sort_order, 'required_field_layout_type': d.required_field_layout_type, 'required_field_type': 'LARGE' if '53' in (d.required_field_layout_type or '') else 'SMALL'} for d in divisions],
+        'divisions': [{'id': d.id, 'name': d.name, 'division_group': d.division_group, 'sort_order': d.sort_order, 'required_field_layout_type': d.required_field_layout_type, 'required_field_type': _required_field_type_for_division(d)} for d in divisions],
         'teams': [{'id': t.id, 'name': t.name, 'division_id': t.division_id, 'is_active': t.is_active} for t in teams],
         'host_locations': [{'id': h.id, 'name': h.name, 'surface_type': h.surface_type} for h in host_locations],
         'fields': [{'id': f.id, 'field_id': f.id, 'host_location_id': f.host_location_id, 'name': f.name, 'display_name': field_display_name(f), 'field_type': f.layout_type, 'is_active': f.is_active} for f in fields],
@@ -25244,24 +25273,7 @@ def list_public_schedule_filters(season_id: uuid.UUID | None = None, db: Session
 
 
 def _required_field_type_for_division(division: Division | None) -> str:
-    if not division:
-        return FIELD_SIZE_SMALL
-    layout_type = (getattr(division, 'required_field_layout_type', None) or '').strip().upper()
-    normalized_size = _normalize_field_size(layout_type)
-    if normalized_size:
-        return normalized_size
-    # Legacy fallback for older seeded data that predates required_field_layout_type.
-    division_label = normalized_division_key(getattr(division, 'division_group', None), getattr(division, 'name', None))
-    small_divisions = {'coed_k_1st', 'girls_k_1st', 'coed_k1st', 'girls_k1st', 'coed_k_1', 'girls_k_2', 'coed_2nd_3rd', 'girls_2nd_3rd', 'coed_2_3'}
-    medium_divisions = {'coed_4th_5th', 'girls_4th_5th', 'coed_4_5', 'girls_3_5'}
-    large_divisions = {'coed_6th_7th', 'girls_6th_7th', 'girls_6th_7th_8th', 'coed_6_7', 'girls_6_8', 'coed_8th', 'girls_8th', 'coed_8'}
-    if division_label in small_divisions:
-        return FIELD_SIZE_SMALL
-    if division_label in medium_divisions:
-        return FIELD_SIZE_MEDIUM
-    if division_label in large_divisions:
-        return FIELD_SIZE_LARGE
-    return FIELD_SIZE_SMALL
+    return required_field_type_for_division(division)
 
 
 LEAGUE_DEMAND_DIVISION_KEYS_BY_SIZE = {

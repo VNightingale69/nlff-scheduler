@@ -76,3 +76,50 @@ def test_one_truly_null_canonical_field_is_a_descriptive_blocking_error():
 def test_season_rollup_reports_partial_and_complete_publication():
     assert _season_publication_rollup([SimpleNamespace(publication_status='PUBLISHED'), SimpleNamespace(publication_status='UNPUBLISHED')]) == 'partially_published'
     assert _season_publication_rollup([SimpleNamespace(publication_status='PUBLISHED'), SimpleNamespace(publication_status='PUBLISHED')]) == 'published'
+
+
+def test_hiller_saved_large_override_is_descriptive_nonblocking_warning():
+    week_id = uuid.uuid4()
+    row = _game(week_id)
+    row[0].kickoff_time = __import__('datetime').time(12, 0)
+    row[0].field = SimpleNamespace(name='Medium Field 1', layout_type='MEDIUM')
+    row[0].field_layout_type_override = 'LARGE'
+    row[0].timeslot_configuration_id = None
+    row[4].name = 'Antioch Girls 6-8'
+    row[5].name = 'Westosha Girls 6-8 Maroon'
+    row[6].division_group = 'Girls'
+    row[6].name = '6-8'
+    row[6].required_field_layout_type = 'LARGE'
+    row[3].name = 'Hiller Stadium'
+    configuration = SimpleNamespace(configuration_name='ONE_LARGE', small_field_count=0, medium_field_count=0, large_field_count=1)
+    with patch('app.routes.api.get_scheduled_games_for_season', return_value=[row]), \
+         patch('app.routes.api.select_supported_layout', return_value=(None, configuration, True)):
+        result = _week_publish_readiness(SimpleNamespace(), SimpleNamespace(id=uuid.uuid4()), [SimpleNamespace(id=week_id)])
+    assert result['blocking_errors'] == []
+    assert len(result['warnings']) == 1
+    warning = result['warnings'][0]
+    assert warning['issue_code'] == 'FIELD_LAYOUT_RECONFIGURATION'
+    assert warning['scheduled_game_display_name'] == 'Antioch Girls 6-8 vs Westosha Girls 6-8 Maroon'
+    assert warning['location'] == 'Hiller Stadium'
+    assert warning['field'] == 'Medium Field 1'
+    assert warning['canonical_field_type'] == 'MEDIUM'
+    assert warning['required_field_type'] == 'LARGE'
+
+
+def test_hiller_large_game_without_saved_override_is_descriptive_error():
+    week_id = uuid.uuid4()
+    row = _game(week_id)
+    row[0].field = SimpleNamespace(name='Medium Field 1', layout_type='MEDIUM')
+    row[6].division_group = 'Girls'; row[6].name = '6-8'; row[6].required_field_layout_type = 'LARGE'
+    configuration = SimpleNamespace(configuration_name='ONE_LARGE', small_field_count=0, medium_field_count=0, large_field_count=1)
+    with patch('app.routes.api.get_scheduled_games_for_season', return_value=[row]), \
+         patch('app.routes.api.select_supported_layout', return_value=(None, configuration, True)):
+        result = _week_publish_readiness(SimpleNamespace(), SimpleNamespace(id=uuid.uuid4()), [SimpleNamespace(id=week_id)])
+    issue = result['blocking_errors'][0]
+    assert issue['issue_code'] == 'FIELD_TYPE_MISMATCH'
+    assert issue['scheduled_game_id'] == str(row[0].id)
+    assert issue['scheduled_game_display_name'] == 'Home Team vs Away Team'
+    assert issue['date'] == '2026-08-16'
+    assert issue['time'] == '10:00:00'
+    assert issue['location'] == 'Hiller Park'
+    assert issue['field'] == 'Medium Field 1'

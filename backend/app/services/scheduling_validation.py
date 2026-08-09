@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.models import Division, Field, FieldInstance, Game, GameSlot, HostLocation, HostingAvailability, Team
 from app.schemas import GameCreate, GameValidationResponse, ValidationMessage
+from app.services.division_field_types import required_field_type_for_division
 
 GAME_DURATION_MINUTES = 60
 
@@ -67,14 +68,7 @@ def _normalized_division_key(division: Division | None) -> str:
 
 
 def _required_field_type_for_division(division: Division | None) -> str:
-    key = _normalized_division_key(division)
-    if key in {'coed_k_1st', 'girls_k_1st', 'coed_k1st', 'girls_k1st', 'coed_k_1', 'girls_k_2', 'coed_2nd_3rd', 'girls_2nd_3rd', 'coed_2_3'}:
-        return 'SMALL'
-    if key in {'coed_4th_5th', 'girls_4th_5th', 'coed_4_5', 'girls_3_5'}:
-        return 'MEDIUM'
-    if key in {'coed_6th_7th', 'girls_6th_7th', 'girls_6th_7th_8th', 'coed_6_7', 'girls_6_8', 'coed_8th', 'girls_8th', 'coed_8'}:
-        return 'LARGE'
-    return _normalize_field_size(division.required_field_layout_type if division else None) or 'SMALL'
+    return required_field_type_for_division(division)
 
 
 def _game_window(payload: GameCreate) -> tuple[datetime, datetime]:
