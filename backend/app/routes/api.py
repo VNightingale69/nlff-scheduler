@@ -4759,6 +4759,9 @@ CONFIGURATION_FIELD_TEMPLATES = {
     key: [(f'{field_type.title()} Field {index}', field_type) for field_type in FIELD_SIZE_ORDER for index in range(1, config['counts'][field_type] + 1)]
     for key, config in TURF_STADIUM_CONFIGURATIONS.items()
 }
+# The canonical stadium positions intentionally use stable, human-facing names
+# rather than implying that additional numbered turf positions exist.
+CONFIGURATION_FIELD_TEMPLATES['ONE_LARGE_ONE_SMALL'] = [('Large Field', FIELD_SIZE_LARGE), ('Small Field', FIELD_SIZE_SMALL)]
 
 TURF_FOOTPRINT_YARDS = 120
 TURF_WAVE_INTENT_SMALL_MEDIUM = 'SMALL_MEDIUM'
@@ -4780,35 +4783,21 @@ STANDARD_TURF_FIELD_SLOT_LABELS = (
 )
 STANDARD_TURF_FIELD_SLOT_SET = frozenset(STANDARD_TURF_FIELD_SLOT_LABELS)
 APPROVED_TURF_FIELD_SLOT_SETS = {
-    'FOUR_SMALL': frozenset({'Small Field 1', 'Small Field 2', 'Small Field 3', 'Small Field 4'}),
-    'THREE_SMALL': frozenset({'Small Field 1', 'Small Field 2', 'Small Field 3'}),
-    'TWO_SMALL_ONE_MEDIUM': frozenset({'Small Field 1', 'Small Field 2', 'Medium Field 1'}),
-    'TWO_MEDIUM': frozenset({'Medium Field 1', 'Medium Field 2'}),
-    'ONE_SMALL_ONE_LARGE': frozenset({'Small Field 1', 'Large Field 1'}),
-    'ONE_LARGE': frozenset({'Large Field 1'}),
-    'ONE_LARGE_ONE_MEDIUM': frozenset({'Medium Field 1', 'Large Field 1'}),
+    'ONE_LARGE_ONE_SMALL': frozenset({'Large Field', 'Small Field'}),
 }
 
 TIM_OSMOND_LOCATION_NAME = 'TIM OSMOND SPORTS COMPLEX'
 TIM_OSMOND_APPROVED_LAYOUT_CODES = frozenset({
-    'FOUR_SMALL', 'TWO_SMALL_ONE_MEDIUM', 'ONE_LARGE_ONE_MEDIUM',
+    'ONE_LARGE_ONE_SMALL',
 })
-STANDARD_APPROVED_LAYOUT_CODES = frozenset({
-    'THREE_SMALL', 'TWO_SMALL_ONE_MEDIUM', 'TWO_MEDIUM',
-    'ONE_SMALL_ONE_LARGE', 'ONE_LARGE',
-})
+STANDARD_APPROVED_LAYOUT_CODES = frozenset({'ONE_LARGE_ONE_SMALL'})
 
 def _johnsburg_location_name(host: HostLocation) -> str | None:
     return johnsburg_location_name(host)
 
 
 def _approved_layout_codes_for_host(host: HostLocation) -> frozenset[str]:
-    """Return the physical layouts approved for this particular stadium."""
-    johnsburg_location = _johnsburg_location_name(host)
-    if johnsburg_location:
-        return JOHNSBURG_APPROVED_LAYOUT_CODES_BY_LOCATION[johnsburg_location]
-    if str(host.name or '').strip().upper() == TIM_OSMOND_LOCATION_NAME:
-        return TIM_OSMOND_APPROVED_LAYOUT_CODES
+    """Return the single league-wide physical layout for every turf stadium."""
     return STANDARD_APPROVED_LAYOUT_CODES
 
 
@@ -4856,7 +4845,7 @@ def _turf_wave_intent_for_layout(layout_code: str) -> str:
     normalized = _normalize_configuration_name(layout_code)
     if normalized == 'TWO_SMALL_ONE_MEDIUM':
         return TURF_WAVE_INTENT_SMALL_MEDIUM
-    if normalized == 'ONE_SMALL_ONE_LARGE':
+    if normalized == 'ONE_LARGE_ONE_SMALL':
         return TURF_WAVE_INTENT_MIXED
     return TURF_WAVE_INTENT_CUSTOM
 
@@ -5457,7 +5446,7 @@ TURF_WAVE_CONFIGURATION_PRIORITY = {
     'TWO_MEDIUM': 30,
     'ONE_SMALL_ONE_LARGE': 20,
     'ONE_LARGE': 10,
-    'ONE_LARGE_ONE_MEDIUM': 25,
+    'ONE_LARGE_ONE_SMALL': 25,
 }
 
 
@@ -5570,12 +5559,19 @@ def _apply_turf_configuration_metadata(obj, configuration_name: str) -> None:
 def _ensure_approved_turf_configurations(db: Session, host: HostLocation) -> bool:
     if not _is_turf_stadium_host(host):
         return False
+    canonical_capacity = (1, 0, 1, 2)
+    current_capacity = (
+        int(host.max_large_fields or 0), int(host.max_medium_fields or 0),
+        int(host.max_small_fields or 0), int(host.max_total_fields or 0),
+    )
+    changed = current_capacity != canonical_capacity
+    if changed:
+        host.max_large_fields, host.max_medium_fields, host.max_small_fields, host.max_total_fields = canonical_capacity
     approved_codes = _approved_layout_codes_for_host(host)
     existing = {
         _normalize_configuration_name(config.configuration_name): config
         for config in db.query(HostLocationConfiguration).filter(HostLocationConfiguration.host_location_id == host.id).all()
     }
-    changed = False
     invalid_config_ids = []
     for config_name, config in existing.items():
         if config_name not in approved_codes:
