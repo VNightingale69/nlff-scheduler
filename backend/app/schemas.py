@@ -942,6 +942,7 @@ class PublicGameRead(BaseModel):
     game_status_id: uuid.UUID
     game_status_code: str
     game_status_label: str
+    game_type: str
     public_score_status: str | None = None
     home_score: int | str | None = None
     away_score: int | str | None = None

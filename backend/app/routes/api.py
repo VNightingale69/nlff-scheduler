@@ -15812,16 +15812,18 @@ def _schedule_hash_payload(db: Session, season_id: uuid.UUID) -> list[dict[str, 
     rows = get_saved_scheduled_game_rows_for_export(db, season_id, {'season_id': season_id})
     payload: list[dict[str, object]] = []
     for game, slot, field_instance, host_location, home_team, away_team, division, _organization, _status in rows:
+        canonical_field = getattr(game, 'field', None)
         payload.append({
             'scheduled_game_id': str(game.id),
             'game_date': game.game_date.isoformat() if game.game_date else None,
             'start_time': game.kickoff_time.isoformat() if game.kickoff_time else None,
             'end_time': slot.end_time.isoformat() if slot and slot.end_time else None,
             'host_location_id': str(game.host_location_id or (host_location.id if host_location else '') or ''),
+            'field_id': str(game.field_id or ''),
             'field_instance_id': str(game.field_instance_id or (field_instance.id if field_instance else '') or ''),
             'timeslot_configuration_id': str(getattr(game, 'timeslot_configuration_id', None) or ''),
             'field_layout_type_override': getattr(game, 'field_layout_type_override', None),
-            'canonical_field_label': str((field_instance.field_name if field_instance else '') or ''),
+            'canonical_field_label': str((getattr(canonical_field, 'name', None) or '') or ''),
             'home_team_id': str(game.home_team_id or (home_team.id if home_team else '') or ''),
             'away_team_id': str(game.away_team_id or (away_team.id if away_team else '') or ''),
             'division_id': str((division.id if division else None) or getattr(home_team, 'division_id', '') or ''),
@@ -25171,7 +25173,7 @@ def list_public_games(season_id: uuid.UUID | None = None, host_location_id: uuid
         )
 
     rows = [
-        row for row in get_scheduled_games_for_season(db, season.id, filters, organization_filter_any_team=True)
+        row for row in get_saved_scheduled_game_rows_for_export(db, season.id, filters, organization_filter_any_team=True)
         if row[0].week_id in published_week_ids and row[6] and row[6].is_active
     ]
     total = len(rows)
@@ -25201,9 +25203,9 @@ def public_schedule_debug(season_id: uuid.UUID | None = None, host_location_id: 
         week_id=week_id,
         status_code=status_code,
     )
-    admin_rows = get_scheduled_games_for_season(db, season.id if season else None, base_filters) if season else []
+    admin_rows = get_saved_scheduled_game_rows_for_export(db, season.id if season else None, base_filters) if season else []
     public_before_filters = admin_rows if season and _season_schedule_is_published(season) else []
-    public_after_filters = get_scheduled_games_for_season(db, season.id, active_filters, organization_filter_any_team=True) if season and _season_schedule_is_published(season) else []
+    public_after_filters = get_saved_scheduled_game_rows_for_export(db, season.id, active_filters, organization_filter_any_team=True) if season and _season_schedule_is_published(season) else []
     return {
         'season_status': season.schedule_status if season else None,
         'admin_schedule_management_count': len(admin_rows),
@@ -25219,7 +25221,7 @@ def list_public_schedule_filters(season_id: uuid.UUID | None = None, db: Session
     season = _get_schedule_scope_season(db, season_id)
     published_week_ids = _published_week_ids(db, season) if season else set()
     rows = [
-        row for row in get_scheduled_games_for_season(db, season.id, _scheduled_games_filters(season.id))
+        row for row in get_saved_scheduled_game_rows_for_export(db, season.id, _scheduled_games_filters(season.id))
         if row[0].week_id in published_week_ids and row[6] and row[6].is_active
     ] if season and published_week_ids else []
 
@@ -25235,18 +25237,18 @@ def list_public_schedule_filters(season_id: uuid.UUID | None = None, db: Session
         weeks_by_id = {g.week.id: g.week for g, _, _, _, _, _, _, _, _ in rows if g.week}
         teams_by_id = {}
         fields_by_id = {}
-        for _, _, fi, _, home, away, _, _, _ in rows:
+        for game, _, _, _, home, away, _, _, _ in rows:
             teams_by_id[home.id] = home
             teams_by_id[away.id] = away
-            if fi:
-                fields_by_id[fi.id] = fi
+            if game.field:
+                fields_by_id[game.field.id] = game.field
 
         host_locations = sorted(host_locations_by_id.values(), key=lambda item: item.name)
         organizations = sorted(organizations_by_id.values(), key=lambda item: item.name)
         divisions = sorted(divisions_by_id.values(), key=lambda item: (item.sort_order or 0, item.name))
         weeks = sorted(weeks_by_id.values(), key=lambda item: (item.start_date, item.week_number))
         teams = sorted(teams_by_id.values(), key=lambda item: item.name)
-        fields = sorted(fields_by_id.values(), key=lambda item: item.field_name)
+        fields = sorted(fields_by_id.values(), key=lambda item: item.name)
     else:
         host_locations = db.query(HostLocation).join(HostLocation.organization).filter(
             HostLocation.is_active.is_(True),
@@ -25259,7 +25261,7 @@ def list_public_schedule_filters(season_id: uuid.UUID | None = None, db: Session
             weeks_query = weeks_query.filter(Week.season_id == season.id)
         weeks = weeks_query.order_by(Week.primary_game_date, Week.week_number).all()
         teams = db.query(Team).filter(Team.is_active.is_(True)).order_by(Team.name).all()
-        fields = db.query(FieldInstance).filter(FieldInstance.is_active.is_(True)).order_by(FieldInstance.field_name).all()
+        fields = db.query(Field).filter(Field.is_active.is_(True)).order_by(Field.name).all()
 
     return {
         'season': ({'id': str(season.id), 'name': season.name, 'schedule_status': season.schedule_status} if season else None),
@@ -25268,7 +25270,7 @@ def list_public_schedule_filters(season_id: uuid.UUID | None = None, db: Session
         'divisions': [{'id': item.id, 'name': item.name, 'division_group': item.division_group} for item in divisions],
         'weeks': [{'id': item.id, 'week_number': item.week_number, 'start_date': item.start_date, 'end_date': item.end_date, 'primary_game_date': item.primary_game_date or item.start_date, 'label': item.label or f'Week {item.week_number}', 'date_type': _week_date_type(item)} for item in weeks],
         'teams': [{'id': item.id, 'name': item.name} for item in teams],
-        'fields': [{'id': item.id, 'name': item.field_name} for item in fields],
+        'fields': [{'id': item.id, 'name': item.name} for item in fields],
     }
 
 
@@ -27173,7 +27175,7 @@ def get_saved_scheduled_game_rows_for_export(db: Session, season_id: uuid.UUID |
         filters['season_id'] = season_id
     home = aliased(Team)
     away = aliased(Team)
-    q = db.query(Game, GameSlot, FieldInstance, HostLocation, home, away, Division, Organization, GameStatus).join(Game.status).join(home, Game.home_team_id == home.id).join(away, Game.away_team_id == away.id).join(Division, home.division_id == Division.id).join(Organization, home.organization_id == Organization.id).outerjoin(GameSlot, and_(GameSlot.assigned_game_id == Game.id, GameSlot.field_instance_id == Game.field_instance_id, GameSlot.host_location_id == Game.host_location_id, GameSlot.slot_date == Game.game_date, GameSlot.start_time == Game.kickoff_time)).outerjoin(FieldInstance, FieldInstance.id == Game.field_instance_id).outerjoin(HostLocation, HostLocation.id == Game.host_location_id)
+    q = db.query(Game, GameSlot, FieldInstance, HostLocation, home, away, Division, Organization, GameStatus).join(Game.status).join(home, Game.home_team_id == home.id).join(away, Game.away_team_id == away.id).join(Division, home.division_id == Division.id).join(Organization, home.organization_id == Organization.id).outerjoin(GameSlot, and_(GameSlot.assigned_game_id == Game.id, GameSlot.field_instance_id == Game.field_instance_id, GameSlot.host_location_id == Game.host_location_id, GameSlot.slot_date == Game.game_date, GameSlot.start_time == Game.kickoff_time)).outerjoin(FieldInstance, FieldInstance.id == Game.field_instance_id).outerjoin(HostLocation, HostLocation.id == Game.host_location_id).outerjoin(Field, Field.id == Game.field_id)
     q = q.filter(GameStatus.is_active.is_(True), _final_schedule_status_filter(db))
     if filters.get('date'): q = q.filter(Game.game_date == filters['date'])
     if filters.get('division_id'): q = q.filter(Division.id == filters['division_id'])
@@ -27183,15 +27185,15 @@ def get_saved_scheduled_game_rows_for_export(db: Session, season_id: uuid.UUID |
         else:
             q = q.filter(home.organization_id == filters['organization_id'])
     if filters.get('host_location_id'): q = q.filter(Game.host_location_id == filters['host_location_id'])
-    if filters.get('field_type'): q = q.filter(FieldInstance.field_type == filters['field_type'])
-    if filters.get('field_id'): q = q.filter(FieldInstance.id == filters['field_id'])
+    if filters.get('field_type'): q = q.filter(Field.layout_type == filters['field_type'])
+    if filters.get('field_id'): q = q.filter(Game.field_id == filters['field_id'])
     if filters.get('team_id'): q = q.filter((home.id == filters['team_id']) | (away.id == filters['team_id']))
     if filters.get('week_id'): q = q.filter(Game.week_id == filters['week_id'])
     if filters.get('status_code'): q = q.filter(func.lower(GameStatus.code) == str(filters['status_code']).strip().lower())
     if filters.get('season_id'): q = q.filter(Game.season_id == filters['season_id'])
     if filters.get('game_type'):
         q = q.filter(func.upper(func.coalesce(Game.game_type, 'REGULAR_SEASON')) == str(filters['game_type']).strip().upper())
-    return q.order_by(Game.game_date, Game.kickoff_time, HostLocation.name, FieldInstance.field_name, home.name, away.name).all()
+    return q.order_by(Game.game_date, Game.kickoff_time, HostLocation.name, Field.name, home.name, away.name).all()
 
 
 SCORE_STATUS_MISSING = 'MISSING'
@@ -28650,6 +28652,12 @@ def _can_view_game_coach_emails(current_user: User | None, home: Team, away: Tea
 
 def _public_game_read_from_schedule_row(row, db: Session | None = None, current_user: User | None = None) -> PublicGameRead:
     g, slot, fi, host, home, away, div, org, status = row
+    canonical_field = getattr(g, 'field', None)
+    if g.field_id and canonical_field is None:
+        logger.error(
+            'public_schedule_field_integrity_error game_id=%s field_id=%s host_location_id=%s',
+            g.id, g.field_id, g.host_location_id,
+        )
     wave = slot.turf_wave if slot and slot.turf_wave_id else None
     turf_configuration_code = _normalize_configuration_name(wave.preferred_layout_code) if wave else None
     coach_contacts_visible = _can_view_game_coach_emails(current_user, home, away)
@@ -28659,9 +28667,9 @@ def _public_game_read_from_schedule_row(row, db: Session | None = None, current_
         kickoff_time=g.kickoff_time,
         host_location_id=host.id if host else None,
         host_location_name=host.name if host else '',
-        field_id=fi.id if fi else None,
-        field_name=_field_export_display_label(slot, fi, db),
-        field_type=slot.field_type if slot else None,
+        field_id=g.field_id,
+        field_name=(canonical_field.name if canonical_field else ('Field unavailable' if g.field_id else 'Field Not Assigned')),
+        field_type=getattr(canonical_field, 'layout_type', None),
         turf_wave_id=slot.turf_wave_id if slot else None,
         turf_wave_start_time=wave.start_time if wave else None,
         turf_configuration_code=turf_configuration_code if turf_configuration_code in TURF_APPROVED_LAYOUT_CODES else None,
@@ -28694,6 +28702,7 @@ def _public_game_read_from_schedule_row(row, db: Session | None = None, current_
         game_status_id=g.game_status_id,
         game_status_code=status.code,
         game_status_label=status.label,
+        game_type=getattr(g, 'game_type', None) or 'REGULAR_SEASON',
         public_notes=getattr(g, 'public_notes', None),
         **_score_fields(getattr(g, 'score', None), g, public=True),
     )
@@ -29168,7 +29177,7 @@ def schedule_quality_report(season_id: uuid.UUID | None = None, division_id: uui
 def schedule_management_games(season_id: uuid.UUID | None = None, date: date | None = None, division_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, host_location_id: uuid.UUID | None = None, field_type: str | None = None, field_id: uuid.UUID | None = None, week_id: uuid.UUID | None = None, team_id: uuid.UUID | None = None, status_code: str | None = None, db: Session = Depends(get_db)):
     season = _get_schedule_scope_season(db, season_id)
     filters = _scheduled_games_filters(season.id if season else season_id, date=date, division_id=division_id, organization_id=organization_id, host_location_id=host_location_id, field_type=field_type, field_id=field_id, week_id=week_id, team_id=team_id, status_code=status_code)
-    rows = get_scheduled_games_for_season(db, season.id if season else season_id, filters)
+    rows = get_saved_scheduled_game_rows_for_export(db, season.id if season else season_id, filters)
     items = []
     for g, slot, fi, host, home, away, div, org, status in rows:
         wave = slot.turf_wave if slot and slot.turf_wave_id else None
