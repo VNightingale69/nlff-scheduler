@@ -15794,11 +15794,25 @@ def _summarize_validation_issue(detail: object, fallback_code: str) -> str:
 
 
 
-def _publish_validation_issue_summary(detail: object, fallback_code: str) -> dict[str, object]:
+def _format_scheduled_game_display_name(home_team_name: object, away_team_name: object) -> str | None:
+    """Return the administrator-facing label used for a scheduled matchup."""
+    home = str(home_team_name or '').strip()
+    away = str(away_team_name or '').strip()
+    return f'{home} vs {away}' if home and away else None
+
+
+def _publish_validation_issue_summary(
+    detail: object,
+    fallback_code: str,
+    game_display_by_id: dict[str, dict[str, str | None]] | None = None,
+) -> dict[str, object]:
     if not isinstance(detail, dict):
         return {
             'issue_code': fallback_code,
             'scheduled_game_id': None,
+            'scheduled_game_display_name': 'Schedule-level check',
+            'home_team_name': None,
+            'away_team_name': None,
             'team': None,
             'date': None,
             'time': None,
@@ -15814,10 +15828,24 @@ def _publish_validation_issue_summary(detail: object, fallback_code: str) -> dic
     host = detail.get('host_location_name') or detail.get('host_location') or detail.get('location')
     field = detail.get('field_name') or detail.get('field') or detail.get('canonical_field_label')
     scheduled_game_id = detail.get('scheduled_game_id') or detail.get('game_id')
+    game_display = (game_display_by_id or {}).get(str(scheduled_game_id), {}) if scheduled_game_id else {}
+    home_team_name = detail.get('home_team_name') or game_display.get('home_team_name')
+    away_team_name = detail.get('away_team_name') or game_display.get('away_team_name')
+    display_name = (
+        detail.get('scheduled_game_display_name')
+        or _format_scheduled_game_display_name(home_team_name, away_team_name)
+        or game_display.get('scheduled_game_display_name')
+    )
+    if not display_name:
+        related_ids = [detail.get('game_1_id'), detail.get('game_2_id'), *(detail.get('game_ids') or [])]
+        display_name = 'Multiple games' if any(related_ids) else 'Schedule-level check'
     bits = [str(value) for value in [team, date_value, time_value, host, field] if value]
     return {
         'issue_code': code,
         'scheduled_game_id': str(scheduled_game_id) if scheduled_game_id else None,
+        'scheduled_game_display_name': display_name,
+        'home_team_name': home_team_name,
+        'away_team_name': away_team_name,
         'team': team,
         'date': date_value,
         'time': time_value,
@@ -28627,13 +28655,23 @@ def schedule_publish_diagnostics(season_id: uuid.UUID | None = None, db: Session
     archived = int(counts.get('archived', 0))
     authoritative_rows = get_scheduled_games_for_season(db, season.id)
     total = len(authoritative_rows)
+    game_display_by_id = {
+        str(game.id): {
+            'home_team_name': getattr(home_team, 'name', None),
+            'away_team_name': getattr(away_team, 'name', None),
+            'scheduled_game_display_name': _format_scheduled_game_display_name(
+                getattr(home_team, 'name', None), getattr(away_team, 'name', None)
+            ),
+        }
+        for game, _slot, _field, _host, home_team, away_team, _division, _organization, _status in authoritative_rows
+    }
     concise_issues: list[dict[str, object]] = []
     for failure in blocking_failures[:5]:
         code = str(failure.get('code') or 'VALIDATION_FAILURE')
         details = failure.get('details') if isinstance(failure.get('details'), list) else []
-        concise_issues.extend(_publish_validation_issue_summary(detail, code) for detail in details[:3])
+        concise_issues.extend(_publish_validation_issue_summary(detail, code, game_display_by_id) for detail in details[:3])
         if not details:
-            concise_issues.append(_publish_validation_issue_summary({'code': code, 'specific_reason': failure.get('message')}, code))
+            concise_issues.append(_publish_validation_issue_summary({'code': code, 'specific_reason': failure.get('message')}, code, game_display_by_id))
     blocking_count = sum(int(failure.get('count') or 1) for failure in blocking_failures)
     source_mismatch = bool((final_validation.get('final_source_reconciliation') or {}).get('count_mismatch'))
     validation_message = 'Publish validation source does not match current saved schedule.' if source_mismatch else ('Schedule validation found blocking issues. Please review the listed games before publishing.' if blocking_count else 'Schedule is ready to publish.')

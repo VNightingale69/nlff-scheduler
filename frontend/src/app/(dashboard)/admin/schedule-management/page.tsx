@@ -8,6 +8,7 @@ import { useAuthSession } from '@/components/AuthGate';
 import { getDivisionLabel } from '@/lib/divisionLabel';
 import { formatDisplayDate, formatDisplayTime } from '@/lib/displayFormat';
 import CommunityLogo from '@/components/CommunityLogo';
+import { getScheduledGameLabel } from '@/lib/scheduledGameLabel';
 
 const tabs = ['By Date', 'By Host Location', 'By Team', 'By Division'] as const;
 type TabKey = (typeof tabs)[number];
@@ -208,9 +209,11 @@ export default function ScheduleManagementPage() {
                 {publishDiagnostics.publish_blocking_issues.map((issue: any, index: number) => {
                   const currentIssue = typeof issue === 'string' ? { issue_code: issue, summary: issue } : issue;
                   return (
-                    <tr key={index}>
+                    <tr key={currentIssue.scheduled_game_id || `${currentIssue.issue_code || 'validation'}-${index}`}>
                       <td className='border p-2 font-semibold'>{currentIssue.issue_code || currentIssue.summary || 'VALIDATION_FAILURE'}</td>
-                      <td className='border p-2'>{currentIssue.scheduled_game_id || 'Current game'}</td>
+                      <td className='border p-2' title={currentIssue.scheduled_game_id ? `Scheduled game ID: ${currentIssue.scheduled_game_id}` : undefined}>
+                        {getScheduledGameLabel(currentIssue)}
+                      </td>
                       <td className='border p-2'>{currentIssue.team || '—'}</td>
                       <td className='border p-2'>{currentIssue.date ? formatDisplayDate(currentIssue.date) : '—'}</td>
                       <td className='border p-2'>{currentIssue.time ? formatDisplayTime(currentIssue.time) : '—'}</td>
