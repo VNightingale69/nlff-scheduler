@@ -7,6 +7,7 @@ import { canManageSchedule } from '@/lib/auth';
 import { useAuthSession } from '@/components/AuthGate';
 import { getDivisionLabel } from '@/lib/divisionLabel';
 import { formatDisplayDate, formatDisplayDateTime, formatDisplayTime } from '@/lib/displayFormat';
+import { normalizeOptionalUuid } from '@/lib/manualSchedulePayload.mjs';
 
 
 type ScheduledGamesFilters = {
@@ -84,15 +85,15 @@ function gameFieldValue(game: any): string {
 
 function editableGameSnapshot(game: any): Record<string, unknown> {
   return {
-    season_id: game?.season_id || null,
-    week_id: game?.week_id || null,
+    season_id: normalizeOptionalUuid(game?.season_id),
+    week_id: normalizeOptionalUuid(game?.week_id),
     division_id: game?.division_id || '',
     home_team_id: game?.home_team_id || '',
     away_team_id: game?.away_team_id || '',
     host_location_id: game?.host_location_id || '',
     field_id: game?.field_id || '',
-    field_instance_id: game?.field_instance_id || game?.generated_field_instance_id || '',
-    game_status_id: game?.game_status_id || null,
+    field_instance_id: normalizeOptionalUuid(game?.field_instance_id || game?.generated_field_instance_id),
+    game_status_id: normalizeOptionalUuid(game?.game_status_id),
     game_date: game?.game_date || '',
     kickoff_time: game?.kickoff_time || '',
     public_notes: game?.public_notes || '',
@@ -521,15 +522,18 @@ export default function ManualScheduleBuilderPage() {
     changes: edits.map((pendingEdit: any) => ({
       game_id: pendingEdit.id,
       gameId: pendingEdit.id,
-      season_id: pendingEdit.season_id,
-      week_id: pendingEdit.week_id,
+      season_id: normalizeOptionalUuid(pendingEdit.season_id),
+      week_id: normalizeOptionalUuid(pendingEdit.week_id),
       division_id: pendingEdit.division_id,
       home_team_id: pendingEdit.home_team_id,
       away_team_id: pendingEdit.away_team_id,
-      host_location_id: pendingEdit.host_location_id,
+      host_location_id: normalizeOptionalUuid(pendingEdit.host_location_id),
       field_id: pendingEdit.field_id,
-      field_instance_id: pendingEdit.field_instance_id,
-      game_status_id: pendingEdit.game_status_id || null,
+      // A canonical field can be selected without a generated field instance.
+      // HTML selects represent that absence as "", which Pydantic's UUID parser
+      // cannot accept.  Send the API's documented nullable value instead.
+      field_instance_id: normalizeOptionalUuid(pendingEdit.field_instance_id),
+      game_status_id: normalizeOptionalUuid(pendingEdit.game_status_id),
       game_date: pendingEdit.game_date,
       kickoff_time: pendingEdit.kickoff_time,
       public_notes: pendingEdit.public_notes || null,

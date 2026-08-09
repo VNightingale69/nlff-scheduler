@@ -14,6 +14,7 @@ assert.match(page, /isMissingFieldAssignment\(pendingEdit\)/, 'missing-field sta
 assert.match(page, />Unsaved<\/span>/, 'a selected dirty field is shown as unsaved rather than missing');
 assert.match(page, /updatePendingEditForGame\(g, \{ field_id: e\.target\.value, field_instance_id:/, 'selecting Field 1 or Field 3 stores its canonical ID in the dirty row');
 assert.match(page, /game_id: pendingEdit\.id,[\s\S]*field_id: pendingEdit\.field_id,/, 'bulk payload sends each dirty game ID and canonical field ID');
+assert.match(page, /field_instance_id: normalizeOptionalUuid\(pendingEdit\.field_instance_id\)/, 'an empty optional field-instance UUID is normalized before serialization');
 assert.match(page, /apiFetch\('\/schedule-management\/games\/manual-edit\/bulk'/, 'Save Changes invokes the bulk API');
 assert.match(page, /type='button'[\s\S]*disabled=\{!hasPendingBulkEdits \|\| bulkSaveLoading\}/, 'Save Changes is a non-submit button and valid dirty rows are not silently blocked by advisory state');
 assert.doesNotMatch(page, /if \(hasInvalidPendingEdits\)[^{]*\{[^}]*return/, 'client-side advisory state cannot prevent the bulk API attempt');
