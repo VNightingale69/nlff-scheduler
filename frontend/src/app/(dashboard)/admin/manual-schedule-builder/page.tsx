@@ -390,6 +390,7 @@ export default function ManualScheduleBuilderPage() {
 
   const extractError = (e: unknown) => {
     if (e instanceof ApiError) {
+      if ((e.details as any)?.error === 'database_error') return 'Unable to load scheduled games. Please try again.';
       const detail = (e.details as any)?.detail;
       if (Array.isArray(detail)) return detail.map((x: any) => x?.msg || JSON.stringify(x)).join('; ');
       if (typeof detail === 'string') return detail;
