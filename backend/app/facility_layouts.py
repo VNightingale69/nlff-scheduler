@@ -2,19 +2,12 @@
 
 JOHNSBURG_ORGANIZATION_NAMES = frozenset({'JOHNSBURG', 'JOHNSBURG SKYHAWKS'})
 JOHNSBURG_APPROVED_LAYOUT_CODES_BY_LOCATION = {
-    'JOHNSBURG STADIUM': frozenset({'ONE_LARGE_ONE_MEDIUM'}),
-    'HILLER PARK': frozenset({'FOUR_SMALL'}),
-    # Hiller's two medium-field positions occupy the same physical footprint as
-    # its one large field.  The layout is selected for each scheduling wave.
-    'HILLER STADIUM': frozenset({'TWO_MEDIUM', 'ONE_LARGE'}),
+    location: frozenset({'ONE_LARGE_ONE_SMALL'})
+    for location in ('JOHNSBURG STADIUM', 'HILLER PARK', 'HILLER STADIUM')
 }
 JOHNSBURG_FIELD_TEMPLATES_BY_LOCATION_AND_LAYOUT = {
-    ('JOHNSBURG STADIUM', 'ONE_LARGE_ONE_MEDIUM'): [('Field 1', 'LARGE'), ('Field 3', 'MEDIUM')],
-    ('HILLER PARK', 'FOUR_SMALL'): [(f'Field {index}', 'SMALL') for index in range(1, 5)],
-    # The legacy administration label for the second position is Field 3;
-    # imports may also call that adjacent physical position Field 2.
-    ('HILLER STADIUM', 'TWO_MEDIUM'): [('Field 1', 'MEDIUM'), ('Field 3', 'MEDIUM')],
-    ('HILLER STADIUM', 'ONE_LARGE'): [('Field 1', 'LARGE')],
+    (location, 'ONE_LARGE_ONE_SMALL'): [('Large Field', 'LARGE'), ('Small Field', 'SMALL')]
+    for location in JOHNSBURG_APPROVED_LAYOUT_CODES_BY_LOCATION
 }
 
 # Backwards-compatible aggregate used by administration/read models.  Layout

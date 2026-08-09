@@ -9,84 +9,23 @@ export type TurfConfiguration = {
 
 export const APPROVED_TURF_CONFIGURATIONS: TurfConfiguration[] = [
   {
-    code: 'FOUR_SMALL',
-    displayName: 'Four Small Fields',
-    availableFields: ['SMALL', 'SMALL', 'SMALL', 'SMALL'],
-    supportedDivisions: ['Coed K-1', 'Coed 2-3', 'Girls K-2'],
-    maxFieldsPerWave: 4,
-    schedulingNote: 'Tim Osmond Sports Complex four-small-field arrangement.',
-  },
-  {
-    code: 'THREE_SMALL',
-    displayName: 'Three Small Fields',
-    availableFields: ['SMALL', 'SMALL', 'SMALL'],
-    supportedDivisions: ['Coed K-1', 'Coed 2-3', 'Girls K-2'],
-    maxFieldsPerWave: 3,
-    schedulingNote: 'Best for waves made entirely of small-field divisions; unused small slots may remain open.',
-  },
-  {
-    code: 'TWO_SMALL_ONE_MEDIUM',
-    displayName: 'Two Small Fields + One Medium Field',
-    availableFields: ['SMALL', 'SMALL', 'MEDIUM'],
-    supportedDivisions: ['Coed K-1', 'Coed 2-3', 'Girls K-2', 'Coed 4-5', 'Girls 3-5'],
-    maxFieldsPerWave: 3,
-    schedulingNote: 'Supports mixed small- and medium-field waves; large-field games require a different approved configuration.',
-  },
-  {
-    code: 'TWO_MEDIUM',
-    displayName: 'Two Medium Fields',
-    availableFields: ['MEDIUM', 'MEDIUM'],
-    supportedDivisions: ['Coed 4-5', 'Girls 3-5'],
-    maxFieldsPerWave: 2,
-    schedulingNote: 'Best for medium-field waves; small and large games are not compatible with this configuration.',
-  },
-  {
-    code: 'ONE_SMALL_ONE_LARGE',
-    displayName: 'One Small Field + One Large Field',
+    code: 'ONE_LARGE_ONE_SMALL',
+    displayName: 'One Large Field + One Small Field',
     availableFields: ['SMALL', 'LARGE'],
     supportedDivisions: ['Coed K-1', 'Coed 2-3', 'Girls K-2', 'Coed 6-7', 'Coed 8', 'Girls 6-8'],
     maxFieldsPerWave: 2,
-    schedulingNote: 'Supports one small-field game and one large-field game in the same wave; medium games require a different approved configuration.',
-  },
-
-  {
-    code: 'ONE_LARGE_ONE_MEDIUM',
-    displayName: 'One Large Field + One Medium Field',
-    availableFields: ['MEDIUM', 'LARGE'],
-    supportedDivisions: ['Coed 4-5', 'Girls 3-5', 'Coed 6-7', 'Coed 8', 'Girls 6-8'],
-    maxFieldsPerWave: 2,
-    schedulingNote: 'Tim Osmond Sports Complex mixed medium- and large-field arrangement.',
-  },
-  {
-    code: 'ONE_LARGE',
-    displayName: 'One Large Field',
-    availableFields: ['LARGE'],
-    supportedDivisions: ['Coed 6-7', 'Coed 8', 'Girls 6-8'],
-    maxFieldsPerWave: 1,
-    schedulingNote: 'Supports one large-field game only; Small Field 1 may be paired with Large Field 1 only under ONE_SMALL_ONE_LARGE.',
+    schedulingNote: 'Canonical league-wide Turf Stadium layout: one Large game and one Small game may run simultaneously.',
   },
 ];
 
 export const APPROVED_TURF_CONFIGURATION_CODES = APPROVED_TURF_CONFIGURATIONS.map((config) => config.code);
 
-export const STANDARD_TURF_CONFIGURATION_CODES = ['THREE_SMALL', 'TWO_SMALL_ONE_MEDIUM', 'TWO_MEDIUM', 'ONE_SMALL_ONE_LARGE', 'ONE_LARGE'];
-export const TIM_OSMOND_CONFIGURATION_CODES = ['FOUR_SMALL', 'TWO_SMALL_ONE_MEDIUM', 'ONE_LARGE_ONE_MEDIUM'];
-export const JOHNSBURG_CONFIGURATION_CODES_BY_HOST: Record<string, string[]> = {
-  'JOHNSBURG STADIUM': ['ONE_LARGE_ONE_MEDIUM'],
-  'HILLER PARK': ['FOUR_SMALL'],
-  'HILLER STADIUM': ['TWO_MEDIUM'],
-};
+export const STANDARD_TURF_CONFIGURATION_CODES = ['ONE_LARGE_ONE_SMALL'];
 
 export const turfConfigurationsForHost = (hostName?: string | null, organizationName?: string | null) => {
-  const normalizedHost = hostName?.trim().toUpperCase() || '';
-  const normalizedOrganization = organizationName?.trim().toUpperCase() || '';
-  const johnsburgCodes = ['JOHNSBURG', 'JOHNSBURG SKYHAWKS'].includes(normalizedOrganization)
-    ? JOHNSBURG_CONFIGURATION_CODES_BY_HOST[normalizedHost]
-    : undefined;
-  const codes = johnsburgCodes || (normalizedHost === 'TIM OSMOND SPORTS COMPLEX'
-    ? TIM_OSMOND_CONFIGURATION_CODES
-    : STANDARD_TURF_CONFIGURATION_CODES);
-  return APPROVED_TURF_CONFIGURATIONS.filter((config) => codes.includes(config.code));
+  void hostName;
+  void organizationName;
+  return APPROVED_TURF_CONFIGURATIONS;
 };
 
 export const isApprovedTurfConfigurationCode = (code?: string | null) => Boolean(code && APPROVED_TURF_CONFIGURATION_CODES.includes(code));

@@ -8,89 +8,21 @@ FIELD_SIZE_ORDER = (FIELD_SIZE_SMALL, FIELD_SIZE_MEDIUM, FIELD_SIZE_LARGE)
 
 INVALID_TURF_CONFIGURATION_MESSAGE = (
     'Invalid turf configuration. Turf stadium locations may only use '
-    'THREE_SMALL, TWO_SMALL_ONE_MEDIUM, TWO_MEDIUM, ONE_SMALL_ONE_LARGE, or ONE_LARGE. TWO_LARGE, Large Field 2, Medium+Large, and Two Small+Large are not valid on one turf surface.'
+    'ONE_LARGE_ONE_SMALL (one Large field and one Small field).'
 )
 
 APPROVED_TURF_CONFIGURATIONS: tuple[dict[str, object], ...] = (
     {
-        'code': 'FOUR_SMALL',
-        'displayName': 'Four Small Fields',
-        'availableFields': (FIELD_SIZE_SMALL,) * 4,
-        'supportedFieldSizes': (FIELD_SIZE_SMALL,),
-        'supportedDivisions': ('Coed K-1', 'Coed 2-3', 'Girls K-2'),
-        'maxFieldsPerWave': 4,
-        'schedulingNote': 'Tim Osmond Sports Complex four-small-field arrangement.',
-        'spaceUsedYards': 120,
-        'remainingYards': 0,
-    },
-    {
-        'code': 'THREE_SMALL',
-        'displayName': 'Three Small Fields',
-        'availableFields': (FIELD_SIZE_SMALL, FIELD_SIZE_SMALL, FIELD_SIZE_SMALL),
-        'supportedFieldSizes': (FIELD_SIZE_SMALL,),
-        'supportedDivisions': ('Coed K-1', 'Coed 2-3', 'Girls K-2'),
-        'maxFieldsPerWave': 3,
-        'schedulingNote': 'Best for waves made entirely of small-field divisions; unused small slots may remain open.',
-        'spaceUsedYards': 100,
-        'remainingYards': 20,
-    },
-    {
-        'code': 'TWO_SMALL_ONE_MEDIUM',
-        'displayName': 'Two Small Fields + One Medium Field',
-        'availableFields': (FIELD_SIZE_SMALL, FIELD_SIZE_SMALL, FIELD_SIZE_MEDIUM),
-        'supportedFieldSizes': (FIELD_SIZE_SMALL, FIELD_SIZE_MEDIUM),
-        'supportedDivisions': ('Coed K-1', 'Coed 2-3', 'Girls K-2', 'Coed 4-5', 'Girls 3-5'),
-        'maxFieldsPerWave': 3,
-        'schedulingNote': 'Supports mixed small- and medium-field waves; large-field games require a different approved configuration.',
-        'spaceUsedYards': 120,
-        'remainingYards': 0,
-    },
-    {
-        'code': 'TWO_MEDIUM',
-        'displayName': 'Two Medium Fields',
-        'availableFields': (FIELD_SIZE_MEDIUM, FIELD_SIZE_MEDIUM),
-        'supportedFieldSizes': (FIELD_SIZE_MEDIUM,),
-        'supportedDivisions': ('Coed 4-5', 'Girls 3-5'),
-        'maxFieldsPerWave': 2,
-        'schedulingNote': 'Best for medium-field waves; small and large games are not compatible with this configuration.',
-        'spaceUsedYards': 110,
-        'remainingYards': 10,
-    },
-    {
-        'code': 'ONE_SMALL_ONE_LARGE',
-        'displayName': 'One Small Field + One Large Field',
+        'code': 'ONE_LARGE_ONE_SMALL',
+        'displayName': 'One Large Field + One Small Field',
         'availableFields': (FIELD_SIZE_SMALL, FIELD_SIZE_LARGE),
         'supportedFieldSizes': (FIELD_SIZE_SMALL, FIELD_SIZE_LARGE),
         'supportedDivisions': ('Coed K-1', 'Coed 2-3', 'Girls K-2', 'Coed 6-7', 'Coed 8', 'Girls 6-8'),
         'maxFieldsPerWave': 2,
-        'schedulingNote': 'Supports one small-field game and one large-field game in the same wave; medium games require a different approved configuration.',
+        'schedulingNote': 'Canonical league-wide Turf Stadium layout: one Large game and one Small game may run simultaneously.',
         'spaceUsedYards': 90,
         'remainingYards': 30,
     },
-
-    {
-        'code': 'ONE_LARGE_ONE_MEDIUM',
-        'displayName': 'One Large Field + One Medium Field',
-        'availableFields': (FIELD_SIZE_MEDIUM, FIELD_SIZE_LARGE),
-        'supportedFieldSizes': (FIELD_SIZE_MEDIUM, FIELD_SIZE_LARGE),
-        'supportedDivisions': ('Coed 4-5', 'Girls 3-5', 'Coed 6-7', 'Coed 8', 'Girls 6-8'),
-        'maxFieldsPerWave': 2,
-        'schedulingNote': 'Tim Osmond Sports Complex mixed medium- and large-field arrangement.',
-        'spaceUsedYards': 120,
-        'remainingYards': 0,
-    },
-    {
-        'code': 'ONE_LARGE',
-        'displayName': 'One Large Field',
-        'availableFields': (FIELD_SIZE_LARGE,),
-        'supportedFieldSizes': (FIELD_SIZE_LARGE,),
-        'supportedDivisions': ('Coed 6-7', 'Coed 8', 'Girls 6-8'),
-        'maxFieldsPerWave': 1,
-        'schedulingNote': 'Supports one large-field game only; Small Field 1 may be paired with Large Field 1 only under ONE_SMALL_ONE_LARGE.',
-        'spaceUsedYards': 70,
-        'remainingYards': 50,
-    },
-
 )
 
 APPROVED_TURF_CONFIGURATIONS_BY_CODE = {str(config['code']): config for config in APPROVED_TURF_CONFIGURATIONS}
