@@ -6,7 +6,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import Base
-from app.models import Division, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, Organization, Season, Team, Week
+from app.models import Division, Field, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, Organization, Season, Team, Week
 from app.routes.api import _build_final_schedule_validation_result, _build_global_doubleheader_validation, _raise_if_single_doubleheader_manual_move, _run_generated_slot_integrity_validation_and_repair, _run_global_doubleheader_repair, build_publish_final_validation, build_schedule_quality_report, publish_schedule
 
 
@@ -157,7 +157,7 @@ class PublishQualityConsistencyTest(unittest.TestCase):
         self.assertEqual(validation['generated_slot_integrity_failure_count'], 0)
         self.assertGreater(validation['required_games_missing_count'], 0)
 
-    def test_global_doubleheader_repair_moves_split_pair_to_same_location_adjacent_open_slot(self):
+    def test_global_doubleheader_repair_leaves_non_overlapping_pair_unchanged(self):
         self.db.query(Game).delete()
         host_a = HostLocation(id=uuid.uuid4(), organization_id=self.org.id, name='Host A', is_active=True)
         host_b = HostLocation(id=uuid.uuid4(), organization_id=self.org.id, name='Host B', is_active=True)
@@ -174,15 +174,15 @@ class PublishQualityConsistencyTest(unittest.TestCase):
         self.db.refresh(second)
 
         self.assertTrue(diagnostics['doubleheader_repair_ran'])
-        self.assertEqual(diagnostics['doubleheader_repair_status'], 'SUCCEEDED')
-        self.assertEqual(diagnostics['invalid_doubleheaders_detected_count'], 1)
-        self.assertEqual(diagnostics['doubleheader_repair_success_count'], 1)
+        self.assertEqual(diagnostics['doubleheader_repair_status'], 'NOT_NEEDED')
+        self.assertEqual(diagnostics['invalid_doubleheaders_detected_count'], 0)
+        self.assertEqual(diagnostics['doubleheader_repair_success_count'], 0)
         self.assertEqual(validation['doubleheader_not_back_to_back_count'], 0)
         self.assertEqual(validation['doubleheader_split_location_count'], 0)
-        self.assertEqual(second.host_location_id, host_a.id)
-        self.assertEqual(second.kickoff_time, time(10, 0))
+        self.assertEqual(second.host_location_id, host_b.id)
+        self.assertEqual(second.kickoff_time, time(11, 0))
         pair = validation['doubleheader_pairs'][0]
-        self.assertTrue(pair['same_location'])
+        self.assertFalse(pair['same_location'])
         self.assertTrue(pair['back_to_back'])
         self.assertTrue(pair['pair_valid'])
 
@@ -217,10 +217,10 @@ class PublishQualityConsistencyTest(unittest.TestCase):
 
         report = build_schedule_quality_report(self.db, self.season.id)
 
-        self.assertEqual(report['metrics']['doubleheader_not_back_to_back_count'], 1)
-        self.assertEqual(report['metrics']['doubleheader_split_location_count'], 1)
-        self.assertTrue(any(error['code'] == 'non_back_to_back_double_headers' for error in report['hard_errors']))
-        self.assertTrue(any(error['code'] == 'split_location_double_headers' for error in report['hard_errors']))
+        self.assertEqual(report['metrics']['doubleheader_not_back_to_back_count'], 0)
+        self.assertEqual(report['metrics']['doubleheader_split_location_count'], 0)
+        self.assertFalse(any(error['code'] == 'non_back_to_back_double_headers' for error in report['hard_errors']))
+        self.assertFalse(any(error['code'] == 'split_location_double_headers' for error in report['hard_errors']))
 
     def test_global_doubleheader_validation_detects_away_team_participation_and_required_diagnostics(self):
         self.db.query(Game).delete()
@@ -234,8 +234,8 @@ class PublishQualityConsistencyTest(unittest.TestCase):
 
         validation = _build_global_doubleheader_validation(self.db, self.season.id)
 
-        self.assertEqual(validation['doubleheader_not_back_to_back_count'], 1)
-        self.assertEqual(validation['doubleheader_split_location_count'], 1)
+        self.assertEqual(validation['doubleheader_not_back_to_back_count'], 0)
+        self.assertEqual(validation['doubleheader_split_location_count'], 0)
         pair = validation['doubleheader_pairs'][0]
         self.assertTrue(pair['inferred_pair'])
         self.assertEqual(pair['team_id'], str(self.team_a.id))
@@ -246,12 +246,11 @@ class PublishQualityConsistencyTest(unittest.TestCase):
         self.assertEqual(pair['game_1_id'], str(first.id))
         self.assertEqual(pair['game_2_id'], str(second.id))
         self.assertFalse(pair['same_location'])
-        self.assertFalse(pair['back_to_back'])
+        self.assertTrue(pair['back_to_back'])
         self.assertTrue(pair['compatible_field_type'])
         self.assertTrue(pair['selected_host_compliant'])
-        self.assertFalse(pair['pair_valid'])
-        self.assertIn('DOUBLEHEADER_SPLIT_LOCATION', pair['validation_failure_reasons'])
-        self.assertIn('DOUBLEHEADER_NOT_BACK_TO_BACK', pair['validation_failure_reasons'])
+        self.assertTrue(pair['pair_valid'])
+        self.assertEqual(pair['validation_failure_reasons'], [])
 
     def test_manual_single_game_move_rejects_any_inferred_doubleheader_pair_member(self):
         self.db.query(Game).delete()
@@ -328,7 +327,7 @@ class PublishQualityConsistencyTest(unittest.TestCase):
         self.assertEqual(validation['final_validation_status'], 'VALIDATION_FAILED')
         self.assertTrue(any(failure['code'] == 'FIELD_TIME_CONFLICT' for failure in validation['hard_rule_failures']))
 
-    def test_publish_validation_valid_and_invalid_doubleheaders_use_current_saved_games(self):
+    def test_publish_validation_allows_non_overlapping_doubleheader_at_different_hosts(self):
         self.db.query(Game).delete()
         host_a = HostLocation(id=uuid.uuid4(), organization_id=self.org.id, name='Host A', is_active=True)
         host_b = HostLocation(id=uuid.uuid4(), organization_id=self.org.id, name='Host B', is_active=True)
@@ -343,8 +342,52 @@ class PublishQualityConsistencyTest(unittest.TestCase):
 
         second.host_location_id = host_b.id
         self.db.commit()
-        invalid = build_publish_final_validation(self.db, self.season.id)
-        self.assertTrue(any(failure['code'] == 'DOUBLEHEADER_SPLIT_LOCATION' for failure in invalid['hard_rule_failures']))
+        still_valid = build_publish_final_validation(self.db, self.season.id)
+        self.assertFalse(any(str(failure['code']).startswith('DOUBLEHEADER_') for failure in still_valid['hard_rule_failures']))
+
+    def test_canonical_field_doubleheader_allows_same_or_different_fields_consecutively(self):
+        self.db.query(Game).delete()
+        host = HostLocation(id=uuid.uuid4(), organization_id=self.org.id, name='Hiller Park', is_active=True)
+        north = Field(id=uuid.uuid4(), host_location_id=host.id, name='North', layout_type='SMALL', is_active=True)
+        southeast = Field(id=uuid.uuid4(), host_location_id=host.id, name='SE', layout_type='SMALL', is_active=True)
+        opponent = Team(id=uuid.uuid4(), organization_id=self.org.id, division_id=self.division.id, name='C', is_active=True)
+        self.db.add_all([host, north, southeast, opponent])
+        self.db.add_all([
+            Game(season_id=self.season.id, week_id=self.week.id, home_team_id=self.team_a.id,
+                 away_team_id=self.team_b.id, host_location_id=host.id, field_id=north.id,
+                 game_status_id=self.status.id, game_date=self.week.start_date, kickoff_time=time(9, 0)),
+            Game(season_id=self.season.id, week_id=self.week.id, home_team_id=self.team_a.id,
+                 away_team_id=opponent.id, host_location_id=host.id, field_id=southeast.id,
+                 game_status_id=self.status.id, game_date=self.week.start_date, kickoff_time=time(10, 0)),
+        ])
+        self.db.commit()
+
+        validation = _build_global_doubleheader_validation(self.db, self.season.id)
+
+        self.assertEqual(validation['doubleheader_field_type_mismatch_count'], 0)
+        self.assertEqual(validation['doubleheader_pair_field_conflict_count'], 0)
+        self.assertEqual(validation['failure_count'], 0)
+
+    def test_timeslot_large_field_override_is_a_non_blocking_warning(self):
+        self.db.query(Game).delete()
+        division = Division(id=uuid.uuid4(), division_group='Girls', name='6-8', required_field_layout_type='LARGE', is_active=True)
+        home = Team(id=uuid.uuid4(), organization_id=self.org.id, division_id=division.id, name='Antioch Girls 6-8', is_active=True)
+        away = Team(id=uuid.uuid4(), organization_id=self.org.id, division_id=division.id, name='Westosha Girls 6-8 Maroon', is_active=True)
+        host = HostLocation(id=uuid.uuid4(), organization_id=self.org.id, name='Hiller Stadium', is_active=True)
+        field = Field(id=uuid.uuid4(), host_location_id=host.id, name='Medium Field 1', layout_type='MEDIUM', is_active=True)
+        game = Game(season_id=self.season.id, week_id=self.week.id, home_team_id=home.id,
+                    away_team_id=away.id, host_location_id=host.id, field_id=field.id,
+                    field_layout_type_override='LARGE', game_status_id=self.status.id,
+                    game_date=self.week.start_date, kickoff_time=time(12, 0))
+        self.db.add_all([division, home, away, host, field, game])
+        self.db.commit()
+
+        validation = build_publish_final_validation(self.db, self.season.id)
+
+        self.assertFalse(any(failure['code'] == 'FIELD_TYPE_MISMATCH' for failure in validation['hard_rule_failures']))
+        self.assertEqual(validation['validation_warning_count'], 1)
+        self.assertEqual(validation['validation_warnings'][0]['code'], 'FIELD_RECONFIGURATION')
+        self.assertFalse(validation['validation_warnings'][0]['blocking'])
 
     def test_publish_validation_does_not_mutate_scheduled_games_or_scores(self):
         self.db.query(Game).delete()
@@ -373,4 +416,3 @@ class PublishQualityConsistencyTest(unittest.TestCase):
         self.assertTrue(response['ok'])
         self.assertEqual(response['publish_validation_message'], 'Schedule is ready to publish.')
         self.assertNotIn('overall_health', response)
-

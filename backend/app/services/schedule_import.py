@@ -275,6 +275,7 @@ def build_preview(db, season_id, raw_rows):
                            'imported_field_name': _text(raw.get('field')),
                            'resolved_field_id': str(field.id) if field else None,
                            'field_id': str(field.id) if field else None,
+                           'field_layout_type_override': field_type if type_mismatch else None,
                            'field_instance_id': str(field_instance.id) if field_instance else None,
                            'game_slot_id': str(resolved_slot.id) if resolved_slot else None,
                            'home_team_id': str(home.id), 'away_team_id': str(away.id),

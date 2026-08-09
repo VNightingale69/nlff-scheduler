@@ -252,6 +252,7 @@ def test_hiller_large_reconfiguration_is_warning_and_records_selected_layout():
     assert preview['diagnostics'][0]['blocking'] is False
     assert staged[0]['imported_field_name'] == 'Field 1'
     assert staged[0]['resolved_field_id'] == staged[0]['field_id']
+    assert staged[0]['field_layout_type_override'] == 'LARGE'
 
 
 @pytest.mark.parametrize(('site_name', 'field_names'), [
@@ -317,6 +318,7 @@ def test_confirm_persists_warning_field_and_replacement_assignments():
     assert result['existing_games_removed'] == 1
     assert [game.field_id for game in games] == [field.id for field in fields]
     assert all(not game.missing_field_assignment for game in games)
+    assert all(row['match'] for row in result['field_persistence_diagnostics'])
 
 
 def test_confirm_rolls_back_replacement_when_canonical_field_is_invalid():
