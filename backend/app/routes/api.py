@@ -22,7 +22,8 @@ from app.config import ADMIN_SEED_EMAIL, COMMUNITY_LOGO_MAX_SIZE_BYTES, COMMUNIT
 from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN, can_manage_fields, can_manage_schedule, enforce_organization_scope, get_current_user, get_optional_current_user, is_community_admin, is_league_admin, is_scheduling_admin, normalize_role_name, require_field_manager, require_roles, require_schedule_admin, require_schedule_publisher
 from app.database import get_db
 from app.organizations import active_organization_filter, normalize_organization_name
-from app.models import Division, Field, FieldConfigurationOption, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostPlanSelection, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Rulebook, LoginAuditLog, ScheduleChangeLog, ScheduleImport, SchedulePublicationEvent, ScoreHistory, ScoreSubmission, Season, Team, Tournament, TournamentDivision, TournamentGame, TournamentTeam, TurfWave, User, Week
+from app.models import Division, Field, FieldConfigurationOption, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostPlanSelection, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Rulebook, LoginAuditLog, ScheduleChangeLog, ScheduleImport, SchedulePublicationEvent, ScoreHistory, ScoreSubmission, Season, Team, TimeslotFieldConfiguration, Tournament, TournamentDivision, TournamentGame, TournamentTeam, TurfWave, User, Week
+from app.services.facility_layout_validation import layout_label, select_supported_layout
 from app.services.schedule_import import build_preview, parse_schedule_file
 from app.schemas import (
     DivisionCreate, DivisionRead, FieldConfigurationOptionCreate, FieldConfigurationOptionRead, FieldCreate, FieldRead, GameCreate, GameRead, GameSaveResponse, ManualGameBulkEditRequest, ManualGameBulkEditResponse, ManualGameEditRequest, ManualGameEditResponse, ScheduleChangeLogRead, ScheduleEditWarning,
@@ -167,9 +168,45 @@ def confirm_schedule_import(
             db.query(GameSlot).filter(GameSlot.assigned_game_id.in_(existing_ids)).update({GameSlot.assigned_game_id:None, GameSlot.status:'OPEN'}, synchronize_session=False)
             for game in existing: db.delete(game)
             db.flush()
+        timeslot_overrides = {}
+        for row, *_resolved in resolved_rows:
+            configuration_value = row.get('configuration_id')
+            if not configuration_value and row.get('configuration_name'):
+                configuration_name = str(row['configuration_name']).strip().upper()
+                supported_configuration = db.query(HostLocationConfiguration).filter_by(
+                    host_location_id=uuid.UUID(row['site_id']), configuration_name=configuration_name,
+                ).first()
+                if not supported_configuration:
+                    number_words = {'ONE': 1, 'TWO': 2, 'THREE': 3, 'FOUR': 4}
+                    counts = {'small_field_count': 0, 'medium_field_count': 0, 'large_field_count': 0}
+                    tokens = configuration_name.split('_')
+                    for index, token in enumerate(tokens[:-1]):
+                        size = tokens[index + 1]
+                        if token in number_words and size in {'SMALL', 'MEDIUM', 'LARGE'}:
+                            counts[f'{size.lower()}_field_count'] += number_words[token]
+                    supported_configuration = HostLocationConfiguration(
+                        host_location_id=uuid.UUID(row['site_id']), configuration_name=configuration_name,
+                        is_active=True, **counts,
+                    )
+                    db.add(supported_configuration); db.flush()
+                configuration_value = str(supported_configuration.id)
+            if not configuration_value:
+                continue
+            key = (uuid.UUID(row['site_id']), date.fromisoformat(row['date']), time.fromisoformat(row['kickoff']))
+            override = db.query(TimeslotFieldConfiguration).filter_by(
+                host_location_id=key[0], configuration_date=key[1], kickoff_time=key[2],
+            ).first()
+            if override and override.configuration_id != uuid.UUID(configuration_value):
+                raise ValueError(f'Imported row {row.get("row")} conflicts with the persisted timeslot layout.')
+            if not override:
+                override = TimeslotFieldConfiguration(host_location_id=key[0], configuration_date=key[1], kickoff_time=key[2],
+                                                      configuration_id=uuid.UUID(configuration_value))
+                db.add(override); db.flush()
+            timeslot_overrides[key] = override
         created_games = []
         for row, resolved_field_id, resolved_instance_id, resolved_slot_id in resolved_rows:
-            game = Game(season_id=record.season_id, week_id=uuid.UUID(row['week_id']), home_team_id=uuid.UUID(row['home_team_id']), away_team_id=uuid.UUID(row['away_team_id']), field_id=resolved_field_id, field_instance_id=resolved_instance_id, field_layout_type_override=row.get('field_layout_type_override'), host_location_id=uuid.UUID(row['site_id']), game_status_id=uuid.UUID(row['game_status_id']), game_date=date.fromisoformat(row['date']), kickoff_time=time.fromisoformat(row['kickoff']), internal_admin_notes=row.get('notes'), is_manual_edit=True, manual_updated_by_user_id=current_user.id, manual_updated_at=datetime.now(timezone.utc))
+            override = timeslot_overrides.get((uuid.UUID(row['site_id']), date.fromisoformat(row['date']), time.fromisoformat(row['kickoff'])))
+            game = Game(season_id=record.season_id, week_id=uuid.UUID(row['week_id']), home_team_id=uuid.UUID(row['home_team_id']), away_team_id=uuid.UUID(row['away_team_id']), field_id=resolved_field_id, field_instance_id=resolved_instance_id, field_layout_type_override=row.get('field_layout_type_override'), timeslot_configuration_id=override.id if override else None, host_location_id=uuid.UUID(row['site_id']), game_status_id=uuid.UUID(row['game_status_id']), game_date=date.fromisoformat(row['date']), kickoff_time=time.fromisoformat(row['kickoff']), internal_admin_notes=row.get('notes'), is_manual_edit=True, manual_updated_by_user_id=current_user.id, manual_updated_at=datetime.now(timezone.utc))
             db.add(game)
             created_games.append((row, game, resolved_field_id, resolved_instance_id, resolved_slot_id))
         db.flush()
@@ -1632,13 +1669,31 @@ def _build_final_schedule_validation_result(
     validation_warnings: list[dict[str, object]] = []
     overflow_host_ids_used: set[str] = set()
 
+    layout_decisions = {}
+    for row in rows:
+        game = row[0]
+        if not game.game_date or not game.kickoff_time or not game.host_location_id:
+            continue
+        key = (game.host_location_id, game.game_date, game.kickoff_time)
+        if key in layout_decisions:
+            continue
+        wave = [candidate for candidate in rows if (candidate[0].host_location_id, candidate[0].game_date, candidate[0].kickoff_time) == key]
+        required_sizes = [_required_field_type_for_division(candidate[6]) for candidate in wave]
+        layout_decisions[key] = select_supported_layout(db, *key, required_sizes)
+
     for g, slot, fi, host, home, away, div, _org, _status in rows:
         game_id = str(g.id)
         canonical_field = getattr(g, 'field', None)
         configured_field_type = (getattr(slot, 'field_type', None) or
                                  getattr(fi, 'field_type', None) or
                                  getattr(canonical_field, 'layout_type', None))
-        field_type = getattr(g, 'field_layout_type_override', None) or configured_field_type
+        required_field_type = _required_field_type_for_division(div)
+        decision = layout_decisions.get((g.host_location_id, g.game_date, g.kickoff_time))
+        supported_reconfiguration = bool(
+            decision and decision[2] and configured_field_type
+            and _normalize_field_size(configured_field_type) != required_field_type
+        )
+        field_type = required_field_type if supported_reconfiguration else (getattr(g, 'field_layout_type_override', None) or configured_field_type)
         has_saved_field = bool(getattr(g, 'field_id', None) or getattr(g, 'field_instance_id', None))
         if not has_saved_field or getattr(g, 'missing_field_assignment', False) or getattr(g, 'field_assignment_status', None) == 'MISSING_FIELD':
             saved_missing_field_failures.append({
@@ -1649,14 +1704,15 @@ def _build_final_schedule_validation_result(
                 'previous_field_id': str(getattr(g, 'previous_field_id', None)) if getattr(g, 'previous_field_id', None) else None,
                 'previous_field_name': getattr(g, 'previous_field_name', None),
             })
-        if getattr(g, 'field_layout_type_override', None) and _normalize_field_size(configured_field_type) != _normalize_field_size(field_type):
+        if supported_reconfiguration:
             field_label = getattr(canonical_field, 'name', None) or getattr(fi, 'field_name', None) or 'Assigned field'
             validation_warnings.append({
-                **_final_validation_game_detail(g, slot, fi, host, home, away, div, failure_code='FIELD_RECONFIGURATION', failure_category='game', specific_reason='Intentional timeslot field reconfiguration requires administrator review.'),
-                'code': 'FIELD_RECONFIGURATION', 'severity': 'WARNING', 'blocking': False,
+                **_final_validation_game_detail(g, slot, fi, host, home, away, div, failure_code='FIELD_LAYOUT_RECONFIGURATION', failure_category='game', specific_reason='Supported timeslot field reconfiguration requires administrator review.'),
+                'code': 'FIELD_LAYOUT_RECONFIGURATION', 'severity': 'WARNING', 'blocking': False,
                 'configured_default_type': _normalize_field_size(configured_field_type),
                 'scheduled_field_type': _normalize_field_size(field_type),
-                'message': f'{getattr(host, "name", "Site")} {field_label} is being used as a {_normalize_field_size(field_type).title()} field for this timeslot. Verify the {_normalize_field_size(field_type).title()}-field reconfiguration before game day.',
+                'selected_layout': layout_label(decision[1]),
+                'message': f'{getattr(host, "name", "Site")} is normally configured differently. This game requires the supported {layout_label(decision[1])} configuration at this timeslot. Verify the field is reconfigured before game day.',
             })
         if field_type and div and _normalize_field_size(field_type) != _required_field_type_for_division(div):
             field_type_mismatches.append({
@@ -15753,6 +15809,8 @@ def _schedule_hash_payload(db: Session, season_id: uuid.UUID) -> list[dict[str, 
             'end_time': slot.end_time.isoformat() if slot and slot.end_time else None,
             'host_location_id': str(game.host_location_id or (host_location.id if host_location else '') or ''),
             'field_instance_id': str(game.field_instance_id or (field_instance.id if field_instance else '') or ''),
+            'timeslot_configuration_id': str(getattr(game, 'timeslot_configuration_id', None) or ''),
+            'field_layout_type_override': getattr(game, 'field_layout_type_override', None),
             'canonical_field_label': str((field_instance.field_name if field_instance else '') or ''),
             'home_team_id': str(game.home_team_id or (home_team.id if home_team else '') or ''),
             'away_team_id': str(game.away_team_id or (away_team.id if away_team else '') or ''),
@@ -15802,6 +15860,7 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
     team_times: dict[tuple, uuid.UUID] = {}
     field_times: dict[tuple, uuid.UUID] = {}
     matchups: set[tuple] = set()
+    layout_groups: dict[tuple, list[tuple]] = {}
     for game, _slot, field, _host, home, away, division, _org, _status in rows:
         def error(code: str, message: str):
             errors.append({'issue_code': code, 'scheduled_game_id': str(game.id), 'summary': message})
@@ -15824,8 +15883,23 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
         key = (game.field_instance_id, game.game_date, game.kickoff_time)
         if game.field_instance_id and key in field_times: error('FIELD_DOUBLE_BOOKING', 'A field has simultaneous games.')
         field_times[key] = game.id
-        if getattr(game, 'field_layout_override', None):
-            warnings.append({'issue_code': 'FIELD_RECONFIGURATION', 'scheduled_game_id': str(game.id), 'summary': 'Review intentional field reconfiguration.'})
+        canonical_type = _normalize_field_size(getattr(getattr(game, 'field', None), 'layout_type', None) or getattr(field, 'field_type', None))
+        required_type = _required_field_type_for_division(division)
+        if canonical_type and required_type and canonical_type != required_type:
+            layout_groups.setdefault((game.host_location_id, game.game_date, game.kickoff_time), []).append((game, required_type, canonical_type, _host))
+    for (host_id, game_date, kickoff), mismatched in layout_groups.items():
+        all_wave = [row for row in rows if row[0].host_location_id == host_id and row[0].game_date == game_date and row[0].kickoff_time == kickoff]
+        required = [_required_field_type_for_division(row[6]) for row in all_wave]
+        override, configuration, valid = select_supported_layout(db, host_id, game_date, kickoff, required)
+        if not valid:
+            for game, required_type, _canonical, _host in mismatched:
+                errors.append({'issue_code': 'FIELD_TYPE_MISMATCH', 'scheduled_game_id': str(game.id),
+                               'summary': f'No supported facility layout provides the required {required_type.title()} field without overlap.'})
+            continue
+        for game, required_type, canonical_type, host in mismatched:
+            warnings.append({'issue_code': 'FIELD_LAYOUT_RECONFIGURATION', 'severity': 'WARNING', 'blocking': False,
+                             'scheduled_game_id': str(game.id), 'field_layout': layout_label(configuration),
+                             'summary': f'{getattr(host, "name", "Host location")} is normally configured for {canonical_type.title()} play. This game requires the supported {layout_label(configuration)} configuration at kickoff. Verify the field is reconfigured before game day.'})
     return {'games': len(rows), 'blocking_errors': errors, 'warnings': warnings,
             'status': 'Blocked' if errors else 'Ready to Publish'}
 
@@ -16560,8 +16634,18 @@ def assign_generated_slot(payload: dict, db: Session = Depends(get_db)):
         available_counts = _turf_wave_layout_counts(selected_config, [slot])
         if int(available_counts.get(expected_field_type, 0) or 0) <= 0:
             raise HTTPException(400, 'Selected approved turf configuration does not include a compatible field-size slot for this division.')
-    if slot.field_type != expected_field_type:
-        raise HTTPException(400, 'Selected slot field type must match division requirement')
+    timeslot_override = None
+    if _normalize_field_size(slot.field_type) != expected_field_type:
+        existing_wave = db.query(Game, Division).join(Team, Game.home_team_id == Team.id).join(Division, Team.division_id == Division.id).filter(
+            Game.host_location_id == slot.host_location_id, Game.game_date == slot.slot_date,
+            Game.kickoff_time == slot.start_time,
+        ).all()
+        required_sizes = [_required_field_type_for_division(row_division) for _game, row_division in existing_wave] + [expected_field_type]
+        timeslot_override, _configuration, supported = select_supported_layout(
+            db, slot.host_location_id, slot.slot_date, slot.start_time, required_sizes, persist=True,
+        )
+        if not supported:
+            raise HTTPException(400, 'No supported facility layout can satisfy this field size without overlapping another game.')
     overlap = db.query(Game).join(GameSlot, GameSlot.assigned_game_id == Game.id).filter(
         Game.game_date == slot.slot_date,
         GameSlot.start_time < slot.end_time,
@@ -16614,6 +16698,8 @@ def assign_generated_slot(payload: dict, db: Session = Depends(get_db)):
         field_id=None,
         host_location_id=slot.host_location_id,
         field_instance_id=slot.field_instance_id,
+        field_layout_type_override=expected_field_type if timeslot_override else None,
+        timeslot_configuration_id=timeslot_override.id if timeslot_override else None,
         game_status_id=status.id,
         game_date=slot.slot_date,
         kickoff_time=slot.start_time,

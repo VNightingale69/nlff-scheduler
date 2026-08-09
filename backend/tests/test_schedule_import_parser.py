@@ -245,7 +245,7 @@ def test_hiller_large_reconfiguration_is_warning_and_records_selected_layout():
         'Field "Field 1" is normally configured as "Medium", but the import requests '
         '"Large". Verify the field will be reconfigured for this timeslot.')
     assert staged[0]['configuration_name'] == 'ONE_LARGE'
-    assert staged[0]['configuration_id'] is None
+    assert staged[0]['configuration_id'] is None  # materialized atomically on confirmation
     assert 'will use its One Large configuration' in preview['rows'][0]['message']
     assert preview['diagnostics'][0]['category'] == 'Scheduling Integrity'
     assert preview['diagnostics'][0]['check'] == 'Field configuration mismatch'
