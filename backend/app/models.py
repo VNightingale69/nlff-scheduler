@@ -278,8 +278,27 @@ class Week(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(20), nullable=False, default='draft')
     host_assignment_pending: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     host_assignment_locked: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    publication_status: Mapped[str] = mapped_column(String(20), nullable=False, default='UNPUBLISHED')
+    published_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    published_by_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('users.id'), nullable=True)
+    unpublished_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_published_schedule_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_published_game_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     season = relationship('Season')
+    published_by = relationship('User', foreign_keys=[published_by_user_id])
     __table_args__ = (UniqueConstraint('season_id', 'week_number', name='uq_week_season_number'),)
+
+
+class SchedulePublicationEvent(Base):
+    """Append-only audit trail for week-scoped schedule publication actions."""
+    __tablename__ = 'schedule_publication_events'
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    season_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('seasons.id'), nullable=False)
+    week_ids: Mapped[str] = mapped_column(Text, nullable=False)
+    action: Mapped[str] = mapped_column(String(20), nullable=False)
+    performed_by_user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('users.id'), nullable=False)
+    performed_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False)
+    game_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
 class HostingAvailability(Base, TimestampMixin):
     __tablename__ = 'hosting_availabilities'

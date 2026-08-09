@@ -41,6 +41,7 @@ export default function ScheduleManagementPage() {
   const [publicationMessage, setPublicationMessage] = useState('');
   const [publishDiagnostics, setPublishDiagnostics] = useState<any | null>(null);
   const [publicationLoading, setPublicationLoading] = useState(false);
+  const [publicationWeekIds, setPublicationWeekIds] = useState<string[]>(searchParams.get('week_id') ? [searchParams.get('week_id')!] : []);
 
   const qs = useMemo(
     () =>
@@ -64,7 +65,7 @@ export default function ScheduleManagementPage() {
     const [gameResponse, conflictResponse, publishDiagnosticsResult] = await Promise.allSettled([
       apiFetch(`/schedule-management/games${qs ? `?${qs}` : ''}`, {}, token),
       apiFetch('/schedule-management/conflicts', {}, token),
-      apiFetch('/schedule-management/publish-diagnostics', {}, token),
+      apiFetch(`/schedule-management/publish-diagnostics${publicationWeekIds.length ? `?${publicationWeekIds.map((id) => `week_ids=${id}`).join('&')}` : ''}`, {}, token),
     ]);
 
     if (gameResponse.status === 'rejected' || conflictResponse.status === 'rejected') {
@@ -87,7 +88,7 @@ export default function ScheduleManagementPage() {
     load().catch((e) => {
       setError(e instanceof ApiError ? e.message : 'Unable to load schedule management data.');
     });
-  }, [qs]);
+  }, [qs, publicationWeekIds.join(',')]);
 
 
   const updateSchedulePublication = async (action: 'publish' | 'unpublish') => {
@@ -97,7 +98,10 @@ export default function ScheduleManagementPage() {
     setError('');
     setPublicationMessage('');
     try {
-      const result = await apiFetch(`/seasons/${seasonId}/${action}-schedule`, { method: 'POST' }, token);
+      const selected = publicationWeekIds.length ? publicationWeekIds : (publishDiagnostics.weeks || []).map((week: any) => week.id);
+      const label = selected.length === 1 ? `Week ${(publishDiagnostics.weeks || []).find((week: any) => week.id === selected[0])?.week_number}` : `${selected.length} selected weeks`;
+      if (!window.confirm(`${action === 'publish' ? 'Publish' : 'Unpublish'} ${label}?\n\n${publishDiagnostics.scope_game_count || 0} games. Blocking errors: ${publishDiagnostics.publish_blocking_issue_count || 0}. Warnings: ${publishDiagnostics.publish_warning_count || 0}.\n\nOther weeks will remain unchanged.`)) return;
+      const result = await apiFetch(`/seasons/${seasonId}/${action}-schedule`, { method: 'POST', body: JSON.stringify({ week_ids: selected }) }, token);
       setPublishDiagnostics({ ...(publishDiagnostics || {}), ...(result as any) });
       setPublicationMessage(String((result as any)?.message || (action === 'unpublish' ? 'Schedule unpublished.' : 'Schedule published.')));
       await load();
@@ -168,16 +172,18 @@ export default function ScheduleManagementPage() {
         <div className='flex flex-wrap items-start justify-between gap-3'>
           <div>
             <div className='font-semibold'>Season: {publishDiagnostics.season_name}</div>
-            <div className='mt-1'>Schedule Publication Status: <span className='font-semibold'>{publishDiagnostics.schedule_published ? 'Published' : 'Unpublished'}</span></div>
+            <div className='mt-1'>Schedule Publication Status: <span className='font-semibold'>{String(publishDiagnostics.schedule_status || 'unpublished').replace('_', ' ')}</span></div>
           </div>
           {canControlSchedulePublication ? <div className='flex flex-wrap gap-2'>
-            {publishDiagnostics.schedule_published ? (
-              <button className='rounded bg-amber-700 px-3 py-2 text-white disabled:cursor-not-allowed disabled:bg-slate-300' disabled={publicationLoading} onClick={() => updateSchedulePublication('unpublish')}>Unpublish Schedule</button>
-            ) : (
-              <button className='rounded bg-emerald-700 px-3 py-2 text-white disabled:cursor-not-allowed disabled:bg-slate-300' disabled={publicationLoading} onClick={() => updateSchedulePublication('publish')}>Publish Schedule</button>
-            )}
+            <button className='rounded bg-emerald-700 px-3 py-2 text-white disabled:cursor-not-allowed disabled:bg-slate-300' disabled={publicationLoading || !!publishDiagnostics.publish_blocking_issue_count} onClick={() => updateSchedulePublication('publish')}>{publicationWeekIds.length === 1 ? `${(publishDiagnostics.weeks || []).find((w: any) => w.id === publicationWeekIds[0])?.needs_republish ? 'Republish' : 'Publish'} Week ${(publishDiagnostics.weeks || []).find((w: any) => w.id === publicationWeekIds[0])?.week_number}` : publicationWeekIds.length ? 'Publish Selected Weeks' : 'Publish Entire Season'}</button>
+            <button className='rounded bg-amber-700 px-3 py-2 text-white disabled:cursor-not-allowed disabled:bg-slate-300' disabled={publicationLoading || !publicationWeekIds.length} onClick={() => updateSchedulePublication('unpublish')}>Unpublish Selected Weeks</button>
           </div> : null}
         </div>
+        <fieldset className='mt-3 rounded border bg-white p-3'><legend className='px-1 font-semibold'>Publication scope</legend>
+          <div className='flex flex-wrap gap-4'>{(publishDiagnostics.weeks || []).map((week: any) => <label key={week.id} className='flex items-center gap-2'><input type='checkbox' checked={publicationWeekIds.includes(week.id)} onChange={(event) => setPublicationWeekIds((current) => event.target.checked ? [...current, week.id] : current.filter((id) => id !== week.id))} /><span>Week {week.week_number} - {formatDisplayDate(week.date)}</span><span className={`rounded px-2 py-0.5 text-xs ${week.publication_status === 'PUBLISHED' ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-100'}`}>{week.needs_republish ? 'Published - Changes Pending' : week.publication_status === 'PUBLISHED' ? 'Published' : 'Draft'}</span></label>)}</div>
+          <button className='mt-2 text-xs text-blue-700 underline' onClick={() => setPublicationWeekIds([])}>Select Entire Season</button>
+        </fieldset>
+        <h2 className='mt-3 font-bold uppercase'>Publish Readiness{publicationWeekIds.length === 1 ? ` - Week ${(publishDiagnostics.weeks || []).find((w: any) => w.id === publicationWeekIds[0])?.week_number}` : ''}</h2>
         <div className='mt-2 grid grid-cols-2 gap-2 md:grid-cols-3'>
           <div>Saved Scheduled Games: <span className='font-semibold'>{publishDiagnostics.saved_games ?? publishDiagnostics.total_scheduled_games ?? 0}</span></div>
           <div>Authoritative Source: <span className='font-semibold'>Saved scheduled games</span></div>
@@ -186,6 +192,9 @@ export default function ScheduleManagementPage() {
           <div>Games Checked: <span className='font-semibold'>{publishDiagnostics.publish_validation_games_checked_count ?? publishDiagnostics.saved_games ?? 0}</span></div>
           <div>Export Count: <span className='font-semibold'>{publishDiagnostics.export_games_count ?? publishDiagnostics.saved_games ?? 0}</span></div>
           <div>Validation Run: <span className='font-semibold'>{publishDiagnostics.publish_validation_run_id ? String(publishDiagnostics.publish_validation_run_id).slice(0, 8) : 'Current'}</span></div>
+          <div>Blocking Errors: <span className='font-semibold'>{publishDiagnostics.publish_blocking_issue_count || 0}</span></div>
+          <div>Warnings: <span className='font-semibold'>{publishDiagnostics.publish_warning_count || 0}</span></div>
+          <div>Status: <span className='font-semibold'>{publishDiagnostics.publish_blocking_issue_count ? 'Blocked' : 'Ready to Publish'}</span></div>
         </div>
         <p className={`mt-2 rounded p-2 ${publishDiagnostics.publish_blocking_issue_count ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-800'}`}>
           {publishDiagnostics.publish_validation_message || (publishDiagnostics.publish_blocking_issue_count ? 'Schedule validation found blocking issues. Please review the listed games before publishing.' : 'Schedule is ready to publish.')}

@@ -22,7 +22,7 @@ from app.config import ADMIN_SEED_EMAIL, COMMUNITY_LOGO_MAX_SIZE_BYTES, COMMUNIT
 from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN, can_manage_fields, can_manage_schedule, enforce_organization_scope, get_current_user, get_optional_current_user, is_community_admin, is_league_admin, is_scheduling_admin, normalize_role_name, require_field_manager, require_roles, require_schedule_admin, require_schedule_publisher
 from app.database import get_db
 from app.organizations import active_organization_filter, normalize_organization_name
-from app.models import Division, Field, FieldConfigurationOption, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostPlanSelection, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Rulebook, LoginAuditLog, ScheduleChangeLog, ScheduleImport, ScoreHistory, ScoreSubmission, Season, Team, Tournament, TournamentDivision, TournamentGame, TournamentTeam, TurfWave, User, Week
+from app.models import Division, Field, FieldConfigurationOption, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostPlanSelection, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Rulebook, LoginAuditLog, ScheduleChangeLog, ScheduleImport, SchedulePublicationEvent, ScoreHistory, ScoreSubmission, Season, Team, Tournament, TournamentDivision, TournamentGame, TournamentTeam, TurfWave, User, Week
 from app.services.schedule_import import build_preview, parse_schedule_file
 from app.schemas import (
     DivisionCreate, DivisionRead, FieldConfigurationOptionCreate, FieldConfigurationOptionRead, FieldCreate, FieldRead, GameCreate, GameRead, GameSaveResponse, ManualGameBulkEditRequest, ManualGameBulkEditResponse, ManualGameEditRequest, ManualGameEditResponse, ScheduleChangeLogRead, ScheduleEditWarning,
@@ -15767,6 +15767,82 @@ def _compute_schedule_hash(db: Session, season_id: uuid.UUID) -> tuple[str, int]
     return hashlib.sha256(encoded.encode('utf-8')).hexdigest(), len(payload)
 
 
+def _week_schedule_payload(db: Session, season_id: uuid.UUID, week_id: uuid.UUID) -> list[dict[str, object]]:
+    return [row for row in _schedule_hash_payload(db, season_id)
+            if str(db.get(Game, uuid.UUID(str(row['scheduled_game_id']))).week_id) == str(week_id)]
+
+
+def _week_schedule_hash(db: Session, season_id: uuid.UUID, week_id: uuid.UUID) -> tuple[str, int]:
+    payload = _week_schedule_payload(db, season_id, week_id)
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(',', ':')).encode()).hexdigest(), len(payload)
+
+
+def _publication_weeks(db: Session, season_id: uuid.UUID, week_ids: list[object] | None) -> list[Week]:
+    configured = db.query(Week).filter(Week.season_id == season_id).order_by(Week.week_number).all()
+    if week_ids is None:
+        return configured
+    if not week_ids:
+        raise HTTPException(400, 'week_ids must contain at least one configured week')
+    try:
+        requested = {uuid.UUID(str(value)) for value in week_ids}
+    except (ValueError, TypeError):
+        raise HTTPException(400, 'week_ids contains an invalid week identifier')
+    selected = [week for week in configured if week.id in requested]
+    if len(selected) != len(requested):
+        raise HTTPException(400, 'Every selected week must belong to the requested season')
+    return selected
+
+
+def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> dict:
+    """Validate hard integrity within the explicit scope; planning advice is non-blocking."""
+    selected = {week.id for week in weeks}
+    rows = [row for row in get_scheduled_games_for_season(db, season.id) if row[0].week_id in selected]
+    errors: list[dict] = []
+    warnings: list[dict] = []
+    team_times: dict[tuple, uuid.UUID] = {}
+    field_times: dict[tuple, uuid.UUID] = {}
+    matchups: set[tuple] = set()
+    for game, _slot, field, _host, home, away, division, _org, _status in rows:
+        def error(code: str, message: str):
+            errors.append({'issue_code': code, 'scheduled_game_id': str(game.id), 'summary': message})
+        if not home or not away: error('INVALID_TEAM', 'Both teams must exist.')
+        elif not home.is_active or not away.is_active: error('INACTIVE_TEAM', 'Both teams must be active.')
+        elif home.id == away.id: error('SAME_TEAM', 'A team cannot play itself.')
+        if not division or (home and home.division_id != division.id) or (away and away.division_id != division.id):
+            error('INVALID_DIVISION', 'Both teams must belong to the game division.')
+        if not game.game_date: error('INVALID_DATE', 'A game date is required.')
+        if not game.kickoff_time: error('INVALID_KICKOFF', 'A kickoff time is required.')
+        if not game.field_instance_id or not field: error('MISSING_FIELD', 'A field assignment is required.')
+        matchup = (game.week_id, game.home_team_id, game.away_team_id, game.game_date, game.kickoff_time)
+        reverse = (game.week_id, game.away_team_id, game.home_team_id, game.game_date, game.kickoff_time)
+        if matchup in matchups or reverse in matchups: error('DUPLICATE_GAME', 'This matchup is duplicated.')
+        matchups.add(matchup)
+        for team_id in (game.home_team_id, game.away_team_id):
+            key = (team_id, game.game_date, game.kickoff_time)
+            if key in team_times: error('SIMULTANEOUS_TEAM_CONFLICT', 'A team has simultaneous games.')
+            team_times[key] = game.id
+        key = (game.field_instance_id, game.game_date, game.kickoff_time)
+        if game.field_instance_id and key in field_times: error('FIELD_DOUBLE_BOOKING', 'A field has simultaneous games.')
+        field_times[key] = game.id
+        if getattr(game, 'field_layout_override', None):
+            warnings.append({'issue_code': 'FIELD_RECONFIGURATION', 'scheduled_game_id': str(game.id), 'summary': 'Review intentional field reconfiguration.'})
+    return {'games': len(rows), 'blocking_errors': errors, 'warnings': warnings,
+            'status': 'Blocked' if errors else 'Ready to Publish'}
+
+
+def _season_publication_rollup(weeks: list[Week]) -> str:
+    published = sum(str(week.publication_status or '').upper() == 'PUBLISHED' for week in weeks)
+    return 'published' if weeks and published == len(weeks) else ('partially_published' if published else 'unpublished')
+
+
+def _published_week_ids(db: Session, season: Season) -> set[uuid.UUID]:
+    ids = {row.id for row in db.query(Week.id).filter(Week.season_id == season.id, func.upper(Week.publication_status) == 'PUBLISHED').all()}
+    # Rows created by pre-migration fixtures retain the old season-level contract.
+    if not ids and str(season.schedule_status or '').lower() in {'published', 'saved'}:
+        ids = {row.id for row in db.query(Week.id).filter(Week.season_id == season.id).all()}
+    return ids
+
+
 def _store_schedule_publish_snapshot(season: Season, schedule_hash: str, game_count: int, now: datetime) -> None:
     season.last_published_schedule_hash = schedule_hash
     season.last_published_game_count = game_count
@@ -15900,7 +15976,41 @@ def get_schedule_publication_status(season_id: uuid.UUID, db: Session = Depends(
 
 
 @router.post('/seasons/{season_id}/publish-schedule')
-def publish_schedule(season_id: uuid.UUID, db: Session = Depends(get_db), current_user: User = Depends(require_schedule_publisher)):
+def publish_schedule(season_id: uuid.UUID, payload: dict | None = None, db: Session = Depends(get_db), current_user: User = Depends(require_schedule_publisher)):
+    season = db.query(Season).filter(Season.id == season_id).first()
+    if not season: raise HTTPException(404, 'Season not found')
+    weeks = _publication_weeks(db, season_id, (payload or {}).get('week_ids'))
+    readiness = _week_publish_readiness(db, season, weeks)
+    if readiness['blocking_errors']:
+        raise HTTPException(400, detail={'error': 'publish_validation_failed', 'message': 'Selected weeks contain blocking errors.', 'readiness': readiness})
+    now = datetime.now(timezone.utc)
+    total_games = 0
+    action = 'PUBLISH'
+    for week in weeks:
+        schedule_hash, game_count = _week_schedule_hash(db, season_id, week.id)
+        if str(week.publication_status or '').upper() == 'PUBLISHED': action = 'REPUBLISH'
+        week.publication_status = 'PUBLISHED'; week.published_at = now; week.published_by_user_id = current_user.id
+        week.last_published_schedule_hash = schedule_hash; week.last_published_game_count = game_count
+        total_games += game_count
+    all_weeks = db.query(Week).filter(Week.season_id == season_id).all()
+    season.schedule_status = _season_publication_rollup(all_weeks)
+    db.add(SchedulePublicationEvent(season_id=season.id, week_ids=json.dumps([str(w.id) for w in weeks]), action=action,
+                                    performed_by_user_id=current_user.id, performed_at=now, game_count=total_games))
+    db.commit()
+    return {'ok': True, **_schedule_publication_status(season), 'season_publication_status': season.schedule_status,
+            'published_week_ids': [str(w.id) for w in weeks], 'game_count': total_games, 'readiness': readiness,
+            'message': f"{'Republished' if action == 'REPUBLISH' else 'Published'} {len(weeks)} week(s)."}
+
+
+@router.post('/schedule/publish')
+def publish_schedule_scope(payload: dict, db: Session = Depends(get_db), current_user: User = Depends(require_schedule_publisher)):
+    if not payload.get('season_id'): raise HTTPException(400, 'season_id is required')
+    return publish_schedule(uuid.UUID(str(payload['season_id'])), payload, db, current_user)
+
+
+@router.post('/seasons/{season_id}/publish-schedule-legacy', include_in_schema=False)
+def publish_schedule_legacy(season_id: uuid.UUID, db: Session = Depends(get_db), current_user: User = Depends(require_schedule_publisher)):
+    """Previous season-wide implementation retained only for old internal callers."""
     season = db.query(Season).filter(Season.id == season_id).first()
     if not season: raise HTTPException(404, 'Season not found')
     now = datetime.now(timezone.utc)
@@ -15940,7 +16050,26 @@ def publish_schedule(season_id: uuid.UUID, db: Session = Depends(get_db), curren
 
 
 @router.post('/seasons/{season_id}/unpublish-schedule')
-def unpublish_schedule(season_id: uuid.UUID, db: Session = Depends(get_db), current_user: User = Depends(require_schedule_publisher)):
+def unpublish_schedule(season_id: uuid.UUID, payload: dict | None = None, db: Session = Depends(get_db), current_user: User = Depends(require_schedule_publisher)):
+    season = db.query(Season).filter(Season.id == season_id).first()
+    if not season: raise HTTPException(404, 'Season not found')
+    weeks = _publication_weeks(db, season_id, (payload or {}).get('week_ids'))
+    now = datetime.now(timezone.utc)
+    game_count = 0
+    for week in weeks:
+        week.publication_status = 'UNPUBLISHED'; week.unpublished_at = now
+        game_count += _week_schedule_hash(db, season_id, week.id)[1]
+    all_weeks = db.query(Week).filter(Week.season_id == season_id).all()
+    season.schedule_status = _season_publication_rollup(all_weeks)
+    db.add(SchedulePublicationEvent(season_id=season.id, week_ids=json.dumps([str(w.id) for w in weeks]), action='UNPUBLISH',
+                                    performed_by_user_id=current_user.id, performed_at=now, game_count=game_count))
+    db.commit()
+    return {'ok': True, **_schedule_publication_status(season), 'season_publication_status': season.schedule_status,
+            'unpublished_week_ids': [str(w.id) for w in weeks], 'game_count': game_count}
+
+
+@router.post('/seasons/{season_id}/unpublish-schedule-legacy', include_in_schema=False)
+def unpublish_schedule_legacy(season_id: uuid.UUID, db: Session = Depends(get_db), current_user: User = Depends(require_schedule_publisher)):
     season = db.query(Season).filter(Season.id == season_id).first()
     if not season: raise HTTPException(404, 'Season not found')
     now = datetime.now(timezone.utc)
@@ -24888,7 +25017,8 @@ def list_public_games(season_id: uuid.UUID | None = None, host_location_id: uuid
             message='No saved schedule is currently available.',
         )
 
-    if not _season_schedule_is_published(season):
+    published_week_ids = _published_week_ids(db, season)
+    if not published_week_ids:
         return PagedResponse(
             items=[],
             total=0,
@@ -24899,7 +25029,7 @@ def list_public_games(season_id: uuid.UUID | None = None, host_location_id: uuid
 
     rows = [
         row for row in get_scheduled_games_for_season(db, season.id, filters, organization_filter_any_team=True)
-        if row[6] and row[6].is_active
+        if row[0].week_id in published_week_ids and row[6] and row[6].is_active
     ]
     total = len(rows)
     start = max(page - 1, 0) * page_size
@@ -24944,10 +25074,11 @@ def public_schedule_debug(season_id: uuid.UUID | None = None, host_location_id: 
 @router.get('/public/schedule-filters')
 def list_public_schedule_filters(season_id: uuid.UUID | None = None, db: Session = Depends(get_db)):
     season = _get_schedule_scope_season(db, season_id)
+    published_week_ids = _published_week_ids(db, season) if season else set()
     rows = [
         row for row in get_scheduled_games_for_season(db, season.id, _scheduled_games_filters(season.id))
-        if row[6] and row[6].is_active
-    ] if season and _season_schedule_is_published(season) else []
+        if row[0].week_id in published_week_ids and row[6] and row[6].is_active
+    ] if season and published_week_ids else []
 
     if rows:
         host_locations_by_id = {host.id: host for _, _, _, host, _, _, _, _, _ in rows if host}
@@ -26840,7 +26971,7 @@ def run_post_schedule_repair_pass(db: Session, season_id: uuid.UUID, *, optimize
     }
 
 def _season_schedule_is_published(season: Season | None) -> bool:
-    return bool(_schedule_publication_status(season)['schedule_published'])
+    return bool(season and str(season.schedule_status or '').lower() in {'published', 'partially_published', 'saved'})
 
 
 def _get_schedule_scope_season(db: Session, season_id: uuid.UUID | None = None) -> Season | None:
@@ -28647,7 +28778,7 @@ def _build_turf_stadium_utilization_diagnostics(db: Session, season_id: uuid.UUI
 
 
 @router.get('/schedule-management/publish-diagnostics', dependencies=[Depends(require_schedule_admin)])
-def schedule_publish_diagnostics(season_id: uuid.UUID | None = None, db: Session = Depends(get_db)):
+def schedule_publish_diagnostics(season_id: uuid.UUID | None = None, week_ids: list[uuid.UUID] | None = Query(None), db: Session = Depends(get_db)):
     if season_id:
         season = db.query(Season).filter(Season.id == season_id).first()
     else:
@@ -28655,8 +28786,10 @@ def schedule_publish_diagnostics(season_id: uuid.UUID | None = None, db: Session
     if not season:
         raise HTTPException(404, 'No season found')
 
-    final_validation = build_publish_final_validation(db, season.id)
-    blocking_failures = _final_validation_blocking_failures(final_validation)
+    weeks = _publication_weeks(db, season.id, week_ids)
+    readiness = _week_publish_readiness(db, season, weeks)
+    final_validation = build_publish_final_validation(db, season.id) if week_ids is None else {}
+    blocking_failures = _final_validation_blocking_failures(final_validation) if week_ids is None else []
     counts = dict(
         db.query(func.lower(GameStatus.code), func.count(Game.id))
         .join(Game, Game.game_status_id == GameStatus.id)
@@ -28684,7 +28817,7 @@ def schedule_publish_diagnostics(season_id: uuid.UUID | None = None, db: Session
         concise_issues.extend(_publish_validation_issue_summary(detail, code, game_display_by_id) for detail in details[:3])
         if not details:
             concise_issues.append(_publish_validation_issue_summary({'code': code, 'specific_reason': failure.get('message')}, code, game_display_by_id))
-    blocking_count = sum(int(failure.get('count') or 1) for failure in blocking_failures)
+    blocking_count = len(readiness['blocking_errors']) if week_ids is not None else sum(int(failure.get('count') or 1) for failure in blocking_failures)
     source_mismatch = bool((final_validation.get('final_source_reconciliation') or {}).get('count_mismatch'))
     validation_message = 'Publish validation source does not match current saved schedule.' if source_mismatch else ('Schedule validation found blocking issues. Please review the listed games before publishing.' if blocking_count else 'Schedule is ready to publish.')
     return {
@@ -28703,7 +28836,17 @@ def schedule_publish_diagnostics(season_id: uuid.UUID | None = None, db: Session
         'source_reconciliation': final_validation.get('final_source_reconciliation'),
         'publish_validation_message': validation_message,
         'publish_blocking_issue_count': blocking_count,
-        'publish_blocking_issues': concise_issues[:10],
+        'publish_blocking_issues': (readiness['blocking_errors'] if week_ids is not None else concise_issues)[:10],
+        'publish_warning_count': len(readiness['warnings']),
+        'publish_warnings': readiness['warnings'][:10],
+        'scope_week_ids': [str(week.id) for week in weeks],
+        'scope_game_count': readiness['games'],
+        'scope_status': readiness['status'],
+        'weeks': [{'id': str(week.id), 'week_number': week.week_number, 'label': week.label,
+                   'date': str(week.primary_game_date or week.start_date),
+                   'publication_status': week.publication_status,
+                   'needs_republish': str(week.publication_status).upper() == 'PUBLISHED' and _week_schedule_hash(db, season.id, week.id)[0] != week.last_published_schedule_hash}
+                  for week in db.query(Week).filter(Week.season_id == season.id).order_by(Week.week_number).all()],
     }
 
 
