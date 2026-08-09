@@ -813,6 +813,17 @@ class ManualGameEditRequest(BaseModel):
     score_change_confirmed: bool = False
     manual_edit_locked: bool = True
 
+    @field_validator(
+        'season_id', 'week_id', 'host_location_id', 'field_id',
+        'field_instance_id', 'game_status_id', mode='before',
+    )
+    @classmethod
+    def normalize_empty_optional_uuid(cls, value):
+        """Accept an unselected HTML control only for nullable UUID fields."""
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
 
 class ScheduleEditWarning(BaseModel):
     code: str

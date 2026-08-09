@@ -379,6 +379,59 @@ class ManualScheduleEditPermissionsTest(unittest.TestCase):
         self.assertEqual(parsed.changes[0].field_id, self.canonical_field.id)
         self.assertIn('field_id', parsed.changes[0].model_fields_set)
 
+    def test_bulk_request_normalizes_only_optional_empty_uuids(self):
+        base_change = dict(self._payload(field_instance_id=''), game_id=str(self.game.id))
+        parsed = ManualGameBulkEditRequest.model_validate({
+            'changes': [base_change],
+        })
+        self.assertEqual(parsed.changes[0].field_id, self.canonical_field.id)
+        self.assertIsNone(parsed.changes[0].field_instance_id)
+
+        omitted = dict(base_change)
+        omitted.pop('field_instance_id')
+        self.assertIsNone(ManualGameBulkEditRequest.model_validate({
+            'changes': [omitted],
+        }).changes[0].field_instance_id)
+
+        explicit_null = dict(base_change, field_instance_id=None)
+        self.assertIsNone(ManualGameBulkEditRequest.model_validate({
+            'changes': [explicit_null],
+        }).changes[0].field_instance_id)
+
+        required_empty = dict(base_change, game_id='')
+        with self.assertRaisesRegex(ValueError, 'game_id'):
+            ManualGameBulkEditRequest.model_validate({'changes': [required_empty]})
+
+    def test_hiller_style_canonical_large_field_saves_without_instance_uuid(self):
+        self.game.field_id = None
+        self.game.field_instance_id = self.field.id
+        self.db.commit()
+
+        response = self.client.patch(
+            '/api/schedule-management/games/manual-edit/bulk',
+            headers=self._token(self.scheduling_user.id),
+            json={'overrideWarnings': True, 'changes': [dict(
+                self._payload(field_id=str(self.canonical_field.id), field_instance_id=''),
+                game_id=str(self.game.id),
+            )]},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()['games'][0]['field_id'], str(self.canonical_field.id))
+        self.assertIsNone(response.json()['games'][0]['field_instance_id'])
+
+        self.db.expire_all()
+        saved = self.db.get(Game, self.game.id)
+        self.assertEqual(saved.field_id, self.canonical_field.id)
+        self.assertIsNone(saved.field_instance_id)
+        self.assertIsNone(saved.timeslot_configuration_id)
+
+        refetched = self.client.get('/api/games?page_size=300', headers=self._token(self.scheduling_user.id))
+        self.assertEqual(refetched.status_code, 200, refetched.text)
+        game = next(row for row in refetched.json()['items'] if row['id'] == str(self.game.id))
+        self.assertEqual(game['field_id'], str(self.canonical_field.id))
+        self.assertIsNone(game['field_instance_id'])
+        self.assertIsNone(game['timeslot_configuration_id'])
+
     def test_advisory_field_size_mismatch_saves_without_override_and_refetches(self):
         self.game.field_id = None
         self.game.field_instance_id = None

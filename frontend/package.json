@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "test": "node tests/auth-client.test.mjs && node tests/community-logo-static.test.mjs && node tests/hosting-availability-auto-layout-static.test.mjs && node tests/host-availability-deferred-static.test.mjs && node tests/schedule-readiness-error-static.test.mjs && node tests/hydration-safety-static.test.mjs && node tests/login-activity-static.test.mjs && node tests/rulebook-static.test.mjs && node tests/tournament-bracket-layout.test.mjs && node tests/schedule-import-static.test.mjs && node tests/manual-schedule-field-options-static.test.mjs && node tests/schedule-management-validation-static.test.mjs"
+    "test": "node tests/auth-client.test.mjs && node tests/community-logo-static.test.mjs && node tests/hosting-availability-auto-layout-static.test.mjs && node tests/host-availability-deferred-static.test.mjs && node tests/schedule-readiness-error-static.test.mjs && node tests/hydration-safety-static.test.mjs && node tests/login-activity-static.test.mjs && node tests/rulebook-static.test.mjs && node tests/tournament-bracket-layout.test.mjs && node tests/schedule-import-static.test.mjs && node tests/manual-schedule-field-options-static.test.mjs && node tests/manual-schedule-uuid-normalization.test.mjs && node tests/schedule-management-validation-static.test.mjs"
   },
   "dependencies": {
     "next": "^14.2.35",
