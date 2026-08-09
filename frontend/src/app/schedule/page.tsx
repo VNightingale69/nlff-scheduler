@@ -29,17 +29,7 @@ type Game = {
   away_team_community_name?: string | null;
   away_team_logo_url?: string | null;
   away_team_logo_alt_text?: string | null;
-  home_team_coach_name?: string | null;
-  home_team_coach_email?: string | null;
-  away_team_coach_name?: string | null;
-  away_team_coach_email?: string | null;
-  coach_contacts_visible?: boolean;
-  game_status_label: string;
   game_type: string;
-  public_notes?: string | null;
-  public_score_status?: string | null;
-  home_score?: number | string | null;
-  away_score?: number | string | null;
   week_label?: string | null;
   date_type?: string | null;
 };
@@ -163,21 +153,27 @@ function PublicScheduleContent() {
       {empty && <div className='rounded border p-4'>{message || (hasActiveFilters ? 'No games match the selected filters.' : 'No saved schedule is currently available.')}</div>}
       {!loading && games.length > 0 && (
         <div className='overflow-x-auto rounded border'>
-          <table className='min-w-full text-sm'>
+          <table className='w-full min-w-[720px] table-fixed text-xs sm:text-sm'>
+            <colgroup>
+              <col className='w-[11%]' />
+              <col className='w-[9%]' />
+              <col className='w-[13%]' />
+              <col className='w-[13%]' />
+              <col className='w-[10%]' />
+              <col className='w-[17%]' />
+              <col className='w-[17%]' />
+              <col className='w-[10%]' />
+            </colgroup>
             <thead className='bg-slate-100 text-left'>
               <tr>
                 <th className='p-2'>Date</th>
                 <th className='p-2'>Time</th>
-                <th className='p-2'>Host location</th>
+                <th className='p-2'>Host Location</th>
                 <th className='p-2'>Field</th>
                 <th className='p-2'>Division</th>
-                <th className='p-2'>Home team</th>
-                <th className='p-2'>Away team</th>
-                <th className='p-2'>Game type</th>
-                <th className='p-2'>Game status</th>
-                <th className='p-2'>Notes</th>
-                <th className='p-2'>Coach Contacts</th>
-                <th className='p-2'>Score</th>
+                <th className='p-2'>Home Team</th>
+                <th className='p-2'>Away Team</th>
+                <th className='p-2'>Game Type</th>
               </tr>
             </thead>
             <tbody>
@@ -191,14 +187,6 @@ function PublicScheduleContent() {
                   <td className='p-2'><span className='flex items-center gap-2'><CommunityLogo src={g.home_team_logo_url} name={g.home_team_community_name || g.home_team_name} altText={g.home_team_logo_alt_text} size={24} />{g.home_team_name}</span></td>
                   <td className='p-2'><span className='flex items-center gap-2'><CommunityLogo src={g.away_team_logo_url} name={g.away_team_community_name || g.away_team_name} altText={g.away_team_logo_alt_text} size={24} />{g.away_team_name}</span></td>
                   <td className='p-2'>{g.game_type === 'REGULAR_SEASON' ? 'Regular Season' : g.game_type.replaceAll('_', ' ')}</td>
-                  <td className='p-2'>{g.game_status_label}</td>
-                  <td className='p-2'>{g.public_notes || ''}</td>
-                  <td className='p-2 text-xs'>
-                    <div><span className='font-semibold'>Home Coach:</span> {g.home_team_coach_name || 'Not provided'}{g.home_team_coach_email ? <> &lt;<a className='text-sky-700 underline' href={`mailto:${g.home_team_coach_email}`}>{g.home_team_coach_email}</a>&gt;</> : null}</div>
-                    <div><span className='font-semibold'>Away Coach:</span> {g.away_team_coach_name || 'Not provided'}{g.away_team_coach_email ? <> &lt;<a className='text-sky-700 underline' href={`mailto:${g.away_team_coach_email}`}>{g.away_team_coach_email}</a>&gt;</> : null}</div>
-                    {!g.coach_contacts_visible && <div className='text-slate-500'>Sign in with an authorized role to view coach emails.</div>}
-                  </td>
-                  <td className='p-2'>{['APPROVED','PUBLISHED'].includes(g.public_score_status || '') ? `${g.home_team_name} ${g.home_score}, ${g.away_team_name} ${g.away_score}` : g.public_score_status === 'SCORE_PENDING' ? 'Score Pending' : ''}</td>
                 </tr>
               ))}
             </tbody>
