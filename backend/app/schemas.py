@@ -755,6 +755,10 @@ class GameUpdate(GameCreate):
 
 class GameRead(BaseSchema, GameCreate):
     status_code: str
+    # Games saved before timeslot reconfiguration support do not have an
+    # override.  Both values are deliberately nullable API fields.
+    field_layout_type_override: str | None = None
+    timeslot_configuration_id: uuid.UUID | None = None
     is_manual_edit: bool = False
     manual_edit_locked: bool = False
     manual_updated_by_user_id: uuid.UUID | None = None

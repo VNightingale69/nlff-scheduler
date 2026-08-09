@@ -12,7 +12,7 @@ from sqlalchemy.pool import StaticPool
 from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN
 from app.database import Base, get_db
 from app.main import app
-from app.models import Division, Field, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, Organization, Role, ScheduleChangeLog, Season, Team, User, Week
+from app.models import Division, Field, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, Organization, Role, ScheduleChangeLog, Season, Team, TimeslotFieldConfiguration, User, Week
 from app.security import create_access_token, hash_password
 from app.schemas import ManualGameBulkEditRequest
 
@@ -127,6 +127,58 @@ class ManualScheduleEditPermissionsTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         item_ids = {item['id'] for item in response.json()['items']}
         self.assertIn(str(self.game.id), item_ids)
+
+    def test_manual_builder_games_loads_mixed_legacy_and_reconfigured_games(self):
+        """The builder collection must not lose one valid row to a null relation."""
+        configuration = HostLocationConfiguration(
+            id=uuid.uuid4(), host_location_id=self.host.id,
+            configuration_name='ONE_LARGE', small_field_count=0,
+            medium_field_count=0, large_field_count=1, is_active=True,
+        )
+        override = TimeslotFieldConfiguration(
+            id=uuid.uuid4(), host_location_id=self.host.id,
+            configuration_id=configuration.id,
+            configuration_date=date(2026, 8, 9), kickoff_time=time(12, 0),
+        )
+        self.db.add_all([configuration, override])
+
+        # Together with the setUp game these are exactly the 21 Week 1 rows
+        # involved in the production regression.  They cover null fields,
+        # normal fields, notes, and nullable/present layout relationships.
+        expected_ids = {str(self.game.id)}
+        for index in range(20):
+            missing_field = index == 0
+            reconfigured = index == 1
+            game = Game(
+                id=uuid.uuid4(), season_id=self.season.id, week_id=self.week.id,
+                home_team_id=self.home_team.id, away_team_id=self.away_team.id,
+                field_id=None if missing_field else self.canonical_field.id,
+                host_location_id=self.host.id, game_status_id=self.status.id,
+                game_date=date(2026, 8, 9), kickoff_time=time(12 + index // 12, index % 12 * 5),
+                internal_admin_notes='saved note' if index % 2 else None,
+                missing_field_assignment=missing_field,
+                field_assignment_status='MISSING_FIELD' if missing_field else None,
+                field_layout_type_override='LARGE' if reconfigured else None,
+                timeslot_configuration_id=override.id if reconfigured else None,
+            )
+            self.db.add(game)
+            expected_ids.add(str(game.id))
+        self.db.commit()
+
+        response = self.client.get('/api/games?page_size=300', headers=self._token(self.scheduling_user.id))
+
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body['total'], 21)
+        self.assertEqual({item['id'] for item in body['items']}, expected_ids)
+        missing = next(item for item in body['items'] if item['field_assignment_status'] == 'MISSING_FIELD')
+        self.assertIsNone(missing['field_id'])
+        self.assertTrue(missing['missing_field_assignment'])
+        legacy = next(item for item in body['items'] if item['id'] == str(self.game.id))
+        self.assertIsNone(legacy['field_layout_type_override'])
+        self.assertIsNone(legacy['timeslot_configuration_id'])
+        configured = next(item for item in body['items'] if item['timeslot_configuration_id'] == str(override.id))
+        self.assertEqual(configured['field_layout_type_override'], 'LARGE')
 
     def test_scheduling_admin_can_save_assignment_move_unschedule_and_export(self):
         assignment_slot = self._open_slot(time(10, 0), time(11, 0))
