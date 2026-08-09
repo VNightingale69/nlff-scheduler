@@ -42,13 +42,24 @@ def handle_http_exception(_: Request, exc: HTTPException):
 
 
 @app.exception_handler(SQLAlchemyError)
-def handle_sqlalchemy_error(_: Request, exc: SQLAlchemyError):
-    logger.exception('Database request failed.', exc_info=exc)
+def handle_sqlalchemy_error(request: Request, exc: SQLAlchemyError):
+    original = getattr(exc, 'orig', None)
+    logger.exception(
+        'Database request failed method=%s path=%s query=%s sqlalchemy_exception=%s '
+        'database_exception=%s postgres_code=%s constraint=%s',
+        request.method,
+        request.url.path,
+        request.url.query,
+        type(exc).__name__,
+        type(original).__name__ if original is not None else None,
+        getattr(original, 'sqlstate', None) or getattr(original, 'pgcode', None),
+        getattr(getattr(original, 'diag', None), 'constraint_name', None),
+    )
     return JSONResponse(
         status_code=500,
         content={
             'error': 'database_error',
-            'message': 'A database error occurred while processing the request.',
+            'message': 'Unable to load scheduled games. Please try again.',
         },
     )
 
