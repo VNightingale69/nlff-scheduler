@@ -16257,6 +16257,8 @@ def _to_game_read(
         placement_status=getattr(g, 'placement_status', 'PLACED'),
         public_notes=getattr(g, 'public_notes', None),
         internal_admin_notes=getattr(g, 'internal_admin_notes', None),
+        field_layout_type_override=getattr(g, 'field_layout_type_override', None),
+        timeslot_configuration_id=getattr(g, 'timeslot_configuration_id', None),
         status_code=g.status.code,
         is_manual_edit=bool(getattr(g, 'is_manual_edit', False)),
         manual_edit_locked=bool(getattr(g, 'manual_edit_locked', False)),
@@ -16280,6 +16282,13 @@ def _to_game_read(
         host_location_id=(generated_slot.host_location_id if generated_slot else g.host_location_id),
         field_instance_name=field_instance_name,
         host_location_name=host_location_name,
+        missing_field_assignment=bool(getattr(g, 'missing_field_assignment', False)),
+        needs_schedule_review=bool(getattr(g, 'needs_schedule_review', False)),
+        field_deleted_from_game=bool(getattr(g, 'field_deleted_from_game', False)),
+        previous_field_id=getattr(g, 'previous_field_id', None),
+        previous_field_name=getattr(g, 'previous_field_name', None),
+        field_deleted_at=getattr(g, 'field_deleted_at', None),
+        field_assignment_status=getattr(g, 'field_assignment_status', None),
     )
 
 @router.get('/games', response_model=PagedResponse[GameRead], dependencies=[Depends(get_current_user)])
