@@ -169,7 +169,7 @@ def confirm_schedule_import(
             db.flush()
         created_games = []
         for row, resolved_field_id, resolved_instance_id, resolved_slot_id in resolved_rows:
-            game = Game(season_id=record.season_id, week_id=uuid.UUID(row['week_id']), home_team_id=uuid.UUID(row['home_team_id']), away_team_id=uuid.UUID(row['away_team_id']), field_id=resolved_field_id, field_instance_id=resolved_instance_id, host_location_id=uuid.UUID(row['site_id']), game_status_id=uuid.UUID(row['game_status_id']), game_date=date.fromisoformat(row['date']), kickoff_time=time.fromisoformat(row['kickoff']), internal_admin_notes=row.get('notes'), is_manual_edit=True, manual_updated_by_user_id=current_user.id, manual_updated_at=datetime.now(timezone.utc))
+            game = Game(season_id=record.season_id, week_id=uuid.UUID(row['week_id']), home_team_id=uuid.UUID(row['home_team_id']), away_team_id=uuid.UUID(row['away_team_id']), field_id=resolved_field_id, field_instance_id=resolved_instance_id, field_layout_type_override=row.get('field_layout_type_override'), host_location_id=uuid.UUID(row['site_id']), game_status_id=uuid.UUID(row['game_status_id']), game_date=date.fromisoformat(row['date']), kickoff_time=time.fromisoformat(row['kickoff']), internal_admin_notes=row.get('notes'), is_manual_edit=True, manual_updated_by_user_id=current_user.id, manual_updated_at=datetime.now(timezone.utc))
             db.add(game)
             created_games.append((row, game, resolved_field_id, resolved_instance_id, resolved_slot_id))
         db.flush()
@@ -195,13 +195,21 @@ def confirm_schedule_import(
                 if db.get(GameSlot, resolved_slot_id).assigned_game_id != game.id:
                     raise RuntimeError(f'Game slot assignment failed to persist for imported row {row.get("row")}.')
         record.existing_games_removed=len(existing); record.games_imported=len(staged); record.status='COMPLETED'
+        field_persistence_diagnostics = [{
+            'game': f'{row.get("home_team")} vs {row.get("away_team")}',
+            'imported_field': row.get('imported_field_name') or row.get('field'),
+            'resolved_field_id': str(resolved_field_id) if resolved_field_id else None,
+            'saved_field_id': str(game.field_id) if game.field_id else None,
+            'match': game.field_id == resolved_field_id,
+        } for row, game, resolved_field_id, _resolved_instance_id, _resolved_slot_id in created_games]
+        logger.info('schedule_import_field_persistence import_id=%s diagnostics=%s', import_id, field_persistence_diagnostics)
         if season: season.schedule_modified_after_publish = bool(season.last_published_at)
         db.commit()
     except Exception:
         db.rollback()
         logger.exception('Schedule import transaction rolled back (import_id=%s)', import_id)
         raise HTTPException(500, 'Schedule import failed and all schedule changes were rolled back.')
-    return {'import_id':str(record.id),'status':'COMPLETED','weeks_replaced':preview['weeks'],'existing_games_removed':len(existing),'games_imported':len(staged),'warning_count':preview['warning_count']}
+    return {'import_id':str(record.id),'status':'COMPLETED','weeks_replaced':preview['weeks'],'existing_games_removed':len(existing),'games_imported':len(staged),'warning_count':preview['warning_count'],'field_persistence_diagnostics':field_persistence_diagnostics}
 
 
 @router.get('/schedule-imports', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
@@ -1621,12 +1629,18 @@ def _build_final_schedule_validation_result(
     field_time_conflicts: list[dict[str, object]] = []
     generated_slot_integrity_failures: list[dict[str, object]] = list(generated_slot_integrity.get('remaining_invalid_scheduled_games') or [])
     saved_missing_field_failures: list[dict[str, object]] = []
+    validation_warnings: list[dict[str, object]] = []
     overflow_host_ids_used: set[str] = set()
 
     for g, slot, fi, host, home, away, div, _org, _status in rows:
         game_id = str(g.id)
-        field_type = getattr(slot, 'field_type', None) or getattr(fi, 'field_type', None)
-        if not fi or not getattr(g, 'field_instance_id', None) or getattr(g, 'missing_field_assignment', False) or getattr(g, 'field_assignment_status', None) == 'MISSING_FIELD':
+        canonical_field = getattr(g, 'field', None)
+        configured_field_type = (getattr(slot, 'field_type', None) or
+                                 getattr(fi, 'field_type', None) or
+                                 getattr(canonical_field, 'layout_type', None))
+        field_type = getattr(g, 'field_layout_type_override', None) or configured_field_type
+        has_saved_field = bool(getattr(g, 'field_id', None) or getattr(g, 'field_instance_id', None))
+        if not has_saved_field or getattr(g, 'missing_field_assignment', False) or getattr(g, 'field_assignment_status', None) == 'MISSING_FIELD':
             saved_missing_field_failures.append({
                 **_final_validation_game_detail(g, slot, fi, host, home, away, div, failure_code='SCHEDULED_GAME_MISSING_FIELD', failure_category='game', specific_reason='Game is missing a field assignment because the assigned field was deleted.'),
                 'missing_field_assignment': True,
@@ -1634,6 +1648,15 @@ def _build_final_schedule_validation_result(
                 'field_deleted_from_game': bool(getattr(g, 'field_deleted_from_game', False)),
                 'previous_field_id': str(getattr(g, 'previous_field_id', None)) if getattr(g, 'previous_field_id', None) else None,
                 'previous_field_name': getattr(g, 'previous_field_name', None),
+            })
+        if getattr(g, 'field_layout_type_override', None) and _normalize_field_size(configured_field_type) != _normalize_field_size(field_type):
+            field_label = getattr(canonical_field, 'name', None) or getattr(fi, 'field_name', None) or 'Assigned field'
+            validation_warnings.append({
+                **_final_validation_game_detail(g, slot, fi, host, home, away, div, failure_code='FIELD_RECONFIGURATION', failure_category='game', specific_reason='Intentional timeslot field reconfiguration requires administrator review.'),
+                'code': 'FIELD_RECONFIGURATION', 'severity': 'WARNING', 'blocking': False,
+                'configured_default_type': _normalize_field_size(configured_field_type),
+                'scheduled_field_type': _normalize_field_size(field_type),
+                'message': f'{getattr(host, "name", "Site")} {field_label} is being used as a {_normalize_field_size(field_type).title()} field for this timeslot. Verify the {_normalize_field_size(field_type).title()}-field reconfiguration before game day.',
             })
         if field_type and div and _normalize_field_size(field_type) != _required_field_type_for_division(div):
             field_type_mismatches.append({
@@ -1664,8 +1687,8 @@ def _build_final_schedule_validation_result(
                 team_time_conflicts.append({**detail, 'conflicting_record': team_time_seen[key]})
             else:
                 team_time_seen[key] = detail
-        if g.game_date and g.kickoff_time and (getattr(slot, 'field_instance_id', None) or g.field_instance_id):
-            field_key = (getattr(slot, 'host_location_id', None) or g.host_location_id, getattr(slot, 'field_instance_id', None) or g.field_instance_id, g.game_date, g.kickoff_time)
+        if g.game_date and g.kickoff_time and (getattr(slot, 'field_instance_id', None) or g.field_instance_id or g.field_id):
+            field_key = (getattr(slot, 'host_location_id', None) or g.host_location_id, getattr(slot, 'field_instance_id', None) or g.field_instance_id or g.field_id, g.game_date, g.kickoff_time)
             detail = _final_validation_game_detail(g, slot, fi, host, home, away, div, failure_code='FIELD_TIME_CONFLICT', failure_category='game', specific_reason='Field is double-booked at the same date and kickoff time.')
             if field_key in field_time_seen:
                 counters['field_time_conflict_count'] += 1
@@ -1985,6 +2008,8 @@ def _build_final_schedule_validation_result(
         'final_validation_failures': failures,
         'hard_rule_failures': hard_rule_failures,
         'hard_rule_failure_count': hard_failure_count,
+        'validation_warnings': validation_warnings,
+        'validation_warning_count': len(validation_warnings),
         'diagnostics_reporting_failures': diagnostics_reporting_failures,
         'diagnostics_reporting_failure_count': diagnostics_reporting_failure_count,
         'detail_count_reconciliation_passed': detail_count_reconciliation_passed,
@@ -2114,11 +2139,14 @@ def _build_global_doubleheader_validation(db: Session, season_id: uuid.UUID | st
                 team_conflict_game_ids.update({team_time_seen[t_key], game.id})
             else:
                 team_time_seen[t_key] = game.id
-        f_key = (getattr(slot, 'host_location_id', None) or getattr(host, 'id', None) or game.host_location_id, getattr(slot, 'field_instance_id', None) or getattr(fi, 'id', None) or game.field_instance_id, game.game_date, game.kickoff_time)
-        if f_key in field_time_seen:
-            field_conflict_game_ids.update({field_time_seen[f_key], game.id})
-        else:
-            field_time_seen[f_key] = game.id
+        field_identity = (getattr(slot, 'field_instance_id', None) or getattr(fi, 'id', None) or
+                          game.field_instance_id or game.field_id)
+        if field_identity:
+            f_key = (getattr(slot, 'host_location_id', None) or getattr(host, 'id', None) or game.host_location_id, field_identity, game.game_date, game.kickoff_time)
+            if f_key in field_time_seen:
+                field_conflict_game_ids.update({field_time_seen[f_key], game.id})
+            else:
+                field_time_seen[f_key] = game.id
 
     pair_rows: list[dict[str, object]] = []
     failures: list[dict[str, object]] = []
@@ -2162,8 +2190,8 @@ def _build_global_doubleheader_validation(db: Session, season_id: uuid.UUID | st
         team = home_1 if home_1.id == team_id else away_1 if away_1.id == team_id else db.get(Team, team_id)
         division_context = getattr(team, 'division', None) or (db.get(Division, division_id) if division_id else div_1)
         required_size = _required_field_type_for_division(division_context)
-        field_type_1 = _normalize_field_size(slot_1.field_type if slot_1 else (fi_1.field_type if fi_1 else None))
-        field_type_2 = _normalize_field_size(slot_2.field_type if slot_2 else (fi_2.field_type if fi_2 else None))
+        field_type_1 = _normalize_field_size(getattr(game_1, 'field_layout_type_override', None) or (slot_1.field_type if slot_1 else None) or (fi_1.field_type if fi_1 else None) or getattr(getattr(game_1, 'field', None), 'layout_type', None))
+        field_type_2 = _normalize_field_size(getattr(game_2, 'field_layout_type_override', None) or (slot_2.field_type if slot_2 else None) or (fi_2.field_type if fi_2 else None) or getattr(getattr(game_2, 'field', None), 'layout_type', None))
         host_id_1 = getattr(slot_1, 'host_location_id', None) or getattr(host_1, 'id', None) or game_1.host_location_id
         host_id_2 = getattr(slot_2, 'host_location_id', None) or getattr(host_2, 'id', None) or game_2.host_location_id
         if not host_1 and host_id_1:
@@ -2176,13 +2204,10 @@ def _build_global_doubleheader_validation(db: Session, season_id: uuid.UUID | st
         start_delta = None
         if start_1 and start_2:
             start_delta = abs((_minutes_from_time(start_2) or 0) - (_minutes_from_time(start_1) or 0))
-        scheduled_blocks = sorted(all_start_times_by_date_host.get((game_date, host_id_1), set()))
-        consecutive_blocks = False
-        if start_1 in scheduled_blocks and start_2 in scheduled_blocks:
-            i1 = scheduled_blocks.index(start_1)
-            i2 = scheduled_blocks.index(start_2)
-            consecutive_blocks = abs(i2 - i1) == 1
-        back_to_back = bool(start_delta == GAME_DURATION_MINUTES and consecutive_blocks)
+        # Adjacent or separated games are both valid: only overlapping windows
+        # make a team's two games invalid. In particular 9:00-10:00 followed
+        # by 10:00-11:00 on the same field is not a field conflict.
+        back_to_back = bool(start_delta is not None and start_delta >= GAME_DURATION_MINUTES)
         compatible_field_type = bool(field_type_1 == required_size and field_type_2 == required_size)
         allowed_hosts_1 = _host_plan_allowed_host_ids_for_week(db, season_id, game_1.week_id, game_date)
         allowed_hosts_2 = _host_plan_allowed_host_ids_for_week(db, season_id, game_2.week_id, game_date)
@@ -2204,42 +2229,29 @@ def _build_global_doubleheader_validation(db: Session, season_id: uuid.UUID | st
         host_owner_as_away = not true_home_host_compliant
         participating_division_ids = {getattr(home_1, 'division_id', None), getattr(away_1, 'division_id', None), getattr(home_2, 'division_id', None), getattr(away_2, 'division_id', None)}
         same_division = participating_division_ids == {division_id}
+        saved_fields_present = bool((game_1.field_id or game_1.field_instance_id) and (game_2.field_id or game_2.field_instance_id))
         pair_valid = all([
             same_division,
-            same_location,
             back_to_back,
             compatible_field_type,
-            selected_host_compliant,
-            true_home_host_compliant,
+            saved_fields_present,
             not team_conflict,
             not field_conflict,
-            not host_owner_as_away,
         ])
         failure_reasons: list[str] = []
-        if not same_location:
-            failure_reasons.append('DOUBLEHEADER_SPLIT_LOCATION')
-            counts['doubleheader_split_location_count'] += 1
         if not back_to_back:
             failure_reasons.append('DOUBLEHEADER_NOT_BACK_TO_BACK')
             counts['doubleheader_not_back_to_back_count'] += 1
         if not compatible_field_type:
             failure_reasons.append('DOUBLEHEADER_FIELD_TYPE_MISMATCH')
             counts['doubleheader_field_type_mismatch_count'] += 1
-        if not selected_host_compliant:
-            failure_reasons.append('DOUBLEHEADER_SELECTED_HOST_VIOLATION')
-            counts['doubleheader_selected_host_violation_count'] += 1
-        if not true_home_host_compliant:
-            failure_reasons.append('DOUBLEHEADER_TRUE_HOME_HOST_VIOLATION')
-            counts['doubleheader_true_home_host_violation_count'] += 1
         if team_conflict:
             failure_reasons.append('DOUBLEHEADER_PAIR_TEAM_CONFLICT')
             counts['doubleheader_pair_team_conflict_count'] += 1
         if field_conflict:
             failure_reasons.append('DOUBLEHEADER_PAIR_FIELD_CONFLICT')
             counts['doubleheader_pair_field_conflict_count'] += 1
-        if host_owner_as_away:
-            counts['doubleheader_host_owner_as_away_count'] += 1
-        if not same_division:
+        if not same_division or not saved_fields_present:
             failure_reasons.append('DOUBLEHEADER_PAIR_VALIDATION_FAILED')
         if not pair_valid:
             counts['doubleheader_pair_validation_failure_count'] += 1

@@ -418,6 +418,7 @@ class Game(Base, TimestampMixin):
     field_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('fields.id'), nullable=True)
     host_location_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('host_locations.id'), nullable=True)
     field_instance_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('field_instances.id'), nullable=True)
+    field_layout_type_override: Mapped[str | None] = mapped_column(String(20), nullable=True)
     game_status_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('game_statuses.id'), nullable=False)
     game_date: Mapped[Date] = mapped_column(Date, nullable=False)
     kickoff_time: Mapped[Time | None] = mapped_column(Time, nullable=True)
