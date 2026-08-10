@@ -10671,7 +10671,13 @@ def _host_availability_matrix_response(db: Session, season_id: uuid.UUID) -> dic
 
 
 @router.get('/host-availability-matrix')
-def get_host_availability_matrix(season_id: uuid.UUID, current_user: User = Depends(require_roles(ROLE_LEAGUE_ADMIN)), db: Session = Depends(get_db)):
+def get_host_availability_matrix(season_id: uuid.UUID, current_user: User = Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_COMMUNITY_ADMIN)), db: Session = Depends(get_db)):
+    """Return the shared, authoritative league availability matrix.
+
+    Community administrators need league-wide visibility here, but none of the
+    host-plan mutation routes below accept that role. Availability mutations
+    continue to be protected by ``enforce_organization_scope``.
+    """
     return _host_availability_matrix_response(db, season_id)
 
 

@@ -1,3 +1,3 @@
-import HostingAvailabilityManager from '@/components/HostingAvailabilityManager';
+import CommunityHostAvailabilityMatrix from '@/components/CommunityHostAvailabilityMatrix';
 
-export default function Page(){ return <HostingAvailabilityManager />; }
+export default function Page(){ return <CommunityHostAvailabilityMatrix />; }
