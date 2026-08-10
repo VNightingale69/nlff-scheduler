@@ -9,3 +9,34 @@
 body {
   @apply bg-slate-50 text-slate-900;
 }
+
+@media print {
+  @page {
+    size: landscape;
+    margin: 0.35in;
+  }
+
+  .public-schedule {
+    width: 100% !important;
+    max-width: none !important;
+    padding: 0 !important;
+  }
+
+  .hosting-grid-scroll {
+    overflow: visible !important;
+  }
+
+  .hosting-grid {
+    min-width: 100% !important;
+  }
+
+  .hosting-grid thead {
+    display: table-header-group;
+  }
+
+  .hosting-grid tr,
+  .hosting-game {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+}

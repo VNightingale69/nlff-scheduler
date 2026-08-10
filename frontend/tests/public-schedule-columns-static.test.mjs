@@ -5,7 +5,7 @@ const publicSchedule = readFileSync(new URL('../src/app/schedule/page.tsx', impo
 const scoreManagement = readFileSync(new URL('../src/app/(dashboard)/admin/scores/page.tsx', import.meta.url), 'utf8');
 const manualSchedule = readFileSync(new URL('../src/app/(dashboard)/admin/manual-schedule-builder/page.tsx', import.meta.url), 'utf8');
 
-const table = publicSchedule.match(/<table[\s\S]*?<\/table>/)?.[0];
+const table = publicSchedule.match(/<table data-view='list'[\s\S]*?<\/table>/)?.[0];
 assert.ok(table, 'the public schedule table must render');
 
 for (const heading of ['Date', 'Time', 'Host Location', 'Field', 'Division', 'Home Team', 'Away Team', 'Game Type']) {
@@ -22,10 +22,10 @@ for (const removedCell of ['game_status_label', 'public_notes', 'coach_contacts_
 
 // Print/PDF invokes the browser print dialog over this same, simplified table.
 assert.match(publicSchedule, /onClick=\{\(\) => window\.print\(\)\}>Print \/ PDF/);
-assert.equal(publicSchedule.match(/<table\b/g)?.length, 1, 'print and screen must share one public table');
+assert.match(publicSchedule, /view === 'list'/, 'the existing list is rendered only in List View');
 
 // The public page uses the available desktop width while preserving tablet overflow.
-assert.match(publicSchedule, /w-\[96%\] max-w-\[1600px\]/);
+assert.match(publicSchedule, /w-\[96%\] max-w-\[1800px\]/);
 assert.match(table, /w-full min-w-\[1180px\]/);
 assert.doesNotMatch(table, /text-xs/);
 assert.match(table, /text-\[15px\]/);
