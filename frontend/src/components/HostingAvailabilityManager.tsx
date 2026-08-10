@@ -7,7 +7,7 @@ import { formatDisplayDate, formatDisplayTime } from '@/lib/displayFormat';
 import Toast from './Toast';
 import { useSearchParams } from 'next/navigation';
 import { APPROVED_TURF_CONFIGURATIONS, isApprovedTurfConfigurationCode, turfConfigurationLabel } from '@/lib/turfConfigurations';
-import { canManageCommunityHosting } from '@/lib/auth';
+import { canManageCommunityHosting, canManageSchedule } from '@/lib/auth';
 
 const STADIUM_TYPE = 'STADIUM_SITE';
 const HOURS = [9, 10, 11, 12, 13, 14, 15, 16];
@@ -114,6 +114,7 @@ export default function HostingAvailabilityManager() {
 
   const { currentUser: user, accessToken: token } = useAuthSession();
   const isCommunityAdmin = user?.role_name === 'COMMUNITY_ADMIN';
+  const showSchedulerDiagnostics = canManageSchedule(user);
   const searchParams = useSearchParams();
   const preselectedHostId = searchParams.get('host_location_id') || '';
   const preselectedOrgId = searchParams.get('organization_id') || '';
@@ -138,9 +139,13 @@ export default function HostingAvailabilityManager() {
         setAreas(a.items || []);
         setConfigs(c.items || []);
         setHostConfigs(hc.items || []);
-        if (user?.role_name === 'COMMUNITY_ADMIN') setOrgId(user.organization_id || '');
-        else if (preselectedOrgId) setOrgId(preselectedOrgId);
-        if (preselectedHostId) setHostId(preselectedHostId);
+        if (user?.role_name === 'COMMUNITY_ADMIN') {
+          setOrgId('');
+          setHostId('');
+        } else {
+          if (preselectedOrgId) setOrgId(preselectedOrgId);
+          if (preselectedHostId) setHostId(preselectedHostId);
+        }
       } catch (e: any) {
         setMessage(e.message || 'Failed to load');
         setType('err');
@@ -148,13 +153,16 @@ export default function HostingAvailabilityManager() {
         setLoading(false);
       }
     })();
-  }, [preselectedHostId, preselectedOrgId]);
+  }, [preselectedHostId, preselectedOrgId, token, user?.organization_id, user?.role_name]);
 
   const effectiveOrgId = orgId;
   const selectedOrg = useMemo(() => orgs.find((org: any) => org.id === effectiveOrgId), [effectiveOrgId, orgs]);
   const canEditCommunity = canManageCommunityHosting(user, effectiveOrgId);
 
-  const hostOptions = useMemo(() => hosts.filter((h: any) => !effectiveOrgId || h.organization_id === effectiveOrgId), [hosts, effectiveOrgId]);
+  const hostOptions = useMemo(
+    () => isCommunityAdmin && !effectiveOrgId ? [] : hosts.filter((h: any) => !effectiveOrgId || h.organization_id === effectiveOrgId),
+    [effectiveOrgId, hosts, isCommunityAdmin],
+  );
   const selectedHost = useMemo(() => hostOptions.find((h: any) => h.id === hostId), [hostId, hostOptions]);
   const isTurfStadiumHost = selectedHost?.surface_type === 'TURF_STADIUM' || selectedHost?.surface_type === STADIUM_TYPE || selectedHost?.host_role === 'TURF_STADIUM';
   const isStadiumArea = (area?: any) => Boolean(
@@ -179,6 +187,18 @@ export default function HostingAvailabilityManager() {
   useEffect(() => {
     if (!hostOptions.some((h: any) => h.id === hostId)) setHostId('');
   }, [hostOptions, hostId]);
+
+  const selectOrganization = (nextOrgId: string) => {
+    setOrgId(nextOrgId);
+    setHostId('');
+    setSelectedWeekIds([]);
+    setSelectedSlots({});
+    setActiveConfigByAreaDate({});
+    setAutoSelectLayoutByAreaDate({});
+    setLockLayoutByAreaDate({});
+    setSavedAvailability([]);
+    setGeneratedSlots([]);
+  };
 
 
   useEffect(() => {
@@ -590,12 +610,13 @@ export default function HostingAvailabilityManager() {
 
       <section className='rounded border p-4'>
         <h2 className='mb-2 font-semibold'>1. Select Organization</h2>
-        <select value={effectiveOrgId} onChange={(e) => setOrgId(e.target.value)} className='w-full rounded border p-2 md:w-1/2'>
+        <select value={effectiveOrgId} onChange={(e) => selectOrganization(e.target.value)} className='w-full rounded border p-2 md:w-1/2'>
           <option value=''>Select organization</option>
           {orgs.map((o: any) => (
             <option key={o.id} value={o.id}>{o.name}{isCommunityAdmin ? (o.id === user?.organization_id ? ' — My Community' : ' — View Only') : ''}</option>
           ))}
         </select>
+        {isCommunityAdmin && !effectiveOrgId ? <p className='mt-2 text-sm text-slate-500'>Select an organization to view hosting availability.</p> : null}
       </section>
 
       {effectiveOrgId && !canEditCommunity ? (
@@ -607,7 +628,7 @@ export default function HostingAvailabilityManager() {
 
       <section className='rounded border p-4'>
         <h2 className='mb-2 font-semibold'>2. Select Hosting Site</h2>
-        <select value={hostId} onChange={(e) => setHostId(e.target.value)} className='w-full rounded border p-2 md:w-1/2'>
+        <select value={hostId} disabled={isCommunityAdmin && !effectiveOrgId} onChange={(e) => setHostId(e.target.value)} className='w-full rounded border p-2 disabled:cursor-not-allowed disabled:bg-slate-100 md:w-1/2'>
           <option value=''>Select hosting site</option>
           {hostOptions.map((h: any) => (
             <option key={h.id} value={h.id}>{h.name}</option>
@@ -626,30 +647,30 @@ export default function HostingAvailabilityManager() {
             <div className='rounded border bg-rose-50 p-3 text-sm'>Weeks missing hosts: <strong>{dashboardMetrics.weeksMissingHosts.join(', ') || 'None'}</strong></div>
             <div className='rounded border bg-rose-50 p-3 text-sm'>Weeks missing large fields: <strong>{dashboardMetrics.weeksMissingLarge.join(', ') || 'None'}</strong></div>
           </div>
-          <div className='rounded border p-3 text-sm'>
+          {showSchedulerDiagnostics ? <div className='rounded border p-3 text-sm'>
             <div className='font-medium'>Scheduling readiness checks</div>
             <ul className='mt-2 list-disc pl-5'>
               <li>Small fields (Coed K-1, Coed 2-3, Girls K-2): {readinessChecks.smallReady ? '✅ Ready' : '⚠️ Not enough capacity'}</li>
               <li>Large fields (Coed 6-7, Coed 8, Girls 6-8): {readinessChecks.largeReady ? '✅ Ready' : '⚠️ Not enough capacity'}</li>
               <li>Total projected slots support: {readinessChecks.slotReady ? `✅ Ready (${readinessChecks.totalSlots} slots)` : `⚠️ Not enough slots (${readinessChecks.totalSlots})`}</li>
             </ul>
-          </div>
+          </div> : null}
           <div className='overflow-auto'>
             <h3 className='mb-2 font-medium'>Hosting summary (week/date/community/site)</h3>
-            <div className='mb-2 rounded border bg-slate-50 p-2 text-xs text-slate-700'>
+            {showSchedulerDiagnostics ? <div className='mb-2 rounded border bg-slate-50 p-2 text-xs text-slate-700'>
               <div className='font-medium'>Readiness definitions</div>
               <ul className='list-disc pl-5'>
                 {Object.entries(READINESS_DEFINITIONS).map(([state, definition]) => (
                   <li key={state}><strong>{state}</strong>: {definition}</li>
                 ))}
               </ul>
-            </div>
+            </div> : null}
               <table className='min-w-full text-sm'>
-              <thead><tr className='border-b text-left'><th className='p-2'>Week</th><th className='p-2'>Date</th><th className='p-2'>Community</th><th className='p-2'>Host location</th><th className='p-2'>Small fields</th><th className='p-2'>Large fields</th><th className='p-2'>Supported Divisions</th><th className='p-2'>Small Field Slots</th><th className='p-2'>Large Field Slots</th><th className='p-2'>Projected Games</th><th className='p-2'>Small Field Utilization %</th><th className='p-2'>Large Field Utilization %</th><th className='p-2'>Overall Utilization %</th><th className='p-2'>First slot</th><th className='p-2'>Last slot</th><th className='p-2'>Readiness</th><th className='p-2'>Validation indicators</th></tr></thead>
+              <thead><tr className='border-b text-left'><th className='p-2'>Week</th><th className='p-2'>Date</th><th className='p-2'>Community</th><th className='p-2'>Host location</th><th className='p-2'>Small fields</th><th className='p-2'>Large fields</th><th className='p-2'>Supported Divisions</th><th className='p-2'>Small Field Slots</th><th className='p-2'>Large Field Slots</th><th className='p-2'>Projected Games</th><th className='p-2'>Small Field Utilization %</th><th className='p-2'>Large Field Utilization %</th><th className='p-2'>Overall Utilization %</th><th className='p-2'>First slot</th><th className='p-2'>Last slot</th>{showSchedulerDiagnostics ? <><th className='p-2'>Readiness</th><th className='p-2'>Validation indicators</th></> : null}</tr></thead>
               <tbody>
                 {summaryRows.map((row: any, i: number) => (
                   <tr key={`${row.available_date}-${row.host_location_name}-${i}`} className='border-b'>
-                    <td className='p-2'>Week {row.week}</td><td className='p-2'>{formatDateLabel(row.available_date)}</td><td className='p-2'>{resolveCommunityName(row.organization_id, row.organization_name)}</td><td className='p-2'>{row.host_location_name}</td><td className='p-2'>{row.smallFieldCount ?? row.small_field_count ?? row.small_field_capacity ?? 0}</td><td className='p-2'>{row.largeFieldCount ?? row.large_field_count ?? row.large_field_capacity ?? 0}</td><td className='p-2'>{supportedDivisionsLabel(row.smallFieldCount ?? row.small_field_count ?? row.small_field_capacity ?? 0, row.largeFieldCount ?? row.large_field_count ?? row.large_field_capacity ?? 0)}</td><td className='p-2'>{row.smallFieldSlots}</td><td className='p-2'>{row.largeFieldSlots}</td><td className='p-2'>{row.projectedGames.toFixed(1)}</td><td className='p-2'>{row.smallFieldUtilizationPct.toFixed(1)}%</td><td className='p-2'>{row.largeFieldUtilizationPct.toFixed(1)}%</td><td className='p-2'>{row.overallUtilizationPct.toFixed(1)}%</td><td className='p-2'>{row.firstStart === 99 ? '—' : displayHour(row.firstStart)}</td><td className='p-2'>{row.lastEnd === 0 ? '—' : displayHour(row.lastEnd)}</td><td className='p-2'><span title={READINESS_DEFINITIONS[row.readiness]} className={`cursor-help rounded px-2 py-1 text-xs font-medium ${row.readiness === 'READY' ? 'bg-emerald-100 text-emerald-800' : row.readiness === 'PARTIAL' ? 'bg-amber-100 text-amber-800' : 'bg-rose-100 text-rose-800'}`}>{row.readiness}</span></td><td className='p-2'>{row.indicators.length ? <ul className='space-y-1'>{row.indicators.map((indicator: string) => <li key={`${row.available_date}-${row.host_location_name}-${indicator}`} title={INDICATOR_DEFINITIONS[indicator]} className='cursor-help underline decoration-dotted'>• {indicator}</li>)}</ul> : 'None'}{row.capacity_diagnostics ? <details className='mt-2'><summary className='cursor-pointer'>Capacity diagnostics</summary><div>Location: {row.capacity_diagnostics.location || '—'}</div><div>Configured fields: {row.capacity_diagnostics.configured_fields?.join(', ') || 'none'}</div><div>Field sizes: {row.capacity_diagnostics.field_sizes?.join(', ') || 'none'}</div><div>Applicable layout: {row.capacity_diagnostics.applicable_layout || 'none'}</div><div>Generated slots: {row.capacity_diagnostics.generated_slots || 0}</div><div>Exclusion reason: {row.capacity_diagnostics.exclusion_reason || 'none'}</div></details> : null}</td>
+                    <td className='p-2'>Week {row.week}</td><td className='p-2'>{formatDateLabel(row.available_date)}</td><td className='p-2'>{resolveCommunityName(row.organization_id, row.organization_name)}</td><td className='p-2'>{row.host_location_name}</td><td className='p-2'>{row.smallFieldCount ?? row.small_field_count ?? row.small_field_capacity ?? 0}</td><td className='p-2'>{row.largeFieldCount ?? row.large_field_count ?? row.large_field_capacity ?? 0}</td><td className='p-2'>{supportedDivisionsLabel(row.smallFieldCount ?? row.small_field_count ?? row.small_field_capacity ?? 0, row.largeFieldCount ?? row.large_field_count ?? row.large_field_capacity ?? 0)}</td><td className='p-2'>{row.smallFieldSlots}</td><td className='p-2'>{row.largeFieldSlots}</td><td className='p-2'>{row.projectedGames.toFixed(1)}</td><td className='p-2'>{row.smallFieldUtilizationPct.toFixed(1)}%</td><td className='p-2'>{row.largeFieldUtilizationPct.toFixed(1)}%</td><td className='p-2'>{row.overallUtilizationPct.toFixed(1)}%</td><td className='p-2'>{row.firstStart === 99 ? '—' : displayHour(row.firstStart)}</td><td className='p-2'>{row.lastEnd === 0 ? '—' : displayHour(row.lastEnd)}</td>{showSchedulerDiagnostics ? <><td className='p-2'><span title={READINESS_DEFINITIONS[row.readiness]} className={`cursor-help rounded px-2 py-1 text-xs font-medium ${row.readiness === 'READY' ? 'bg-emerald-100 text-emerald-800' : row.readiness === 'PARTIAL' ? 'bg-amber-100 text-amber-800' : 'bg-rose-100 text-rose-800'}`}>{row.readiness}</span></td><td className='p-2'>{row.indicators.length ? <ul className='space-y-1'>{row.indicators.map((indicator: string) => <li key={`${row.available_date}-${row.host_location_name}-${indicator}`} title={INDICATOR_DEFINITIONS[indicator]} className='cursor-help underline decoration-dotted'>• {indicator}</li>)}</ul> : 'None'}{row.capacity_diagnostics ? <details className='mt-2'><summary className='cursor-pointer'>Capacity diagnostics</summary><div>Location: {row.capacity_diagnostics.location || '—'}</div><div>Configured fields: {row.capacity_diagnostics.configured_fields?.join(', ') || 'none'}</div><div>Field sizes: {row.capacity_diagnostics.field_sizes?.join(', ') || 'none'}</div><div>Applicable layout: {row.capacity_diagnostics.applicable_layout || 'none'}</div><div>Generated slots: {row.capacity_diagnostics.generated_slots || 0}</div><div>Exclusion reason: {row.capacity_diagnostics.exclusion_reason || 'none'}</div></details> : null}</td></> : null}
                   </tr>
                 ))}
               </tbody>
