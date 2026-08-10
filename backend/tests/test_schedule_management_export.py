@@ -303,6 +303,105 @@ class ScheduleManagementExportSavedManualRowsTest(unittest.TestCase):
     def _headers(self):
         return {'Authorization': f'Bearer {create_access_token(str(self.admin.id))}'}
 
+    def _csv_rows(self, query=''):
+        response = self.client.get(f'/api/schedule-management/export.csv{query}', headers=self._headers())
+        return response, list(csv.DictReader(io.StringIO(response.text)))
+
+    def test_fully_published_schedule_download_has_csv_headers(self):
+        response, rows = self._csv_rows()
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(response.headers['content-type'].startswith('text/csv'))
+        self.assertEqual(response.headers['content-disposition'], 'attachment; filename="schedule-export.csv"')
+        self.assertEqual(len(rows), 12)
+
+    def test_partial_publication_week_filter_exports_published_week(self):
+        self.season.schedule_status = 'partially_published'
+        self.week.publication_status = 'PUBLISHED'
+        self.db.commit()
+
+        response, rows = self._csv_rows(f'?week_id={self.week.id}')
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(len(rows), 12)
+        self.assertEqual({row['Date'] for row in rows}, {'8/23/2026'})
+
+    def test_partial_publication_admin_export_includes_draft_and_published_weeks(self):
+        self.season.schedule_status = 'partially_published'
+        self.week.publication_status = 'PUBLISHED'
+        draft_week = Week(
+            id=uuid.uuid4(), season_id=self.season.id, week_number=4, label='Week 4',
+            start_date=date(2026, 8, 30), end_date=date(2026, 9, 5),
+            primary_game_date=date(2026, 8, 30), publication_status='UNPUBLISHED',
+        )
+        template = next(iter(self.games.values()))
+        draft_game = Game(
+            id=uuid.uuid4(), season_id=self.season.id, week_id=draft_week.id,
+            home_team_id=template.home_team_id, away_team_id=template.away_team_id,
+            host_location_id=template.host_location_id, field_instance_id=template.field_instance_id,
+            game_status_id=self.status.id, game_date=date(2026, 8, 30), kickoff_time=time(9, 0),
+        )
+        self.db.add_all([draft_week, draft_game])
+        self.db.commit()
+
+        all_response, all_rows = self._csv_rows()
+        draft_response, draft_rows = self._csv_rows(f'?week_id={draft_week.id}')
+
+        self.assertEqual(all_response.status_code, 200, all_response.text)
+        self.assertEqual(len(all_rows), 13)
+        self.assertEqual(draft_response.status_code, 200, draft_response.text)
+        self.assertEqual(len(draft_rows), 1)
+        self.assertEqual(draft_rows[0]['Date'], '8/30/2026')
+
+    def test_no_filters_exports_22_saved_games(self):
+        templates = list(self.games.values())
+        for index in range(10):
+            template = templates[index]
+            self.db.add(Game(
+                id=uuid.uuid4(), season_id=self.season.id, week_id=self.week.id,
+                home_team_id=template.home_team_id, away_team_id=template.away_team_id,
+                host_location_id=template.host_location_id, field_instance_id=template.field_instance_id,
+                game_status_id=self.status.id, game_date=template.game_date,
+                kickoff_time=time(15 + (index // 2), (index % 2) * 30), is_manual_edit=True,
+            ))
+        self.db.commit()
+
+        response, rows = self._csv_rows()
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(len(rows), 22)
+
+    def test_zero_matches_returns_safe_controlled_error(self):
+        response = self.client.get('/api/schedule-management/export.csv?date=2026-10-31', headers=self._headers())
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json(), {'detail': 'No scheduled games matched the selected filters.'})
+
+    def test_csv_writer_escapes_punctuation_and_special_characters(self):
+        game = next(iter(self.games.values()))
+        home = self.db.get(Team, game.home_team_id)
+        away = self.db.get(Team, game.away_team_id)
+        home.name = 'St. John\'s, "Blue" – North'
+        away.name = "O'Brien-South"
+        self.db.commit()
+
+        response, rows = self._csv_rows()
+
+        self.assertEqual(response.status_code, 200, response.text)
+        exported = next(row for row in rows if row['Home Team'] == home.name)
+        self.assertEqual(exported['Home Team'], 'St. John\'s, "Blue" – North')
+        self.assertEqual(exported['Away Team'], "O'Brien-South")
+        self.assertIn('"St. John\'s, ""Blue"" – North"', response.text)
+
+    def test_frontend_downloads_blob_and_surfaces_safe_server_detail(self):
+        root = __import__('pathlib').Path(__file__).parents[2]
+        source = (root / 'frontend' / 'src' / 'app' / '(dashboard)' / 'admin' / 'schedule-management' / 'page.tsx').read_text()
+
+        self.assertIn('const blob = await response.blob()', source)
+        self.assertIn('window.URL.createObjectURL(blob)', source)
+        self.assertIn("typeof payload?.detail === 'string'", source)
+        self.assertIn('Unable to export CSV${explanation ?', source)
+
     def test_export_matches_saved_manual_schedule_builder_rows_for_2026_08_23_johnsburg(self):
         response = self.client.get('/api/schedule-management/export.csv?date=2026-08-23', headers=self._headers())
         self.assertEqual(response.status_code, 200, response.text)
