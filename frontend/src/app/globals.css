@@ -31,31 +31,76 @@ body {
 
 @media print {
   @page {
-    size: landscape;
-    margin: 0.35in;
+    size: letter landscape;
+    margin: 0.3in;
   }
 
   .public-schedule {
     width: 100% !important;
     max-width: none !important;
+    overflow: visible !important;
     padding: 0 !important;
   }
 
+  .public-navigation,
+  .schedule-filters,
+  .schedule-actions,
+  .schedule-view-toggle {
+    display: none !important;
+  }
+
+  .public-schedule-header {
+    margin-bottom: 0.12in;
+  }
+
+  .hosting-view,
+  .hosting-date-section,
   .hosting-grid-scroll {
     overflow: visible !important;
+    overflow-x: visible !important;
+    overflow-y: visible !important;
+    width: auto !important;
+    max-width: none !important;
+    height: auto !important;
+    max-height: none !important;
+    contain: none !important;
+    clip: auto !important;
   }
 
   .hosting-grid {
-    min-width: 100% !important;
+    width: 100% !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    table-layout: fixed !important;
+    font-size: 8pt !important;
+    line-height: 1.15 !important;
   }
 
   .hosting-grid thead {
     display: table-header-group;
   }
 
-  .hosting-grid tr,
+  .hosting-grid th,
+  .hosting-grid td {
+    position: static !important;
+    width: auto !important;
+    min-width: 0 !important;
+    padding: 3px 4px !important;
+  }
+
+  .hosting-grid th:first-child {
+    width: 0.65in !important;
+  }
+
   .hosting-game {
+    min-height: 0 !important;
+    margin: 1px 0 !important;
     break-inside: avoid;
     page-break-inside: avoid;
+  }
+
+  .hosting-game > div {
+    margin-top: 1px !important;
+    margin-bottom: 1px !important;
   }
 }
