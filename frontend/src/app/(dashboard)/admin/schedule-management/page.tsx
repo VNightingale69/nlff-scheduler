@@ -123,7 +123,15 @@ export default function ScheduleManagementPage() {
       });
 
       if (!response.ok) {
-        throw new ApiError('Unable to export CSV.', response.status, await response.text());
+        const raw = await response.text();
+        let explanation = '';
+        try {
+          const payload = JSON.parse(raw);
+          explanation = typeof payload?.detail === 'string' ? payload.detail : (typeof payload?.message === 'string' ? payload.message : '');
+        } catch {
+          // Non-JSON proxy responses are intentionally not shown to the user.
+        }
+        throw new ApiError(`Unable to export CSV${explanation ? `: ${explanation}` : '.'}`, response.status, raw);
       }
 
       const blob = await response.blob();
@@ -136,7 +144,7 @@ export default function ScheduleManagementPage() {
       link.remove();
       window.URL.revokeObjectURL(url);
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : 'Unable to export schedule CSV.');
+      setError(e instanceof ApiError ? e.message : 'Unable to export CSV: The download could not be completed.');
     }
   };
 

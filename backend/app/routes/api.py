@@ -30065,32 +30065,60 @@ def _schedule_export_row_values(g, slot, fi, host, home, away, div, status, db: 
 
 
 @router.get('/schedule-management/export.csv', dependencies=[Depends(require_schedule_admin)])
-def export_schedule_management_csv(date: date | None = None, division_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, host_location_id: uuid.UUID | None = None, field_type: str | None = None, field_id: uuid.UUID | None = None, team_id: uuid.UUID | None = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    active_season = db.query(Season).filter(Season.is_active.is_(True)).order_by(Season.start_date.desc()).first()
-    validation_season_id = active_season.id if active_season else None
-    export_filters = {'date': date, 'division_id': division_id, 'organization_id': organization_id, 'host_location_id': host_location_id, 'field_type': field_type, 'field_id': field_id, 'team_id': team_id}
-    rows = get_saved_scheduled_game_rows_for_export(db, validation_season_id, export_filters) if validation_season_id else get_saved_scheduled_game_rows_for_export(db, None, export_filters)
-    out = io.StringIO()
-    w = csv.writer(out)
-    include_admin_columns = can_manage_schedule(current_user)
-    headers = ['Date', 'Time', 'Normalized Division Key', 'Home Team', 'Away Team', 'Host Location', 'Field', 'Field Type', 'Status']
-    if include_admin_columns:
-        headers.extend(['Home Coach Name', 'Home Coach Email', 'Away Coach Name', 'Away Coach Email', 'Edited', 'Last Updated', 'Admin Notes'])
-    w.writerow(headers)
-    export_division_names: set[str] = set()
-    exported_dates = {g.game_date for g, *_ in rows if g.game_date}
-    for g, slot, fi, host, home, away, div, org, status in rows:
-        export_division_names.add(f'{div.division_group} {div.name}'.strip())
-        w.writerow(_schedule_export_row_values(g, slot, fi, host, home, away, div, status, db, include_admin_columns=include_admin_columns))
+def export_schedule_management_csv(season_id: uuid.UUID | None = None, date: date | None = None, division_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, host_location_id: uuid.UUID | None = None, field_type: str | None = None, field_id: uuid.UUID | None = None, team_id: uuid.UUID | None = None, week_id: uuid.UUID | None = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    season = _get_schedule_scope_season(db, season_id)
+    scoped_season_id = season.id if season else season_id
+    export_filters = {
+        'date': date,
+        'division_id': division_id,
+        'organization_id': organization_id,
+        'host_location_id': host_location_id,
+        'field_type': field_type,
+        'field_id': field_id,
+        'team_id': team_id,
+        'week_id': week_id,
+    }
+    log_filters = _serialize_schedule_filters(export_filters)
+    try:
+        # Publication state is deliberately not part of this query. Authorized
+        # administrators export the persisted games in their selected scope,
+        # including a published week in a partially published season or drafts.
+        rows = get_saved_scheduled_game_rows_for_export(db, scoped_season_id, export_filters)
+        matched_count = len(rows)
+        if not rows:
+            logger.info(
+                'schedule_management_csv_export season_id=%s week_filter=%s filters=%s matched_game_count=0 http_result=404',
+                scoped_season_id, week_id, log_filters,
+            )
+            raise HTTPException(status_code=404, detail='No scheduled games matched the selected filters.')
 
-    # Normal schedule export intentionally contains only authoritative saved game rows.
-    # Validation issues are handled by publish-time checks and are not exported as report rows.
-    export_validation_warnings: list[dict[str, object]] = []
+        out = io.StringIO()
+        writer = csv.writer(out)
+        include_admin_columns = can_manage_schedule(current_user)
+        headers = ['Date', 'Time', 'Normalized Division Key', 'Home Team', 'Away Team', 'Host Location', 'Field', 'Field Type', 'Status']
+        if include_admin_columns:
+            headers.extend(['Home Coach Name', 'Home Coach Email', 'Away Coach Name', 'Away Coach Email', 'Edited', 'Last Updated', 'Admin Notes'])
+        writer.writerow(headers)
+        for g, slot, fi, host, home, away, div, _org, status in rows:
+            writer.writerow(_schedule_export_row_values(g, slot, fi, host, home, away, div, status, db, include_admin_columns=include_admin_columns))
 
-    if export_validation_warnings:
-        logger.warning('export_schedule_management_csv incomplete_division_week_schedules=%s', export_validation_warnings)
-    logger.info('export_schedule_management_csv division_entries=%s', sorted(export_division_names))
-    return StreamingResponse(iter([out.getvalue()]), media_type='text/csv', headers={'Content-Disposition':'attachment; filename="schedule-export.csv"'})
+        logger.info(
+            'schedule_management_csv_export season_id=%s week_filter=%s filters=%s matched_game_count=%s http_result=200',
+            scoped_season_id, week_id, log_filters, matched_count,
+        )
+        return StreamingResponse(
+            iter([out.getvalue()]),
+            media_type='text/csv',
+            headers={'Content-Disposition': 'attachment; filename="schedule-export.csv"'},
+        )
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception(
+            'schedule_management_csv_export season_id=%s week_filter=%s filters=%s matched_game_count=%s http_result=500',
+            scoped_season_id, week_id, log_filters, locals().get('matched_count', 0),
+        )
+        raise HTTPException(status_code=500, detail='Server error while generating export.')
 
 
 def _raise_if_invalid_scheduled_game_payload(db: Session, payload: GameCreate, *, game_id: uuid.UUID | None = None) -> None:
