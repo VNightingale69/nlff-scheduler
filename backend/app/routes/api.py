@@ -28788,7 +28788,11 @@ def _public_game_read_from_schedule_row(row, db: Session | None = None, current_
         host_location_name=host.name if host else '',
         field_id=g.field_id,
         field_name=(canonical_field.name if canonical_field else ('Field unavailable' if g.field_id else 'Field Not Assigned')),
-        field_type=getattr(canonical_field, 'layout_type', None),
+        # Generated/turf schedules assign the physical component through the
+        # published game slot rather than a canonical ``Field`` row.  Expose
+        # that authoritative size so public reports can label the assignment
+        # accurately without inferring it from the division.
+        field_type=(getattr(slot, 'field_type', None) or getattr(fi, 'field_type', None) or getattr(canonical_field, 'layout_type', None)),
         turf_wave_id=slot.turf_wave_id if slot else None,
         turf_wave_start_time=wave.start_time if wave else None,
         turf_configuration_code=turf_configuration_code if turf_configuration_code in TURF_APPROVED_LAYOUT_CODES else None,

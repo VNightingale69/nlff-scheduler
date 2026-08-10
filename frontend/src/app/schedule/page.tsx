@@ -16,6 +16,7 @@ type Game = {
   kickoff_time: string;
   host_location_name: string;
   field_name: string;
+  field_type?: string | null;
   turf_configuration_code?: string | null;
   turf_field_slot?: string | null;
   division_name: string;
@@ -33,6 +34,94 @@ type Game = {
   week_label?: string | null;
   date_type?: string | null;
 };
+
+type ScheduleView = 'list' | 'hosting';
+type HostingField = { key: string; name: string; type: string };
+type HostingLocation = { name: string; fields: HostingField[] };
+
+const normalizeFieldType = (value?: string | null) => {
+  const normalized = (value || '').toUpperCase();
+  if (normalized.includes('SMALL') || normalized.includes('THIRTY')) return 'SMALL';
+  if (normalized.includes('MEDIUM') || normalized.includes('FIFTY')) return 'MEDIUM';
+  if (normalized.includes('LARGE') || normalized.includes('FULL')) return 'LARGE';
+  return 'UNASSIGNED';
+};
+
+const fieldTypeLabel = (type: string) => type === 'UNASSIGNED' ? 'Unassigned' : `${type[0]}${type.slice(1).toLowerCase()} Field`;
+const fieldTone = (type: string) => ({
+  SMALL: 'bg-emerald-50',
+  MEDIUM: 'bg-sky-50',
+  LARGE: 'bg-rose-50',
+  UNASSIGNED: 'bg-slate-50',
+}[type] || 'bg-slate-50');
+
+const gameField = (game: Game): HostingField => {
+  const assignedName = game.turf_field_slot || (game.field_name && !/not assigned|unavailable/i.test(game.field_name) ? game.field_name : 'Unassigned');
+  const type = assignedName === 'Unassigned' ? 'UNASSIGNED' : normalizeFieldType(game.field_type || assignedName);
+  return { key: assignedName, name: assignedName, type };
+};
+
+function HostingSchedule({ games }: { games: Game[] }) {
+  const dates = useMemo(() => Array.from(new Set(games.map((game) => game.game_date))).sort(), [games]);
+
+  return <div className='hosting-view space-y-10'>
+    <div className='flex flex-wrap items-center gap-3 text-sm' aria-label='Field size legend'>
+      <span className='font-semibold text-slate-700'>Field legend:</span>
+      {['SMALL', 'MEDIUM', 'LARGE', 'UNASSIGNED'].map((type) => <span key={type} className={`rounded border px-3 py-1.5 ${fieldTone(type)}`}>{type === 'UNASSIGNED' ? 'No Game / Unassigned' : fieldTypeLabel(type)}</span>)}
+    </div>
+    {dates.map((date) => {
+      const dateGames = games.filter((game) => game.game_date === date);
+      const locations: HostingLocation[] = [];
+      dateGames.forEach((game) => {
+        const locationName = game.host_location_name || 'Host Location Unassigned';
+        let location = locations.find((item) => item.name === locationName);
+        if (!location) { location = { name: locationName, fields: [] }; locations.push(location); }
+        const field = gameField(game);
+        if (!location.fields.some((item) => item.key === field.key)) location.fields.push(field);
+      });
+      const times = Array.from(new Set(dateGames.map((game) => game.kickoff_time))).sort();
+      const weekLabels = Array.from(new Set(dateGames.map((game) => game.week_label).filter(Boolean)));
+      const title = weekLabels.length === 1 ? `Hosting View — ${weekLabels[0]}` : 'Hosting View';
+      const totalFields = locations.reduce((sum, location) => sum + location.fields.length, 0);
+
+      return <section key={date} className='space-y-3'>
+        <div><h2 className='text-xl font-bold'>{title}</h2><p className='text-base font-medium text-slate-600'>{formatDisplayDate(date)}</p></div>
+        <div className='hosting-grid-scroll overflow-x-auto rounded border bg-white'>
+          <table className='hosting-grid w-full border-separate border-spacing-0 text-sm leading-snug' style={{ minWidth: `${Math.max(900, 130 + totalFields * 205)}px` }}>
+            <thead>
+              <tr>
+                <th rowSpan={2} scope='col' className='sticky left-0 top-0 z-30 w-[130px] min-w-[130px] border-b border-r bg-slate-200 px-3 py-3 text-left'>Time</th>
+                {locations.map((location) => <th key={location.name} scope='colgroup' colSpan={location.fields.length} className='sticky top-0 z-20 border-b border-r bg-slate-200 px-3 py-2 text-center text-base font-bold'>{location.name}</th>)}
+              </tr>
+              <tr>
+                {locations.flatMap((location) => location.fields.map((field) => <th key={`${location.name}-${field.key}`} scope='col' className={`sticky top-[41px] z-20 min-w-[205px] border-b border-r px-3 py-2 text-center font-semibold ${fieldTone(field.type)}`}>
+                  <span className='block'>{field.name}</span><span className='mt-0.5 block text-xs font-medium uppercase tracking-wide text-slate-600'>{fieldTypeLabel(field.type)}</span>
+                </th>))}
+              </tr>
+            </thead>
+            <tbody>
+              {times.map((time) => <tr key={time}>
+                <th scope='row' className='sticky left-0 z-10 whitespace-nowrap border-b border-r bg-slate-100 px-3 py-4 text-left align-top font-bold'>{formatDisplayTime(time)}</th>
+                {locations.flatMap((location) => location.fields.map((field) => {
+                  const game = dateGames.find((item) => item.host_location_name === location.name && item.kickoff_time === time && gameField(item).key === field.key);
+                  return <td key={`${location.name}-${field.key}`} className={`break-words border-b border-r p-3 align-top ${game ? fieldTone(field.type) : 'bg-white text-slate-400'}`}>
+                    {game ? <div className='hosting-game min-h-[105px]'>
+                      <div className='mb-2 font-bold text-slate-700'>{game.division_name}</div>
+                      <div className='flex items-center gap-2 font-medium'><CommunityLogo src={game.home_team_logo_url} name={game.home_team_community_name || game.home_team_name} altText={game.home_team_logo_alt_text} size={24} /><span>{game.home_team_name}</span></div>
+                      <div className='my-1 pl-8 text-xs font-semibold uppercase text-slate-500'>vs</div>
+                      <div className='flex items-center gap-2 font-medium'><CommunityLogo src={game.away_team_logo_url} name={game.away_team_community_name || game.away_team_name} altText={game.away_team_logo_alt_text} size={24} /><span>{game.away_team_name}</span></div>
+                    </div> : <span aria-label='No game'>—</span>}
+                  </td>;
+                }))}
+              </tr>)}
+            </tbody>
+          </table>
+        </div>
+        <p className='text-sm text-slate-600'><strong>{dateGames.length}</strong> games across <strong>{totalFields}</strong> fields at <strong>{locations.length}</strong> host {locations.length === 1 ? 'location' : 'locations'}.</p>
+      </section>;
+    })}
+  </div>;
+}
 
 type PublicScheduleFilters = {
   host_location_id?: string;
@@ -87,6 +176,7 @@ const buildScheduleQuery = (activeFilters: PublicScheduleFilters) => {
 
 function PublicScheduleContent() {
   const searchParams = useSearchParams();
+  const [view, setView] = useState<ScheduleView>(searchParams.get('view') === 'hosting' ? 'hosting' : 'list');
   const [games, setGames] = useState<Game[]>([]);
   const [filters, setFilters] = useState<PublicScheduleFilters>({ week_id: searchParams.get('week_id') || undefined });
   const [options, setOptions] = useState<PublicScheduleOptions>(emptyOptions);
@@ -116,8 +206,15 @@ function PublicScheduleContent() {
   const empty = useMemo(() => !loading && games.length === 0, [loading, games.length]);
   const hasActiveFilters = useMemo(() => Object.values(filters).some(Boolean), [filters]);
 
+  const selectView = (nextView: ScheduleView) => {
+    setView(nextView);
+    const query = new URLSearchParams(window.location.search);
+    if (nextView === 'hosting') query.set('view', 'hosting'); else query.delete('view');
+    window.history.replaceState(null, '', `${window.location.pathname}${query.size ? `?${query.toString()}` : ''}`);
+  };
+
   return (
-    <div className='mx-auto w-[96%] max-w-[1600px] space-y-5 px-6 py-5'>
+    <div className='public-schedule mx-auto w-[96%] max-w-[1800px] space-y-5 px-6 py-5'>
       <div className='flex flex-wrap items-start justify-between gap-3'><div><h1 className='text-[26px] font-bold leading-tight'>{APP_SCHEDULE_NAME}</h1><p className='mt-1 text-base font-medium text-slate-600'>{APP_SUBTITLE}</p></div><div className='flex flex-wrap gap-2'><Link className='inline-flex h-11 items-center rounded border px-4 text-[15px] font-medium hover:bg-slate-50' href='/tournaments'>Tournament Bracket</Link><Link className='inline-flex h-11 items-center rounded border px-4 text-[15px] font-medium hover:bg-slate-50' href='/rulebook'>Rulebook</Link></div></div>
 
       <div className='grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5'>
@@ -149,11 +246,16 @@ function PublicScheduleContent() {
         <button className='h-11 rounded border px-4 text-[15px] font-medium' onClick={() => window.print()}>Print / PDF</button>
       </div>
 
+      <div className='inline-flex rounded-lg border bg-white p-1' role='group' aria-label='Schedule view'>
+        {([['list', 'List View'], ['hosting', 'Hosting View']] as const).map(([value, label]) => <button key={value} type='button' aria-pressed={view === value} onClick={() => selectView(value)} className={`rounded-md px-4 py-2 text-[15px] font-semibold transition ${view === value ? 'bg-slate-800 text-white shadow-sm' : 'text-slate-700 hover:bg-slate-100'}`}>{label}</button>)}
+      </div>
+
       {loading && <div className='rounded border p-4'>Loading saved schedule...</div>}
       {empty && <div className='rounded border p-4'>{message || (hasActiveFilters ? 'No games match the selected filters.' : 'No saved schedule is currently available.')}</div>}
-      {!loading && games.length > 0 && (
+      {!loading && games.length > 0 && view === 'hosting' && <HostingSchedule games={games} />}
+      {!loading && games.length > 0 && view === 'list' && (
         <div className='overflow-x-auto rounded border'>
-          <table className='w-full min-w-[1180px] table-fixed text-[15px] leading-snug'>
+          <table data-view='list' className='w-full min-w-[1180px] table-fixed text-[15px] leading-snug'>
             <colgroup>
               <col className='w-[10%]' />
               <col className='w-[8%]' />
@@ -199,7 +301,7 @@ function PublicScheduleContent() {
 
 export default function PublicSchedulePage() {
   return (
-    <Suspense fallback={<div className='mx-auto w-[96%] max-w-[1600px] px-6 py-5 text-base'>Loading saved schedule...</div>}>
+    <Suspense fallback={<div className='mx-auto w-[96%] max-w-[1800px] px-6 py-5 text-base'>Loading saved schedule...</div>}>
       <PublicScheduleContent />
     </Suspense>
   );
