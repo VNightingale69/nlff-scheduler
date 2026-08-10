@@ -90,7 +90,7 @@ function HostingSchedule({ games }: { games: Game[] }) {
       const title = weekLabels.length === 1 ? `Hosting View — ${weekLabels[0]}` : 'Hosting View';
       const totalFields = locations.reduce((sum, location) => sum + location.fields.length, 0);
 
-      return <section key={date} className='space-y-3'>
+      return <section key={date} className='hosting-date-section space-y-3'>
         <div><h2 className='text-xl font-bold'>{title}</h2><p className='text-base font-medium text-slate-600'>{formatDisplayDate(date)}</p></div>
         <div className='hosting-grid-scroll overflow-x-auto rounded border bg-white'>
           <table className='hosting-grid w-full border-separate border-spacing-0 text-sm leading-snug' style={{ minWidth: `${Math.max(900, 130 + totalFields * 205)}px` }}>
@@ -224,9 +224,9 @@ function PublicScheduleContent() {
 
   return (
     <div className='public-schedule mx-auto w-[96%] max-w-[1800px] space-y-5 px-6 py-5'>
-      <div className='flex flex-wrap items-start justify-between gap-3'><div><h1 className='text-[26px] font-bold leading-tight'>{APP_SCHEDULE_NAME}</h1><p className='mt-1 text-base font-medium text-slate-600'>{APP_SUBTITLE}</p></div><div className='flex flex-wrap gap-2'><Link className='inline-flex h-11 items-center rounded border px-4 text-[15px] font-medium hover:bg-slate-50' href='/tournaments'>Tournament Bracket</Link><Link className='inline-flex h-11 items-center rounded border px-4 text-[15px] font-medium hover:bg-slate-50' href='/rulebook'>Rulebook</Link></div></div>
+      <div className='public-schedule-header flex flex-wrap items-start justify-between gap-3'><div><h1 className='text-[26px] font-bold leading-tight'>{APP_SCHEDULE_NAME}</h1><p className='mt-1 text-base font-medium text-slate-600'>{APP_SUBTITLE}</p></div><div className='public-navigation flex flex-wrap gap-2'><Link className='inline-flex h-11 items-center rounded border px-4 text-[15px] font-medium hover:bg-slate-50' href='/tournaments'>Tournament Bracket</Link><Link className='inline-flex h-11 items-center rounded border px-4 text-[15px] font-medium hover:bg-slate-50' href='/rulebook'>Rulebook</Link></div></div>
 
-      <div className='grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5'>
+      <div className='schedule-filters grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5'>
         <select className='h-11 rounded border px-3 text-base' value={filters.host_location_id || ''} onChange={(e) => setFilters({ ...filters, host_location_id: e.target.value })}>
           <option value=''>All Host Locations</option>
           {options.host_locations.map((o: any) => <option key={o.id} value={o.id}>{o.name}</option>)}
@@ -249,13 +249,13 @@ function PublicScheduleContent() {
         </select>
       </div>
 
-      <div className='flex flex-wrap gap-2'>
+      <div className='schedule-actions flex flex-wrap gap-2'>
         <button className='h-11 rounded bg-slate-800 px-4 text-[15px] font-medium text-white' onClick={() => load(filters)}>Apply Filters</button>
         <button className='h-11 rounded border px-4 text-[15px] font-medium' onClick={() => { setFilters({}); load({}); }}>Reset</button>
         <button className='h-11 rounded border px-4 text-[15px] font-medium' onClick={() => window.print()}>Print / PDF</button>
       </div>
 
-      <div className='inline-flex rounded-lg border bg-white p-1' role='group' aria-label='Schedule view'>
+      <div className='schedule-view-toggle inline-flex rounded-lg border bg-white p-1' role='group' aria-label='Schedule view'>
         {([['list', 'List View'], ['hosting', 'Hosting View']] as const).map(([value, label]) => <button key={value} type='button' aria-pressed={view === value} onClick={() => selectView(value)} className={`rounded-md px-4 py-2 text-[15px] font-semibold transition ${view === value ? 'bg-slate-800 text-white shadow-sm' : 'text-slate-700 hover:bg-slate-100'}`}>{label}</button>)}
       </div>
 
