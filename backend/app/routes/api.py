@@ -7774,7 +7774,6 @@ def create_organization(payload: OrganizationCreate, db: Session = Depends(get_d
 @router.get('/organizations', response_model=PagedResponse[OrganizationRead], dependencies=[Depends(get_current_user)])
 def list_organizations(search: str | None = None, is_active: bool | None = None, include_deleted: bool = False, page: int = 1, page_size: int = 20, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     q = db.query(Organization).filter(func.upper(func.trim(Organization.name)) != 'TBD')
-    if is_community_admin(current_user): q = q.filter(Organization.id == current_user.organization_id)
     if search: q = q.filter(func.lower(Organization.name).like(f"%{search.lower()}%"))
     if is_active is not None:
         q = q.filter(Organization.is_active == is_active)
@@ -7789,7 +7788,6 @@ def get_organization(org_id: uuid.UUID, current_user: User = Depends(get_current
     org = db.query(Organization).filter(Organization.id == org_id).first()
     if not org:
         raise HTTPException(status_code=404, detail='Organization not found')
-    enforce_organization_scope(org.id, current_user)
     return _organization_read(org)
 
 @router.put('/organizations/{org_id}', response_model=OrganizationRead, dependencies=[Depends(get_current_user)])
@@ -11252,10 +11250,7 @@ def list_host_locations(search: str | None = None, organization_id: uuid.UUID | 
     role_name = normalize_role_name(current_user.role.name)
     q = db.query(HostLocation).filter(func.upper(func.trim(HostLocation.name)) != 'TBD')
     selected_organization_id = organization_id
-    if is_community_admin(current_user):
-        selected_organization_id = current_user.organization_id
-        q = q.filter(HostLocation.organization_id == current_user.organization_id)
-    elif organization_id: q = q.filter(HostLocation.organization_id == organization_id)
+    if organization_id: q = q.filter(HostLocation.organization_id == organization_id)
     if search: q = q.filter(func.lower(HostLocation.name).like(f"%{search.lower()}%"))
     if is_active is not None: q = q.filter(HostLocation.is_active == is_active)
     page_data = paginate(q.order_by(HostLocation.name), page, page_size)
@@ -11324,15 +11319,10 @@ def list_host_location_configurations(host_location_id: uuid.UUID | None = None,
     role_name = normalize_role_name(current_user.role.name)
     selected_organization_id = organization_id
     q = db.query(HostLocationConfiguration).join(HostLocationConfiguration.host_location)
-    if is_community_admin(current_user):
-        selected_organization_id = current_user.organization_id
-        q = q.filter(HostLocation.organization_id == current_user.organization_id)
-    elif organization_id:
+    if organization_id:
         q = q.filter(HostLocation.organization_id == organization_id)
     turf_hosts_query = db.query(HostLocation)
-    if is_community_admin(current_user):
-        turf_hosts_query = turf_hosts_query.filter(HostLocation.organization_id == current_user.organization_id)
-    elif organization_id:
+    if organization_id:
         turf_hosts_query = turf_hosts_query.filter(HostLocation.organization_id == organization_id)
     if host_location_id:
         turf_hosts_query = turf_hosts_query.filter(HostLocation.id == host_location_id)
@@ -11469,7 +11459,6 @@ def create_physical_field_area(payload: PhysicalFieldAreaCreate, current_user: U
 @router.get('/physical-field-areas', response_model=PagedResponse[PhysicalFieldAreaRead], dependencies=[Depends(get_current_user)])
 def list_physical_field_areas(host_location_id: uuid.UUID | None = None, page: int = 1, page_size: int = 50, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     q = db.query(PhysicalFieldArea).join(PhysicalFieldArea.host_location)
-    if is_community_admin(current_user): q = q.filter(HostLocation.organization_id == current_user.organization_id)
     if host_location_id: q = q.filter(PhysicalFieldArea.host_location_id == host_location_id)
     return paginate(q.order_by(PhysicalFieldArea.name), page, page_size)
 
@@ -11512,7 +11501,6 @@ def create_field_configuration_option(payload: FieldConfigurationOptionCreate, c
 @router.get('/field-configuration-options', response_model=PagedResponse[FieldConfigurationOptionRead], dependencies=[Depends(get_current_user)])
 def list_field_configuration_options(physical_field_area_id: uuid.UUID | None = None, page: int = 1, page_size: int = 50, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     q = db.query(FieldConfigurationOption).join(FieldConfigurationOption.physical_field_area).join(PhysicalFieldArea.host_location)
-    if is_community_admin(current_user): q = q.filter(HostLocation.organization_id == current_user.organization_id)
     if physical_field_area_id: q = q.filter(FieldConfigurationOption.physical_field_area_id == physical_field_area_id)
     return paginate(q.order_by(FieldConfigurationOption.name), page, page_size)
 
@@ -11870,8 +11858,7 @@ def create_hosting_availability(payload: HostingAvailabilityCreate, current_user
 @router.get('/hosting-availabilities', response_model=PagedResponse[HostingAvailabilityRead], dependencies=[Depends(get_current_user)])
 def list_hosting_availabilities(field_id: uuid.UUID | None = None, field_ids: str | None = None, host_location_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, available_date: str | None = None, available_dates: str | None = None, page: int = 1, page_size: int = 20, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     q = db.query(HostingAvailability).outerjoin(HostingAvailability.host_location).outerjoin(HostingAvailability.field)
-    if is_community_admin(current_user): q = q.filter(or_(HostLocation.organization_id == current_user.organization_id, HostingAvailability.organization_id == current_user.organization_id, HostingAvailability.field_id.in_(db.query(Field.id).join(Field.host_location).filter(HostLocation.organization_id == current_user.organization_id))))
-    elif organization_id: q = q.filter(or_(HostLocation.organization_id == organization_id, HostingAvailability.organization_id == organization_id, HostingAvailability.field_id.in_(db.query(Field.id).join(Field.host_location).filter(HostLocation.organization_id == organization_id))))
+    if organization_id: q = q.filter(or_(HostLocation.organization_id == organization_id, HostingAvailability.organization_id == organization_id, HostingAvailability.field_id.in_(db.query(Field.id).join(Field.host_location).filter(HostLocation.organization_id == organization_id))))
     if host_location_id: q = q.filter(or_(HostingAvailability.host_location_id == host_location_id, Field.host_location_id == host_location_id))
     if field_id: q = q.filter(HostingAvailability.field_id == field_id)
     if field_ids:
@@ -12003,9 +11990,7 @@ def list_saved_hosting_availability(season_id: uuid.UUID | None = None, organiza
         q = q.filter(HostingAvailability.season_id == season_id)
         if season_game_dates:
             q = q.filter(HostingAvailability.available_date.in_(list(season_game_dates)))
-    if is_community_admin(current_user):
-        q = q.filter(HostLocation.organization_id == current_user.organization_id)
-    elif organization_id:
+    if organization_id:
         q = q.filter(HostLocation.organization_id == organization_id)
     if host_location_id:
         q = q.filter(HostLocation.id == host_location_id)
@@ -12235,9 +12220,7 @@ def list_saved_hosting_availability(season_id: uuid.UUID | None = None, organiza
         direct_q = direct_q.filter(HostingAvailability.season_id == season_id)
         if season_game_dates:
             direct_q = direct_q.filter(HostingAvailability.available_date.in_(list(season_game_dates)))
-    if is_community_admin(current_user):
-        direct_q = direct_q.filter(HostLocation.organization_id == current_user.organization_id)
-    elif organization_id:
+    if organization_id:
         direct_q = direct_q.filter(HostLocation.organization_id == organization_id)
     if host_location_id:
         direct_q = direct_q.filter(HostLocation.id == host_location_id)
@@ -12305,9 +12288,7 @@ def list_saved_hosting_availability(season_id: uuid.UUID | None = None, organiza
         field_q = field_q.filter(HostingAvailability.season_id == season_id)
         if season_game_dates:
             field_q = field_q.filter(HostingAvailability.available_date.in_(list(season_game_dates)))
-    if is_community_admin(current_user):
-        field_q = field_q.filter(HostLocation.organization_id == current_user.organization_id)
-    elif organization_id:
+    if organization_id:
         field_q = field_q.filter(HostLocation.organization_id == organization_id)
     if host_location_id:
         field_q = field_q.filter(HostLocation.id == host_location_id)
@@ -12630,7 +12611,7 @@ def list_generated_slots(host_location_id: uuid.UUID, available_date: str | None
     host = db.query(HostLocation).filter(HostLocation.id == host_location_id).first()
     if not host:
         raise HTTPException(404, 'Host location not found')
-    enforce_organization_scope(host.organization_id, current_user)
+    # Read access is league-wide; every mutation continues to enforce ownership.
     q = db.query(GameSlot, FieldInstance.field_name, HostLocation.name.label('host_location_name'), Week.season_id.label('season_id')).join(GameSlot.field_instance).join(GameSlot.host_location).outerjoin(Week, Week.id == GameSlot.week_id).filter(GameSlot.host_location_id == host_location_id)
     if available_date:
         q = q.filter(func.cast(GameSlot.slot_date, str) == available_date)

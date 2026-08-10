@@ -73,6 +73,13 @@ export function canManageFields(user: AuthUser | null | undefined): boolean {
   return role === 'LEAGUE_ADMIN' || role === 'COMMUNITY_ADMIN' || role === 'SCHEDULING_ADMIN';
 }
 
+/** Centralized ownership check for community-scoped hosting mutations. */
+export function canManageCommunityHosting(user: AuthUser | null | undefined, communityId?: string | null): boolean {
+  const role = normalizeRoleName(user?.role_name);
+  if (role === 'LEAGUE_ADMIN' || role === 'SCHEDULING_ADMIN') return true;
+  return role === 'COMMUNITY_ADMIN' && Boolean(communityId) && user?.organization_id === communityId;
+}
+
 export function canPublishSchedule(user: AuthUser | null | undefined): boolean {
   return canManageSchedule(user);
 }
