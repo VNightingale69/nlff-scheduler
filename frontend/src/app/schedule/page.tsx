@@ -55,6 +55,12 @@ const fieldTone = (type: string) => ({
   UNASSIGNED: 'bg-slate-50',
 }[type] || 'bg-slate-50');
 
+const locationAccent = (index: number) => `location-accent-${(index % 4) + 1}`;
+const locationEdge = (fieldIndex: number, fieldCount: number) => [
+  fieldIndex === 0 ? 'location-boundary-start' : '',
+  fieldIndex === fieldCount - 1 ? 'location-boundary-end' : '',
+].filter(Boolean).join(' ');
+
 const gameField = (game: Game): HostingField => {
   const assignedName = game.turf_field_slot || (game.field_name && !/not assigned|unavailable/i.test(game.field_name) ? game.field_name : 'Unassigned');
   const type = assignedName === 'Unassigned' ? 'UNASSIGNED' : normalizeFieldType(game.field_type || assignedName);
@@ -91,10 +97,13 @@ function HostingSchedule({ games }: { games: Game[] }) {
             <thead>
               <tr>
                 <th rowSpan={2} scope='col' className='sticky left-0 top-0 z-30 w-[130px] min-w-[130px] border-b border-r bg-slate-200 px-3 py-3 text-left'>Time</th>
-                {locations.map((location) => <th key={location.name} scope='colgroup' colSpan={location.fields.length} className='sticky top-0 z-20 border-b border-r bg-slate-200 px-3 py-2 text-center text-base font-bold'>{location.name}</th>)}
+                {locations.map((location, locationIndex) => <th key={location.name} scope='colgroup' colSpan={location.fields.length} className={`location-group-header ${locationAccent(locationIndex)} sticky top-0 z-20 px-3 py-2.5 text-center`}>
+                  <span className='block text-base font-extrabold tracking-wide text-slate-900'>{location.name}</span>
+                  <span className='mt-0.5 block text-xs font-semibold text-slate-700'>{location.fields.length} {location.fields.length === 1 ? 'Field' : 'Fields'}</span>
+                </th>)}
               </tr>
               <tr>
-                {locations.flatMap((location) => location.fields.map((field) => <th key={`${location.name}-${field.key}`} scope='col' className={`sticky top-[41px] z-20 min-w-[205px] border-b border-r px-3 py-2 text-center font-semibold ${fieldTone(field.type)}`}>
+                {locations.flatMap((location, locationIndex) => location.fields.map((field, fieldIndex) => <th key={`${location.name}-${field.key}`} scope='col' className={`${locationAccent(locationIndex)} ${locationEdge(fieldIndex, location.fields.length)} sticky top-[58px] z-20 min-w-[205px] border-b px-3 py-2 text-center font-semibold ${fieldTone(field.type)}`}>
                   <span className='block'>{field.name}</span><span className='mt-0.5 block text-xs font-medium uppercase tracking-wide text-slate-600'>{fieldTypeLabel(field.type)}</span>
                 </th>))}
               </tr>
@@ -102,9 +111,9 @@ function HostingSchedule({ games }: { games: Game[] }) {
             <tbody>
               {times.map((time) => <tr key={time}>
                 <th scope='row' className='sticky left-0 z-10 whitespace-nowrap border-b border-r bg-slate-100 px-3 py-4 text-left align-top font-bold'>{formatDisplayTime(time)}</th>
-                {locations.flatMap((location) => location.fields.map((field) => {
+                {locations.flatMap((location, locationIndex) => location.fields.map((field, fieldIndex) => {
                   const game = dateGames.find((item) => item.host_location_name === location.name && item.kickoff_time === time && gameField(item).key === field.key);
-                  return <td key={`${location.name}-${field.key}`} className={`break-words border-b border-r p-3 align-top ${game ? fieldTone(field.type) : 'bg-white text-slate-400'}`}>
+                  return <td key={`${location.name}-${field.key}`} className={`${locationAccent(locationIndex)} ${locationEdge(fieldIndex, location.fields.length)} location-schedule-cell break-words border-b p-3 align-top ${game ? fieldTone(field.type) : 'bg-white text-slate-400'}`}>
                     {game ? <div className='hosting-game min-h-[105px]'>
                       <div className='mb-2 font-bold text-slate-700'>{game.division_name}</div>
                       <div className='flex items-center gap-2 font-medium'><CommunityLogo src={game.home_team_logo_url} name={game.home_team_community_name || game.home_team_name} altText={game.home_team_logo_alt_text} size={24} /><span>{game.home_team_name}</span></div>
