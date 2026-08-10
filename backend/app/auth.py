@@ -188,9 +188,9 @@ def enforce_organization_scope(request_org_id: uuid.UUID | None, current_user: U
         return
     if is_community_admin(current_user):
         if not current_user.organization_id:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail={'code': 'COMMUNITY_WRITE_FORBIDDEN', 'message': "You may view this community's hosting availability but may only modify communities you administer."})
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail={'code': 'COMMUNITY_WRITE_FORBIDDEN', 'message': "You may view this community's hosting availability but cannot modify it."})
         if request_org_id and request_org_id != current_user.organization_id:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail={'code': 'COMMUNITY_WRITE_FORBIDDEN', 'message': "You may view this community's hosting availability but may only modify communities you administer."})
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail={'code': 'COMMUNITY_WRITE_FORBIDDEN', 'message': "You may view this community's hosting availability but cannot modify it."})
         return
     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Unsupported role')
 

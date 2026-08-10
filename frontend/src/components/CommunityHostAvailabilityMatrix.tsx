@@ -6,7 +6,9 @@ import { canManageCommunityHosting } from '@/lib/auth';
 import { useAuthSession } from './AuthGate';
 
 type MatrixDate = { game_date: string; week_id: string | null; week_number: number | null; label: string; is_postseason: boolean; status: string | null; date_type?: string | null; host_assignment_pending?: boolean };
-type MatrixCell = { status: string; has_saved_availability: boolean; available_slot_count: number; capacity_by_size: Record<string, number> };
+// Community mode intentionally consumes availability state only. Scheduler
+// capacity and readiness fields returned for the admin matrix are not rendered.
+type MatrixCell = { status: string; has_saved_availability: boolean };
 type MatrixRow = { community_id: string; community_name: string; host_location_id: string; host_location_name: string; cells: Record<string, MatrixCell> };
 type Matrix = { season: { id: string; name: string }; dates: MatrixDate[]; rows: MatrixRow[] };
 type Editor = { row: MatrixRow; date: MatrixDate } | null;
