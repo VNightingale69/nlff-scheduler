@@ -10,6 +10,25 @@ body {
   @apply bg-slate-50 text-slate-900;
 }
 
+/* Location accents supplement (rather than replace) the field-size backgrounds. */
+.location-accent-1 { --location-border: #47816b; --location-tint: #e7f2ed; }
+.location-accent-2 { --location-border: #507da3; --location-tint: #e8f0f7; }
+.location-accent-3 { --location-border: #a46170; --location-tint: #f7eaed; }
+.location-accent-4 { --location-border: #8a713e; --location-tint: #f5f0e4; }
+
+.hosting-grid .location-group-header {
+  background: var(--location-tint);
+  border-top: 3px solid var(--location-border);
+  border-right: 3px solid var(--location-border);
+  border-bottom: 1px solid var(--location-border);
+  border-left: 3px solid var(--location-border);
+  border-radius: 0.5rem 0.5rem 0 0;
+}
+
+.hosting-grid .location-boundary-start { border-left: 3px solid var(--location-border); }
+.hosting-grid .location-boundary-end { border-right: 3px solid var(--location-border); }
+.hosting-grid tbody tr:last-child .location-schedule-cell { border-bottom: 3px solid var(--location-border); }
+
 @media print {
   @page {
     size: landscape;
