@@ -155,6 +155,21 @@ class HostingAvailabilityCommunityPermissionsTest(unittest.TestCase):
         self.assertEqual(len(response.json()['items']), 1)
         self.assertEqual(response.json()['items'][0]['organization_id'], str(self.other_org.id))
 
+    def test_community_admin_can_read_shared_host_availability_matrix(self):
+        response = self.client.get(
+            f'/api/host-availability-matrix?season_id={self.season.id}',
+            headers=self._token(self.community_user.id),
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        rows = response.json()['rows']
+        self.assertEqual(
+            {(row['community_id'], row['host_location_id']) for row in rows},
+            {
+                (str(self.org.id), str(self.host.id)),
+                (str(self.other_org.id), str(self.other_host.id)),
+            },
+        )
+
     def test_community_admin_cannot_use_another_organizations_field_area(self):
         response = self.client.post(
             '/api/hosting-availabilities/bulk-upsert',
