@@ -151,7 +151,10 @@ function extractError(error: unknown) {
   return error instanceof Error ? error.message : 'Request failed.';
 }
 
-export default function HostAvailabilityMatrix() {
+export type HostAvailabilityMatrixMode = 'scheduler' | 'community-readonly';
+
+export default function HostAvailabilityMatrix({ mode = 'scheduler' }: { mode?: HostAvailabilityMatrixMode }) {
+  const isReadOnly = mode === 'community-readonly';
   const { accessToken: token } = useAuthSession();
   const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
   const [seasons, setSeasons] = useState<Array<{ id: string; name: string }>>([]);
@@ -171,7 +174,7 @@ export default function HostAvailabilityMatrix() {
     setCurrentUser(getAuthUser());
   }, []);
 
-  const canModifyMatrix = currentUser?.email?.trim().toLowerCase() === HOST_PLAN_SELECTION_ADMIN_EMAIL;
+  const canModifyMatrix = !isReadOnly && currentUser?.email?.trim().toLowerCase() === HOST_PLAN_SELECTION_ADMIN_EMAIL;
 
 
   useEffect(() => {
@@ -429,15 +432,15 @@ export default function HostAvailabilityMatrix() {
     <div className='rounded border bg-white p-4 shadow-sm'>
       <div className='flex flex-wrap items-center justify-between gap-3'>
         <div>
-          <p className='text-sm font-semibold uppercase tracking-wide text-slate-500'>Admin → Scheduling → Host Availability Matrix</p>
-          <h1 className='text-2xl font-bold text-slate-900'>Host Availability Matrix</h1>
-          <p className='text-sm text-slate-600'>Season-wide scheduler planning tool for communities, host locations, and game dates. Select fields for auto-schedule, exclude available fields, and lock weekly host plans without deleting community availability.</p>
+          <p className='text-sm font-semibold uppercase tracking-wide text-slate-500'>{isReadOnly ? 'Community Management' : 'Admin → Scheduling → Host Availability Matrix'}</p>
+          <h1 className='text-2xl font-bold text-slate-900'>{isReadOnly ? 'Hosting Availability' : 'Host Availability Matrix'}</h1>
+          <p className='text-sm text-slate-600'>{isReadOnly ? 'League-wide hosting plan — Read Only' : 'Season-wide scheduler planning tool for communities, host locations, and game dates. Select fields for auto-schedule, exclude available fields, and lock weekly host plans without deleting community availability.'}</p>
         </div>
         <select className='rounded border p-2' value={seasonId} onChange={(e) => setSeasonId(e.target.value)}>
           {seasons.map((season) => <option key={season.id} value={season.id}>{season.name}</option>)}
         </select>
       </div>
-      {!canModifyMatrix ? <div className='mt-4 rounded bg-amber-50 p-3 text-sm font-medium text-amber-900'>{HOST_PLAN_SELECTION_PERMISSION_MESSAGE}</div> : null}
+      {isReadOnly ? <div className='mt-4 inline-flex rounded bg-slate-100 px-3 py-2 text-xs font-bold uppercase tracking-wide text-slate-700'>View only</div> : !canModifyMatrix ? <div className='mt-4 rounded bg-amber-50 p-3 text-sm font-medium text-amber-900'>{HOST_PLAN_SELECTION_PERMISSION_MESSAGE}</div> : null}
       <div className='mt-4 grid gap-3 md:grid-cols-4'>
         <label className='text-sm font-medium text-slate-700'>Weekly filter
           <select className='mt-1 w-full rounded border p-2 font-normal' value={weekFilterDate} onChange={(e) => { setWeekFilterDate(e.target.value); if (e.target.value) setSelectedDate(e.target.value); }}>
@@ -455,7 +458,7 @@ export default function HostAvailabilityMatrix() {
           <button className='rounded border px-3 py-2 text-sm font-semibold text-slate-700' onClick={() => { setWeekFilterDate(''); setCommunityFilter(''); setLocationFilter(''); }}>Clear Filters</button>
         </div>
       </div>
-      <div className='mt-4 flex flex-wrap gap-2'>
+      {!isReadOnly ? <div className='mt-4 flex flex-wrap gap-2'>
         {selectedSummary?.host_assignment_pending
           ? <button className='rounded bg-amber-700 px-3 py-2 text-sm font-semibold text-white disabled:bg-slate-300' disabled={!canModifyMatrix || !selectedDate || Boolean(selectedSummary.host_assignment_locked)} onClick={() => runAction('resolve')}>Resolve TBD Hosting</button>
           : <button className='rounded bg-amber-600 px-3 py-2 text-sm font-semibold text-white disabled:bg-slate-300' disabled={!canModifyMatrix || !selectedDate || selectedSummary?.date_type !== 'REGULAR_SEASON'} onClick={() => runAction('defer')}>Mark Hosting TBD</button>}
@@ -466,15 +469,15 @@ export default function HostAvailabilityMatrix() {
         <button className='rounded border border-rose-300 px-3 py-2 text-sm font-semibold text-rose-700 disabled:text-slate-300' disabled={!canModifyMatrix || !selectedDate} onClick={() => runAction('clear')}>Clear Host Plan Selections</button>
         <button className='rounded border border-amber-300 px-3 py-2 text-sm font-semibold text-amber-800 disabled:text-slate-300' disabled={!canModifyMatrix || !seasonId} onClick={() => runAction('repair')}>Repair Missing or Mismatched Hosting Availability</button>
         <button className='rounded bg-slate-900 px-3 py-2 text-sm font-semibold text-white disabled:bg-slate-300' disabled={!canModifyMatrix || !seasonId} onClick={() => runAction('auto')}>Run Auto-Schedule Using Selected Fields</button>
-      </div>
+      </div> : null}
       <div className='mt-3 flex flex-wrap gap-3 text-xs text-slate-600'>
-        <span><b>Blank</b> = not available</span><span><b>Missing Hosting Availability</b> = selected host is missing Hosting Availability and cannot be used</span><span><b>X</b> = available</span><span><b>✓</b> = selected for auto-schedule</span><span><b>O</b> = excluded</span><span><b>P</b> = playoff/championship date</span><span><b>L</b> = locked</span>{canModifyMatrix ? <><span><b>Click</b> = available → selected → excluded</span><span><b>Shift-click</b> = lock/unlock</span><span><b>Right-click</b> = lock, unlock, overflow, or note</span></> : <span><b>Read-only</b> = editing disabled</span>}
+        {isReadOnly ? <><span><b>Blank</b> = not available</span><span><b>X</b> = available</span><span><b>✓</b> = selected hosting site</span><span><b>L</b> = locked hosting site</span><span><b>TBD</b> = hosting plan not yet finalized</span><span><b>P</b> = playoff/championship date</span><span><b>B</b> = league blackout</span></> : <><span><b>Blank</b> = not available</span><span><b>Missing Hosting Availability</b> = selected host is missing Hosting Availability and cannot be used</span><span><b>X</b> = available</span><span><b>✓</b> = selected for auto-schedule</span><span><b>O</b> = excluded</span><span><b>P</b> = playoff/championship date</span><span><b>L</b> = locked</span>{canModifyMatrix ? <><span><b>Click</b> = available → selected → excluded</span><span><b>Shift-click</b> = lock/unlock</span><span><b>Right-click</b> = lock, unlock, overflow, or note</span></> : <span><b>Read-only</b> = editing disabled</span>}</>}
       </div>
       {message ? <div className='mt-3 rounded bg-emerald-50 p-2 text-sm text-emerald-800'>{message}</div> : null}
       {error ? <div className='mt-3 rounded bg-rose-50 p-2 text-sm text-rose-800'>{error}</div> : null}
     </div>
 
-    <div className='grid gap-4 xl:grid-cols-[minmax(0,1fr)_340px]'>
+    <div className={`grid gap-4 ${isReadOnly ? '' : 'xl:grid-cols-[minmax(0,1fr)_340px]'}`}>
       <div className='overflow-auto rounded border bg-white shadow-sm'>
         <table className='min-w-full border-collapse text-sm'>
           <thead className='sticky top-0 z-10 bg-slate-100'>
@@ -482,7 +485,7 @@ export default function HostAvailabilityMatrix() {
               <th className='sticky left-0 z-20 border-b bg-slate-100 px-3 py-2 text-left'>Community</th>
               <th className='sticky left-36 z-20 border-b bg-slate-100 px-3 py-2 text-left'>Host Location</th>
               {filteredDates.map((date) => <th key={date.game_date} className={`border-b px-2 py-2 text-center ${date.host_assignment_pending ? 'bg-amber-200 font-bold text-amber-950' : date.is_postseason ? 'bg-amber-100 font-bold text-amber-900' : ''}`}>
-                <button className='min-w-16' onClick={() => setSelectedDate(date.game_date)}>{date.date_type === 'BLACKOUT' ? 'B ' : date.is_postseason ? 'P ' : ''}{formatDate(date.game_date)}{date.host_assignment_pending ? <span className='block text-xs'>TBD{date.host_assignment_locked ? ' · Locked' : ''}</span> : null}</button>
+                {isReadOnly ? <span className='inline-block min-w-16'>{date.date_type === 'BLACKOUT' ? 'B ' : date.is_postseason ? 'P ' : ''}{formatDate(date.game_date)}{date.host_assignment_pending ? <span className='block text-xs'>TBD{date.host_assignment_locked ? ' · Locked' : ''}</span> : null}</span> : <button className='min-w-16' onClick={() => setSelectedDate(date.game_date)}>{date.date_type === 'BLACKOUT' ? 'B ' : date.is_postseason ? 'P ' : ''}{formatDate(date.game_date)}{date.host_assignment_pending ? <span className='block text-xs'>TBD{date.host_assignment_locked ? ' · Locked' : ''}</span> : null}</button>}
               </th>)}
             </tr>
           </thead>
@@ -494,14 +497,18 @@ export default function HostAvailabilityMatrix() {
                 const cell = getCell(row, date);
                 const status = cell.locked ? 'LOCKED' : cell.status;
                 const classes = CELL_CLASSES[status] || CELL_CLASSES.AVAILABLE;
+                const label = date.host_assignment_pending ? 'TBD' : (LABELS[status] ?? status.slice(0, 1));
                 return <td key={date.game_date} className={`px-1 py-1 text-center ${date.host_assignment_pending ? 'bg-amber-50' : ''}`}>
-                  <button
+                  {isReadOnly ? <span
+                    title={cell.has_saved_availability ? `${status}${cell.reason ? `: ${cell.reason}` : ''}` : 'Not available'}
+                    className={`inline-flex h-9 w-12 cursor-default items-center justify-center rounded border text-sm font-semibold ${classes}`}
+                  >{label}</span> : <button
                     title={!canModifyMatrix ? HOST_PLAN_SELECTION_PERMISSION_MESSAGE : cell.has_saved_availability ? `${status}${cell.reason ? `: ${cell.reason}` : ''}` : HOST_PLAN_MISSING_AVAILABILITY_MESSAGE}
                     className={`h-9 w-12 rounded border text-sm font-semibold ${classes} ${selectedDate === date.game_date ? 'outline outline-2 outline-offset-1 outline-indigo-400' : ''} ${canModifyMatrix ? '' : 'cursor-not-allowed opacity-80'}`}
                     disabled={!canModifyMatrix || Boolean(date.host_assignment_pending)}
                     onClick={(event) => handleCellClick(row, date, event)}
                     onContextMenu={(event) => handleCellMenu(row, date, event)}
-                  >{date.host_assignment_pending ? 'TBD' : (LABELS[status] ?? status.slice(0, 1))}</button>
+                  >{label}</button>}
                 </td>;
               })}
             </tr>))}
@@ -510,7 +517,7 @@ export default function HostAvailabilityMatrix() {
         </table>
       </div>
 
-      <aside className='rounded border bg-white p-4 shadow-sm'>
+      {!isReadOnly ? <aside className='rounded border bg-white p-4 shadow-sm'>
         <h2 className='text-lg font-bold text-slate-900'>Weekly Summary</h2>
         {selectedSummary ? <div className='mt-2 space-y-4 text-sm'>
           <div>
@@ -611,7 +618,7 @@ export default function HostAvailabilityMatrix() {
           </section>
           </> : null}
         </div> : <p className='mt-2 text-sm text-slate-500'>Select a date column to view capacity, selected fields, excluded fields, and validation.</p>}
-      </aside>
+      </aside> : null}
     </div>
   </div>;
 }

@@ -1,3 +1,3 @@
-import CommunityHostAvailabilityMatrix from '@/components/CommunityHostAvailabilityMatrix';
+import HostAvailabilityMatrix from '@/components/HostAvailabilityMatrix';
 
-export default function Page(){ return <CommunityHostAvailabilityMatrix />; }
+export default function Page() { return <HostAvailabilityMatrix mode="community-readonly" />; }
