@@ -112,8 +112,48 @@ class HostingAvailabilityCommunityPermissionsTest(unittest.TestCase):
             json={'slots': [self._slot_payload(organization_id=str(self.other_org.id))]},
         )
         self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()['detail']['code'], 'COMMUNITY_WRITE_FORBIDDEN')
         self.db.expire_all()
         self.assertEqual(self.db.query(HostingAvailability).count(), 0)
+
+    def test_community_admin_can_read_league_communities_and_hosting_setup(self):
+        organizations = self.client.get('/api/organizations?page_size=100', headers=self._token(self.community_user.id))
+        self.assertEqual(organizations.status_code, 200, organizations.text)
+        self.assertEqual({item['id'] for item in organizations.json()['items']}, {str(self.org.id), str(self.other_org.id)})
+
+        hosts = self.client.get(
+            f'/api/host-locations?organization_id={self.other_org.id}&page_size=100',
+            headers=self._token(self.community_user.id),
+        )
+        self.assertEqual(hosts.status_code, 200, hosts.text)
+        self.assertEqual([item['id'] for item in hosts.json()['items']], [str(self.other_host.id)])
+
+        areas = self.client.get(
+            f'/api/physical-field-areas?host_location_id={self.other_host.id}&page_size=100',
+            headers=self._token(self.community_user.id),
+        )
+        self.assertEqual(areas.status_code, 200, areas.text)
+        self.assertEqual([item['id'] for item in areas.json()['items']], [str(self.other_area.id)])
+
+    def test_community_admin_can_read_other_community_saved_availability(self):
+        create = self.client.post(
+            '/api/hosting-availabilities/bulk-upsert',
+            headers=self._token(self.league_user.id),
+            json={'slots': [self._slot_payload(
+                physical_field_area_id=str(self.other_area.id),
+                field_configuration_option_id=str(self.other_option.id),
+                organization_id=str(self.other_org.id),
+            )]},
+        )
+        self.assertEqual(create.status_code, 200, create.text)
+
+        response = self.client.get(
+            f'/api/hosting-availabilities/saved?organization_id={self.other_org.id}&host_location_id={self.other_host.id}',
+            headers=self._token(self.community_user.id),
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(len(response.json()['items']), 1)
+        self.assertEqual(response.json()['items'][0]['organization_id'], str(self.other_org.id))
 
     def test_community_admin_cannot_use_another_organizations_field_area(self):
         response = self.client.post(

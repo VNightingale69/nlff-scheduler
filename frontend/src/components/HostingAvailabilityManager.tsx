@@ -7,6 +7,7 @@ import { formatDisplayDate, formatDisplayTime } from '@/lib/displayFormat';
 import Toast from './Toast';
 import { useSearchParams } from 'next/navigation';
 import { APPROVED_TURF_CONFIGURATIONS, isApprovedTurfConfigurationCode, turfConfigurationLabel } from '@/lib/turfConfigurations';
+import { canManageCommunityHosting } from '@/lib/auth';
 
 const STADIUM_TYPE = 'STADIUM_SITE';
 const HOURS = [9, 10, 11, 12, 13, 14, 15, 16];
@@ -149,13 +150,9 @@ export default function HostingAvailabilityManager() {
     })();
   }, [preselectedHostId, preselectedOrgId]);
 
-  const effectiveOrgId = isCommunityAdmin ? (user?.organization_id || '') : orgId;
-
-  useEffect(() => {
-    if (isCommunityAdmin && user?.organization_id && orgId !== user.organization_id) {
-      setOrgId(user.organization_id);
-    }
-  }, [isCommunityAdmin, orgId, user?.organization_id]);
+  const effectiveOrgId = orgId;
+  const selectedOrg = useMemo(() => orgs.find((org: any) => org.id === effectiveOrgId), [effectiveOrgId, orgs]);
+  const canEditCommunity = canManageCommunityHosting(user, effectiveOrgId);
 
   const hostOptions = useMemo(() => hosts.filter((h: any) => !effectiveOrgId || h.organization_id === effectiveOrgId), [hosts, effectiveOrgId]);
   const selectedHost = useMemo(() => hostOptions.find((h: any) => h.id === hostId), [hostId, hostOptions]);
@@ -209,7 +206,7 @@ export default function HostingAvailabilityManager() {
   );
   const isBlackoutWeek = (week: SeasonWeek) => String(week.date_type || '').toUpperCase() === 'BLACKOUT';
   const isPlayoffWeek = (week: SeasonWeek) => String(week.date_type || '').toUpperCase() === 'PLAYOFF';
-  const canSelectWeek = (week: SeasonWeek) => Boolean(week.primary_game_date) && (!isBlackoutWeek(week) || adminOverrideBlackout);
+  const canSelectWeek = (week: SeasonWeek) => Boolean(week.primary_game_date) && (!isBlackoutWeek(week) || !canEditCommunity || adminOverrideBlackout);
   const selectedWeeks = useMemo(() => selectedWeekIds.map((weekId) => weeks.find((week) => week.id === weekId)).filter(Boolean).filter((week) => canSelectWeek(week as SeasonWeek)) as SeasonWeek[], [adminOverrideBlackout, selectedWeekIds, weeks]);
   const selectedDates = useMemo(() => selectedWeeks.map((week) => week.primary_game_date).filter(Boolean) as string[], [selectedWeeks]);
   const weekByDate = useMemo(() => new Map(weeks.filter((week) => week.primary_game_date).map((week) => [week.primary_game_date as string, week])), [weeks]);
@@ -234,6 +231,15 @@ export default function HostingAvailabilityManager() {
     setSelectedSlots((p) => ({ ...p, [slotKey(a, d, h)]: !p[slotKey(a, d, h)] }));
 
   const allDay = (a: string, d: string) => HOURS.every((h) => selectedSlots[slotKey(a, d, h)]);
+
+  const isHourAvailable = (areaId: string, date: string, hour: number) => {
+    if (canEditCommunity) return Boolean(selectedSlots[slotKey(areaId, date, hour)]);
+    return savedAvailability.some((entry: any) => entry.available_date === date && entry.time_ranges?.some((range: any) => {
+      const start = Number(range.start_time.slice(0, 2));
+      const end = Number(range.end_time.slice(0, 2));
+      return hour >= start && hour < end;
+    }));
+  };
 
   const toggleAllDay = (a: string, d: string, on: boolean) =>
     setSelectedSlots((p) => {
@@ -584,13 +590,20 @@ export default function HostingAvailabilityManager() {
 
       <section className='rounded border p-4'>
         <h2 className='mb-2 font-semibold'>1. Select Organization</h2>
-        <select disabled={isCommunityAdmin} value={effectiveOrgId} onChange={(e) => setOrgId(e.target.value)} className='w-full rounded border p-2 md:w-1/2'>
+        <select value={effectiveOrgId} onChange={(e) => setOrgId(e.target.value)} className='w-full rounded border p-2 md:w-1/2'>
           <option value=''>Select organization</option>
           {orgs.map((o: any) => (
-            <option key={o.id} value={o.id}>{o.name}</option>
+            <option key={o.id} value={o.id}>{o.name}{isCommunityAdmin ? (o.id === user?.organization_id ? ' — My Community' : ' — View Only') : ''}</option>
           ))}
         </select>
       </section>
+
+      {effectiveOrgId && !canEditCommunity ? (
+        <section className='rounded border border-sky-200 bg-sky-50 p-4 text-sky-950' role='status'>
+          <div className='font-semibold'>VIEW ONLY — {selectedOrg?.name || 'Community'}</div>
+          <p className='mt-1 text-sm'>You are viewing hosting availability for {selectedOrg?.name || 'this community'}. Community Administrators may only modify hosting information for communities they administer.</p>
+        </section>
+      ) : null}
 
       <section className='rounded border p-4'>
         <h2 className='mb-2 font-semibold'>2. Select Hosting Site</h2>
@@ -668,7 +681,7 @@ export default function HostingAvailabilityManager() {
                 <div key={area.id} className='rounded border bg-slate-50 p-3'>
                   <div className='font-medium'>{area.name}</div>
                   <div className='text-sm text-slate-600'>{isStadium ? 'Turf Stadium' : 'Grass/Park Site'}</div>
-                  {isCommunityAdmin ? <p className='mt-2 rounded bg-emerald-50 p-2 text-sm text-emerald-900'>{isStadium ? 'Turf stadium layouts are selected automatically during scheduling.' : 'Grass field size is fixed from My Fields.'}</p> : <ul className='mt-2 list-disc pl-6 text-sm'>
+                  {isCommunityAdmin && canEditCommunity ? <p className='mt-2 rounded bg-emerald-50 p-2 text-sm text-emerald-900'>{isStadium ? 'Turf stadium layouts are selected automatically during scheduling.' : 'Grass field size is fixed from My Fields.'}</p> : <ul className='mt-2 list-disc pl-6 text-sm'>
                     {cfgs.map((c: any) => <li key={c.id}>{layoutLabel(c.name)} ({c.small_field_count || c.thirty_yard_capacity || 0} Small / {c.medium_field_count || 0} Medium / {c.large_field_count || c.fifty_three_yard_capacity || 0} Large)</li>)}
                   </ul>}
                 </div>
@@ -691,10 +704,10 @@ export default function HostingAvailabilityManager() {
             <input type='checkbox' checked={showCancelledWeeks} onChange={(e) => setShowCancelledWeeks(e.target.checked)} />
             Show Cancelled Weeks
           </label>
-          <label className='inline-flex items-center gap-2 text-sm text-amber-800'>
+          {!isCommunityAdmin ? <label className='inline-flex items-center gap-2 text-sm text-amber-800'>
             <input type='checkbox' checked={adminOverrideBlackout} onChange={(e) => setAdminOverrideBlackout(e.target.checked)} />
             Admin override: allow Blackout availability
-          </label>
+          </label> : null}
         </div>
         {!seasonId ? <p className='text-slate-500'>Select a season to load week records.</p> : !visibleWeeks.length ? <p className='text-slate-500'>No selectable weeks found for this season.</p> : (
           <div className='grid gap-2 md:grid-cols-2 lg:grid-cols-4'>
@@ -737,16 +750,16 @@ export default function HostingAvailabilityManager() {
                       <div className='text-sm text-slate-600'>{isStadium ? 'Turf Stadium' : 'Grass/Park Site'}</div>
                     </div>
                     {isStadium ? (
-                      isCommunityAdmin ? <div className='max-w-md rounded bg-emerald-50 p-2 text-sm text-emerald-900'>The scheduler will determine the best turf stadium layout for each selected hosting date.</div> : <div className='flex flex-col gap-2 md:items-end'>
-                        <select className='rounded border p-2 text-sm' value={selectedCfg} disabled={getAutoSelectLayout(area.id, date) && !getLockLayout(area.id, date)} onChange={(e) => setActiveConfigByAreaDate({ ...activeConfigByAreaDate, [layoutKey(area.id, date)]: e.target.value })}>
+                      isCommunityAdmin && canEditCommunity ? <div className='max-w-md rounded bg-emerald-50 p-2 text-sm text-emerald-900'>The scheduler will determine the best turf stadium layout for each selected hosting date.</div> : <div className='flex flex-col gap-2 md:items-end'>
+                        <select className='rounded border p-2 text-sm' value={selectedCfg} disabled={!canEditCommunity || (getAutoSelectLayout(area.id, date) && !getLockLayout(area.id, date))} onChange={(e) => setActiveConfigByAreaDate({ ...activeConfigByAreaDate, [layoutKey(area.id, date)]: e.target.value })}>
                           {cfgs.map((c: any) => <option key={c.id} value={c.id}>{layoutLabel(c.name)}</option>)}
                         </select>
                         <label className='inline-flex items-center gap-2 text-xs text-slate-700'>
-                          <input type='checkbox' checked={getAutoSelectLayout(area.id, date)} onChange={(e) => setAutoSelectLayoutByAreaDate({ ...autoSelectLayoutByAreaDate, [layoutKey(area.id, date)]: e.target.checked })} />
+                          <input type='checkbox' disabled={!canEditCommunity} checked={getAutoSelectLayout(area.id, date)} onChange={(e) => setAutoSelectLayoutByAreaDate({ ...autoSelectLayoutByAreaDate, [layoutKey(area.id, date)]: e.target.checked })} />
                           Auto Select Best Layout
                         </label>
                         <label className='inline-flex items-center gap-2 text-xs text-slate-700'>
-                          <input type='checkbox' checked={getLockLayout(area.id, date)} onChange={(e) => setLockLayoutByAreaDate({ ...lockLayoutByAreaDate, [layoutKey(area.id, date)]: e.target.checked })} />
+                          <input type='checkbox' disabled={!canEditCommunity} checked={getLockLayout(area.id, date)} onChange={(e) => setLockLayoutByAreaDate({ ...lockLayoutByAreaDate, [layoutKey(area.id, date)]: e.target.checked })} />
                           Lock Specific Layout
                         </label>
                       </div>
@@ -754,15 +767,15 @@ export default function HostingAvailabilityManager() {
                   </div>
                   <div className='mb-2'>
                     <label className='inline-flex items-center gap-2 text-sm font-medium'>
-                      <input type='checkbox' checked={allDay(area.id, date)} onChange={(e) => toggleAllDay(area.id, date, e.target.checked)} /> All Day (09:00 AM–04:00 PM)
+                      <input type='checkbox' disabled={!canEditCommunity} checked={canEditCommunity ? allDay(area.id, date) : HOURS.every((hour) => isHourAvailable(area.id, date, hour))} onChange={(e) => toggleAllDay(area.id, date, e.target.checked)} /> All Day (09:00 AM–04:00 PM)
                     </label>
                   </div>
                   <div className='grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-8'>
                     {HOURS.map((h) => {
-                      const selected = selectedSlots[slotKey(area.id, date, h)];
+                      const selected = isHourAvailable(area.id, date, h);
                       return (
-                        <button key={h} onClick={() => toggleHour(area.id, date, h)} className={`rounded border px-2 py-3 text-sm ${selected ? 'border-emerald-700 bg-emerald-600 text-white' : 'bg-white'}`}>
-                          {hourLabel(h)}
+                        <button key={h} disabled={!canEditCommunity} onClick={() => toggleHour(area.id, date, h)} className={`rounded border px-2 py-3 text-sm ${selected ? 'border-emerald-700 bg-emerald-600 text-white' : 'bg-white'}`}>
+                          {hourLabel(h)} — {selected ? 'Available' : 'Unavailable'}
                         </button>
                       );
                     })}
@@ -785,7 +798,7 @@ export default function HostingAvailabilityManager() {
           <div key={`${entry.available_date}-${idx}`} className='rounded border bg-slate-50 p-3 text-sm'>
             <div className='flex items-start justify-between gap-2'>
               <div><div className='font-semibold'>{formatDateLabel(entry.available_date)}</div><div>{entry.host_location_name}</div><div>{entry.site_type === 'STADIUM_SITE' || entry.site_type === 'TURF_STADIUM' ? 'Turf Stadium' : 'Grass Field'}</div>{entry.auto_select_turf_layout ? <><div>Available Layout Mode: Auto-select</div><div>Layout: Auto-select</div><div>Capacity: Will be determined during slot generation</div><div>Current Generated Layout: {entry.current_generated_layout ? layoutLabel(entry.current_generated_layout) : 'Not generated'}</div>{entry.current_generated_layout ? <div>Generated Capacity: {entry.generated_small_field_capacity || 0} Small / {entry.generated_medium_field_capacity || 0} Medium / {entry.generated_large_field_capacity || 0} Large</div> : null}</> : <><div>Available Layout Mode: Manually selected{entry.lock_selected_layout ? ' • Layout locked' : ''}</div><div>Layout: {layoutLabel(entry.available_layout)}</div><div>Capacity: {entry.small_field_capacity} Small / {entry.medium_field_capacity || 0} Medium / {entry.large_field_capacity} Large</div></>}</div>
-              <div className='flex gap-2'><button onClick={() => editSaved(entry)} className='rounded border px-3 py-1'>Edit</button><button onClick={() => deleteSaved(entry)} className='rounded border border-red-300 px-3 py-1 text-red-700'>Delete</button></div>
+              {canEditCommunity ? <div className='flex gap-2'><button onClick={() => editSaved(entry)} className='rounded border px-3 py-1'>Edit</button><button onClick={() => deleteSaved(entry)} className='rounded border border-red-300 px-3 py-1 text-red-700'>Delete</button></div> : null}
             </div>
             <div className='mt-1'>Available:</div><ul className='list-disc pl-6'>{entry.time_ranges.map((range: any, rIdx: number) => <li key={rIdx}>{displayHour(Number(range.start_time.slice(0,2)))}–{displayHour(Number(range.end_time.slice(0,2)))}</li>)}</ul>
           </div>
@@ -851,7 +864,7 @@ export default function HostingAvailabilityManager() {
         )}
       </section>
 
-      <button className='rounded bg-emerald-700 px-4 py-2 text-white' disabled={saving} onClick={save}>{saving ? 'Saving…' : 'Save Availability'}</button>
+      {canEditCommunity ? <button className='rounded bg-emerald-700 px-4 py-2 text-white' disabled={saving} onClick={save}>{saving ? 'Saving…' : 'Save Availability'}</button> : null}
     </div>
   );
 }
