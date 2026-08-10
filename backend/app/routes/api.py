@@ -23,7 +23,7 @@ from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_AD
 from app.database import get_db
 from app.organizations import active_organization_filter, normalize_organization_name
 from app.models import Division, Field, FieldConfigurationOption, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostPlanSelection, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Rulebook, LoginAuditLog, ScheduleChangeLog, ScheduleImport, SchedulePublicationEvent, ScoreHistory, ScoreSubmission, Season, Team, TimeslotFieldConfiguration, Tournament, TournamentDivision, TournamentGame, TournamentTeam, TurfWave, User, Week
-from app.services.facility_layout_validation import layout_label, select_supported_layout
+from app.services.facility_layout_validation import layout_label, select_supported_layout, validate_timeslot_demands
 from app.services.division_field_types import required_field_type_for_division
 from app.services.schedule_import import build_preview, parse_schedule_file
 from app.schemas import (
@@ -8854,6 +8854,9 @@ def _build_weekly_field_demand_readiness(db: Session, season_id: uuid.UUID | Non
             continue
         eligible_slots, exclusion_reasons = _eligible_slots_for_week(db, week)
         eligible = _capacity_by_size_from_slots(eligible_slots)
+        wave_capacity: dict[tuple, dict[str, int]] = {}
+        wave_demand: dict[tuple, dict[str, int]] = {}
+        games_scheduled = {size: 0 for size in FIELD_SIZE_ORDER}
         host_rows: dict[uuid.UUID, dict[str, object]] = {}
         for slot in eligible_slots:
             host = slot.host_location
@@ -8867,31 +8870,68 @@ def _build_weekly_field_demand_readiness(db: Session, season_id: uuid.UUID | Non
             row[key] += 1
             location = row['host_locations'].setdefault(str(host.id), {'host_location': host.name, 'small_capacity': 0, 'medium_capacity': 0, 'large_capacity': 0})
             location[key] += 1
+            wave_key = (slot.slot_date, slot.host_location_id, slot.start_time)
+            wave_capacity.setdefault(wave_key, {field_size: 0 for field_size in FIELD_SIZE_ORDER})[size] += 1
+        scheduled_rows = db.query(Game, Division).join(
+            Team, Game.home_team_id == Team.id,
+        ).join(Division, Team.division_id == Division.id).filter(
+            Game.season_id == week.season_id,
+            Game.week_id == week.id,
+            Game.game_date == _week_game_date(week),
+            Game.host_location_id.isnot(None),
+            Game.kickoff_time.isnot(None),
+        ).all()
+        for game, division in scheduled_rows:
+            size = _required_field_type_for_division(division)
+            if size not in FIELD_SIZE_ORDER:
+                continue
+            wave_key = (game.game_date, game.host_location_id, game.kickoff_time)
+            wave_demand.setdefault(wave_key, {field_size: 0 for field_size in FIELD_SIZE_ORDER})[size] += 1
+            games_scheduled[size] += 1
         day_capacity = []
         for value in host_rows.values():
             value = dict(value); value['host_locations'] = list(value['host_locations'].values()); day_capacity.append(value)
+        capacity_validation = validate_timeslot_demands(
+            wave_demand, {key: [capacity] for key, capacity in wave_capacity.items()},
+        )
         failed = []
-        for size in FIELD_SIZE_ORDER:
-            shortage = max(int(demand.get(size, 0)) - int(eligible.get(size, 0)), 0)
-            if not shortage:
-                continue
-            generated = db.query(GameSlot).filter(GameSlot.season_id == week.season_id, GameSlot.week_id == week.id, GameSlot.slot_date == _week_game_date(week), GameSlot.field_type == size).count()
-            failed.append({
-                'week': week.week_number, 'date': str(_week_game_date(week)), 'field_size': size,
-                'host_community': 'Selected host communities', 'host_location': 'Selected host locations',
-                'turf_configuration': 'See selected host layout/wave diagnostics',
-                'expected_field_sizes': [key for key in FIELD_SIZE_ORDER if demand.get(key, 0)],
-                'field_sizes_actually_generated': [key for key in FIELD_SIZE_ORDER if db.query(GameSlot.id).filter(GameSlot.season_id == week.season_id, GameSlot.week_id == week.id, GameSlot.slot_date == _week_game_date(week), GameSlot.field_type == key).first()],
-                'generated_slot_count': generated, 'eligible_slot_count': int(eligible.get(size, 0)),
-                'required_count': int(demand.get(size, 0)), 'shortage': shortage,
-                'eligibility_exclusions': exclusion_reasons,
-            })
+        for failure in capacity_validation['shortages']:
+            slot_date, host_id, kickoff = failure['key']
+            host = db.get(HostLocation, host_id)
+            for size in FIELD_SIZE_ORDER:
+                shortage = failure['shortage_by_size'][size]
+                if not shortage:
+                    continue
+                failed.append({
+                    'week': week.week_number, 'date': str(slot_date), 'time': str(kickoff),
+                    'field_size': size,
+                    'host_community': getattr(getattr(host, 'organization', None), 'name', None),
+                    'host_location': getattr(host, 'name', str(host_id)),
+                    'turf_configuration': 'Active layout at this kickoff',
+                    'expected_field_sizes': [key for key in FIELD_SIZE_ORDER if failure['demand'][key]],
+                    'field_sizes_actually_generated': [key for key in FIELD_SIZE_ORDER if failure['available_layouts'][0].get(key, 0)] if failure['available_layouts'] else [],
+                    'generated_slot_count': failure['available_layouts'][0].get(size, 0) if failure['available_layouts'] else 0,
+                    'eligible_slot_count': failure['available_layouts'][0].get(size, 0) if failure['available_layouts'] else 0,
+                    'required_count': failure['demand'].get(size, 0), 'shortage': shortage,
+                    'unsupported_simultaneous_configuration': failure['unsupported_combination'],
+                    'eligibility_exclusions': exclusion_reasons,
+                })
+            if failure['unsupported_combination']:
+                failed.append({
+                    'week': week.week_number, 'date': str(slot_date), 'time': str(kickoff),
+                    'field_size': 'CONFIGURATION', 'host_location': getattr(host, 'name', str(host_id)),
+                    'required_count': sum(failure['demand'].values()), 'shortage': 0,
+                    'unsupported_simultaneous_configuration': True,
+                    'expected_field_sizes': [key for key in FIELD_SIZE_ORDER if failure['demand'][key]],
+                    'field_sizes_actually_generated': [], 'eligibility_exclusions': exclusion_reasons,
+                })
         rows.append({
             'week': week.week_number, 'host_date': _week_game_date(week),
-            'small_games_required': demand.get(FIELD_SIZE_SMALL, 0), 'medium_games_required': demand.get(FIELD_SIZE_MEDIUM, 0), 'large_games_required': demand.get(FIELD_SIZE_LARGE, 0),
-            'capacity_available': sum(eligible.values()), 'capacity_used': sum(demand.values()),
+            'small_games_required': games_scheduled[FIELD_SIZE_SMALL], 'medium_games_required': games_scheduled[FIELD_SIZE_MEDIUM], 'large_games_required': games_scheduled[FIELD_SIZE_LARGE],
+            'capacity_available': sum(eligible.values()), 'capacity_used': sum(games_scheduled.values()),
             'available_capacity_by_community': sorted(day_capacity, key=lambda item: item.get('community') or ''),
-            'required_by_size': demand, 'eligible_by_size': eligible,
+            'required_by_size': games_scheduled, 'eligible_by_size': eligible,
+            'peak_simultaneous_by_size': capacity_validation['peak_by_size'],
             'status': 'SHORT' if failed else 'READY', 'failed_field_size_requirements': failed,
         })
     return rows
@@ -15869,6 +15909,7 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
     field_times: dict[tuple, uuid.UUID] = {}
     matchups: set[tuple] = set()
     layout_groups: dict[tuple, list[tuple]] = {}
+    turf_capacity_groups: dict[tuple, list[tuple]] = {}
     for game, _slot, field_instance, host, home, away, division, _org, _status in rows:
         canonical_field = getattr(game, 'field', None)
         def error(code: str, message: str):
@@ -15912,8 +15953,31 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
         field_times[key] = game.id
         canonical_type = _normalize_field_size(getattr(canonical_field, 'layout_type', None) or getattr(field_instance, 'field_type', None))
         required_type = _required_field_type_for_division(division)
+        if host and (host.surface_type or 'GRASS_FIELD') == 'TURF_STADIUM' and required_type:
+            turf_capacity_groups.setdefault((game.host_location_id, game.game_date, game.kickoff_time), []).append(
+                (game, required_type, host, home, away)
+            )
         if canonical_type and required_type and canonical_type != required_type:
             layout_groups.setdefault((game.host_location_id, game.game_date, game.kickoff_time), []).append((game, required_type, canonical_type, host))
+    for (host_id, game_date, kickoff), wave in turf_capacity_groups.items():
+        _override, configuration, valid = select_supported_layout(
+            db, host_id, game_date, kickoff, [item[1] for item in wave],
+        )
+        if valid:
+            continue
+        game, _required_type, host, home, away = wave[0]
+        errors.append({
+            'issue_code': 'HOST_TIMESLOT_CAPACITY_SHORTAGE',
+            'scheduled_game_id': str(game.id),
+            'scheduled_game_display_name': _format_scheduled_game_display_name(getattr(home, 'name', None), getattr(away, 'name', None)),
+            'date': game_date.isoformat() if game_date else None,
+            'time': kickoff.isoformat() if kickoff else None,
+            'location': getattr(host, 'name', None),
+            'simultaneous_demand': {size: sum(required == size for _game, required, _host, _home, _away in wave) for size in FIELD_SIZE_ORDER},
+            'selected_layout': layout_label(configuration),
+            'recommended_action': 'Reduce overlapping games or select an allowed field layout for this kickoff.',
+            'summary': 'Simultaneous field-size demand exceeds every allowed physical layout at this host and kickoff.',
+        })
     for (host_id, game_date, kickoff), mismatched in layout_groups.items():
         all_wave = [row for row in rows if row[0].host_location_id == host_id and row[0].game_date == game_date and row[0].kickoff_time == kickoff]
         required = [_required_field_type_for_division(row[6]) for row in all_wave]

@@ -16,6 +16,41 @@ def _capacity(configuration):
     return {size: int(getattr(configuration, f'{size.lower()}_field_count', 0) or 0) for size in SIZES}
 
 
+def validate_timeslot_demands(demands, available_layouts):
+    """Validate physical capacity independently for every host kickoff wave.
+
+    ``demands`` maps ``(date, host, kickoff)`` to size counts and
+    ``available_layouts`` maps the same key to one or more allowed capacity
+    dictionaries.  A later kickoff is deliberately a different key, so the
+    same physical field can be reused.  A wave is valid only when one complete
+    allowed layout can accommodate its simultaneous combination.
+    """
+    shortages = []
+    peak = {size: 0 for size in SIZES}
+    for key, raw_demand in demands.items():
+        demand = {size: int(raw_demand.get(size, 0) or 0) for size in SIZES}
+        for size in SIZES:
+            peak[size] = max(peak[size], demand[size])
+        layouts = [
+            {size: int(layout.get(size, 0) or 0) for size in SIZES}
+            for layout in available_layouts.get(key, [])
+        ]
+        if any(all(layout[size] >= demand[size] for size in SIZES) for layout in layouts):
+            continue
+        best = max(layouts, key=lambda layout: sum(min(layout[size], demand[size]) for size in SIZES), default={size: 0 for size in SIZES})
+        individually_supported = bool(layouts) and all(
+            max((layout[size] for layout in layouts), default=0) >= demand[size] for size in SIZES
+        )
+        shortages.append({
+            'key': key,
+            'demand': demand,
+            'available_layouts': layouts,
+            'shortage_by_size': {size: max(demand[size] - best.get(size, 0), 0) for size in SIZES},
+            'unsupported_combination': individually_supported,
+        })
+    return {'valid': not shortages, 'peak_by_size': peak, 'shortages': shortages}
+
+
 def select_supported_layout(db, host_id, game_date, kickoff, required_sizes, *, persist=False):
     """Select one explicitly configured layout satisfying the whole wave.
 
@@ -30,7 +65,10 @@ def select_supported_layout(db, host_id, game_date, kickoff, required_sizes, *, 
         host_location_id=host_id, is_active=True,
     ).order_by(HostLocationConfiguration.configuration_name).all()
     supported = [configuration for configuration in configurations
-                 if all(_capacity(configuration)[size] >= count for size, count in demand.items())]
+                 if validate_timeslot_demands(
+                     {(game_date, host_id, kickoff): demand},
+                     {(game_date, host_id, kickoff): [_capacity(configuration)]},
+                 )['valid']]
     if existing:
         selected = next((item for item in configurations if item.id == existing.configuration_id), None)
         return existing, selected, bool(selected and selected in supported)
