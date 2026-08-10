@@ -7,7 +7,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN
+from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN
 from app.database import Base, get_db
 from app.main import app
 from app.models import FieldConfigurationOption, HostLocation, Organization, PhysicalFieldArea, Role, Season, User, Week, HostingAvailability
@@ -28,6 +28,7 @@ class HostingAvailabilityCommunityPermissionsTest(unittest.TestCase):
 
         self.league_role = Role(id=uuid.uuid4(), name=ROLE_LEAGUE_ADMIN, is_active=True)
         self.community_role = Role(id=uuid.uuid4(), name=ROLE_COMMUNITY_ADMIN, is_active=True)
+        self.scheduling_role = Role(id=uuid.uuid4(), name=ROLE_SCHEDULING_ADMIN, is_active=True)
         self.org = Organization(id=uuid.uuid4(), name='Westosha', is_active=True)
         self.other_org = Organization(id=uuid.uuid4(), name='Lake County', is_active=True)
         self.season = Season(id=uuid.uuid4(), name='Fall 2026', start_date=date(2026, 9, 1), end_date=date(2026, 11, 1), is_active=True)
@@ -49,10 +50,11 @@ class HostingAvailabilityCommunityPermissionsTest(unittest.TestCase):
         self.community_user = User(id=uuid.uuid4(), email='westosha@example.com', full_name='Westosha Admin', password_hash=hash_password('Password123!'), role_id=self.community_role.id, organization_id=self.org.id, is_active=True)
         self.other_user = User(id=uuid.uuid4(), email='lake@example.com', full_name='Lake Admin', password_hash=hash_password('Password123!'), role_id=self.community_role.id, organization_id=self.other_org.id, is_active=True)
         self.league_user = User(id=uuid.uuid4(), email='league@example.com', full_name='League Admin', password_hash=hash_password('Password123!'), role_id=self.league_role.id, organization_id=None, is_active=True)
+        self.scheduling_user = User(id=uuid.uuid4(), email='scheduling@example.com', full_name='Scheduling Admin', password_hash=hash_password('Password123!'), role_id=self.scheduling_role.id, organization_id=None, is_active=True)
         self.db.add_all([
-            self.league_role, self.community_role, self.org, self.other_org, self.season, self.week,
+            self.league_role, self.community_role, self.scheduling_role, self.org, self.other_org, self.season, self.week,
             self.host, self.other_host, self.area, self.other_area, self.option, self.other_option,
-            self.community_user, self.other_user, self.league_user,
+            self.community_user, self.other_user, self.league_user, self.scheduling_user,
         ])
         self.db.commit()
 
@@ -113,6 +115,7 @@ class HostingAvailabilityCommunityPermissionsTest(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()['detail']['code'], 'COMMUNITY_WRITE_FORBIDDEN')
+        self.assertEqual(response.json()['detail']['message'], "You may view this community's hosting availability but cannot modify it.")
         self.db.expire_all()
         self.assertEqual(self.db.query(HostingAvailability).count(), 0)
 
@@ -169,6 +172,15 @@ class HostingAvailabilityCommunityPermissionsTest(unittest.TestCase):
                 (str(self.other_org.id), str(self.other_host.id)),
             },
         )
+
+    def test_scheduling_admin_retains_shared_planning_matrix_access(self):
+        response = self.client.get(
+            f'/api/host-availability-matrix?season_id={self.season.id}',
+            headers=self._token(self.scheduling_user.id),
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn('summaries', response.json())
+        self.assertIn('status_options', response.json())
 
     def test_community_admin_cannot_use_another_organizations_field_area(self):
         response = self.client.post(

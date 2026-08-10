@@ -21,4 +21,10 @@ assert.match(matrix, /VIEW ONLY/);
 assert.match(matrix, /League blackout/);
 assert.match(matrix, /canManageCommunityHosting\(user, row\.community_id\)/);
 assert.doesNotMatch(matrix, /Generate Suggested Host Plan|Run Auto-Schedule|Lock Selected Week/);
+assert.doesNotMatch(matrix, /Hosting summary|Readiness definitions|Operations Dashboard/);
+assert.doesNotMatch(matrix, /Projected Games|Utilization|Capacity diagnostics|READY|PARTIAL|NOT READY/);
+
+const adminMatrix = fs.readFileSync(new URL('../src/components/HostAvailabilityMatrix.tsx', import.meta.url), 'utf8');
+assert.match(adminMatrix, /Generate Suggested Host Plan/);
+assert.match(adminMatrix, /summaries/);
 console.log('hosting availability league view static checks passed');
