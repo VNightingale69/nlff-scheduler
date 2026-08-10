@@ -24,10 +24,15 @@ for (const removedCell of ['game_status_label', 'public_notes', 'coach_contacts_
 assert.match(publicSchedule, /onClick=\{\(\) => window\.print\(\)\}>Print \/ PDF/);
 assert.equal(publicSchedule.match(/<table\b/g)?.length, 1, 'print and screen must share one public table');
 
-// Longer values receive explicit additional width without leaving space for removed columns.
+// The public page uses the available desktop width while preserving tablet overflow.
+assert.match(publicSchedule, /w-\[96%\] max-w-\[1600px\]/);
+assert.match(table, /w-full min-w-\[1180px\]/);
+assert.doesNotMatch(table, /text-xs/);
+assert.match(table, /text-\[15px\]/);
+
+// Team names receive the largest share without leaving space for removed columns.
 assert.equal(table.match(/<col className=/g)?.length, 8);
-assert.equal(table.match(/w-\[17%\]/g)?.length, 2);
-assert.match(table, /min-w-\[720px\]/);
+assert.equal(table.match(/w-\[19%\]/g)?.length, 2);
 
 // The change is public-only: administrative schedule and score tools retain useful fields.
 assert.match(scoreManagement, /Home Score/);
