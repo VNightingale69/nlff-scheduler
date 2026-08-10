@@ -10,5 +10,8 @@ assert.match(page, /title=\{currentIssue\.scheduled_game_id/, 'UUID remains avai
 assert.match(page, /key=\{currentIssue\.scheduled_game_id/, 'UUID remains available for row identity');
 assert.match(helper, /`\$\{home\} vs \$\{away\}`/, 'matchups use Home Team vs Away Team');
 assert.match(helper, /'Schedule-level check'/, 'diagnostics without a game use a schedule-level label');
+assert.match(page, /Division \/ Required Size/, 'blocking issues expose division and required physical size');
+assert.match(page, /Current Layout/, 'blocking issues expose the active physical layout');
+assert.match(page, /currentIssue\.reason \|\| currentIssue\.summary/, 'blocking issues expose the exact invalidity reason');
 
 console.log('schedule management validation display checks passed');

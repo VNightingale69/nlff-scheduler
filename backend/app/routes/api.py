@@ -8548,24 +8548,27 @@ def _build_hosting_rotation_readiness(db: Session) -> list[dict[str, object]]:
     games_by_date_org: dict[tuple[date, uuid.UUID], int] = {}
     games_by_date_host: dict[tuple[date, uuid.UUID], int] = {}
     generated_host_locations_by_date_org: dict[tuple[date, uuid.UUID], dict[uuid.UUID, str]] = {}
-    scheduled_rows = db.query(GameSlot.slot_date, HostLocation.organization_id, func.count(Game.id)).select_from(Game).join(
-        GameSlot, GameSlot.assigned_game_id == Game.id
-    ).join(HostLocation, HostLocation.id == GameSlot.host_location_id).join(Game.status).filter(
+    # Saved games, rather than generated slots, are authoritative after a
+    # schedule has been persisted.  A canonical/manual assignment does not
+    # necessarily retain an assigned GameSlot relationship.
+    scheduled_rows = db.query(Game.game_date, HostLocation.organization_id, func.count(Game.id)).select_from(Game).join(
+        HostLocation, HostLocation.id == Game.host_location_id
+    ).join(Game.status).filter(
         GameStatus.code == 'SCHEDULED',
         GameStatus.is_active.is_(True),
         HostLocation.organization_id.isnot(None),
-        GameSlot.slot_date.isnot(None),
-    ).group_by(GameSlot.slot_date, HostLocation.organization_id).all()
+        Game.game_date.isnot(None),
+    ).group_by(Game.game_date, HostLocation.organization_id).all()
     for slot_date, org_id, count in scheduled_rows:
         selected_by_date.setdefault(slot_date, set()).add(org_id)
         games_by_date_org[(slot_date, org_id)] = int(count or 0)
-    scheduled_host_rows = db.query(GameSlot.slot_date, HostLocation.id, func.count(Game.id)).select_from(Game).join(
-        GameSlot, GameSlot.assigned_game_id == Game.id
-    ).join(HostLocation, HostLocation.id == GameSlot.host_location_id).join(Game.status).filter(
+    scheduled_host_rows = db.query(Game.game_date, HostLocation.id, func.count(Game.id)).select_from(Game).join(
+        HostLocation, HostLocation.id == Game.host_location_id
+    ).join(Game.status).filter(
         GameStatus.code == 'SCHEDULED',
         GameStatus.is_active.is_(True),
-        GameSlot.slot_date.isnot(None),
-    ).group_by(GameSlot.slot_date, HostLocation.id).all()
+        Game.game_date.isnot(None),
+    ).group_by(Game.game_date, HostLocation.id).all()
     for slot_date, host_id, count in scheduled_host_rows:
         if slot_date and host_id:
             games_by_date_host[(slot_date, host_id)] = int(count or 0)
@@ -8696,6 +8699,15 @@ def _build_hosting_rotation_readiness(db: Session) -> list[dict[str, object]]:
             else:
                 item['reason_selected_or_skipped'] = 'skipped: no scheduled games found on this host date'
 
+        readiness_week = db.query(Week).filter(
+            or_(Week.primary_game_date == host_date, Week.start_date == host_date),
+        ).order_by(Week.week_number).first()
+        readiness_season = db.get(Season, readiness_week.season_id) if readiness_week else None
+        saved_assignment_readiness = (
+            _week_publish_readiness(db, readiness_season, [readiness_week])
+            if readiness_week and readiness_season and total_games_on_date else None
+        )
+
         rows.append({
             'diagnostic_label': 'Weekly Community Host Plan',
             'week': f"Week {weeks_by_date.get(host_date)}" if weeks_by_date.get(host_date) is not None else str(host_date),
@@ -8707,6 +8719,14 @@ def _build_hosting_rotation_readiness(db: Session) -> list[dict[str, object]]:
                 org_names.get(org_id, 'Unknown community'): capacity_by_size_by_org.get(org_id, {})
                 for org_id in selected
             },
+            'capacity_diagnostic_label': 'Generated game-slot capacity',
+            'host_capacity_status': 'VALID' if selected and total_games_on_date <= sum(capacity_by_org.get(org_id, 0) for org_id in selected) else 'INVALID',
+            'saved_schedule_assignment_status': (
+                'VALID' if saved_assignment_readiness and not saved_assignment_readiness['blocking_errors']
+                else f"{len(saved_assignment_readiness['blocking_errors'])} blocking issue(s)" if saved_assignment_readiness
+                else 'NOT SAVED'
+            ),
+            'saved_schedule_blocking_issues': saved_assignment_readiness['blocking_errors'] if saved_assignment_readiness else [],
             'locations_used_under_each_community': selected_host_locations_by_community,
             'reason_additional_community_needed': (
                 'Primary selected community lacked enough aggregate capacity, so the next rotation community was added.'
@@ -15913,6 +15933,8 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
     for game, _slot, field_instance, host, home, away, division, _org, _status in rows:
         canonical_field = getattr(game, 'field', None)
         def error(code: str, message: str):
+            issue_required_type = _required_field_type_for_division(division)
+            issue_configuration = getattr(getattr(game, 'timeslot_configuration', None), 'configuration', None)
             errors.append({
                 'issue_code': code,
                 'scheduled_game_id': str(game.id),
@@ -15925,7 +15947,16 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
                 'time': game.kickoff_time.isoformat() if game.kickoff_time else None,
                 'location': getattr(host, 'name', None),
                 'field': getattr(canonical_field, 'name', None) or getattr(field_instance, 'field_name', None) or 'Not Assigned',
-                'recommended_action': 'Assign a field in Manual Schedule Builder.' if code == 'MISSING_FIELD' else 'Correct the game in Manual Schedule Builder.',
+                'division': f'{getattr(division, "division_group", "") or ""} {getattr(division, "name", "") or ""}'.strip(),
+                'required_field_type': issue_required_type,
+                'selected_layout': layout_label(issue_configuration),
+                'reason': message,
+                'recommended_action': (
+                    'Assign a field in Manual Schedule Builder.' if code == 'MISSING_FIELD'
+                    else f'Reassign to an active {issue_required_type.title()} field in Manual Schedule Builder.'
+                    if code == 'INVALID_FIELD_FOR_ACTIVE_LAYOUT' and issue_required_type
+                    else 'Correct the game in Manual Schedule Builder.'
+                ),
                 'summary': message,
             })
         if not home or not away: error('INVALID_TEAM', 'Both teams must exist.')
@@ -15939,6 +15970,12 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
         # manually assigned logical fields do not require a generated instance.
         if not game.field_id or not canonical_field:
             error('MISSING_FIELD', 'A canonical field assignment is required.')
+        elif (
+            not bool(getattr(canonical_field, 'is_active', True))
+            or getattr(canonical_field, 'deleted_at', None) is not None
+            or getattr(canonical_field, 'host_location_id', game.host_location_id) != game.host_location_id
+        ):
+            error('INVALID_FIELD_FOR_ACTIVE_LAYOUT', 'The assigned field is retired, inactive, or belongs to a different host location.')
         matchup = (game.week_id, game.home_team_id, game.away_team_id, game.game_date, game.kickoff_time)
         reverse = (game.week_id, game.away_team_id, game.home_team_id, game.game_date, game.kickoff_time)
         if matchup in matchups or reverse in matchups: error('DUPLICATE_GAME', 'This matchup is duplicated.')
@@ -15953,6 +15990,28 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
         field_times[key] = game.id
         canonical_type = _normalize_field_size(getattr(canonical_field, 'layout_type', None) or getattr(field_instance, 'field_type', None))
         required_type = _required_field_type_for_division(division)
+        saved_timeslot = getattr(game, 'timeslot_configuration', None)
+        if saved_timeslot and (
+            getattr(saved_timeslot, 'host_location_id', None) != game.host_location_id
+            or getattr(saved_timeslot, 'configuration_date', None) != game.game_date
+            or getattr(saved_timeslot, 'kickoff_time', None) != game.kickoff_time
+            or not bool(getattr(getattr(saved_timeslot, 'configuration', None), 'is_active', False))
+        ):
+            errors.append({
+                'issue_code': 'INVALID_FIELD_FOR_ACTIVE_LAYOUT',
+                'scheduled_game_id': str(game.id),
+                'scheduled_game_display_name': _format_scheduled_game_display_name(getattr(home, 'name', None), getattr(away, 'name', None)),
+                'division': f'{getattr(division, "division_group", "") or ""} {getattr(division, "name", "") or ""}'.strip(),
+                'date': game.game_date.isoformat() if game.game_date else None,
+                'time': game.kickoff_time.isoformat() if game.kickoff_time else None,
+                'location': getattr(host, 'name', None),
+                'field': getattr(canonical_field, 'name', None) or 'Not Assigned',
+                'required_field_type': required_type,
+                'selected_layout': layout_label(getattr(saved_timeslot, 'configuration', None)),
+                'reason': 'The saved field-layout reference does not match the current host, date, kickoff, or an active configuration.',
+                'recommended_action': f'Reassign to an active {required_type.title()} field in Manual Schedule Builder.' if required_type else 'Reassign to a field in the active layout.',
+                'summary': 'Saved game references a stale or inactive facility layout.',
+            })
         if host and (host.surface_type or 'GRASS_FIELD') == 'TURF_STADIUM' and required_type:
             turf_capacity_groups.setdefault((game.host_location_id, game.game_date, game.kickoff_time), []).append(
                 (game, required_type, host, home, away)
