@@ -10,5 +10,7 @@ assert.match(source, /Administrator diagnostics/);
 assert.match(source, /HTTP status/);
 assert.match(source, /\{!error && loaded \? <>/,
   'empty-data sections must not render after an API failure');
+assert.match(source, /Generated game-slot capacity/, 'planning capacity is explicitly distinguished from physical capacity');
+assert.match(source, /Saved schedule assignments:/, 'host plan reports authoritative saved-assignment readiness separately');
 
 console.log('schedule readiness success/error rendering checks passed');

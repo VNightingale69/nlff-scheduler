@@ -211,6 +211,9 @@ export default function ScheduleManagementPage() {
                   <th className='border p-2'>Time</th>
                   <th className='border p-2'>Location</th>
                   <th className='border p-2'>Field</th>
+                  <th className='border p-2'>Division / Required Size</th>
+                  <th className='border p-2'>Current Layout</th>
+                  <th className='border p-2'>Why Invalid</th>
                   <th className='border p-2'>Recommended Action</th>
                 </tr>
               </thead>
@@ -228,6 +231,9 @@ export default function ScheduleManagementPage() {
                       <td className='border p-2'>{currentIssue.time ? formatDisplayTime(currentIssue.time) : '—'}</td>
                       <td className='border p-2'>{currentIssue.location || '—'}</td>
                       <td className='border p-2'>{currentIssue.field || '—'}</td>
+                      <td className='border p-2'>{currentIssue.division || '—'}{currentIssue.required_field_type ? ` / ${currentIssue.required_field_type}` : ''}</td>
+                      <td className='border p-2'>{currentIssue.selected_layout || currentIssue.current_layout || '—'}</td>
+                      <td className='border p-2'>{currentIssue.reason || currentIssue.summary || '—'}</td>
                       <td className='border p-2'>{currentIssue.recommended_action || 'Open Manual Schedule Builder and correct the affected current saved scheduled game.'}</td>
                     </tr>
                   );
