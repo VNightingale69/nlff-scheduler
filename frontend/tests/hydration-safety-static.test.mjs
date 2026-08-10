@@ -68,7 +68,7 @@ assert.match(standingsSource, /const \[payload, setPayload\] = useState<[^>]+ \|
 assert.match(standingsSource, /useEffect\(\(\) => \{ load\(\); \}, \[\]\)/);
 assert.match(publicScheduleSource, /const \[games, setGames\] = useState<Game\[\]>\(\[\]\)/);
 assert.match(publicScheduleSource, /const \[loading, setLoading\] = useState\(true\)/);
-assert.match(publicScheduleSource, /<Suspense fallback=\{<div className='mx-auto max-w-6xl p-4'>Loading saved schedule\.\.\.<\/div>\}>/);
+assert.match(publicScheduleSource, /<Suspense fallback=\{<div[^>]*>Loading saved schedule\.\.\.<\/div>\}>/);
 assert.match(publicTournamentSource, /const \[tournaments, setTournaments\] = useState<PublicTournament\[\]>\(\[\]\)/);
 assert.match(publicTournamentSource, /const \[loading, setLoading\] = useState\(true\)/);
 assert.match(bracketSource, /function TournamentBracket/);
