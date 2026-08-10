@@ -677,6 +677,7 @@ class WeeklyFieldDemandRow(BaseModel):
     available_capacity_by_community: list[dict] = []
     required_by_size: dict[str, int] = {}
     eligible_by_size: dict[str, int] = {}
+    peak_simultaneous_by_size: dict[str, int] = {}
     status: str = 'READY'
     readiness_message: str | None = None
     failed_field_size_requirements: list[dict] = []
