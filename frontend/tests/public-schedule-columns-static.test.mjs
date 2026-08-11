@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 const publicSchedule = readFileSync(new URL('../src/app/schedule/page.tsx', import.meta.url), 'utf8');
+const globalStyles = readFileSync(new URL('../src/app/globals.css', import.meta.url), 'utf8');
 const scoreManagement = readFileSync(new URL('../src/app/(dashboard)/admin/scores/page.tsx', import.meta.url), 'utf8');
 const manualSchedule = readFileSync(new URL('../src/app/(dashboard)/admin/manual-schedule-builder/page.tsx', import.meta.url), 'utf8');
 
@@ -33,6 +34,17 @@ assert.match(table, /text-\[15px\]/);
 // Team names receive the largest share without leaving space for removed columns.
 assert.equal(table.match(/<col className=/g)?.length, 8);
 assert.equal(table.match(/w-\[19%\]/g)?.length, 2);
+
+// Printing removes the desktop width constraints and assigns extra room to fields and teams.
+assert.match(publicSchedule, /schedule-table-wrapper overflow-x-auto/);
+assert.match(table, /schedule-table w-full min-w-\[1180px\]/);
+assert.match(globalStyles, /@page\s*{\s*size: landscape;\s*margin: 0\.3in 0\.25in;/);
+assert.match(globalStyles, /\.public-schedule,\s*\.public-schedule-header,\s*\.schedule-table-wrapper\s*{[\s\S]*?width: 100% !important;[\s\S]*?max-width: none !important;/);
+assert.match(globalStyles, /\.schedule-table\s*{[\s\S]*?width: 100% !important;[\s\S]*?min-width: 0 !important;[\s\S]*?table-layout: auto !important;/);
+assert.match(globalStyles, /\.schedule-table col:nth-child\(4\)\s*{ width: 18% !important; }/);
+assert.match(globalStyles, /\.schedule-table col:nth-child\(6\),\s*\.schedule-table col:nth-child\(7\)\s*{ width: 18% !important; }/);
+assert.match(globalStyles, /\.schedule-table thead\s*{\s*display: table-header-group;/);
+assert.match(globalStyles, /\.schedule-table tr\s*{[\s\S]*?break-inside: avoid;[\s\S]*?page-break-inside: avoid;/);
 
 // The change is public-only: administrative schedule and score tools retain useful fields.
 assert.match(scoreManagement, /Home Score/);
