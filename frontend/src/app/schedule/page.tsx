@@ -71,7 +71,7 @@ function HostingSchedule({ games }: { games: Game[] }) {
   const dates = useMemo(() => Array.from(new Set(games.map((game) => game.game_date))).sort(), [games]);
 
   return <div className='hosting-view space-y-10'>
-    <div className='flex flex-wrap items-center gap-3 text-sm' aria-label='Field size legend'>
+    <div className='hosting-field-legend flex flex-wrap items-center gap-3 text-sm' aria-label='Field size legend'>
       <span className='font-semibold text-slate-700'>Field legend:</span>
       {['SMALL', 'MEDIUM', 'LARGE', 'UNASSIGNED'].map((type) => <span key={type} className={`rounded border px-3 py-1.5 ${fieldTone(type)}`}>{type === 'UNASSIGNED' ? 'No Game / Unassigned' : fieldTypeLabel(type)}</span>)}
     </div>
@@ -91,9 +91,10 @@ function HostingSchedule({ games }: { games: Game[] }) {
       const totalFields = locations.reduce((sum, location) => sum + location.fields.length, 0);
 
       return <section key={date} className='hosting-date-section space-y-3'>
-        <div><h2 className='text-xl font-bold'>{title}</h2><p className='text-base font-medium text-slate-600'>{formatDisplayDate(date)}</p></div>
+        <div className='hosting-date-heading'><h2 className='text-xl font-bold'>{title}</h2><p className='text-base font-medium text-slate-600'>{formatDisplayDate(date)}</p></div>
         <div className='hosting-grid-scroll overflow-x-auto rounded border bg-white'>
           <table className='hosting-grid w-full border-separate border-spacing-0 text-sm leading-snug' style={{ minWidth: `${Math.max(900, 130 + totalFields * 205)}px` }}>
+            <colgroup><col className='hosting-time-column' />{Array.from({ length: totalFields }, (_, index) => <col key={index} className='hosting-field-column' />)}</colgroup>
             <thead>
               <tr>
                 <th rowSpan={2} scope='col' className='sticky left-0 top-0 z-30 w-[130px] min-w-[130px] border-b border-r bg-slate-200 px-3 py-3 text-left'>Time</th>
@@ -115,10 +116,10 @@ function HostingSchedule({ games }: { games: Game[] }) {
                   const game = dateGames.find((item) => item.host_location_name === location.name && item.kickoff_time === time && gameField(item).key === field.key);
                   return <td key={`${location.name}-${field.key}`} className={`${locationAccent(locationIndex)} ${locationEdge(fieldIndex, location.fields.length)} location-schedule-cell break-words border-b p-3 align-top ${game ? fieldTone(field.type) : 'bg-white text-slate-400'}`}>
                     {game ? <div className='hosting-game min-h-[105px]'>
-                      <div className='mb-2 font-bold text-slate-700'>{game.division_name}</div>
-                      <div className='flex items-center gap-2 font-medium'><CommunityLogo src={game.home_team_logo_url} name={game.home_team_community_name || game.home_team_name} altText={game.home_team_logo_alt_text} size={24} /><span>{game.home_team_name}</span></div>
-                      <div className='my-1 pl-8 text-xs font-semibold uppercase text-slate-500'>vs</div>
-                      <div className='flex items-center gap-2 font-medium'><CommunityLogo src={game.away_team_logo_url} name={game.away_team_community_name || game.away_team_name} altText={game.away_team_logo_alt_text} size={24} /><span>{game.away_team_name}</span></div>
+                      <div className='hosting-division mb-2 font-bold text-slate-700'>{game.division_name}</div>
+                      <div className='hosting-team flex items-center gap-2 font-medium'><CommunityLogo src={game.home_team_logo_url} name={game.home_team_community_name || game.home_team_name} altText={game.home_team_logo_alt_text} size={24} /><span>{game.home_team_name}</span></div>
+                      <div className='hosting-vs my-1 pl-8 text-xs font-semibold uppercase text-slate-500'>vs</div>
+                      <div className='hosting-team flex items-center gap-2 font-medium'><CommunityLogo src={game.away_team_logo_url} name={game.away_team_community_name || game.away_team_name} altText={game.away_team_logo_alt_text} size={24} /><span>{game.away_team_name}</span></div>
                     </div> : <span aria-label='No game'>—</span>}
                   </td>;
                 }))}
@@ -126,7 +127,7 @@ function HostingSchedule({ games }: { games: Game[] }) {
             </tbody>
           </table>
         </div>
-        <p className='text-sm text-slate-600'><strong>{dateGames.length}</strong> games across <strong>{totalFields}</strong> fields at <strong>{locations.length}</strong> host {locations.length === 1 ? 'location' : 'locations'}.</p>
+        <p className='hosting-summary text-sm text-slate-600'><strong>{dateGames.length}</strong> games across <strong>{totalFields}</strong> fields at <strong>{locations.length}</strong> host {locations.length === 1 ? 'location' : 'locations'}.</p>
       </section>;
     })}
   </div>;
@@ -223,7 +224,7 @@ function PublicScheduleContent() {
   };
 
   return (
-    <div className='public-schedule mx-auto w-[96%] max-w-[1800px] space-y-5 px-6 py-5'>
+    <div className={`public-schedule ${view === 'hosting' ? 'hosting-view-active' : 'list-view-active'} mx-auto w-[96%] max-w-[1800px] space-y-5 px-6 py-5`}>
       <div className='public-schedule-header flex flex-wrap items-start justify-between gap-3'><div><h1 className='text-[26px] font-bold leading-tight'>{APP_SCHEDULE_NAME}</h1><p className='mt-1 text-base font-medium text-slate-600'>{APP_SUBTITLE}</p></div><div className='public-navigation flex flex-wrap gap-2'><Link className='inline-flex h-11 items-center rounded border px-4 text-[15px] font-medium hover:bg-slate-50' href='/tournaments'>Tournament Bracket</Link><Link className='inline-flex h-11 items-center rounded border px-4 text-[15px] font-medium hover:bg-slate-50' href='/rulebook'>Rulebook</Link></div></div>
 
       <div className='schedule-filters grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5'>

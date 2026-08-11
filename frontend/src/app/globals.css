@@ -41,6 +41,11 @@ body {
     margin: 0.3in 0.25in;
   }
 
+  @page hosting-view {
+    size: landscape;
+    margin: 0.2in 0.15in;
+  }
+
   .public-schedule,
   .public-schedule-header,
   .schedule-table-wrapper {
@@ -61,6 +66,11 @@ body {
   .schedule-filters,
   .schedule-actions,
   .schedule-view-toggle {
+    display: none !important;
+  }
+
+  /* Only Hosting View suppresses the branded heading; List View keeps it. */
+  .public-schedule.hosting-view-active .public-schedule-header {
     display: none !important;
   }
 
@@ -122,12 +132,65 @@ body {
     overflow: visible !important;
     overflow-x: visible !important;
     overflow-y: visible !important;
-    width: auto !important;
+    width: 100% !important;
     max-width: none !important;
     height: auto !important;
     max-height: none !important;
     contain: none !important;
     clip: auto !important;
+  }
+
+  .public-schedule.hosting-view-active {
+    page: hosting-view;
+    min-height: 0 !important;
+    height: auto !important;
+    width: 100% !important;
+    max-width: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  .hosting-view {
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+
+  .hosting-field-legend {
+    margin: 0 0 8px !important;
+    gap: 4px 8px !important;
+    font-size: 7.5pt !important;
+    line-height: 1.1 !important;
+  }
+
+  .hosting-field-legend > span {
+    padding: 2px 5px !important;
+  }
+
+  .hosting-date-section {
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+
+  .hosting-date-heading {
+    margin: 0 0 4px !important;
+  }
+
+  .hosting-date-heading h2 {
+    font-size: 11pt !important;
+    line-height: 1.1 !important;
+  }
+
+  .hosting-date-heading p {
+    margin: 1px 0 0 !important;
+    font-size: 8pt !important;
+    line-height: 1.1 !important;
+  }
+
+  .hosting-grid-scroll {
+    margin: 0 !important;
+    padding: 0 !important;
   }
 
   .hosting-grid {
@@ -139,8 +202,16 @@ body {
     line-height: 1.15 !important;
   }
 
+  .hosting-grid .hosting-time-column { width: 0.55in !important; }
+  .hosting-grid .hosting-field-column { width: auto !important; min-width: 0 !important; }
+
   .hosting-grid thead {
     display: table-header-group;
+  }
+
+  .hosting-grid tr {
+    break-inside: avoid;
+    page-break-inside: avoid;
   }
 
   .hosting-grid th,
@@ -152,7 +223,26 @@ body {
   }
 
   .hosting-grid th:first-child {
-    width: 0.65in !important;
+    width: 0.55in !important;
+    font-size: 7.5pt !important;
+    white-space: nowrap !important;
+  }
+
+  .hosting-grid .location-group-header {
+    border-width: 2px 2px 1px !important;
+    font-size: 10pt !important;
+    line-height: 1.05 !important;
+  }
+
+  .hosting-grid .location-group-header span:first-child { font-size: 10pt !important; }
+  .hosting-grid .location-group-header span:last-child { font-size: 7pt !important; }
+
+  .hosting-grid thead tr:nth-child(2) th {
+    font-size: 7pt !important;
+    line-height: 1.1 !important;
+    white-space: normal !important;
+    overflow-wrap: normal !important;
+    word-break: normal !important;
   }
 
   .hosting-game {
@@ -165,5 +255,36 @@ body {
   .hosting-game > div {
     margin-top: 1px !important;
     margin-bottom: 1px !important;
+  }
+
+  .hosting-division { font-size: 7pt !important; }
+  .hosting-team {
+    gap: 3px !important;
+    align-items: center !important;
+    font-size: 7pt !important;
+    line-height: 1.1 !important;
+    white-space: normal !important;
+    overflow-wrap: normal !important;
+    word-break: normal !important;
+  }
+
+  .hosting-team img,
+  .hosting-team [data-community-logo='fallback'] {
+    width: 16px !important;
+    height: 16px !important;
+    min-width: 16px !important;
+  }
+
+  .hosting-vs {
+    padding-left: 19px !important;
+    font-size: 6pt !important;
+    line-height: 1 !important;
+  }
+
+  .hosting-summary {
+    margin: 4px 0 0 !important;
+    padding: 0 !important;
+    font-size: 7.5pt !important;
+    line-height: 1.1 !important;
   }
 }
