@@ -31,6 +31,11 @@ assert.match(table, /w-full min-w-\[1180px\]/);
 assert.doesNotMatch(table, /text-xs/);
 assert.match(table, /text-\[15px\]/);
 
+// Headers, data, and each team logo/name unit remain centered on screen.
+assert.match(table, /<thead className='[^']*text-center/);
+assert.match(globalStyles, /\.public-schedule \.schedule-table th,\s*\.public-schedule \.schedule-table td\s*{\s*text-align: center;\s*vertical-align: middle;/);
+assert.equal(table.match(/team-content flex items-center justify-center gap-2 text-center/g)?.length, 2);
+
 // Team names receive the largest share without leaving space for removed columns.
 assert.equal(table.match(/<col className=/g)?.length, 8);
 assert.equal(table.match(/w-\[19%\]/g)?.length, 2);
@@ -45,6 +50,8 @@ assert.match(globalStyles, /\.schedule-table col:nth-child\(4\)\s*{ width: 18% !
 assert.match(globalStyles, /\.schedule-table col:nth-child\(6\),\s*\.schedule-table col:nth-child\(7\)\s*{ width: 18% !important; }/);
 assert.match(globalStyles, /\.schedule-table thead\s*{\s*display: table-header-group;/);
 assert.match(globalStyles, /\.schedule-table tr\s*{[\s\S]*?break-inside: avoid;[\s\S]*?page-break-inside: avoid;/);
+assert.match(globalStyles, /\.schedule-table th,\s*\.schedule-table td\s*{[\s\S]*?text-align: center !important;[\s\S]*?vertical-align: middle !important;/);
+assert.match(globalStyles, /\.schedule-table \.team-content\s*{[\s\S]*?align-items: center !important;[\s\S]*?justify-content: center !important;[\s\S]*?text-align: center !important;/);
 
 // The change is public-only: administrative schedule and score tools retain useful fields.
 assert.match(scoreManagement, /Home Score/);

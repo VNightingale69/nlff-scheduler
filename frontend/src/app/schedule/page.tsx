@@ -275,7 +275,7 @@ function PublicScheduleContent() {
               <col className='w-[19%]' />
               <col className='w-[9%]' />
             </colgroup>
-            <thead className='bg-slate-100 text-left text-[15px] font-semibold'>
+            <thead className='bg-slate-100 text-center text-[15px] font-semibold'>
               <tr>
                 <th className='whitespace-nowrap px-3 py-3'>Date</th>
                 <th className='whitespace-nowrap px-3 py-3'>Time</th>
@@ -295,8 +295,8 @@ function PublicScheduleContent() {
                   <td className='whitespace-nowrap px-3 py-3'>{g.host_location_name}</td>
                   <td className='whitespace-nowrap px-3 py-3'>{g.field_name}</td>
                   <td className='whitespace-nowrap px-3 py-3'>{g.division_name}</td>
-                  <td className='team-cell px-3 py-3'><span className='team-content flex items-center gap-2'><CommunityLogo src={g.home_team_logo_url} name={g.home_team_community_name || g.home_team_name} altText={g.home_team_logo_alt_text} size={24} />{g.home_team_name}</span></td>
-                  <td className='team-cell px-3 py-3'><span className='team-content flex items-center gap-2'><CommunityLogo src={g.away_team_logo_url} name={g.away_team_community_name || g.away_team_name} altText={g.away_team_logo_alt_text} size={24} />{g.away_team_name}</span></td>
+                  <td className='team-cell px-3 py-3'><span className='team-content flex items-center justify-center gap-2 text-center'><CommunityLogo src={g.home_team_logo_url} name={g.home_team_community_name || g.home_team_name} altText={g.home_team_logo_alt_text} size={24} />{g.home_team_name}</span></td>
+                  <td className='team-cell px-3 py-3'><span className='team-content flex items-center justify-center gap-2 text-center'><CommunityLogo src={g.away_team_logo_url} name={g.away_team_community_name || g.away_team_name} altText={g.away_team_logo_alt_text} size={24} />{g.away_team_name}</span></td>
                   <td className='whitespace-nowrap px-3 py-3'>{g.game_type === 'REGULAR_SEASON' ? 'Regular Season' : g.game_type.replaceAll('_', ' ')}</td>
                 </tr>
               ))}

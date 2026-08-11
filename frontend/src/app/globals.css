@@ -29,6 +29,12 @@ body {
 .hosting-grid .location-boundary-end { border-right: 3px solid var(--location-border); }
 .hosting-grid tbody tr:last-child .location-schedule-cell { border-bottom: 3px solid var(--location-border); }
 
+.public-schedule .schedule-table th,
+.public-schedule .schedule-table td {
+  text-align: center;
+  vertical-align: middle;
+}
+
 @media print {
   @page {
     size: landscape;
@@ -93,6 +99,8 @@ body {
   .schedule-table th,
   .schedule-table td {
     padding: 4px 5px !important;
+    text-align: center !important;
+    vertical-align: middle !important;
   }
 
   .schedule-table .team-cell,
@@ -103,7 +111,9 @@ body {
   }
 
   .schedule-table .team-content {
-    align-items: flex-start !important;
+    align-items: center !important;
+    justify-content: center !important;
+    text-align: center !important;
   }
 
   .hosting-view,
