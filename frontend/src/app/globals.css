@@ -31,15 +31,24 @@ body {
 
 @media print {
   @page {
-    size: letter landscape;
-    margin: 0.3in;
+    size: landscape;
+    margin: 0.3in 0.25in;
   }
 
-  .public-schedule {
+  .public-schedule,
+  .public-schedule-header,
+  .schedule-table-wrapper {
     width: 100% !important;
     max-width: none !important;
+    margin-left: 0 !important;
+    margin-right: 0 !important;
+    padding-left: 0 !important;
+    padding-right: 0 !important;
+  }
+
+  .public-schedule,
+  .schedule-table-wrapper {
     overflow: visible !important;
-    padding: 0 !important;
   }
 
   .public-navigation,
@@ -51,6 +60,50 @@ body {
 
   .public-schedule-header {
     margin-bottom: 0.12in;
+  }
+
+  .schedule-table {
+    width: 100% !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    table-layout: auto !important;
+    font-size: 9pt !important;
+    line-height: 1.2 !important;
+  }
+
+  .schedule-table col:nth-child(1) { width: 9% !important; }
+  .schedule-table col:nth-child(2) { width: 8% !important; }
+  .schedule-table col:nth-child(3) { width: 13% !important; }
+  .schedule-table col:nth-child(4) { width: 18% !important; }
+  .schedule-table col:nth-child(5) { width: 7% !important; }
+  .schedule-table col:nth-child(6),
+  .schedule-table col:nth-child(7) { width: 18% !important; }
+  .schedule-table col:nth-child(8) { width: 9% !important; }
+
+  .schedule-table thead {
+    display: table-header-group;
+    font-size: 9.5pt !important;
+  }
+
+  .schedule-table tr {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  .schedule-table th,
+  .schedule-table td {
+    padding: 4px 5px !important;
+  }
+
+  .schedule-table .team-cell,
+  .schedule-table .team-content {
+    white-space: normal !important;
+    overflow-wrap: normal !important;
+    word-break: normal !important;
+  }
+
+  .schedule-table .team-content {
+    align-items: flex-start !important;
   }
 
   .hosting-view,

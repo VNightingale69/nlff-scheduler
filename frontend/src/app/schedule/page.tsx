@@ -263,8 +263,8 @@ function PublicScheduleContent() {
       {empty && <div className='rounded border p-4'>{message || (hasActiveFilters ? 'No games match the selected filters.' : 'No saved schedule is currently available.')}</div>}
       {!loading && games.length > 0 && view === 'hosting' && <HostingSchedule games={games} />}
       {!loading && games.length > 0 && view === 'list' && (
-        <div className='overflow-x-auto rounded border'>
-          <table data-view='list' className='w-full min-w-[1180px] table-fixed text-[15px] leading-snug'>
+        <div className='schedule-table-wrapper overflow-x-auto rounded border'>
+          <table data-view='list' className='schedule-table w-full min-w-[1180px] table-fixed text-[15px] leading-snug'>
             <colgroup>
               <col className='w-[10%]' />
               <col className='w-[8%]' />
@@ -295,8 +295,8 @@ function PublicScheduleContent() {
                   <td className='whitespace-nowrap px-3 py-3'>{g.host_location_name}</td>
                   <td className='whitespace-nowrap px-3 py-3'>{g.field_name}</td>
                   <td className='whitespace-nowrap px-3 py-3'>{g.division_name}</td>
-                  <td className='px-3 py-3'><span className='flex items-center gap-2'><CommunityLogo src={g.home_team_logo_url} name={g.home_team_community_name || g.home_team_name} altText={g.home_team_logo_alt_text} size={24} />{g.home_team_name}</span></td>
-                  <td className='px-3 py-3'><span className='flex items-center gap-2'><CommunityLogo src={g.away_team_logo_url} name={g.away_team_community_name || g.away_team_name} altText={g.away_team_logo_alt_text} size={24} />{g.away_team_name}</span></td>
+                  <td className='team-cell px-3 py-3'><span className='team-content flex items-center gap-2'><CommunityLogo src={g.home_team_logo_url} name={g.home_team_community_name || g.home_team_name} altText={g.home_team_logo_alt_text} size={24} />{g.home_team_name}</span></td>
+                  <td className='team-cell px-3 py-3'><span className='team-content flex items-center gap-2'><CommunityLogo src={g.away_team_logo_url} name={g.away_team_community_name || g.away_team_name} altText={g.away_team_logo_alt_text} size={24} />{g.away_team_name}</span></td>
                   <td className='whitespace-nowrap px-3 py-3'>{g.game_type === 'REGULAR_SEASON' ? 'Regular Season' : g.game_type.replaceAll('_', ' ')}</td>
                 </tr>
               ))}
