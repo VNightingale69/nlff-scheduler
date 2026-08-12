@@ -1,13 +1,71 @@
 import unittest
 import uuid
 from datetime import date, time
+from types import SimpleNamespace
 
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, func
+from sqlalchemy.pool import StaticPool
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.auth import get_current_user
 from app.database import Base
+from app.database import get_db
+from app.main import app
 from app.models import Division, Game, GameStatus, Organization, OrganizationDivisionParticipation, Season, Team, TurfWave, Week
 from app.routes.api import get_schedule_readiness
+
+
+class ScheduleReadinessAuthenticationTest(unittest.TestCase):
+    def setUp(self):
+        self.engine = create_engine(
+            'sqlite+pysqlite:///:memory:',
+            connect_args={'check_same_thread': False},
+            poolclass=StaticPool,
+            future=True,
+        )
+        Base.metadata.create_all(self.engine)
+        self.session_factory = sessionmaker(bind=self.engine)
+
+        def override_db():
+            db = self.session_factory()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        app.dependency_overrides[get_db] = override_db
+        self.client = TestClient(app)
+
+    def tearDown(self):
+        app.dependency_overrides.clear()
+        self.engine.dispose()
+
+    def test_unauthenticated_request_returns_401(self):
+        response = self.client.get('/api/schedule-readiness')
+
+        self.assertEqual(401, response.status_code)
+        self.assertEqual('Not authenticated', response.json()['detail'])
+
+    def test_authenticated_league_admin_receives_200(self):
+        app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(
+            role=SimpleNamespace(name='LEAGUE_ADMIN')
+        )
+
+        response = self.client.get('/api/schedule-readiness')
+
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertIn('rows', response.json())
+
+    def test_authenticated_community_admin_receives_403(self):
+        app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(
+            role=SimpleNamespace(name='COMMUNITY_ADMIN')
+        )
+
+        response = self.client.get('/api/schedule-readiness')
+
+        self.assertEqual(403, response.status_code)
+        self.assertEqual('Insufficient role', response.json()['detail'])
 
 
 class ScheduleReadinessTest(unittest.TestCase):
