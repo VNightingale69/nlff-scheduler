@@ -102,12 +102,27 @@ def validate_field_combination(db, host_id, field_ids):
     configurations = db.query(HostLocationConfiguration).filter_by(host_location_id=host_id, is_active=True).all()
     layouts = []
     for configuration in configurations:
-        members = {row.field_id for row in db.query(FieldConfigurationMember).filter_by(field_configuration_id=configuration.id)}
+        members = {
+            row.field_id
+            for row in db.query(FieldConfigurationMember)
+            .join(Field, Field.id == FieldConfigurationMember.field_id)
+            .filter(
+                FieldConfigurationMember.field_configuration_id == configuration.id,
+                Field.is_active.is_(True),
+                Field.deleted_at.is_(None),
+            )
+        }
         if members:
             layouts.append((configuration, members))
     if not layouts:
-        active = {row.id for row in db.query(Field.id).filter_by(host_location_id=host_id, is_active=True)
-                  if row.deleted_at is None}
+        active = {
+            row.id
+            for row in db.query(Field.id).filter(
+                Field.host_location_id == host_id,
+                Field.is_active.is_(True),
+                Field.deleted_at.is_(None),
+            )
+        }
         return used.issubset(active), [], active
     matching = [configuration for configuration, members in layouts if used.issubset(members)]
     return bool(matching), [configuration.configuration_name for configuration, _members in layouts], used
