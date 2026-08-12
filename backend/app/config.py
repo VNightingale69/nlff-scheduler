@@ -23,7 +23,19 @@ JWT_ALGORITHM = 'HS256'
 ADMIN_SEED_EMAIL = os.getenv('ADMIN_SEED_EMAIL', 'admin@example.com')
 ADMIN_SEED_PASSWORD = os.getenv('ADMIN_SEED_PASSWORD', 'ChangeMe123!')
 ADMIN_SEED_FULL_NAME = os.getenv('ADMIN_SEED_FULL_NAME', 'League Admin')
-CORS_ORIGINS = [origin.strip() for origin in os.getenv('CORS_ORIGINS', 'http://localhost:3000').split(',') if origin.strip()]
+def _cors_origins() -> list[str]:
+    origins = [
+        origin.strip().rstrip('/')
+        for origin in os.getenv('CORS_ORIGINS', 'http://localhost:3000').split(',')
+        if origin.strip()
+    ]
+    if '*' in origins:
+        raise RuntimeError('CORS_ORIGINS must list explicit origins because credentialed CORS is enabled.')
+    return origins
+
+
+CORS_ORIGINS = _cors_origins()
+LOG_HTTP_REQUESTS = os.getenv('LOG_HTTP_REQUESTS', 'false').strip().lower() in {'1', 'true', 'yes', 'on'}
 
 UPLOAD_STORAGE_DIR = os.getenv('UPLOAD_STORAGE_DIR', '/app/uploads' if _is_production_environment() else 'uploads')
 RULEBOOK_UPLOAD_DIR = os.getenv('RULEBOOK_UPLOAD_DIR', str(Path(UPLOAD_STORAGE_DIR) / 'rulebooks'))

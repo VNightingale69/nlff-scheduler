@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN
 from app.branding import APP_API_TITLE
-from app.config import ADMIN_SEED_EMAIL, ADMIN_SEED_FULL_NAME, ADMIN_SEED_PASSWORD, CORS_ORIGINS
+from app.config import ADMIN_SEED_EMAIL, ADMIN_SEED_FULL_NAME, ADMIN_SEED_PASSWORD, CORS_ORIGINS, LOG_HTTP_REQUESTS
 from app.database import get_db
 from app.models import Organization, Role, Season, User, Week
 from app.routes.api import ensure_league_defined_divisions, router as api_router, validate_upload_storage_on_startup
@@ -82,6 +82,22 @@ app.add_middleware(
     allow_methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allow_headers=['*'],
 )
+
+
+@app.middleware('http')
+async def log_http_request_diagnostics(request: Request, call_next):
+    """Log safe request metadata when explicitly enabled for diagnostics."""
+    response = await call_next(request)
+    if LOG_HTTP_REQUESTS:
+        logger.info(
+            'HTTP request method=%s path=%s origin=%s preflight=%s status=%s',
+            request.method,
+            request.url.path,
+            request.headers.get('origin', '<none>'),
+            request.method == 'OPTIONS',
+            response.status_code,
+        )
+    return response
 
 
 def _auth_tables_ready(db: Session) -> bool:
