@@ -22,8 +22,8 @@ from app.config import ADMIN_SEED_EMAIL, COMMUNITY_LOGO_MAX_SIZE_BYTES, COMMUNIT
 from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN, can_manage_fields, can_manage_schedule, enforce_organization_scope, get_current_user, get_optional_current_user, is_community_admin, is_league_admin, is_scheduling_admin, normalize_role_name, require_field_manager, require_roles, require_schedule_admin, require_schedule_publisher
 from app.database import get_db
 from app.organizations import active_organization_filter, normalize_organization_name
-from app.models import Division, Field, FieldConfigurationOption, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostPlanSelection, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Rulebook, LoginAuditLog, ScheduleChangeLog, ScheduleImport, SchedulePublicationEvent, ScoreHistory, ScoreSubmission, Season, Team, TimeslotFieldConfiguration, Tournament, TournamentDivision, TournamentGame, TournamentTeam, TurfWave, User, Week
-from app.services.facility_layout_validation import layout_label, select_supported_layout, validate_timeslot_demands
+from app.models import Division, Field, FieldConfigurationMember, FieldConfigurationOption, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostPlanSelection, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Rulebook, LoginAuditLog, ScheduleChangeLog, ScheduleImport, SchedulePublicationEvent, ScoreHistory, ScoreSubmission, Season, Team, TimeslotFieldConfiguration, Tournament, TournamentDivision, TournamentGame, TournamentTeam, TurfWave, User, Week
+from app.services.facility_layout_validation import layout_label, select_supported_layout, validate_field_combination, validate_timeslot_demands
 from app.services.division_field_types import required_field_type_for_division
 from app.services.schedule_import import build_preview, parse_schedule_file
 from app.schemas import (
@@ -4974,6 +4974,14 @@ def _grass_field_templates_for_availability(db: Session, availability: HostingAv
         if field and field.is_active and field.host_location_id == host.id and field_size:
             return [(field.name, field_size)]
         return []
+    configurations = db.query(HostLocationConfiguration).filter_by(host_location_id=host.id, is_active=True).all()
+    explicit = [config for config in configurations if config.members]
+    if explicit:
+        selected = next((config for config in explicit if config.id == availability.selected_configuration_id), None)
+        selected = selected or max(explicit, key=lambda config: (len(config.members), -config.sort_order))
+        return [(member.field.name, _normalize_field_size(member.field.layout_type)) for member in selected.members
+                if member.field and member.field.is_active and member.field.deleted_at is None
+                and _normalize_field_size(member.field.layout_type)]
     return _grass_field_templates_for_host(db, host.id)
 
 
@@ -5574,7 +5582,9 @@ def _ensure_approved_turf_configurations(db: Session, host: HostLocation) -> boo
     }
     invalid_config_ids = []
     for config_name, config in existing.items():
-        if config_name not in approved_codes:
+        # Administrator-defined physical layouts with explicit field membership
+        # coexist with legacy generated turf codes.
+        if config_name not in approved_codes and not config.members:
             invalid_config_ids.append(config.id)
             if config.is_active:
                 config.is_active = False
@@ -5605,11 +5615,25 @@ def _ensure_approved_turf_configurations(db: Session, host: HostLocation) -> boo
     return changed
 
 def _attach_configuration_instances(config: HostLocationConfiguration) -> HostLocationConfiguration:
-    config.field_instances = [
-        field_name
-        for field_name, _field_type in _configuration_field_templates_for_host(config.host_location, config.configuration_name)
+    member_fields = [member.field for member in config.members if member.field and member.field.deleted_at is None]
+    config.field_ids = [field.id for field in member_fields]
+    config.field_instances = [field.name for field in member_fields] or [
+        field_name for field_name, _field_type in _configuration_field_templates_for_host(config.host_location, config.configuration_name)
     ]
     return config
+
+
+def _sync_configuration_members(db: Session, config: HostLocationConfiguration, field_ids: list[uuid.UUID]) -> None:
+    fields = db.query(Field).filter(Field.id.in_(field_ids), Field.host_location_id == config.host_location_id,
+                                    Field.deleted_at.is_(None)).all() if field_ids else []
+    if len(fields) != len(set(field_ids)):
+        raise HTTPException(400, 'Every layout field must be an existing field at this host location')
+    config.members[:] = [FieldConfigurationMember(field=field) for field in fields]
+    counts = {size: 0 for size in FIELD_SIZE_ORDER}
+    for field in fields:
+        size = _normalize_field_size(field.layout_type)
+        if size in counts: counts[size] += 1
+    config.small_field_count, config.medium_field_count, config.large_field_count = counts['SMALL'], counts['MEDIUM'], counts['LARGE']
 
 
 GENERATED_SLOT_REGENERATION_BUG_WARNINGS = {
@@ -11311,14 +11335,14 @@ def create_host_location_configuration(payload: HostLocationConfigurationCreate,
     host = db.query(HostLocation).filter(HostLocation.id == payload.host_location_id).first()
     if not host: raise HTTPException(400, 'Invalid host location')
     enforce_organization_scope(host.organization_id, current_user)
-    if (host.surface_type or 'GRASS_FIELD') != 'TURF_STADIUM':
-        raise HTTPException(400, 'Host location configurations are only available for turf stadium locations')
-    config_name = _normalize_configuration_name(payload.configuration_name)
-    if config_name not in _approved_layout_codes_for_host(host):
-        raise HTTPException(400, f'{config_name} is not an approved physical layout for {host.name}')
-    x = HostLocationConfiguration(host_location_id=payload.host_location_id, configuration_name=config_name, is_active=payload.is_active)
-    _apply_turf_configuration_metadata(x, config_name)
-    db.add(x); db.commit(); db.refresh(x); return _attach_configuration_instances(x)
+    config_name = payload.configuration_name.strip()
+    if not config_name: raise HTTPException(400, 'Configuration name is required')
+    x = HostLocationConfiguration(host_location_id=payload.host_location_id, configuration_name=config_name,
+                                  surface_type=host.surface_type or 'GRASS_FIELD', is_active=payload.is_active,
+                                  sort_order=payload.sort_order)
+    db.add(x); db.flush()
+    _sync_configuration_members(db, x, payload.field_ids)
+    db.commit(); db.refresh(x); return _attach_configuration_instances(x)
 
 
 @router.get('/host-location-configurations', response_model=PagedResponse[HostLocationConfigurationRead], dependencies=[Depends(get_current_user)])
@@ -11362,12 +11386,11 @@ def upd_host_location_configuration(item_id: uuid.UUID, payload: HostLocationCon
     host = db.query(HostLocation).filter(HostLocation.id == payload.host_location_id).first()
     if not host: raise HTTPException(400, 'Invalid host location')
     enforce_organization_scope(host.organization_id, current_user)
-    if (host.surface_type or 'GRASS_FIELD') != 'TURF_STADIUM':
-        raise HTTPException(400, 'Host location configurations are only available for turf stadium locations')
-    config_name = _normalize_configuration_name(payload.configuration_name)
     x.host_location_id = payload.host_location_id
-    _apply_turf_configuration_metadata(x, config_name)
+    x.configuration_name = payload.configuration_name.strip()
     x.is_active = payload.is_active
+    x.sort_order = payload.sort_order
+    _sync_configuration_members(db, x, payload.field_ids)
     db.commit(); db.refresh(x); return _attach_configuration_instances(x)
 
 
@@ -11376,7 +11399,8 @@ def del_host_location_configuration(item_id: uuid.UUID, current_user: User = Dep
     x = db.query(HostLocationConfiguration).join(HostLocationConfiguration.host_location).filter(HostLocationConfiguration.id == item_id).first()
     if not x: raise HTTPException(404, 'Host location configuration not found')
     enforce_organization_scope(x.host_location.organization_id, current_user)
-    in_use = db.query(HostingAvailability).filter(HostingAvailability.selected_configuration_id == item_id).count()
+    in_use = (db.query(HostingAvailability).filter(HostingAvailability.selected_configuration_id == item_id).count()
+              + db.query(TimeslotFieldConfiguration).filter(TimeslotFieldConfiguration.configuration_id == item_id).count())
     if in_use:
         x.is_active = False
     else:
@@ -11548,14 +11572,17 @@ def create_field(payload: FieldCreate, current_user: User = Depends(get_current_
     host_location = db.query(HostLocation).filter(HostLocation.id == payload.host_location_id).first()
     if not host_location: raise HTTPException(400, 'Invalid host location')
     enforce_organization_scope(host_location.organization_id, current_user)
-    if (host_location.surface_type or 'GRASS_FIELD') != 'GRASS_FIELD':
-        raise HTTPException(400, 'Manual fields are only allowed for grass field locations')
     if not _normalize_field_size(payload.layout_type):
         raise HTTPException(400, 'Field type must be Small, Medium, or Large')
     if payload.physical_field_area_id:
         area = db.query(PhysicalFieldArea).filter(PhysicalFieldArea.id == payload.physical_field_area_id, PhysicalFieldArea.host_location_id == payload.host_location_id).first()
         if not area: raise HTTPException(400, 'Invalid physical field area for host location')
-    x = Field(**{**payload.model_dump(), 'layout_type': _normalize_field_size(payload.layout_type)}); db.add(x); db.commit(); db.refresh(x); return x
+    x = Field(**{**payload.model_dump(), 'layout_type': _normalize_field_size(payload.layout_type)}); db.add(x); db.flush()
+    default = db.query(HostLocationConfiguration).filter_by(host_location_id=host_location.id, configuration_name='Default Layout', is_active=True).first()
+    if default:
+        default.members.append(FieldConfigurationMember(field=x))
+        setattr(default, f'{x.layout_type.lower()}_field_count', getattr(default, f'{x.layout_type.lower()}_field_count') + 1)
+    db.commit(); db.refresh(x); return x
 
 @router.get('/fields', response_model=PagedResponse[FieldRead], dependencies=[Depends(get_current_user)])
 def list_fields(search: str | None = None, host_location_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, page: int = 1, page_size: int = 20, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -11593,8 +11620,6 @@ def upd_field(item_id: uuid.UUID, payload: FieldCreate, current_user: User = Dep
     host_location = db.query(HostLocation).filter(HostLocation.id == payload.host_location_id).first()
     if not host_location: raise HTTPException(400, 'Invalid host location')
     enforce_organization_scope(host_location.organization_id, current_user)
-    if (host_location.surface_type or 'GRASS_FIELD') != 'GRASS_FIELD':
-        raise HTTPException(400, 'Manual fields are only allowed for grass field locations')
     if not _normalize_field_size(payload.layout_type):
         raise HTTPException(400, 'Field type must be Small, Medium, or Large')
     for k, v in {**payload.model_dump(), 'layout_type': _normalize_field_size(payload.layout_type)}.items(): setattr(x, k, v)
@@ -16057,6 +16082,23 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
                              'field_layout': layout_label(configuration),
                              'recommended_action': 'Verify field reconfiguration before kickoff.',
                              'summary': f'{getattr(host, "name", "Host location")} normally uses two Medium fields. This {game.kickoff_time.strftime("%I:%M %p").lstrip("0")} {detail["division"]} game uses the supported {layout_label(configuration)} configuration. Verify field reconfiguration before kickoff.'})
+    physical_waves = {}
+    for game, _slot, _instance, host, _home, _away, _division, _org, _status in rows:
+        if game.host_location_id and game.game_date and game.kickoff_time and game.field_id:
+            physical_waves.setdefault((game.host_location_id, game.game_date, game.kickoff_time), {'host': host, 'fields': set(), 'game': game})['fields'].add(game.field_id)
+    for (_host_id, game_date, kickoff), wave in physical_waves.items():
+        valid, supported_layouts, _used = validate_field_combination(db, _host_id, wave['fields'])
+        if valid:
+            continue
+        names = [name for (name,) in db.query(Field.name).filter(Field.id.in_(wave['fields'])).all()]
+        errors.append({
+            'issue_code': 'FIELD_LAYOUT_CONFLICT', 'scheduled_game_id': str(wave['game'].id),
+            'date': game_date.isoformat(), 'time': kickoff.isoformat(),
+            'location': getattr(wave['host'], 'name', None), 'scheduled_fields': sorted(names),
+            'supported_layouts': supported_layouts,
+            'summary': 'No supported field configuration allows these fields to operate simultaneously.',
+            'recommended_action': 'Move a game or choose fields that are contained together in one active supported layout.',
+        })
     return {'games': len(rows), 'blocking_errors': errors, 'warnings': warnings,
             'status': 'Blocked' if errors else 'Ready to Publish'}
 

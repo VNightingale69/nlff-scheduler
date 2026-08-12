@@ -176,8 +176,20 @@ class HostLocationConfiguration(Base, TimestampMixin):
     medium_field_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     small_field_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     host_location = relationship('HostLocation')
+    members = relationship('FieldConfigurationMember', cascade='all, delete-orphan', back_populates='configuration')
     __table_args__ = (UniqueConstraint('host_location_id', 'configuration_name', name='uq_host_location_configuration_name'),)
+
+
+class FieldConfigurationMember(Base, TimestampMixin):
+    __tablename__ = 'field_configuration_members'
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    field_configuration_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('host_location_configurations.id', ondelete='CASCADE'), nullable=False)
+    field_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('fields.id'), nullable=False)
+    configuration = relationship('HostLocationConfiguration', back_populates='members')
+    field = relationship('Field')
+    __table_args__ = (UniqueConstraint('field_configuration_id', 'field_id', name='uq_field_configuration_member'),)
 
 
 class Field(Base, TimestampMixin):

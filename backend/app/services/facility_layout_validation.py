@@ -1,7 +1,7 @@
 """Resolve and validate supported facility layouts for scheduled kickoff waves."""
 from collections import Counter
 
-from app.models import HostLocationConfiguration, TimeslotFieldConfiguration
+from app.models import Field, FieldConfigurationMember, HostLocationConfiguration, TimeslotFieldConfiguration
 
 
 SIZES = ('SMALL', 'MEDIUM', 'LARGE')
@@ -90,3 +90,24 @@ def layout_label(configuration):
         return None
     parts = [f'{count} {size.title()}' for size, count in _capacity(configuration).items() if count]
     return ' + '.join(parts) or configuration.configuration_name
+
+
+def validate_field_combination(db, host_id, field_ids):
+    """Return whether exact physical fields are a subset of one active layout.
+
+    A missing layout is treated as the legacy all-active-fields layout so older
+    facilities remain schedulable while administrators migrate their setup.
+    """
+    used = {field_id for field_id in field_ids if field_id}
+    configurations = db.query(HostLocationConfiguration).filter_by(host_location_id=host_id, is_active=True).all()
+    layouts = []
+    for configuration in configurations:
+        members = {row.field_id for row in db.query(FieldConfigurationMember).filter_by(field_configuration_id=configuration.id)}
+        if members:
+            layouts.append((configuration, members))
+    if not layouts:
+        active = {row.id for row in db.query(Field.id).filter_by(host_location_id=host_id, is_active=True)
+                  if row.deleted_at is None}
+        return used.issubset(active), [], active
+    matching = [configuration for configuration, members in layouts if used.issubset(members)]
+    return bool(matching), [configuration.configuration_name for configuration, _members in layouts], used

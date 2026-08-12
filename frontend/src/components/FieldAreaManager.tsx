@@ -124,6 +124,8 @@ export default function FieldAreaManager() {
   const [fieldLoadError, setFieldLoadError] = useState('');
   const [fieldForm, setFieldForm] = useState({ name: '', layout_type: '', is_active: true });
   const [editingFieldId, setEditingFieldId] = useState<string | null>(null);
+  const [configurationForm, setConfigurationForm] = useState({ name: '', field_ids: [] as string[], is_active: true });
+  const [editingConfigurationId, setEditingConfigurationId] = useState<string | null>(null);
   const [facilityForm, setFacilityForm] = useState('');
   const [savingFacility, setSavingFacility] = useState(false);
 
@@ -224,7 +226,6 @@ export default function FieldAreaManager() {
   const saveField = async () => {
     try {
       if (!selectedHost) { setType('err'); setMessage('Hosting site is required.'); return; }
-      if (selectedHost.surface_type !== GRASS_FIELD) { setType('err'); setMessage('Manual fields are only available for Grass Field locations.'); return; }
       if (!fieldForm.name.trim()) { setType('err'); setMessage('Field name is required.'); return; }
       if (!FIELD_TYPES.includes(fieldForm.layout_type)) { setType('err'); setMessage('Every configured field must have a field type.'); return; }
       const payload = { host_location_id: selectedHost.id, physical_field_area_id: null, name: fieldForm.name.trim(), layout_type: fieldForm.layout_type, is_active: fieldForm.is_active, notes: null };
@@ -243,6 +244,19 @@ export default function FieldAreaManager() {
       setMessage(isActive ? 'Field activated.' : 'Field deactivated. Existing scheduled games keep this field, but inactive fields are not available for future slot generation.');
       await loadOrgData(orgId, hostId);
     } catch (e: any) { setType('err'); setMessage(e.message || `Unable to ${isActive ? 'activate' : 'deactivate'} field`); }
+  };
+
+  const saveConfiguration = async () => {
+    if (!selectedHost || !configurationForm.name.trim()) return;
+    try {
+      const payload = { host_location_id: selectedHost.id, configuration_name: configurationForm.name.trim(),
+        field_ids: configurationForm.field_ids, is_active: configurationForm.is_active, sort_order: 0 };
+      await apiFetch(editingConfigurationId ? `/host-location-configurations/${editingConfigurationId}` : '/host-location-configurations',
+        { method: editingConfigurationId ? 'PUT' : 'POST', body: JSON.stringify(payload) }, token);
+      setConfigurationForm({ name: '', field_ids: [], is_active: true }); setEditingConfigurationId(null);
+      setType('ok'); setMessage(editingConfigurationId ? 'Supported layout updated.' : 'Supported layout added.');
+      await loadOrgData(orgId, hostId);
+    } catch (e: any) { setType('err'); setMessage(e.message || 'Unable to save supported layout'); }
   };
 
   const deleteField = async (field: any) => {
@@ -426,22 +440,17 @@ export default function FieldAreaManager() {
       <p className='mt-3 rounded bg-emerald-50 p-3 text-sm text-emerald-900'>This turf location supports {selectedTurfLayouts.length} approved physical layout{selectedTurfLayouts.length === 1 ? '' : 's'}. During scheduling, each one-hour wave will use one configured layout. Unused field slots are not inferred as additional fields.</p>
     </section>}
 
-    {selectedHost?.surface_type === GRASS_FIELD && <section className='rounded border p-4'>
+    {selectedHost && <section className='rounded border p-4'>
       <div className='flex flex-wrap items-center justify-between gap-2'>
         <div>
-          <h2 className='font-semibold'>Grass Field Setup Guidance</h2>
-          <p className='text-sm text-slate-600'>Field sizes are consistent across all locations: Small, Medium, and Large. For grass locations, each configured field should represent a field that can realistically be used during the same one-hour game block at that location. Only add fields that can be played at the same time based on available space, lining, staffing, equipment, parking, and field overlap.</p>
-          <ul className='mt-2 list-disc pl-5 text-xs text-slate-600'>
-            <li>If the location can support three Small fields at the same time, add Small Field 1, Small Field 2, and Small Field 3.</li>
-            <li>If the location can support two Large fields at the same time, add Large Field 1 and Large Field 2.</li>
-            <li>If a Large field layout overlaps with Small fields and they cannot be used at the same time, do not configure those overlapping fields as simultaneously active.</li>
-            <li>If a field exists physically but cannot be lined, staffed, equipped, or operated during a one-hour block, do not mark it active.</li>
-          </ul>
+          <h2 className='font-semibold'>Field Setup Guidance</h2>
+          <p className='text-sm text-slate-600'>Add the physical or configurable fields that may be used at this location. Supported Field Layouts determine which fields may operate simultaneously during the same scheduling block.</p>
+          <p className='mt-2 text-xs text-slate-600'>A location may support multiple alternative layouts. Fields appearing in different layouts are not assumed to be simultaneously available.</p>
           <p className='mt-2 text-xs text-slate-600'>Grass field locations use active configured fields for slot generation and must have at least one active field before hosting availability can use them. Deactivate keeps existing scheduled assignments; Delete removes the field from active use and flags affected scheduled games for Scheduling Administrator review.</p>
         </div>
         {canManageFieldDefinitions && <button className='rounded border px-3 py-2 text-sm' onClick={resetFieldForm}>Add Field</button>}
       </div>
-      <p className='mt-3 text-sm font-medium text-slate-700'>Add only fields that this location can support during the same one-hour block.</p>
+      <h3 className='mt-3 text-sm font-semibold text-slate-700'>2. Physical / Configurable Fields</h3>
       <div className='mt-2 grid gap-2 md:grid-cols-4'>
         <input className='rounded border p-2' placeholder='Field Name' value={fieldForm.name} onChange={(e) => setFieldForm({ ...fieldForm, name: e.target.value })} />
         <select className='rounded border p-2' value={fieldForm.layout_type} onChange={(e) => setFieldForm({ ...fieldForm, layout_type: e.target.value })}>
@@ -462,6 +471,20 @@ export default function FieldAreaManager() {
         <p>Small: {DIVISION_COMPATIBILITY.SMALL.join(', ')}</p>
         <p>Medium: {DIVISION_COMPATIBILITY.MEDIUM.join(', ')}</p>
         <p>Large: {DIVISION_COMPATIBILITY.LARGE.join(', ')}</p>
+      </div>
+      <div className='mt-5 border-t pt-4'>
+        <h3 className='font-semibold'>3. Supported Field Layouts</h3>
+        <p className='text-sm text-slate-600'>Each layout lists the fields that can operate together in one scheduling block.</p>
+        {canManageFieldDefinitions && <div className='mt-3 rounded border p-3'>
+          <input className='w-full rounded border p-2' placeholder='Configuration name' value={configurationForm.name} onChange={(e) => setConfigurationForm({...configurationForm, name: e.target.value})} />
+          <div className='mt-2 grid gap-2 sm:grid-cols-2'>{selectedHostFields.filter((field: any) => field.is_active).map((field: any) => <label key={field.id} className='flex gap-2 text-sm'><input type='checkbox' checked={configurationForm.field_ids.includes(field.id)} onChange={(e) => setConfigurationForm({...configurationForm, field_ids: e.target.checked ? [...configurationForm.field_ids, field.id] : configurationForm.field_ids.filter((id) => id !== field.id)})} />{field.name}</label>)}</div>
+          <button className='mt-3 rounded bg-emerald-700 px-3 py-2 text-sm text-white' onClick={saveConfiguration}>{editingConfigurationId ? 'Update Configuration' : 'Add Configuration'}</button>
+        </div>}
+        <div className='mt-3 grid gap-3 md:grid-cols-2'>{(hostConfigsByHost[hostId] || []).map((config: any) => <article key={config.id} className='rounded border p-3'>
+          <div className='flex justify-between'><strong>{config.configuration_name}</strong><span className='text-xs'>{config.is_active ? 'Active' : 'Inactive'}</span></div>
+          <ul className='mt-2 list-disc pl-5 text-sm'>{(config.field_instances || []).map((name: string) => <li key={name}>{name}</li>)}</ul>
+          {canManageFieldDefinitions && <button className='mt-2 rounded border px-2 py-1 text-xs' onClick={() => { setEditingConfigurationId(config.id); setConfigurationForm({name: config.configuration_name, field_ids: config.field_ids || [], is_active: config.is_active}); }}>Edit / Assign Fields</button>}
+        </article>)}</div>
       </div>
     </section>}
 
