@@ -9,7 +9,7 @@ from app.database import get_db
 from app.models import Role, User
 from app.security import auth_invalid_token_exception, decode_token
 
-security = HTTPBearer()
+security = HTTPBearer(auto_error=False)
 optional_security = HTTPBearer(auto_error=False)
 
 ROLE_LEAGUE_ADMIN = 'LEAGUE_ADMIN'
@@ -51,7 +51,12 @@ def normalize_role_name(role_name: str | None) -> str:
     return _ROLE_ALIASES.get(normalized_role_name, raw_role_name)
 
 
-def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)) -> User:
+def get_current_user(credentials: HTTPAuthorizationCredentials | None = Depends(security), db: Session = Depends(get_db)) -> User:
+    # HTTPBearer historically reports a missing header as 403.  Missing
+    # credentials are an authentication failure, while 403 is reserved for an
+    # authenticated user who does not have the required role.
+    if credentials is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='Not authenticated')
     payload = decode_token(credentials.credentials, 'access')
     user_id = payload.get('sub')
     try:

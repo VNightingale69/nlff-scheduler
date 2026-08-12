@@ -89,6 +89,24 @@ type ReadinessTotals = {
 const MINIMUM_UNIQUE_MATCHUPS_HELP =
   'This represents the minimum number of unique matchups required for a single round-robin format before repeat matchups or double headers are considered.';
 
+function scheduleReadinessErrorMessage(status: number): string {
+  if (status === 401) return 'Your login session is not being accepted by the scheduling API. Please sign in again. If the problem continues, contact the scheduling administrator.';
+  if (status === 403) return 'You are signed in but do not have permission to access Schedule Readiness.';
+  if (status === 404) return 'Schedule Readiness API endpoint was not found.';
+  if (status >= 500) return 'The server encountered an error while loading Schedule Readiness.';
+  if (status === 0) return 'Unable to connect to server';
+  return 'Schedule Readiness could not be loaded.';
+}
+
+function scheduleReadinessDiagnostic(status: number): string {
+  if (status === 401) return 'Authentication required';
+  if (status === 403) return 'Permission denied';
+  if (status === 404) return 'Endpoint not found';
+  if (status >= 500) return 'Server error';
+  if (status === 0) return 'Network error / no HTTP response';
+  return 'HTTP request failed';
+}
+
 export default function ScheduleReadinessPage() {
   const { accessToken: token } = useAuthSession();
   const [rows, setRows] = useState<ReadinessRow[]>([]);
@@ -120,14 +138,15 @@ export default function ScheduleReadinessPage() {
         setFieldEfficiency(data?.field_configuration_efficiency || []);
         setWeeklyDemand(data?.weekly_field_demand || []);
       } catch (e: any) {
-        setError(e?.message || 'Failed to load schedule readiness report');
-        setErrorStatus(typeof e?.status === 'number' ? e.status : 0);
+        const status = typeof e?.status === 'number' ? e.status : 0;
+        setError(scheduleReadinessErrorMessage(status));
+        setErrorStatus(status);
         setErrorDetails(e?.details ?? null);
       } finally {
         setLoaded(true);
       }
     })();
-  }, []);
+  }, [token]);
 
   const statusClass = (status: ReadinessRow['status']) => {
     if (status === 'READY') return 'bg-green-100 text-green-700';
@@ -145,9 +164,10 @@ export default function ScheduleReadinessPage() {
           <details className='mt-2'>
             <summary className='cursor-pointer font-medium'>Administrator diagnostics</summary>
             <dl className='mt-2 grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 break-all'>
-              <dt>Endpoint</dt><dd>{API_URL}/schedule-readiness</dd>
-              <dt>HTTP status</dt><dd>{errorStatus === 0 ? 'Network error / no HTTP response' : errorStatus}</dd>
-              <dt>Error</dt><dd>{error}</dd>
+              <dt>HTTP status</dt><dd>{errorStatus === 0 ? 'No HTTP response' : `HTTP ${errorStatus}`}</dd>
+              <dt>Classification</dt><dd>{scheduleReadinessDiagnostic(errorStatus ?? 0)}</dd>
+              <dt>Endpoint</dt><dd>/api/schedule-readiness</dd>
+              <dt>Request URL</dt><dd>{API_URL}/schedule-readiness</dd>
               {errorDetails ? <><dt>Response</dt><dd><pre className='whitespace-pre-wrap'>{JSON.stringify(errorDetails, null, 2)}</pre></dd></> : null}
             </dl>
           </details>
