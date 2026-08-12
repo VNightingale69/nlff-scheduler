@@ -19,6 +19,8 @@ assert.match(source, /if \(status === 0\) return 'Unable to connect to server'/,
   'only a request without an HTTP response is classified as a network failure');
 assert.match(source, /if \(status === 401\) return 'Authentication required'/);
 assert.match(source, /<dt>Endpoint<\/dt><dd>\/api\/schedule-readiness<\/dd>/);
+assert.match(source, /Possible browser CORS or preflight failure\. Check browser developer console and OPTIONS request\./,
+  'network failures include a safe CORS and preflight troubleshooting hint');
 assert.doesNotMatch(source, /setError\(e\?\.message/,
   'raw authentication responses cannot be mislabeled by page-specific handling');
 assert.match(source, /\{!error && loaded \? <>/,

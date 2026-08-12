@@ -17,6 +17,8 @@ from app.routes.api import get_schedule_readiness
 
 
 class ScheduleReadinessAuthenticationTest(unittest.TestCase):
+    allowed_origin = 'http://localhost:3000'
+
     def setUp(self):
         self.engine = create_engine(
             'sqlite+pysqlite:///:memory:',
@@ -42,10 +44,43 @@ class ScheduleReadinessAuthenticationTest(unittest.TestCase):
         self.engine.dispose()
 
     def test_unauthenticated_request_returns_401(self):
-        response = self.client.get('/api/schedule-readiness')
+        response = self.client.get('/api/schedule-readiness', headers={'Origin': self.allowed_origin})
 
         self.assertEqual(401, response.status_code)
         self.assertEqual('Not authenticated', response.json()['detail'])
+        self.assertEqual(self.allowed_origin, response.headers['access-control-allow-origin'])
+        self.assertEqual('true', response.headers['access-control-allow-credentials'])
+
+    def test_allowed_origin_preflight_accepts_bearer_request(self):
+        response = self.client.options(
+            '/api/schedule-readiness',
+            headers={
+                'Origin': self.allowed_origin,
+                'Access-Control-Request-Method': 'GET',
+                'Access-Control-Request-Headers': 'Authorization, Content-Type',
+            },
+        )
+
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertEqual(self.allowed_origin, response.headers['access-control-allow-origin'])
+        self.assertEqual('true', response.headers['access-control-allow-credentials'])
+        self.assertIn('GET', response.headers['access-control-allow-methods'])
+        allowed_headers = response.headers['access-control-allow-headers'].lower()
+        self.assertIn('authorization', allowed_headers)
+        self.assertIn('content-type', allowed_headers)
+
+    def test_unknown_origin_is_not_granted_cors_access(self):
+        response = self.client.options(
+            '/api/schedule-readiness',
+            headers={
+                'Origin': 'https://unapproved.example',
+                'Access-Control-Request-Method': 'GET',
+                'Access-Control-Request-Headers': 'Authorization, Content-Type',
+            },
+        )
+
+        self.assertEqual(400, response.status_code)
+        self.assertNotIn('access-control-allow-origin', response.headers)
 
     def test_authenticated_league_admin_receives_200(self):
         app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(

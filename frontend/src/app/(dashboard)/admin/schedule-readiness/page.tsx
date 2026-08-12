@@ -168,6 +168,7 @@ export default function ScheduleReadinessPage() {
               <dt>Classification</dt><dd>{scheduleReadinessDiagnostic(errorStatus ?? 0)}</dd>
               <dt>Endpoint</dt><dd>/api/schedule-readiness</dd>
               <dt>Request URL</dt><dd>{API_URL}/schedule-readiness</dd>
+              {errorStatus === 0 ? <><dt>Hint</dt><dd>Possible browser CORS or preflight failure. Check browser developer console and OPTIONS request.</dd></> : null}
               {errorDetails ? <><dt>Response</dt><dd><pre className='whitespace-pre-wrap'>{JSON.stringify(errorDetails, null, 2)}</pre></dd></> : null}
             </dl>
           </details>

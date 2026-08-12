@@ -32,6 +32,7 @@ Backend environment variables:
 - `ADMIN_SEED_PASSWORD` (default: `ChangeMe123!`)
 - `ADMIN_SEED_FULL_NAME` (default: `League Admin`)
 - `CORS_ORIGINS` (default: `http://localhost:3000`; comma-separated list)
+- `LOG_HTTP_REQUESTS` (default: `false`; logs only method, path, origin, preflight status, and response status)
 
 Frontend environment variables:
 
@@ -170,6 +171,7 @@ Passwords must be 8-128 chars and include:
 
 - Backend uses FastAPI `CORSMiddleware`.
 - Default allowed origin is `http://localhost:3000` (configurable via `CORS_ORIGINS`).
+- Production must set `CORS_ORIGINS` to a comma-separated list containing the exact deployed frontend origin and any intentionally supported development origin. Wildcards are rejected because credentialed CORS is enabled; omit paths and trailing slashes.
 - Allowed methods: `GET, POST, PUT, PATCH, DELETE, OPTIONS`.
 - Allowed headers: `*` (covers `Authorization`, `Content-Type`, and preflight-requested custom headers).
 - Middleware is attached at the top-level FastAPI app, so it applies to all `/api/*` routes (including `/api/fields` and `/api/host-locations`) and error responses.
