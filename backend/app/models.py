@@ -176,6 +176,7 @@ class HostLocationConfiguration(Base, TimestampMixin):
     medium_field_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     small_field_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    is_legacy: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     host_location = relationship('HostLocation')
     members = relationship('FieldConfigurationMember', cascade='all, delete-orphan', back_populates='configuration')

@@ -126,6 +126,7 @@ export default function FieldAreaManager() {
   const [editingFieldId, setEditingFieldId] = useState<string | null>(null);
   const [configurationForm, setConfigurationForm] = useState({ name: '', field_ids: [] as string[], is_active: true });
   const [editingConfigurationId, setEditingConfigurationId] = useState<string | null>(null);
+  const [showInactiveLayouts, setShowInactiveLayouts] = useState(false);
   const [facilityForm, setFacilityForm] = useState('');
   const [savingFacility, setSavingFacility] = useState(false);
 
@@ -168,7 +169,7 @@ export default function FieldAreaManager() {
     try {
       const [fieldData, configData] = await Promise.all([
         apiFetch(`/fields?${query}&page_size=5000`, {}, token),
-        apiFetch(`/host-location-configurations?${query}&page_size=5000`, {}, token),
+        apiFetch(`/host-location-configurations?${query}&page_size=5000${showInactiveLayouts ? '&include_inactive_legacy=true' : ''}`, {}, token),
       ]);
       setFields((fieldData as any).items || []);
       setHostConfigs((configData as any).items || []);
@@ -185,7 +186,7 @@ export default function FieldAreaManager() {
   };
 
   useEffect(() => { loadOrganizations().catch((e: any) => { setType('err'); setMessage(errorMessage(e, 'Failed to load organizations.')); }); }, []);
-  useEffect(() => { loadOrgData(orgId, hostId); }, [orgId, hostId]);
+  useEffect(() => { loadOrgData(orgId, hostId); }, [orgId, hostId, showInactiveLayouts]);
 
   const hostOptions = useMemo(() => hosts.filter((h: any) => !orgId || h.organization_id === orgId), [hosts, orgId]);
   const selectedHost = useMemo(() => hosts.find((h: any) => h.id === hostId), [hosts, hostId]);
@@ -257,6 +258,14 @@ export default function FieldAreaManager() {
       setType('ok'); setMessage(editingConfigurationId ? 'Supported layout updated.' : 'Supported layout added.');
       await loadOrgData(orgId, hostId);
     } catch (e: any) { setType('err'); setMessage(e.message || 'Unable to save supported layout'); }
+  };
+
+  const setConfigurationActive = async (config: any, isActive: boolean) => {
+    try {
+      await apiFetch(`/host-location-configurations/${config.id}/active?is_active=${isActive}`, { method: 'PATCH' }, token);
+      setType('ok'); setMessage(`Supported layout ${isActive ? 'activated' : 'deactivated'}.`);
+      await loadOrgData(orgId, hostId);
+    } catch (e: any) { setType('err'); setMessage(e.message || `Unable to ${isActive ? 'activate' : 'deactivate'} supported layout`); }
   };
 
   const deleteField = async (field: any) => {
@@ -475,15 +484,16 @@ export default function FieldAreaManager() {
       <div className='mt-5 border-t pt-4'>
         <h3 className='font-semibold'>3. Supported Field Layouts</h3>
         <p className='text-sm text-slate-600'>Each layout lists the fields that can operate together in one scheduling block.</p>
+        <label className='mt-2 flex items-center gap-2 text-sm'><input type='checkbox' checked={showInactiveLayouts} onChange={(e) => setShowInactiveLayouts(e.target.checked)} />Show inactive / legacy layouts</label>
         {canManageFieldDefinitions && <div className='mt-3 rounded border p-3'>
           <input className='w-full rounded border p-2' placeholder='Configuration name' value={configurationForm.name} onChange={(e) => setConfigurationForm({...configurationForm, name: e.target.value})} />
           <div className='mt-2 grid gap-2 sm:grid-cols-2'>{selectedHostFields.filter((field: any) => field.is_active).map((field: any) => <label key={field.id} className='flex gap-2 text-sm'><input type='checkbox' checked={configurationForm.field_ids.includes(field.id)} onChange={(e) => setConfigurationForm({...configurationForm, field_ids: e.target.checked ? [...configurationForm.field_ids, field.id] : configurationForm.field_ids.filter((id) => id !== field.id)})} />{field.name}</label>)}</div>
           <button className='mt-3 rounded bg-emerald-700 px-3 py-2 text-sm text-white' onClick={saveConfiguration}>{editingConfigurationId ? 'Update Configuration' : 'Add Configuration'}</button>
         </div>}
-        <div className='mt-3 grid gap-3 md:grid-cols-2'>{(hostConfigsByHost[hostId] || []).map((config: any) => <article key={config.id} className='rounded border p-3'>
+        <div className='mt-3 grid gap-3 md:grid-cols-2'>{(hostConfigsByHost[hostId] || []).filter((config: any) => showInactiveLayouts || config.is_active).map((config: any) => <article key={config.id} className='rounded border p-3'>
           <div className='flex justify-between'><strong>{config.configuration_name}</strong><span className='text-xs'>{config.is_active ? 'Active' : 'Inactive'}</span></div>
           <ul className='mt-2 list-disc pl-5 text-sm'>{(config.field_instances || []).map((name: string) => <li key={name}>{name}</li>)}</ul>
-          {canManageFieldDefinitions && <button className='mt-2 rounded border px-2 py-1 text-xs' onClick={() => { setEditingConfigurationId(config.id); setConfigurationForm({name: config.configuration_name, field_ids: config.field_ids || [], is_active: config.is_active}); }}>Edit / Assign Fields</button>}
+          {canManageFieldDefinitions && <div className='mt-2 flex gap-2'><button className='rounded border px-2 py-1 text-xs' onClick={() => { setEditingConfigurationId(config.id); setConfigurationForm({name: config.configuration_name, field_ids: config.field_ids || [], is_active: config.is_active}); }}>Edit / Assign Fields</button><button className='rounded border px-2 py-1 text-xs' onClick={() => setConfigurationActive(config, !config.is_active)}>{config.is_active ? 'Deactivate' : 'Activate'}</button></div>}
         </article>)}</div>
       </div>
     </section>}

@@ -193,6 +193,7 @@ class HostLocationConfigurationCreate(BaseModel):
     field_ids: list[uuid.UUID] = PydanticField(default_factory=list)
 
 class HostLocationConfigurationRead(BaseSchema, HostLocationConfigurationCreate):
+    is_legacy: bool = False
     surface_type: str = 'TURF_STADIUM'
     space_used_yards: int = 0
     remaining_yards: int = 0

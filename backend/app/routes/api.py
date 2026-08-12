@@ -5636,6 +5636,30 @@ def _sync_configuration_members(db: Session, config: HostLocationConfiguration, 
     config.small_field_count, config.medium_field_count, config.large_field_count = counts['SMALL'], counts['MEDIUM'], counts['LARGE']
 
 
+def _validate_configuration_activation(db: Session, config: HostLocationConfiguration) -> None:
+    """Validate an explicitly assigned layout before it becomes schedulable."""
+    fields = [member.field for member in config.members if member.field and member.field.deleted_at is None]
+    if not fields:
+        raise HTTPException(400, detail={'code': 'EMPTY_FIELD_CONFIGURATION', 'message': 'An active layout must have at least one assigned field.'})
+    if any(field.host_location_id != config.host_location_id for field in fields):
+        raise HTTPException(400, detail={'code': 'MIXED_HOST_FIELD_CONFIGURATION', 'message': 'Every assigned field must belong to this host location.'})
+    if any(not field.is_active for field in fields):
+        raise HTTPException(400, detail={'code': 'INACTIVE_CONFIGURATION_FIELD', 'message': 'Every assigned field must be active.'})
+    member_ids = {field.id for field in fields}
+    candidates = db.query(HostLocationConfiguration).filter(
+        HostLocationConfiguration.host_location_id == config.host_location_id,
+        HostLocationConfiguration.is_active.is_(True),
+        HostLocationConfiguration.id != config.id,
+    ).all()
+    duplicate = next((candidate for candidate in candidates
+                      if {member.field_id for member in candidate.members} == member_ids), None)
+    if duplicate:
+        raise HTTPException(409, detail={
+            'code': 'DUPLICATE_FIELD_CONFIGURATION',
+            'message': f'This layout is already represented by the active configuration "{duplicate.configuration_name}".',
+        })
+
+
 GENERATED_SLOT_REGENERATION_BUG_WARNINGS = {
     'duplicate_field_name': 'BUG: duplicate generated field_name detected before flush.',
     'duplicate_component_identity': 'BUG: generated turf component identity duplicated.',
@@ -11342,14 +11366,18 @@ def create_host_location_configuration(payload: HostLocationConfigurationCreate,
                                   sort_order=payload.sort_order)
     db.add(x); db.flush()
     _sync_configuration_members(db, x, payload.field_ids)
+    if x.is_active:
+        _validate_configuration_activation(db, x)
     db.commit(); db.refresh(x); return _attach_configuration_instances(x)
 
 
 @router.get('/host-location-configurations', response_model=PagedResponse[HostLocationConfigurationRead], dependencies=[Depends(get_current_user)])
-def list_host_location_configurations(host_location_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, page: int = 1, page_size: int = 100, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def list_host_location_configurations(host_location_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, include_inactive_legacy: bool = False, page: int = 1, page_size: int = 100, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     role_name = normalize_role_name(current_user.role.name)
     selected_organization_id = organization_id
     q = db.query(HostLocationConfiguration).join(HostLocationConfiguration.host_location)
+    if not include_inactive_legacy:
+        q = q.filter(HostLocationConfiguration.is_legacy.is_(False))
     if organization_id:
         q = q.filter(HostLocation.organization_id == organization_id)
     turf_hosts_query = db.query(HostLocation)
@@ -11391,6 +11419,20 @@ def upd_host_location_configuration(item_id: uuid.UUID, payload: HostLocationCon
     x.is_active = payload.is_active
     x.sort_order = payload.sort_order
     _sync_configuration_members(db, x, payload.field_ids)
+    if x.is_active:
+        _validate_configuration_activation(db, x)
+    db.commit(); db.refresh(x); return _attach_configuration_instances(x)
+
+
+@router.patch('/host-location-configurations/{item_id}/active', response_model=HostLocationConfigurationRead, dependencies=[Depends(get_current_user)])
+def set_host_location_configuration_active(item_id: uuid.UUID, is_active: bool, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Toggle layout status without changing its name or field assignments."""
+    x = db.query(HostLocationConfiguration).filter(HostLocationConfiguration.id == item_id).first()
+    if not x: raise HTTPException(404, 'Host location configuration not found')
+    enforce_organization_scope(x.host_location.organization_id, current_user)
+    if is_active:
+        _validate_configuration_activation(db, x)
+    x.is_active = is_active
     db.commit(); db.refresh(x); return _attach_configuration_instances(x)
 
 
