@@ -1,7 +1,7 @@
 import uuid
 from datetime import date, datetime, time
 
-from pydantic import BaseModel, EmailStr, field_validator
+from pydantic import BaseModel, EmailStr, Field as PydanticField, field_validator
 
 
 class BaseSchema(BaseModel):
@@ -189,6 +189,8 @@ class HostLocationConfigurationCreate(BaseModel):
     host_location_id: uuid.UUID
     configuration_name: str
     is_active: bool = True
+    sort_order: int = 0
+    field_ids: list[uuid.UUID] = PydanticField(default_factory=list)
 
 class HostLocationConfigurationRead(BaseSchema, HostLocationConfigurationCreate):
     surface_type: str = 'TURF_STADIUM'
