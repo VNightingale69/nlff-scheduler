@@ -1,5 +1,6 @@
 import unittest
 import uuid
+from datetime import datetime, timezone
 
 from fastapi import HTTPException
 from sqlalchemy import create_engine
@@ -66,6 +67,61 @@ class SupportedFieldLayoutActivationTest(unittest.TestCase):
         valid, layouts, _used = validate_field_combination(self.db, self.host.id, [self.fields[0].id, self.fields[1].id])
         self.assertTrue(valid)
         self.assertIn('4 Small', layouts)
+
+    def test_scheduler_accepts_an_alternative_active_configuration(self):
+        valid, layouts, _used = validate_field_combination(
+            self.db, self.host.id, [self.large.id, self.medium.id],
+        )
+
+        self.assertTrue(valid)
+        self.assertIn('1 Large + 1 Medium', layouts)
+        self.assertGreater(len(layouts), 1)
+
+    def test_inactive_configuration_is_excluded(self):
+        valid, layouts, _used = validate_field_combination(
+            self.db, self.host.id, [self.fields[2].id, self.fields[3].id],
+        )
+
+        self.assertTrue(valid)
+        self.assertNotIn('FOUR_SMALL', layouts)
+
+    def test_soft_deleted_configuration_member_is_excluded(self):
+        self.large.deleted_at = datetime.now(timezone.utc)
+        self.db.commit()
+
+        valid, layouts, _used = validate_field_combination(
+            self.db, self.host.id, [self.large.id, self.medium.id],
+        )
+
+        self.assertFalse(valid)
+        self.assertIn('1 Large + 1 Medium', layouts)
+
+    def test_legacy_active_field_fallback_excludes_soft_deleted_fields(self):
+        for configuration in [self.canonical, *self.alternatives]:
+            configuration.is_active = False
+        self.fields[0].deleted_at = datetime.now(timezone.utc)
+        self.db.commit()
+
+        valid, layouts, active = validate_field_combination(
+            self.db, self.host.id, [self.fields[0].id],
+        )
+
+        self.assertFalse(valid)
+        self.assertEqual([], layouts)
+        self.assertNotIn(self.fields[0].id, active)
+
+    def test_legacy_active_field_fallback_returns_active_fields_without_row_attribute_error(self):
+        for configuration in [self.canonical, *self.alternatives]:
+            configuration.is_active = False
+        self.db.commit()
+
+        valid, layouts, active = validate_field_combination(
+            self.db, self.host.id, [self.fields[0].id],
+        )
+
+        self.assertTrue(valid)
+        self.assertEqual([], layouts)
+        self.assertIn(self.fields[0].id, active)
 
 
 if __name__ == '__main__':
