@@ -63,15 +63,17 @@ class TestUserSoftDelete:
         assert list_response.status_code == 200
         assert str(self.community_admin.id) not in {item['id'] for item in list_response.json()['items']}
         for marker in (
-            'DELETE USER REQUEST RECEIVED',
-            'DELETE USER TARGET LOOKUP',
-            'DELETE USER TARGET FOUND',
-            'DELETE USER VALIDATION COMPLETE',
-            'DELETE USER SOFT DELETE START',
-            'DELETE USER FLUSH START',
-            'DELETE USER FLUSH SUCCESS',
-            'DELETE USER COMMIT START',
-            'DELETE USER COMMIT SUCCESS',
+            'DELETE USER: request received',
+            'DELETE USER: target lookup start',
+            'DELETE USER: target lookup success',
+            'DELETE USER: authorization validation start',
+            'DELETE USER: authorization validation success',
+            'DELETE USER: soft-delete mutation start',
+            'DELETE USER: soft-delete mutation complete',
+            'DELETE USER: flush start',
+            'DELETE USER: flush success',
+            'DELETE USER: commit start',
+            'DELETE USER: commit success',
         ):
             assert marker in caplog.text
 

@@ -7863,9 +7863,9 @@ def delete_user(user_id: uuid.UUID, current_user: User = Depends(get_current_use
         'target_role': None,
         'target_community_id': None,
     }
-    logger.info('DELETE USER REQUEST RECEIVED context=%s', diagnostic_context)
+    logger.info('DELETE USER: request received target=%s', user_id)
     try:
-        logger.info('DELETE USER TARGET LOOKUP context=%s', diagnostic_context)
+        logger.info('DELETE USER: target lookup start target=%s', user_id)
         target = db.query(User).filter(User.id == user_id).first()
         if target:
             diagnostic_context.update({
@@ -7873,10 +7873,11 @@ def delete_user(user_id: uuid.UUID, current_user: User = Depends(get_current_use
                 'target_role': normalize_role_name(target.role.name),
                 'target_community_id': str(target.organization_id) if target.organization_id else None,
             })
+        logger.info('DELETE USER: target lookup success target=%s', user_id)
     except SQLAlchemyError as exc:
         db.rollback()
         logger.exception(
-            'DELETE USER DATABASE ERROR target_user_id=%s acting_user_id=%s',
+            'DELETE USER DATABASE FAILURE target_user_id=%s acting_user_id=%s',
             user_id,
             current_user.id,
         )
@@ -7885,26 +7886,27 @@ def delete_user(user_id: uuid.UUID, current_user: User = Depends(get_current_use
     if not target or target.deleted_at is not None:
         raise HTTPException(404, 'User not found')
 
-    logger.info('DELETE USER TARGET FOUND context=%s', diagnostic_context)
+    logger.info('DELETE USER: authorization validation start target=%s acting_user_id=%s', user_id, current_user.id)
     if target.id == current_user.id:
         raise HTTPException(409, 'You cannot delete your own user account.')
-    logger.info('DELETE USER VALIDATION COMPLETE context=%s', diagnostic_context)
+    logger.info('DELETE USER: authorization validation success target=%s acting_user_id=%s', user_id, current_user.id)
 
     try:
-        logger.info('DELETE USER SOFT DELETE START context=%s', diagnostic_context)
+        logger.info('DELETE USER: soft-delete mutation start target=%s', user_id)
         target.is_active = False
         target.deleted_at = datetime.now(timezone.utc)
         db.add(target)
-        logger.info('DELETE USER FLUSH START context=%s', diagnostic_context)
+        logger.info('DELETE USER: soft-delete mutation complete target=%s', user_id)
+        logger.info('DELETE USER: flush start target=%s', user_id)
         db.flush()
-        logger.info('DELETE USER FLUSH SUCCESS context=%s', diagnostic_context)
-        logger.info('DELETE USER COMMIT START context=%s', diagnostic_context)
+        logger.info('DELETE USER: flush success target=%s', user_id)
+        logger.info('DELETE USER: commit start target=%s', user_id)
         db.commit()
-        logger.info('DELETE USER COMMIT SUCCESS context=%s', diagnostic_context)
+        logger.info('DELETE USER: commit success target=%s', user_id)
     except SQLAlchemyError as exc:
         db.rollback()
         logger.exception(
-            'DELETE USER DATABASE ERROR target_user_id=%s acting_user_id=%s '
+            'DELETE USER DATABASE FAILURE target_user_id=%s acting_user_id=%s '
             'target_role=%s target_community_id=%s',
             user_id,
             current_user.id,
