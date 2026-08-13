@@ -7857,28 +7857,61 @@ def reset_user_password(user_id: uuid.UUID, payload: UserPasswordReset, db: Sess
 
 @router.delete('/users/{user_id}', status_code=204, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
 def delete_user(user_id: uuid.UUID, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    logger.info('DELETE USER START acting_user_id=%s target_user_id=%s', current_user.id, user_id)
-    target = db.query(User).filter(User.id == user_id).first()
-    if not target or target.deleted_at is not None:
-        raise HTTPException(404, 'User not found')
-    if target.id == current_user.id:
-        raise HTTPException(409, 'You cannot delete your own user account.')
-    context = {'acting_user_id': str(current_user.id), 'target_user_id': str(target.id),
-               'target_role': normalize_role_name(target.role.name),
-               'target_community_id': str(target.organization_id) if target.organization_id else None,
-               'action': 'delete_user'}
-    logger.info('DELETE USER TARGET FOUND context=%s', context)
+    diagnostic_context = {
+        'target_user_id': str(user_id),
+        'acting_user_id': str(current_user.id),
+        'target_role': None,
+        'target_community_id': None,
+    }
+    logger.info('DELETE USER REQUEST RECEIVED context=%s', diagnostic_context)
     try:
-        target.is_active = False
-        target.deleted_at = datetime.now(timezone.utc)
-        logger.info('DELETE USER COMMIT START context=%s', context)
-        db.commit()
-        logger.info('DELETE USER COMMIT SUCCESS context=%s', context)
+        logger.info('DELETE USER TARGET LOOKUP context=%s', diagnostic_context)
+        target = db.query(User).filter(User.id == user_id).first()
+        if target:
+            diagnostic_context.update({
+                'target_user_id': str(target.id),
+                'target_role': normalize_role_name(target.role.name),
+                'target_community_id': str(target.organization_id) if target.organization_id else None,
+            })
     except SQLAlchemyError as exc:
         db.rollback()
-        logger.exception('DELETE USER FAILED context=%s exception_type=%s exception_message=%s',
-                         context, type(exc).__name__, str(exc))
-        raise HTTPException(500, 'Unable to delete the user because of an unexpected server error.')
+        logger.exception(
+            'DELETE USER DATABASE ERROR target_user_id=%s acting_user_id=%s',
+            user_id,
+            current_user.id,
+        )
+        raise HTTPException(500, 'Unable to delete user due to a database error.') from exc
+
+    if not target or target.deleted_at is not None:
+        raise HTTPException(404, 'User not found')
+
+    logger.info('DELETE USER TARGET FOUND context=%s', diagnostic_context)
+    if target.id == current_user.id:
+        raise HTTPException(409, 'You cannot delete your own user account.')
+    logger.info('DELETE USER VALIDATION COMPLETE context=%s', diagnostic_context)
+
+    try:
+        logger.info('DELETE USER SOFT DELETE START context=%s', diagnostic_context)
+        target.is_active = False
+        target.deleted_at = datetime.now(timezone.utc)
+        db.add(target)
+        logger.info('DELETE USER FLUSH START context=%s', diagnostic_context)
+        db.flush()
+        logger.info('DELETE USER FLUSH SUCCESS context=%s', diagnostic_context)
+        logger.info('DELETE USER COMMIT START context=%s', diagnostic_context)
+        db.commit()
+        logger.info('DELETE USER COMMIT SUCCESS context=%s', diagnostic_context)
+    except SQLAlchemyError as exc:
+        db.rollback()
+        logger.exception(
+            'DELETE USER DATABASE ERROR target_user_id=%s acting_user_id=%s '
+            'target_role=%s target_community_id=%s',
+            user_id,
+            current_user.id,
+            diagnostic_context['target_role'],
+            diagnostic_context['target_community_id'],
+        )
+        raise HTTPException(500, 'Unable to delete user due to a database error.') from exc
 
 @router.post('/organizations', response_model=OrganizationRead, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def create_organization(payload: OrganizationCreate, db: Session = Depends(get_db)):

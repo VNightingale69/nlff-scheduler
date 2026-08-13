@@ -1,3 +1,5 @@
+import logging
+
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -44,7 +46,8 @@ class TestUserSoftDelete:
     def teardown_method(self):
         app.dependency_overrides.clear(); self.db.close()
 
-    def test_league_admin_deletes_only_account_and_preserves_community_data(self):
+    def test_league_admin_deletes_only_account_and_preserves_community_data(self, caplog):
+        caplog.set_level(logging.INFO, logger='app.routes.api')
         response = self.client.delete(f'/api/users/{self.community_admin.id}', headers=auth(self.league_admin))
         assert response.status_code == 204
         self.db.expire_all()
@@ -55,6 +58,22 @@ class TestUserSoftDelete:
         assert self.db.get(Team, self.team.id).name == 'Preserved Team'
         assert self.db.get(HostLocation, self.facility.id).name == 'Preserved Facility'
         assert self.db.get(User, self.other_admin.id).is_active is True
+
+        list_response = self.client.get('/api/users?page_size=100', headers=auth(self.league_admin))
+        assert list_response.status_code == 200
+        assert str(self.community_admin.id) not in {item['id'] for item in list_response.json()['items']}
+        for marker in (
+            'DELETE USER REQUEST RECEIVED',
+            'DELETE USER TARGET LOOKUP',
+            'DELETE USER TARGET FOUND',
+            'DELETE USER VALIDATION COMPLETE',
+            'DELETE USER SOFT DELETE START',
+            'DELETE USER FLUSH START',
+            'DELETE USER FLUSH SUCCESS',
+            'DELETE USER COMMIT START',
+            'DELETE USER COMMIT SUCCESS',
+        ):
+            assert marker in caplog.text
 
     def test_deleted_user_cannot_login_or_use_existing_token(self):
         assert self.client.delete(f'/api/users/{self.community_admin.id}', headers=auth(self.league_admin)).status_code == 204
