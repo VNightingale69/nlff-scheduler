@@ -250,6 +250,21 @@ export default function ScheduleManagementPage() {
             </table>
           </div>
         ) : null}
+        {publishDiagnostics.publish_layout_evaluations?.length ? <div className='mt-3 space-y-2'>
+          <h3 className='font-semibold'>Host capacity validation basis</h3>
+          {publishDiagnostics.publish_layout_evaluations.map((evaluation: any, index: number) => <div key={`${evaluation.host_location_id}-${evaluation.date}-${evaluation.time}-${index}`} className='rounded border bg-white p-2'>
+            <div className='font-medium'>{evaluation.host_location_name || 'Host'} — {evaluation.date ? formatDisplayDate(evaluation.date) : '—'} {evaluation.time ? formatDisplayTime(evaluation.time) : ''}</div>
+            <div><strong>Required:</strong> {Object.entries(evaluation.required || {}).filter(([, count]) => Number(count)).map(([size, count]) => `${count} ${size.toLowerCase()}`).join(', ') || 'None'}</div>
+            <div><strong>Configuration basis:</strong> {evaluation.configuration_basis}</div>
+            <div><strong>Compatible configuration:</strong> {evaluation.matched_layout || 'None confirmed'}</div>
+            <div><strong>Assigned fields:</strong> {evaluation.assigned_fields?.join(', ') || 'None'}</div>
+            <div><strong>Result:</strong> {evaluation.result}</div>
+          </div>)}
+        </div> : null}
+        {publishDiagnostics.publish_warnings?.length ? <div className='mt-3 rounded border border-amber-300 bg-amber-50 p-2'>
+          <h3 className='font-semibold text-amber-900'>Warnings — do not block publication</h3>
+          <ul className='mt-1 list-disc pl-5'>{publishDiagnostics.publish_warnings.map((warning: any, index: number) => <li key={`${warning.issue_code || 'warning'}-${index}`}><strong>{warning.issue_code || 'WARNING'}:</strong> {warning.summary || warning.reason}</li>)}</ul>
+        </div> : null}
       </div> : null}
 
       <div className='grid gap-2 md:grid-cols-7'>

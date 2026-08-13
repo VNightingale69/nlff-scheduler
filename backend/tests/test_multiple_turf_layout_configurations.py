@@ -144,3 +144,27 @@ def test_retired_timeslot_selection_does_not_override_current_layouts(facility):
     assert {three_small.configuration_name, two_medium.configuration_name, large_small.configuration_name} == {
         'THREE_SMALL', 'TWO_MEDIUM', 'ONE_LARGE_ONE_SMALL',
     }
+
+
+def test_active_timeslot_configuration_is_an_explicit_capacity_lock(facility):
+    db, host, user, fields = facility
+    three_small = _add(db, host, user, {name: fields[name] for name in
+                                       ('Small Field 1', 'Small Field 2', 'Small Field 3')}, 'THREE_SMALL')
+    locked = _add(db, host, user, {name: fields[name] for name in
+                                  ('Large Field 1', 'Small Field 1')}, 'ONE_LARGE_ONE_SMALL')
+    selected_day = date(2026, 8, 23)
+    selected_time = time(9)
+    row = TimeslotFieldConfiguration(
+        id=uuid.uuid4(), host_location_id=host.id, configuration_id=locked.id,
+        configuration_date=selected_day, kickoff_time=selected_time,
+    )
+    db.add(row); db.commit()
+
+    override, selected, valid = select_supported_layout(
+        db, host.id, selected_day, selected_time, ['SMALL'] * 3,
+    )
+
+    assert override.id == row.id
+    assert selected.id == locked.id
+    assert not valid
+    assert three_small.is_active  # The alternate is ignored only because this kickoff is explicitly locked.

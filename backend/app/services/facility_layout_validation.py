@@ -107,13 +107,12 @@ def select_supported_layout(db, host_id, game_date, kickoff, required_sizes, *, 
                  )['valid']]
     if existing:
         selected = next((item for item in configurations if item.id == existing.configuration_id), None)
-        if selected in supported:
-            return existing, selected, True
-        # A timeslot selection is a scheduling aid, not a snapshot of physical
-        # capacity.  It may point at a layout that has since been retired or at
-        # a layout that does not fit the now-saved wave.  Continue matching
-        # against every current active layout instead of making that historical
-        # relationship authoritative.
+        if selected:
+            # An active, time-specific row is an explicit physical-layout lock.
+            # It is the only case where one layout may conclusively block a
+            # wave.  A row pointing to a retired layout is historical generated
+            # metadata, however, and must not hide current alternatives.
+            return existing, selected, selected in supported
     if not supported:
         return None, None, False
     # Prefer the tightest valid footprint, making the sole satisfying alternate
@@ -136,7 +135,7 @@ def active_layout_capacities(db, host_id):
     """Return the current host-scoped layouts considered by validation."""
     configurations = get_active_supported_layouts(db, host_id)
     return [
-        {'code': configuration.configuration_name, 'capacity': _capacity(configuration)}
+        {'id': str(configuration.id), 'code': configuration.configuration_name, 'capacity': _capacity(configuration)}
         for configuration in configurations
     ]
 
