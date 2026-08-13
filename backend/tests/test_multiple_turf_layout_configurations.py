@@ -1,4 +1,5 @@
 import uuid
+from datetime import date, time
 
 import pytest
 from fastapi import HTTPException
@@ -6,7 +7,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
-from app.models import Field, HostLocation, HostLocationConfiguration, Organization, Role, User
+from app.models import Field, HostLocation, HostLocationConfiguration, Organization, Role, TimeslotFieldConfiguration, User
 from app.routes.api import create_host_location_configuration
 from app.schemas import HostLocationConfigurationCreate
 from app.services.facility_layout_validation import select_supported_layout
@@ -75,3 +76,31 @@ def test_validation_and_host_scoped_code_uniqueness(facility):
     db.add_all([other, other_field]); db.commit()
     _add(db, other, user, {'Small Field 1': other_field}, 'THREE_SMALL')
     assert db.query(HostLocationConfiguration).filter_by(configuration_name='THREE_SMALL').count() == 2
+
+
+def test_retired_timeslot_selection_does_not_override_current_layouts(facility):
+    db, host, user, fields = facility
+    three_small = _add(db, host, user, {name: fields[name] for name in ('Small Field 1', 'Small Field 2', 'Small Field 3')}, 'THREE_SMALL')
+    two_medium = _add(db, host, user, {name: fields[name] for name in ('Medium 1', 'Medium 2')}, 'TWO_MEDIUM')
+    large_small = _add(db, host, user, {name: fields[name] for name in ('Large Field 1', 'Small Field 1')}, 'ONE_LARGE_ONE_SMALL')
+    retired = HostLocationConfiguration(
+        id=uuid.uuid4(), host_location_id=host.id, configuration_name='RETIRED_GENERATED',
+        medium_field_count=1, is_active=False,
+    )
+    selected_day = date(2026, 8, 23)
+    selected_time = time(13)
+    stale = TimeslotFieldConfiguration(
+        id=uuid.uuid4(), host_location_id=host.id, configuration_id=retired.id,
+        configuration_date=selected_day, kickoff_time=selected_time,
+    )
+    db.add_all([retired, stale]); db.commit()
+
+    override, matched, valid = select_supported_layout(
+        db, host.id, selected_day, selected_time, ['MEDIUM'],
+    )
+    assert valid
+    assert override is None
+    assert matched.id == two_medium.id
+    assert {three_small.configuration_name, two_medium.configuration_name, large_small.configuration_name} == {
+        'THREE_SMALL', 'TWO_MEDIUM', 'ONE_LARGE_ONE_SMALL',
+    }
