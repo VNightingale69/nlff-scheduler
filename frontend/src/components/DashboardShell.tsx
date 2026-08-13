@@ -12,7 +12,7 @@ export default function DashboardShell({ children, user }: { children: React.Rea
 
   const role = normalizeRoleName(user?.role_name) as AuthUser['role_name'];
   const navOrder = role === 'COMMUNITY_ADMIN'
-    ? ['organizations', 'teams', 'host-locations', 'fields', 'hosting-availability', 'score-entry', 'standings', 'rulebook']
+    ? ['organizations', 'teams', 'host-locations', 'fields', 'hosting-availability', 'schedule-review', 'score-entry', 'standings', 'rulebook']
     : [
       'users',
       'organizations',
@@ -43,6 +43,7 @@ export default function DashboardShell({ children, user }: { children: React.Rea
     'host-locations': 'My Host Locations',
     fields: 'My Fields',
     'hosting-availability': 'My Hosting Availability',
+    'schedule-review': 'Schedule Review',
     'score-entry': 'Score Entry',
     standings: 'Results & Standings',
     rulebook: 'Rulebook',
@@ -59,7 +60,7 @@ export default function DashboardShell({ children, user }: { children: React.Rea
     const isAdminScores = role !== 'COMMUNITY_ADMIN' && key.startsWith('scores');
     const isCommunityScores = role === 'COMMUNITY_ADMIN' && key === 'score-entry';
     const navTitle = key === 'scores' ? 'Score Management' : key === 'scores/flagged' ? 'Flagged Scores' : key === 'scores/missing' ? 'Missing Scores' : title;
-    return <div key={key}>{key === 'login-activity' ? <div className='px-2 pt-2 text-xs font-semibold uppercase tracking-wide text-slate-400'>Security</div> : null}{key === 'host-availability-matrix' ? <div className='px-2 pt-2 text-xs font-semibold uppercase tracking-wide text-slate-400'>Scheduling</div> : null}{(key === 'scores' || isCommunityScores) ? <div className='px-2 pt-2 text-xs font-semibold uppercase tracking-wide text-slate-400'>Scores</div> : null}<Link className={`block rounded px-2 py-1 ${pathname?.includes(`/admin/${key}`) || pathname === `/organizations` ? 'bg-slate-700' : isAdminScores ? 'ml-3 hover:bg-slate-800' : 'hover:bg-slate-800'}`} href={`/admin/${key}`}>{navTitle}</Link></div>;
+    return <div key={key}>{key === 'login-activity' ? <div className='px-2 pt-2 text-xs font-semibold uppercase tracking-wide text-slate-400'>Security</div> : null}{(key === 'host-availability-matrix' || (role === 'COMMUNITY_ADMIN' && key === 'schedule-review')) ? <div className='px-2 pt-2 text-xs font-semibold uppercase tracking-wide text-slate-400'>Scheduling</div> : null}{(key === 'scores' || isCommunityScores) ? <div className='px-2 pt-2 text-xs font-semibold uppercase tracking-wide text-slate-400'>Scores</div> : null}<Link className={`block rounded px-2 py-1 ${pathname?.includes(`/admin/${key}`) || pathname === `/organizations` ? 'bg-slate-700' : isAdminScores ? 'ml-3 hover:bg-slate-800' : 'hover:bg-slate-800'}`} href={`/admin/${key}`}>{navTitle}</Link></div>;
   })}
   <Link className='block rounded px-2 py-1 hover:bg-slate-800' href='/schedule'>Published Schedule</Link>
   <Link className='block rounded px-2 py-1 hover:bg-slate-800' href='/rulebook'>Public Rulebook</Link>

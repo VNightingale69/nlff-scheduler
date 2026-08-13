@@ -101,6 +101,42 @@ class ManualScheduleEditPermissionsTest(unittest.TestCase):
         payload.update(overrides)
         return payload
 
+    def test_community_admin_reviews_draft_and_entire_league_saved_schedule(self):
+        self.week.publication_status = 'UNPUBLISHED'
+        self.db.commit()
+        mine = self.client.get('/api/schedule-review', headers=self._token(self.community_user.id))
+        assert mine.status_code == 200
+        assert mine.json()['weeks'][0]['publication_status'] == 'DRAFT'
+        assert len(mine.json()['weeks'][0]['games']) == 1
+        league = self.client.get('/api/schedule-review?scope=league', headers=self._token(self.community_user.id))
+        assert league.status_code == 200
+        assert len(league.json()['weeks'][0]['games']) == 1
+        game = league.json()['weeks'][0]['games'][0]
+        assert 'id' not in game and 'internal_admin_notes' not in game and 'slot_id' not in game
+
+    def test_public_schedule_does_not_return_draft_week(self):
+        self.week.publication_status = 'UNPUBLISHED'
+        self.db.commit()
+        response = self.client.get('/api/public/schedule')
+        assert response.status_code == 200
+        assert response.json()['items'] == []
+
+    def test_schedule_review_allows_existing_schedule_admin_roles(self):
+        for user in (self.league_user, self.scheduling_user):
+            response = self.client.get('/api/schedule-review?scope=league', headers=self._token(user.id))
+            assert response.status_code == 200
+            assert len(response.json()['weeks'][0]['games']) == 1
+
+    def test_community_admin_review_export_has_draft_marking_without_admin_data(self):
+        self.week.publication_status = 'UNPUBLISHED'
+        self.game.internal_admin_notes = 'private solver note'
+        self.db.commit()
+        response = self.client.get('/api/schedule-review/export.csv', headers=self._token(self.community_user.id))
+        assert response.status_code == 200
+        assert 'PREPUBLISHED SCHEDULE' in response.text
+        assert 'Publication Status' in response.text
+        assert 'private solver note' not in response.text
+
 
     def _open_slot(self, start=time(10, 0), end=time(11, 0)):
         slot = GameSlot(
