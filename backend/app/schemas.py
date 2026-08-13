@@ -38,6 +38,19 @@ class UserRead(BaseSchema):
     role_name: str
     organization_id: uuid.UUID | None
     is_active: bool
+    deleted_at: datetime | None = None
+
+
+class UserUpdate(BaseModel):
+    email: EmailStr
+    full_name: str
+    role_name: str
+    organization_id: uuid.UUID | None = None
+    is_active: bool
+
+
+class UserPasswordReset(BaseModel):
+    password: str
 
 
 class LoginRequest(BaseModel):

@@ -55,11 +55,15 @@ def handle_sqlalchemy_error(request: Request, exc: SQLAlchemyError):
         getattr(original, 'sqlstate', None) or getattr(original, 'pgcode', None),
         getattr(getattr(original, 'diag', None), 'constraint_name', None),
     )
+    is_user_delete = request.method == 'DELETE' and request.url.path.startswith('/api/users/')
     return JSONResponse(
         status_code=500,
         content={
             'error': 'database_error',
-            'message': 'Unable to load scheduled games. Please try again.',
+            'message': (
+                'Unable to delete the user because of an unexpected server error.'
+                if is_user_delete else 'A database operation failed. Please try again.'
+            ),
         },
     )
 

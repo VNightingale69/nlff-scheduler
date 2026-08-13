@@ -14,6 +14,7 @@ export default function DashboardShell({ children, user }: { children: React.Rea
   const navOrder = role === 'COMMUNITY_ADMIN'
     ? ['organizations', 'teams', 'host-locations', 'fields', 'hosting-availability', 'score-entry', 'standings', 'rulebook']
     : [
+      'users',
       'organizations',
       'divisions',
       'host-locations',

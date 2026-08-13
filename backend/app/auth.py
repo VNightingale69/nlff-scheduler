@@ -63,7 +63,7 @@ def get_current_user(credentials: HTTPAuthorizationCredentials | None = Depends(
         user_uuid = uuid.UUID(user_id)
     except (TypeError, ValueError):
         raise auth_invalid_token_exception()
-    user = db.query(User).filter(User.id == user_uuid, User.is_active.is_(True)).first()
+    user = db.query(User).filter(User.id == user_uuid, User.is_active.is_(True), User.deleted_at.is_(None)).first()
     if not user:
         raise auth_invalid_token_exception()
     if normalize_role_name(user.role.name) == ROLE_COMMUNITY_ADMIN:
@@ -83,7 +83,7 @@ def get_optional_current_user(credentials: HTTPAuthorizationCredentials | None =
         user_id = payload.get('sub')
         if not user_id:
             return None
-        return db.query(User).filter(User.id == uuid.UUID(user_id), User.is_active.is_(True)).first()
+        return db.query(User).filter(User.id == uuid.UUID(user_id), User.is_active.is_(True), User.deleted_at.is_(None)).first()
     except Exception:
         return None
 

@@ -19,7 +19,7 @@ from sqlalchemy.exc import IntegrityError, ProgrammingError, SQLAlchemyError
 from sqlalchemy.orm import Session, aliased
 
 from app.config import ADMIN_SEED_EMAIL, COMMUNITY_LOGO_MAX_SIZE_BYTES, COMMUNITY_LOGO_UPLOAD_DIR, ENABLE_SCHEDULE_QUALITY_REPORT, ENABLE_TURF_OPTIMIZATION, RULEBOOK_MAX_SIZE_BYTES, RULEBOOK_UPLOAD_DIR, UPLOAD_STORAGE_DIR
-from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN, can_manage_fields, can_manage_schedule, enforce_organization_scope, get_current_user, get_optional_current_user, is_community_admin, is_league_admin, is_scheduling_admin, normalize_role_name, require_field_manager, require_roles, require_schedule_admin, require_schedule_publisher
+from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN, can_manage_fields, can_manage_schedule, enforce_organization_scope, get_current_user, get_optional_current_user, is_community_admin, is_league_admin, is_scheduling_admin, normalize_role_name, require_field_manager, require_roles, require_schedule_admin, require_schedule_publisher, role_by_name
 from app.database import get_db
 from app.organizations import active_organization_filter, normalize_organization_name
 from app.models import Division, Field, FieldConfigurationMember, FieldConfigurationOption, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostPlanSelection, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Rulebook, LoginAuditLog, ScheduleChangeLog, ScheduleImport, SchedulePublicationEvent, ScoreHistory, ScoreSubmission, Season, Team, TimeslotFieldConfiguration, Tournament, TournamentDivision, TournamentGame, TournamentTeam, TurfWave, User, Week
@@ -31,7 +31,7 @@ from app.schemas import (
     OrganizationDivisionParticipationBulkUpsertRequest, OrganizationDivisionParticipationRead,
     GeneratedSlotRead, GeneratedSlotsClearResponse, HostAvailabilityMatrixSaveRequest, HostAvailabilityMatrixSaveResponse, HostLocationCreate, HostLocationRead, HostLocationConfigurationCreate, HostLocationConfigurationRead, HostingAvailabilityCreate, HostingAvailabilityRead, HostingAvailabilityBulkUpsertRequest, HostingAvailabilityBulkUpsertResponse, HostingGenerationRunResult, HostingGenerationLocationResult, PhysicalFieldAreaCreate, PhysicalFieldAreaRead, SavedAvailabilityResponse,
     LoginAuditLogRead, LoginRequest, OrganizationCreate, OrganizationRead, PagedResponse, PublicGameRead, RefreshRequest, RulebookRead, ScoreApprovePayload, ScorePayload,
-    TeamCreate, TeamRead, TeamUpdate, TokenResponse, UserCreate, UserRead,
+    TeamCreate, TeamRead, TeamUpdate, TokenResponse, UserCreate, UserPasswordReset, UserRead, UserUpdate,
     HOST_PLAN_SELECTION_STATUSES, ScheduleReadinessDivisionRow, ScheduleReadinessHostDateRow, ScheduleReadinessHostSiteRow, ScheduleReadinessResponse, ScheduleReadinessTotals, ScheduleReadinessTurfWaveRow, ScheduleReadinessTurfWaveSlotRow
 )
 from app.security import access_token_expires_at, auth_invalid_token_exception, create_access_token, create_refresh_token, hash_password, validate_password_strength, verify_password, decode_token
@@ -7734,7 +7734,7 @@ def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)
     failure_reason = None
     if not user:
         failure_reason = 'missing_user'
-    elif not user.is_active or not user.role or not user.role.is_active:
+    elif not user.is_active or user.deleted_at is not None or not user.role or not user.role.is_active:
         failure_reason = 'inactive_user'
     elif normalize_role_name(user.role.name) == ROLE_COMMUNITY_ADMIN and (not user.organization or not user.organization.is_active or user.organization.deleted_at is not None):
         failure_reason = 'inactive_organization'
@@ -7786,7 +7786,7 @@ def refresh(payload: RefreshRequest, db: Session = Depends(get_db)):
         user_uuid = uuid.UUID(token_data['sub'])
     except (KeyError, TypeError, ValueError):
         raise auth_invalid_token_exception()
-    user = db.query(User).join(User.role).filter(User.id == user_uuid, User.is_active.is_(True), Role.is_active.is_(True)).first()
+    user = db.query(User).join(User.role).filter(User.id == user_uuid, User.is_active.is_(True), User.deleted_at.is_(None), Role.is_active.is_(True)).first()
     if not user:
         raise auth_invalid_token_exception()
     return _token_response(user)
@@ -7804,7 +7804,77 @@ def create_user(payload: UserCreate, db: Session = Depends(get_db)):
     validate_password_strength(payload.password)
     obj = User(email=payload.email.lower(), full_name=payload.full_name, password_hash=hash_password(payload.password), role_id=role.id, organization_id=payload.organization_id, is_active=payload.is_active)
     db.add(obj); db.commit(); db.refresh(obj)
-    return UserRead(id=obj.id, created_at=obj.created_at, updated_at=obj.updated_at, email=obj.email, full_name=obj.full_name, role_name=normalize_role_name(obj.role.name), organization_id=obj.organization_id, is_active=obj.is_active)
+    return _user_read(obj)
+
+
+def _user_read(user: User) -> UserRead:
+    return UserRead(id=user.id, created_at=user.created_at, updated_at=user.updated_at, email=user.email,
+                    full_name=user.full_name, role_name=normalize_role_name(user.role.name),
+                    organization_id=user.organization_id, is_active=user.is_active, deleted_at=user.deleted_at)
+
+
+@router.get('/users', response_model=PagedResponse[UserRead], dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+def list_users(search: str | None = None, role: str | None = None, organization_id: uuid.UUID | None = None,
+               is_active: bool | None = None, page: int = 1, page_size: int = 20, db: Session = Depends(get_db)):
+    q = db.query(User).join(User.role).filter(User.deleted_at.is_(None))
+    if search:
+        q = q.filter(or_(func.lower(User.email).contains(search.lower()), func.lower(User.full_name).contains(search.lower())))
+    if role:
+        q = q.filter(Role.name == normalize_role_name(role))
+    if organization_id:
+        q = q.filter(User.organization_id == organization_id)
+    if is_active is not None:
+        q = q.filter(User.is_active == is_active)
+    total = q.count()
+    items = q.order_by(User.full_name).offset((page - 1) * page_size).limit(page_size).all()
+    return PagedResponse(items=[_user_read(item) for item in items], total=total, page=page, page_size=page_size)
+
+
+@router.put('/users/{user_id}', response_model=UserRead, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+def update_user(user_id: uuid.UUID, payload: UserUpdate, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.id == user_id, User.deleted_at.is_(None)).first()
+    if not user:
+        raise HTTPException(404, 'User not found')
+    role = role_by_name(db, payload.role_name)
+    if normalize_role_name(role.name) == ROLE_COMMUNITY_ADMIN and not payload.organization_id:
+        raise HTTPException(400, 'Community administrator requires organization_id')
+    user.email = payload.email.lower(); user.full_name = payload.full_name; user.role_id = role.id
+    user.organization_id = payload.organization_id; user.is_active = payload.is_active
+    db.commit(); db.refresh(user)
+    return _user_read(user)
+
+
+@router.post('/users/{user_id}/reset-password', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+def reset_user_password(user_id: uuid.UUID, payload: UserPasswordReset, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.id == user_id, User.deleted_at.is_(None)).first()
+    if not user:
+        raise HTTPException(404, 'User not found')
+    validate_password_strength(payload.password)
+    user.password_hash = hash_password(payload.password)
+    db.commit()
+    return {'message': 'Temporary password reset successfully.'}
+
+
+@router.delete('/users/{user_id}', status_code=204, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+def delete_user(user_id: uuid.UUID, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    target = db.query(User).filter(User.id == user_id).first()
+    if not target or target.deleted_at is not None:
+        raise HTTPException(404, 'User not found')
+    if target.id == current_user.id:
+        raise HTTPException(409, 'You cannot delete your own user account.')
+    context = {'acting_user_id': str(current_user.id), 'target_user_id': str(target.id),
+               'target_role': normalize_role_name(target.role.name),
+               'target_community_id': str(target.organization_id) if target.organization_id else None,
+               'action': 'delete_user'}
+    try:
+        target.is_active = False
+        target.deleted_at = datetime.now(timezone.utc)
+        db.commit()
+        logger.info('user_delete result=success context=%s', context)
+    except SQLAlchemyError:
+        db.rollback()
+        logger.exception('user_delete result=database_error context=%s', context)
+        raise HTTPException(500, 'Unable to delete the user because of an unexpected server error.')
 
 @router.post('/organizations', response_model=OrganizationRead, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def create_organization(payload: OrganizationCreate, db: Session = Depends(get_db)):
