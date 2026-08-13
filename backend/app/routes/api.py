@@ -23,7 +23,7 @@ from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_AD
 from app.database import get_db
 from app.organizations import active_organization_filter, normalize_organization_name
 from app.models import Division, Field, FieldConfigurationMember, FieldConfigurationOption, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostPlanSelection, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Rulebook, LoginAuditLog, ScheduleChangeLog, ScheduleImport, SchedulePublicationEvent, ScoreHistory, ScoreSubmission, Season, Team, TimeslotFieldConfiguration, Tournament, TournamentDivision, TournamentGame, TournamentTeam, TurfWave, User, Week
-from app.services.facility_layout_validation import layout_label, select_supported_layout, validate_field_combination, validate_timeslot_demands
+from app.services.facility_layout_validation import active_layout_capacities, layout_label, select_supported_layout, validate_field_combination, validate_timeslot_demands
 from app.services.division_field_types import required_field_type_for_division
 from app.services.schedule_import import build_preview, parse_schedule_file
 from app.schemas import (
@@ -16176,14 +16176,19 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
         canonical_type = _normalize_field_size(getattr(canonical_field, 'layout_type', None) or getattr(field_instance, 'field_type', None))
         required_type = _required_field_type_for_division(division)
         saved_timeslot = getattr(game, 'timeslot_configuration', None)
-        if saved_timeslot and (
+        if game.field_id and canonical_field and saved_timeslot and (
             getattr(saved_timeslot, 'host_location_id', None) != game.host_location_id
             or getattr(saved_timeslot, 'configuration_date', None) != game.game_date
             or getattr(saved_timeslot, 'kickoff_time', None) != game.kickoff_time
             or not bool(getattr(getattr(saved_timeslot, 'configuration', None), 'is_active', False))
         ):
-            errors.append({
+            # Generated/timeslot configuration relationships are historical
+            # scheduling metadata.  Once a game has a valid canonical field,
+            # do not let a retired relationship block publication.
+            warnings.append({
                 'issue_code': 'INVALID_FIELD_FOR_ACTIVE_LAYOUT',
+                'severity': 'WARNING',
+                'blocking': False,
                 'scheduled_game_id': str(game.id),
                 'scheduled_game_display_name': _format_scheduled_game_display_name(getattr(home, 'name', None), getattr(away, 'name', None)),
                 'division': f'{getattr(division, "division_group", "") or ""} {getattr(division, "name", "") or ""}'.strip(),
@@ -16194,8 +16199,8 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
                 'required_field_type': required_type,
                 'selected_layout': layout_label(getattr(saved_timeslot, 'configuration', None)),
                 'reason': 'The saved field-layout reference does not match the current host, date, kickoff, or an active configuration.',
-                'recommended_action': f'Reassign to an active {required_type.title()} field in Manual Schedule Builder.' if required_type else 'Reassign to a field in the active layout.',
-                'summary': 'Saved game references a stale or inactive facility layout.',
+                'recommended_action': 'The obsolete generated/timeslot layout relationship may be detached; the current canonical field remains authoritative.',
+                'summary': 'Ignored a stale generated/timeslot layout reference because the game has a current canonical field.',
             })
         if host and (host.surface_type or 'GRASS_FIELD') == 'TURF_STADIUM' and required_type:
             turf_capacity_groups.setdefault((game.host_location_id, game.game_date, game.kickoff_time), []).append(
@@ -16210,6 +16215,13 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
         if valid:
             continue
         game, _required_type, host, home, away = wave[0]
+        demand = {size: sum(required == size for _game, required, _host, _home, _away in wave) for size in FIELD_SIZE_ORDER}
+        evaluated_layouts = active_layout_capacities(db, host_id)
+        demand_text = ', '.join(f'{count} {size.title()}' for size, count in demand.items() if count) or 'none'
+        layout_text = '; '.join(
+            f"{layout['code']}: " + ' / '.join(f"{layout['capacity'][size]} {size.title()}" for size in FIELD_SIZE_ORDER)
+            for layout in evaluated_layouts
+        ) or 'none'
         errors.append({
             'issue_code': 'HOST_TIMESLOT_CAPACITY_SHORTAGE',
             'scheduled_game_id': str(game.id),
@@ -16217,10 +16229,12 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
             'date': game_date.isoformat() if game_date else None,
             'time': kickoff.isoformat() if kickoff else None,
             'location': getattr(host, 'name', None),
-            'simultaneous_demand': {size: sum(required == size for _game, required, _host, _home, _away in wave) for size in FIELD_SIZE_ORDER},
+            'simultaneous_demand': demand,
+            'available_layouts': evaluated_layouts,
+            'matched_layout': None,
             'selected_layout': layout_label(configuration),
             'recommended_action': 'Reduce overlapping games or select an allowed field layout for this kickoff.',
-            'summary': 'Simultaneous field-size demand exceeds every allowed physical layout at this host and kickoff.',
+            'summary': f'Required: {demand_text}. Available layouts: {layout_text}. No active layout can satisfy this timeslot.',
         })
     for (host_id, game_date, kickoff), mismatched in layout_groups.items():
         all_wave = [row for row in rows if row[0].host_location_id == host_id and row[0].game_date == game_date and row[0].kickoff_time == kickoff]

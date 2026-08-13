@@ -56,6 +56,21 @@ class TimeslotCapacityValidationTest(unittest.TestCase):
         )
         self.assertTrue(result['valid'])
 
+    def test_approved_westosha_layouts_allow_unused_fields(self):
+        cases = (
+            ({'SMALL': 3}, {'SMALL': 3}, True),
+            ({'MEDIUM': 2}, {'MEDIUM': 2}, True),
+            ({'MEDIUM': 1}, {'MEDIUM': 2}, True),
+            ({'LARGE': 1, 'SMALL': 1}, {'LARGE': 1, 'SMALL': 1}, True),
+            ({'LARGE': 1}, {'LARGE': 1, 'SMALL': 1}, True),
+            ({'SMALL': 1}, {'SMALL': 3}, True),
+            ({'SMALL': 4}, {'SMALL': 3}, False),
+        )
+        for demand, layout, expected in cases:
+            with self.subTest(demand=demand, layout=layout):
+                result = self.validate({time(9): demand}, {time(9): [layout]})
+                self.assertEqual(result['valid'], expected)
+
 
 if __name__ == '__main__':
     unittest.main()
