@@ -4792,14 +4792,14 @@ TIM_OSMOND_LOCATION_NAME = 'TIM OSMOND SPORTS COMPLEX'
 TIM_OSMOND_APPROVED_LAYOUT_CODES = frozenset({
     'ONE_LARGE_ONE_SMALL',
 })
-STANDARD_APPROVED_LAYOUT_CODES = frozenset({'ONE_LARGE_ONE_SMALL'})
+STANDARD_APPROVED_LAYOUT_CODES = frozenset(TURF_APPROVED_LAYOUT_CODES)
 
 def _johnsburg_location_name(host: HostLocation) -> str | None:
     return johnsburg_location_name(host)
 
 
 def _approved_layout_codes_for_host(host: HostLocation) -> frozenset[str]:
-    """Return the single league-wide physical layout for every turf stadium."""
+    """Return every alternate league-approved layout for a managed turf surface."""
     return STANDARD_APPROVED_LAYOUT_CODES
 
 
@@ -5566,7 +5566,9 @@ def _apply_turf_configuration_metadata(obj, configuration_name: str) -> None:
 def _ensure_approved_turf_configurations(db: Session, host: HostLocation) -> bool:
     if not _is_turf_stadium_host(host):
         return False
-    canonical_capacity = (1, 0, 1, 2)
+    # Maxima summarize capability; they are never added together for a wave.
+    # Scheduling capacity is evaluated against one complete approved layout.
+    canonical_capacity = (1, 2, 3, 3)
     current_capacity = (
         int(host.max_large_fields or 0), int(host.max_medium_fields or 0),
         int(host.max_small_fields or 0), int(host.max_total_fields or 0),

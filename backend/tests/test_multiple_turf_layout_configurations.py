@@ -67,16 +67,33 @@ def test_new_layout_is_visible_immediately_without_slot_regeneration_or_cache_cl
     db, host, user, fields = facility
     _add(db, host, user, {'Large Field 1': fields['Large Field 1'],
                          'Small Field 1': fields['Small Field 1']}, 'ONE_LARGE_ONE_SMALL')
-    assert [layout.configuration_name for layout in get_active_supported_layouts(db, host.id)] == [
-        'ONE_LARGE_ONE_SMALL',
-    ]
+    assert {layout.configuration_name for layout in get_active_supported_layouts(db, host.id)} == {
+        'THREE_SMALL', 'TWO_MEDIUM', 'ONE_LARGE_ONE_SMALL',
+    }
 
     two_medium = _add(db, host, user, {'Medium 1': fields['Medium 1'], 'Medium 2': fields['Medium 2']},
                       'TWO_MEDIUM')
 
     layouts = get_active_supported_layouts(db, host.id)
-    assert {layout.configuration_name for layout in layouts} == {'ONE_LARGE_ONE_SMALL', 'TWO_MEDIUM'}
+    assert {layout.configuration_name for layout in layouts} == {
+        'THREE_SMALL', 'TWO_MEDIUM', 'ONE_LARGE_ONE_SMALL',
+    }
     assert select_supported_layout(db, host.id, date(2026, 8, 23), time(13), ['MEDIUM'])[1].id == two_medium.id
+
+
+def test_approved_layouts_override_a_single_misleading_current_layout(facility):
+    db, host, user, fields = facility
+    _add(db, host, user, {
+        'Large Field 1': fields['Large Field 1'],
+        'Small Field 1': fields['Small Field 1'],
+    }, 'ONE_LARGE_ONE_SMALL')
+
+    _override, selected, valid = select_supported_layout(
+        db, host.id, date(2026, 8, 23), time(9), ['SMALL', 'SMALL', 'SMALL'],
+    )
+
+    assert valid
+    assert selected.configuration_name == 'THREE_SMALL'
 
 
 def test_layout_records_persist_selected_canonical_fields(facility):

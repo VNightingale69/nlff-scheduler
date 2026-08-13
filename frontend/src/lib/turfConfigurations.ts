@@ -36,7 +36,7 @@ export const APPROVED_TURF_CONFIGURATIONS: TurfConfiguration[] = [
 
 export const APPROVED_TURF_CONFIGURATION_CODES = APPROVED_TURF_CONFIGURATIONS.map((config) => config.code);
 
-export const STANDARD_TURF_CONFIGURATION_CODES = ['ONE_LARGE_ONE_SMALL'];
+export const STANDARD_TURF_CONFIGURATION_CODES = APPROVED_TURF_CONFIGURATION_CODES;
 
 export const turfConfigurationsForHost = (hostName?: string | null, organizationName?: string | null) => {
   void hostName;
