@@ -23,7 +23,7 @@ from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_AD
 from app.database import get_db
 from app.organizations import active_organization_filter, normalize_organization_name
 from app.models import Division, Field, FieldConfigurationMember, FieldConfigurationOption, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostPlanSelection, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Rulebook, LoginAuditLog, ScheduleChangeLog, ScheduleImport, SchedulePublicationEvent, ScoreHistory, ScoreSubmission, Season, Team, TimeslotFieldConfiguration, Tournament, TournamentDivision, TournamentGame, TournamentTeam, TurfWave, User, Week
-from app.services.facility_layout_validation import active_layout_capacities, layout_label, select_supported_layout, validate_field_combination, validate_timeslot_demands
+from app.services.facility_layout_validation import active_layout_capacities, active_supported_layouts_query, get_active_supported_layouts, layout_label, select_supported_layout, validate_field_combination, validate_timeslot_demands
 from app.services.division_field_types import required_field_type_for_division
 from app.services.schedule_import import build_preview, parse_schedule_file
 from app.schemas import (
@@ -5117,10 +5117,7 @@ def _host_availability_capacity_by_size(db: Session, host: HostLocation, availab
     if surface_type == 'TURF_STADIUM':
         _ensure_approved_turf_configurations(db, host)
         db.flush()
-        active_configs = db.query(HostLocationConfiguration).filter(
-            HostLocationConfiguration.host_location_id == host.id,
-            HostLocationConfiguration.is_active.is_(True),
-        ).all()
+        active_configs = get_active_supported_layouts(db, host.id)
         active_names = _available_turf_configuration_names(active_configs)
         if not active_names:
             return capacity
@@ -11492,7 +11489,10 @@ def create_host_location_configuration(payload: HostLocationConfigurationCreate,
 def list_host_location_configurations(host_location_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, include_inactive_legacy: bool = False, page: int = 1, page_size: int = 100, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     role_name = normalize_role_name(current_user.role.name)
     selected_organization_id = organization_id
-    q = db.query(HostLocationConfiguration).join(HostLocationConfiguration.host_location)
+    q = (active_supported_layouts_query(db, host_location_id)
+         if host_location_id and not include_inactive_legacy
+         else db.query(HostLocationConfiguration))
+    q = q.join(HostLocationConfiguration.host_location)
     if not include_inactive_legacy:
         q = q.filter(HostLocationConfiguration.is_legacy.is_(False))
     if organization_id:
@@ -16115,6 +16115,7 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
     matchups: set[tuple] = set()
     layout_groups: dict[tuple, list[tuple]] = {}
     turf_capacity_groups: dict[tuple, list[tuple]] = {}
+    layout_evaluations: list[dict[str, object]] = []
     for game, _slot, field_instance, host, home, away, division, _org, _status in rows:
         canonical_field = getattr(game, 'field', None)
         def error(code: str, message: str):
@@ -16212,11 +16213,20 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
         _override, configuration, valid = select_supported_layout(
             db, host_id, game_date, kickoff, [item[1] for item in wave],
         )
+        demand = {size: sum(required == size for _game, required, _host, _home, _away in wave) for size in FIELD_SIZE_ORDER}
+        evaluated_layouts = active_layout_capacities(db, host_id)
+        layout_evaluations.append({
+            'host_location_id': str(host_id),
+            'host_location_name': getattr(wave[0][2], 'name', None),
+            'date': game_date.isoformat() if game_date else None,
+            'time': kickoff.isoformat() if kickoff else None,
+            'required': demand,
+            'available_layouts': evaluated_layouts,
+            'matched_layout': configuration.configuration_name if valid and configuration else None,
+        })
         if valid:
             continue
         game, _required_type, host, home, away = wave[0]
-        demand = {size: sum(required == size for _game, required, _host, _home, _away in wave) for size in FIELD_SIZE_ORDER}
-        evaluated_layouts = active_layout_capacities(db, host_id)
         demand_text = ', '.join(f'{count} {size.title()}' for size, count in demand.items() if count) or 'none'
         layout_text = '; '.join(
             f"{layout['code']}: " + ' / '.join(f"{layout['capacity'][size]} {size.title()}" for size in FIELD_SIZE_ORDER)
@@ -16286,6 +16296,7 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
             'recommended_action': 'Move a game or choose fields that are contained together in one active supported layout.',
         })
     return {'games': len(rows), 'blocking_errors': errors, 'warnings': warnings,
+            'layout_evaluations': layout_evaluations,
             'status': 'Blocked' if errors else 'Ready to Publish'}
 
 
@@ -16786,10 +16797,7 @@ def get_active_fields_for_host_locations(
         if fields_by_host.get(host.id):
             continue
         _ensure_approved_turf_configurations(db, host)
-        active_configs = db.query(HostLocationConfiguration).filter(
-            HostLocationConfiguration.host_location_id == host.id,
-            HostLocationConfiguration.is_active.is_(True),
-        ).all()
+        active_configs = get_active_supported_layouts(db, host.id)
         templates = {
             (label, _normalize_field_size(field_type) or field_type)
             for config in active_configs
@@ -25698,10 +25706,7 @@ def _availability_generation_reason(
     if not availability.is_available:
         return f'{host.name}: availability is marked unavailable.'
     if surface_type == 'TURF_STADIUM':
-        active_configs = db.query(HostLocationConfiguration).filter(
-            HostLocationConfiguration.host_location_id == host.id,
-            HostLocationConfiguration.is_active.is_(True),
-        ).all()
+        active_configs = get_active_supported_layouts(db, host.id)
         active_names = sorted(_available_turf_configuration_names(active_configs))
         demand = _normalized_demand_counts(demand_counts_override) if demand_counts_override is not None else _turf_demand_counts_for_date(db, host, availability.available_date)
         selected = availability.selected_configuration.configuration_name if availability.selected_configuration else None
