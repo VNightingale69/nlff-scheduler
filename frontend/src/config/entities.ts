@@ -7,6 +7,7 @@ export type EntityConfig = {
 };
 
 export const ENTITIES: Record<string, EntityConfig> = {
+  users: { title: 'Users', path: '/users', nav: true, roles: ['LEAGUE_ADMIN'], fields: [] },
   organizations: { title: 'Organizations', path: '/organizations', nav: true, fields: [{ key: 'name', label: 'Name' }, { key: 'is_active', label: 'Active', type: 'checkbox' }] },
   divisions: { title: 'Community Division Participation', path: '/divisions', nav: true, fields: [{ key: 'name', label: 'Name' }] },
   'host-locations': { title: 'Host Locations', path: '/host-locations', nav: true, fields: [{ key: 'organization_id', label: 'Organization', type: 'select' }, { key: 'name', label: 'Name' }, { key: 'address_line1', label: 'Street Address' }, { key: 'address_line2', label: 'Address Line 2' }, { key: 'city', label: 'City' }, { key: 'state', label: 'State' }, { key: 'zip_code', label: 'Zip Code' }, { key: 'is_active', label: 'Active', type: 'checkbox' }] },

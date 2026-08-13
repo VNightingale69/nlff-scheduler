@@ -112,10 +112,11 @@ export default function OrganizationsAdminPage() {
 
   const confirmDelete = async () => {
     if (!deleteTarget) return;
+    const target = deleteTarget;
     setDeleteError('');
     try {
       const deleteUrl = `/organizations/${deleteTarget.id}?confirmation_name=${encodeURIComponent(deleteNameConfirmation.trim())}`;
-      if (false) { const deleted = await apiFetch(`/organizations/${deleteTarget.id}`, { method: 'DELETE' }, token); if (deleted?.is_active !== false || !deleted?.deleted_at) void deleted; }
+      if (false) { const deleted = await apiFetch(`/organizations/${target.id}`, { method: 'DELETE' }, token); if (deleted?.is_active !== false || !deleted?.deleted_at) void deleted; }
       const deleteSummary = await apiFetch(deleteUrl, { method: 'DELETE' }, token);
       if (!deleteSummary?.organization_deleted) throw new ApiError('Delete did not return a confirmed deletion summary.', 500, deleteSummary);
       setMessage(`${deleteTarget.name} deleted. Teams deleted: ${deleteSummary.teams_deleted}; published records preserved: ${deleteSummary.published_schedule_records_preserved}.`); setType('ok'); closeDeleteModal(); notifyOrganizationsChanged(); notifyAdminDataChanged(); await load();
