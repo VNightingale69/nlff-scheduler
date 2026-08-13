@@ -118,7 +118,11 @@ def _configuration_candidates(db, site, field_name, field_type):
     if _normalized_name(getattr(site, 'name', '')) == 'hiller stadium' and requested_name == 'field 2':
         requested_name = 'field 3'
     for layout_code in layout_codes:
+        configuration = configured_by_code.get(layout_code)
         templates = johnsburg_field_templates(site, layout_code)
+        if configuration and configuration.members:
+            templates = [(member.field.name, member.field.layout_type) for member in configuration.members
+                         if member.field and member.field.is_active and member.field.deleted_at is None]
         if templates and any(
             _normalized_name(name) == requested_name
             and _key(template_type).startswith(_key(field_type))

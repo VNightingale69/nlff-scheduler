@@ -7,11 +7,32 @@ FIELD_SIZE_LARGE = 'LARGE'
 FIELD_SIZE_ORDER = (FIELD_SIZE_SMALL, FIELD_SIZE_MEDIUM, FIELD_SIZE_LARGE)
 
 INVALID_TURF_CONFIGURATION_MESSAGE = (
-    'Invalid turf configuration. Turf stadium locations may only use '
-    'ONE_LARGE_ONE_SMALL (one Large field and one Small field).'
+    'Invalid turf configuration. Use a supported Turf Stadium layout.'
 )
 
 APPROVED_TURF_CONFIGURATIONS: tuple[dict[str, object], ...] = (
+    {
+        'code': 'THREE_SMALL',
+        'displayName': 'Three Small Fields',
+        'availableFields': (FIELD_SIZE_SMALL, FIELD_SIZE_SMALL, FIELD_SIZE_SMALL),
+        'supportedFieldSizes': (FIELD_SIZE_SMALL,),
+        'supportedDivisions': ('Coed K-1', 'Coed 2-3', 'Girls K-2'),
+        'maxFieldsPerWave': 3,
+        'schedulingNote': 'Alternative layout for three simultaneous Small games.',
+        'spaceUsedYards': 90,
+        'remainingYards': 30,
+    },
+    {
+        'code': 'TWO_MEDIUM',
+        'displayName': 'Two Medium Fields',
+        'availableFields': (FIELD_SIZE_MEDIUM, FIELD_SIZE_MEDIUM),
+        'supportedFieldSizes': (FIELD_SIZE_MEDIUM,),
+        'supportedDivisions': ('Coed 4-5', 'Girls 3-5'),
+        'maxFieldsPerWave': 2,
+        'schedulingNote': 'Alternative layout for two simultaneous Medium games.',
+        'spaceUsedYards': 106,
+        'remainingYards': 14,
+    },
     {
         'code': 'ONE_LARGE_ONE_SMALL',
         'displayName': 'One Large Field + One Small Field',
@@ -19,7 +40,7 @@ APPROVED_TURF_CONFIGURATIONS: tuple[dict[str, object], ...] = (
         'supportedFieldSizes': (FIELD_SIZE_SMALL, FIELD_SIZE_LARGE),
         'supportedDivisions': ('Coed K-1', 'Coed 2-3', 'Girls K-2', 'Coed 6-7', 'Coed 8', 'Girls 6-8'),
         'maxFieldsPerWave': 2,
-        'schedulingNote': 'Canonical league-wide Turf Stadium layout: one Large game and one Small game may run simultaneously.',
+        'schedulingNote': 'Alternative layout for one Large and one Small game simultaneously.',
         'spaceUsedYards': 90,
         'remainingYards': 30,
     },

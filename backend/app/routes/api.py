@@ -4783,6 +4783,8 @@ STANDARD_TURF_FIELD_SLOT_LABELS = (
 )
 STANDARD_TURF_FIELD_SLOT_SET = frozenset(STANDARD_TURF_FIELD_SLOT_LABELS)
 APPROVED_TURF_FIELD_SLOT_SETS = {
+    'THREE_SMALL': frozenset({'Small Field 1', 'Small Field 2', 'Small Field 3'}),
+    'TWO_MEDIUM': frozenset({'Medium Field 1', 'Medium Field 2'}),
     'ONE_LARGE_ONE_SMALL': frozenset({'Large Field', 'Small Field'}),
 }
 
@@ -5645,19 +5647,8 @@ def _validate_configuration_activation(db: Session, config: HostLocationConfigur
         raise HTTPException(400, detail={'code': 'MIXED_HOST_FIELD_CONFIGURATION', 'message': 'Every assigned field must belong to this host location.'})
     if any(not field.is_active for field in fields):
         raise HTTPException(400, detail={'code': 'INACTIVE_CONFIGURATION_FIELD', 'message': 'Every assigned field must be active.'})
-    member_ids = {field.id for field in fields}
-    candidates = db.query(HostLocationConfiguration).filter(
-        HostLocationConfiguration.host_location_id == config.host_location_id,
-        HostLocationConfiguration.is_active.is_(True),
-        HostLocationConfiguration.id != config.id,
-    ).all()
-    duplicate = next((candidate for candidate in candidates
-                      if {member.field_id for member in candidate.members} == member_ids), None)
-    if duplicate:
-        raise HTTPException(409, detail={
-            'code': 'DUPLICATE_FIELD_CONFIGURATION',
-            'message': f'This layout is already represented by the active configuration "{duplicate.configuration_name}".',
-        })
+    # Fields may deliberately overlap between alternative layouts.  The only
+    # layout-level uniqueness rule is (host_location_id, configuration_name).
 
 
 GENERATED_SLOT_REGENERATION_BUG_WARNINGS = {
@@ -11468,16 +11459,33 @@ def create_host_location_configuration(payload: HostLocationConfigurationCreate,
     host = db.query(HostLocation).filter(HostLocation.id == payload.host_location_id).first()
     if not host: raise HTTPException(400, 'Invalid host location')
     enforce_organization_scope(host.organization_id, current_user)
-    config_name = payload.configuration_name.strip()
+    config_name = _normalize_configuration_name(payload.configuration_name)
     if not config_name: raise HTTPException(400, 'Configuration name is required')
+    if not payload.field_ids:
+        raise HTTPException(400, detail={'code': 'EMPTY_FIELD_CONFIGURATION',
+                                         'message': 'Select at least one active field.'})
+    duplicate = db.query(HostLocationConfiguration.id).filter(
+        HostLocationConfiguration.host_location_id == payload.host_location_id,
+        HostLocationConfiguration.configuration_name == config_name,
+    ).first()
+    if duplicate:
+        raise HTTPException(409, detail={'code': 'DUPLICATE_CONFIGURATION_CODE',
+                                         'message': 'Configuration code already exists at this host location.'})
     x = HostLocationConfiguration(host_location_id=payload.host_location_id, configuration_name=config_name,
                                   surface_type=host.surface_type or 'GRASS_FIELD', is_active=payload.is_active,
                                   sort_order=payload.sort_order)
-    db.add(x); db.flush()
-    _sync_configuration_members(db, x, payload.field_ids)
-    if x.is_active:
-        _validate_configuration_activation(db, x)
-    db.commit(); db.refresh(x); return _attach_configuration_instances(x)
+    try:
+        db.add(x); db.flush()
+        _sync_configuration_members(db, x, payload.field_ids)
+        if x.is_active:
+            _validate_configuration_activation(db, x)
+        db.commit(); db.refresh(x); return _attach_configuration_instances(x)
+    except IntegrityError as exc:
+        db.rollback()
+        if 'uq_host_location_configuration_name' in str(exc.orig) or 'host_location_id, configuration_name' in str(exc.orig):
+            raise HTTPException(409, detail={'code': 'DUPLICATE_CONFIGURATION_CODE',
+                                             'message': 'Configuration code already exists at this host location.'}) from exc
+        raise
 
 
 @router.get('/host-location-configurations', response_model=PagedResponse[HostLocationConfigurationRead], dependencies=[Depends(get_current_user)])
@@ -11524,7 +11532,20 @@ def upd_host_location_configuration(item_id: uuid.UUID, payload: HostLocationCon
     if not host: raise HTTPException(400, 'Invalid host location')
     enforce_organization_scope(host.organization_id, current_user)
     x.host_location_id = payload.host_location_id
-    x.configuration_name = payload.configuration_name.strip()
+    x.configuration_name = _normalize_configuration_name(payload.configuration_name)
+    if not x.configuration_name:
+        raise HTTPException(400, 'Configuration name is required')
+    if not payload.field_ids:
+        raise HTTPException(400, detail={'code': 'EMPTY_FIELD_CONFIGURATION',
+                                         'message': 'Select at least one active field.'})
+    duplicate = db.query(HostLocationConfiguration.id).filter(
+        HostLocationConfiguration.host_location_id == payload.host_location_id,
+        HostLocationConfiguration.configuration_name == x.configuration_name,
+        HostLocationConfiguration.id != x.id,
+    ).first()
+    if duplicate:
+        raise HTTPException(409, detail={'code': 'DUPLICATE_CONFIGURATION_CODE',
+                                         'message': 'Configuration code already exists at this host location.'})
     x.is_active = payload.is_active
     x.sort_order = payload.sort_order
     _sync_configuration_members(db, x, payload.field_ids)

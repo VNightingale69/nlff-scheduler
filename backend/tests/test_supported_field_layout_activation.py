@@ -45,12 +45,8 @@ class SupportedFieldLayoutActivationTest(unittest.TestCase):
     def tearDown(self):
         self.db.close()
 
-    def test_duplicate_membership_cannot_be_activated(self):
-        with self.assertRaises(HTTPException) as raised:
-            _validate_configuration_activation(self.db, self.legacy)
-        self.assertEqual(409, raised.exception.status_code)
-        self.assertEqual('DUPLICATE_FIELD_CONFIGURATION', raised.exception.detail['code'])
-        self.assertIn('4 Small', raised.exception.detail['message'])
+    def test_overlapping_alternative_membership_can_be_activated(self):
+        _validate_configuration_activation(self.db, self.legacy)
 
     def test_legacy_layout_is_hidden_by_default(self):
         result = list_host_location_configurations(host_location_id=self.host.id, current_user=self.admin, db=self.db)
