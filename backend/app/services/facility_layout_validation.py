@@ -3,7 +3,8 @@ from collections import Counter
 
 from sqlalchemy.orm import selectinload
 
-from app.models import Field, FieldConfigurationMember, HostLocationConfiguration, TimeslotFieldConfiguration
+from app.models import Field, FieldConfigurationMember, HostLocation, HostLocationConfiguration, TimeslotFieldConfiguration
+from app.turf_configurations import APPROVED_TURF_CONFIGURATIONS, turf_configuration_counts
 
 
 SIZES = ('SMALL', 'MEDIUM', 'LARGE')
@@ -36,13 +37,37 @@ def active_supported_layouts_query(db, host_location_id):
 def get_active_supported_layouts(db, host_location_id):
     """Load every current alternative layout for one host location.
 
-    ``host_location_configurations`` and its ``field_configuration_members``
-    relationship are the physical-layout authority.  This intentionally does
-    not inspect generated slots, turf waves, a default timeslot selection, or
-    process-local configuration, and it deliberately executes a fresh query on
-    every call so an administrator's committed change is visible immediately.
-    Members and canonical fields are eagerly loaded for all downstream users.
+    League-approved definitions are authoritative for managed turf stadiums;
+    persisted configurations remain authoritative for other facility types.
+    This intentionally does not inspect generated slots, turf waves, or a
+    default timeslot selection. Persisted members and fields are eagerly loaded.
     """
+    host = db.query(HostLocation).filter(HostLocation.id == host_location_id).first()
+    if host and (host.surface_type or '').upper() == 'TURF_STADIUM':
+        # Approved layouts describe capability. They must not disappear because
+        # a legacy row is inactive or only the most recently generated layout
+        # happened to be persisted.
+        existing = {
+            str(row.configuration_name or '').strip().upper(): row
+            for row in db.query(HostLocationConfiguration).filter(
+                HostLocationConfiguration.host_location_id == host_location_id,
+            ).all()
+        }
+        layouts = []
+        for sort_order, metadata in enumerate(APPROVED_TURF_CONFIGURATIONS):
+            code = str(metadata['code'])
+            configuration = existing.get(code) or HostLocationConfiguration(
+                host_location_id=host_location_id,
+                configuration_name=code,
+                is_active=True,
+            )
+            counts = turf_configuration_counts(metadata)
+            configuration.small_field_count = counts['SMALL']
+            configuration.medium_field_count = counts['MEDIUM']
+            configuration.large_field_count = counts['LARGE']
+            configuration.sort_order = sort_order
+            layouts.append(configuration)
+        return layouts
     return (
         active_supported_layouts_query(db, host_location_id)
         .order_by(
@@ -115,11 +140,33 @@ def select_supported_layout(db, host_id, game_date, kickoff, required_sizes, *, 
             return existing, selected, selected in supported
     if not supported:
         return None, None, False
-    # Prefer the tightest valid footprint, making the sole satisfying alternate
-    # deterministic while avoiding needless reconfiguration where possible.
-    selected = min(supported, key=lambda item: (sum(_capacity(item).values()), item.configuration_name))
+    previous_code = None
+    if game_date is not None and kickoff is not None:
+        previous = (
+            db.query(TimeslotFieldConfiguration)
+            .join(HostLocationConfiguration)
+            .filter(
+                TimeslotFieldConfiguration.host_location_id == host_id,
+                TimeslotFieldConfiguration.configuration_date == game_date,
+                TimeslotFieldConfiguration.kickoff_time < kickoff,
+                HostLocationConfiguration.is_active.is_(True),
+            )
+            .order_by(TimeslotFieldConfiguration.kickoff_time.desc())
+            .first()
+        )
+        if previous and previous.configuration:
+            previous_code = previous.configuration.configuration_name
+
+    demand_total = sum(demand.values())
+    demand_exact = {size: int(demand.get(size, 0)) for size in SIZES}
+    selected = min(supported, key=lambda item: (
+        0 if _capacity(item) == demand_exact else 1,
+        sum(_capacity(item).values()) - demand_total,
+        0 if item.configuration_name == previous_code else 1,
+        item.configuration_name,
+    ))
     override = None
-    if persist:
+    if persist and selected.id is not None:
         if existing:
             existing.configuration_id = selected.id
             override = existing
@@ -135,7 +182,7 @@ def active_layout_capacities(db, host_id):
     """Return the current host-scoped layouts considered by validation."""
     configurations = get_active_supported_layouts(db, host_id)
     return [
-        {'id': str(configuration.id), 'code': configuration.configuration_name, 'capacity': _capacity(configuration)}
+        {'id': str(configuration.id) if configuration.id else None, 'code': configuration.configuration_name, 'capacity': _capacity(configuration)}
         for configuration in configurations
     ]
 

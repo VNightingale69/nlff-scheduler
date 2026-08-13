@@ -430,8 +430,8 @@ export default function FieldAreaManager() {
     </section>}
 
     {!isCommunityAdmin && selectedHost?.surface_type === TURF_STADIUM && <section className='rounded border p-4'>
-      <h2 className='font-semibold'>Approved Turf Stadium Layouts</h2>
-      <p className='text-sm text-slate-600'>Only league-approved turf configurations are supported. The scheduler assigns one approved configuration code per turf field per one-hour wave and then fills as many compatible game slots as practical.</p>
+      <h2 className='font-semibold'>2. Approved Turf Configurations</h2>
+      <p className='text-sm text-slate-600'>These are alternate layouts of the same turf surface. Only one layout may be used during a scheduling block, and the scheduler may change layouts between kickoff times.</p>
       <div className='mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-3'>
         {selectedTurfLayouts.map((layout) => <article key={layout.name} className='rounded border bg-slate-50 p-3 text-left'>
           <p className='text-xs font-semibold uppercase text-slate-500'>Configuration Code</p>
@@ -452,14 +452,14 @@ export default function FieldAreaManager() {
     {selectedHost && <section className='rounded border p-4'>
       <div className='flex flex-wrap items-center justify-between gap-2'>
         <div>
-          <h2 className='font-semibold'>Field Setup Guidance</h2>
+          <h2 className='font-semibold'>{selectedHost.surface_type === TURF_STADIUM ? '3. Logical / Configurable Fields' : 'Field Setup Guidance'}</h2>
           <p className='text-sm text-slate-600'>Add the physical or configurable fields that may be used at this location. Supported Field Layouts determine which fields may operate simultaneously during the same scheduling block.</p>
-          <p className='mt-2 text-xs text-slate-600'>A location may support multiple alternative layouts. Fields appearing in different layouts are not assumed to be simultaneously available.</p>
+          <p className='mt-2 text-xs text-slate-600'>{selectedHost.surface_type === TURF_STADIUM ? 'These are logical field positions used by the approved turf configurations. They are not all simultaneously available.' : 'A location may support multiple alternative layouts. Fields appearing in different layouts are not assumed to be simultaneously available.'}</p>
           <p className='mt-2 text-xs text-slate-600'>Grass field locations use active configured fields for slot generation and must have at least one active field before hosting availability can use them. Deactivate keeps existing scheduled assignments; Delete removes the field from active use and flags affected scheduled games for Scheduling Administrator review.</p>
         </div>
         {canManageFieldDefinitions && <button className='rounded border px-3 py-2 text-sm' onClick={resetFieldForm}>Add Field</button>}
       </div>
-      <h3 className='mt-3 text-sm font-semibold text-slate-700'>2. Physical / Configurable Fields</h3>
+      <h3 className='mt-3 text-sm font-semibold text-slate-700'>{selectedHost.surface_type === TURF_STADIUM ? 'Logical field positions' : '2. Physical / Configurable Fields'}</h3>
       <div className='mt-2 grid gap-2 md:grid-cols-4'>
         <input className='rounded border p-2' placeholder='Field Name' value={fieldForm.name} onChange={(e) => setFieldForm({ ...fieldForm, name: e.target.value })} />
         <select className='rounded border p-2' value={fieldForm.layout_type} onChange={(e) => setFieldForm({ ...fieldForm, layout_type: e.target.value })}>
@@ -481,8 +481,8 @@ export default function FieldAreaManager() {
         <p>Medium: {DIVISION_COMPATIBILITY.MEDIUM.join(', ')}</p>
         <p>Large: {DIVISION_COMPATIBILITY.LARGE.join(', ')}</p>
       </div>
-      <div className='mt-5 border-t pt-4'>
-        <h3 className='font-semibold'>3. Supported Field Layouts</h3>
+      {selectedHost.surface_type !== TURF_STADIUM && <div className='mt-5 border-t pt-4'>
+        <h3 className='font-semibold'>3. Custom Field Layouts</h3>
         <p className='text-sm text-slate-600'>Each layout lists the fields that can operate together in one scheduling block.</p>
         <label className='mt-2 flex items-center gap-2 text-sm'><input type='checkbox' checked={showInactiveLayouts} onChange={(e) => setShowInactiveLayouts(e.target.checked)} />Show inactive / legacy layouts</label>
         {canManageFieldDefinitions && <div className='mt-3 rounded border p-3'>
@@ -495,14 +495,14 @@ export default function FieldAreaManager() {
           <ul className='mt-2 list-disc pl-5 text-sm'>{(config.field_instances || []).map((name: string) => <li key={name}>{name}</li>)}</ul>
           {canManageFieldDefinitions && <div className='mt-2 flex gap-2'><button className='rounded border px-2 py-1 text-xs' onClick={() => { setEditingConfigurationId(config.id); setConfigurationForm({name: config.configuration_name, field_ids: config.field_ids || [], is_active: config.is_active}); }}>Edit / Assign Fields</button><button className='rounded border px-2 py-1 text-xs' onClick={() => setConfigurationActive(config, !config.is_active)}>{config.is_active ? 'Deactivate' : 'Activate'}</button></div>}
         </article>)}</div>
-      </div>
+      </div>}
     </section>}
 
     <section className='rounded border p-4'>
-      <h2 className='mb-2 font-semibold'>Current Facility Setups</h2>
+      <h2 className='mb-2 font-semibold'>Facility Capability Summary</h2>
       <div className='overflow-x-auto'>
         <table className='w-full text-sm'>
-          <thead>{isCommunityAdmin ? <tr><th className='border p-2 text-left'>Organization / Community</th><th className='border p-2 text-left'>Host Location</th><th className='border p-2 text-left'>Facility Type</th><th className='border p-2 text-left'>Status</th><th className='border p-2 text-left'>Actions</th></tr> : tableHosts.length > 0 && tableHosts.every((host: any) => (host.surface_type || GRASS_FIELD) !== TURF_STADIUM) ? <tr><th className='border p-2 text-left'>Organization</th><th className='border p-2 text-left'>Host Location</th><th className='border p-2 text-left'>Surface Type</th><th className='border p-2 text-left'>Active Configured Fields</th><th className='border p-2 text-left'>Large Fields</th><th className='border p-2 text-left'>Medium Fields</th><th className='border p-2 text-left'>Small Fields</th><th className='border p-2 text-left'>Status</th><th className='border p-2 text-left'>Actions</th></tr> : <tr><th className='border p-2 text-left'>Organization</th><th className='border p-2 text-left'>Host Location</th><th className='border p-2 text-left'>Surface Type</th><th className='border p-2 text-left'>Active Layouts / Configured Fields</th><th className='border p-2 text-left'>Turf Layout Count / Large Fields</th><th className='border p-2 text-left'>Max Fields Per Hour / Medium Fields</th><th className='border p-2 text-left'>Turf Surface / Small Fields</th><th className='border p-2 text-left'>Status</th><th className='border p-2 text-left'>Actions</th></tr>}</thead>
+          <thead>{isCommunityAdmin ? <tr><th className='border p-2 text-left'>Organization / Community</th><th className='border p-2 text-left'>Host Location</th><th className='border p-2 text-left'>Facility Type</th><th className='border p-2 text-left'>Status</th><th className='border p-2 text-left'>Actions</th></tr> : tableHosts.length > 0 && tableHosts.every((host: any) => (host.surface_type || GRASS_FIELD) !== TURF_STADIUM) ? <tr><th className='border p-2 text-left'>Organization</th><th className='border p-2 text-left'>Host Location</th><th className='border p-2 text-left'>Surface Type</th><th className='border p-2 text-left'>Active Configured Fields</th><th className='border p-2 text-left'>Large Fields</th><th className='border p-2 text-left'>Medium Fields</th><th className='border p-2 text-left'>Small Fields</th><th className='border p-2 text-left'>Status</th><th className='border p-2 text-left'>Actions</th></tr> : <tr><th className='border p-2 text-left'>Organization</th><th className='border p-2 text-left'>Host Location</th><th className='border p-2 text-left'>Surface Type</th><th className='border p-2 text-left'>Supported Turf Configurations / Configured Fields</th><th className='border p-2 text-left'>Turf Layout Count / Large Fields</th><th className='border p-2 text-left'>Max Fields Per Hour / Medium Fields</th><th className='border p-2 text-left'>Turf Surface / Small Fields</th><th className='border p-2 text-left'>Status</th><th className='border p-2 text-left'>Actions</th></tr>}</thead>
           <tbody>{renderSetupRows()}</tbody>
         </table>
       </div>
