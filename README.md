@@ -58,6 +58,8 @@ Services:
 - Public schedule page: http://localhost:3000/schedule
 
 > Backend container startup now runs `alembic upgrade head` automatically before starting Uvicorn.
+> Railway uses `backend/railway.json` and the backend Dockerfile. Its deploy start command also runs
+> `alembic upgrade head` before Uvicorn; configure the Railway service root directory as `backend`.
 
 ---
 

@@ -3,7 +3,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN
+from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN
 from app.database import Base, get_db
 from app.main import app
 from app.models import Division, HostLocation, Organization, Role, Team, User
@@ -22,15 +22,17 @@ class TestUserSoftDelete:
         self.db = self.Session()
         self.league_role = Role(name=ROLE_LEAGUE_ADMIN, is_active=True)
         self.community_role = Role(name=ROLE_COMMUNITY_ADMIN, is_active=True)
+        self.scheduling_role = Role(name=ROLE_SCHEDULING_ADMIN, is_active=True)
         self.community = Organization(name='Preserved Community', is_active=True)
         self.division = Division(name='5th', division_group='COED', sort_order=1, required_field_layout_type='LARGE', is_active=True)
-        self.db.add_all([self.league_role, self.community_role, self.community, self.division]); self.db.flush()
+        self.db.add_all([self.league_role, self.community_role, self.scheduling_role, self.community, self.division]); self.db.flush()
         self.league_admin = User(email='league@example.com', full_name='League Admin', password_hash=hash_password('Password123!'), role_id=self.league_role.id, is_active=True)
         self.community_admin = User(email='community@example.com', full_name='Community Admin', password_hash=hash_password('Password123!'), role_id=self.community_role.id, organization_id=self.community.id, is_active=True)
+        self.scheduling_admin = User(email='scheduler@example.com', full_name='Scheduling Admin', password_hash=hash_password('Password123!'), role_id=self.scheduling_role.id, is_active=True)
         self.other_admin = User(email='other@example.com', full_name='Other Admin', password_hash=hash_password('Password123!'), role_id=self.community_role.id, organization_id=self.community.id, is_active=True)
         self.team = Team(name='Preserved Team', organization_id=self.community.id, division_id=self.division.id, is_active=True)
         self.facility = HostLocation(name='Preserved Facility', organization_id=self.community.id, is_active=True)
-        self.db.add_all([self.league_admin, self.community_admin, self.other_admin, self.team, self.facility]); self.db.commit()
+        self.db.add_all([self.league_admin, self.scheduling_admin, self.community_admin, self.other_admin, self.team, self.facility]); self.db.commit()
 
         def override_db():
             db = self.Session()
@@ -79,3 +81,24 @@ class TestUserSoftDelete:
         ids = {item['id'] for item in response.json()['items']}
         assert str(self.community_admin.id) not in ids and str(self.other_admin.id) in ids
         assert next(item for item in response.json()['items'] if item['id'] == str(self.other_admin.id))['deleted_at'] is None
+
+    def test_scheduling_admin_delete_then_browser_reload_succeeds(self):
+        delete_response = self.client.delete(
+            f'/api/users/{self.community_admin.id}', headers=auth(self.scheduling_admin)
+        )
+        assert delete_response.status_code == 204
+
+        list_response = self.client.get('/api/users?page_size=500', headers=auth(self.scheduling_admin))
+        assert list_response.status_code == 200
+        assert str(self.community_admin.id) not in {item['id'] for item in list_response.json()['items']}
+
+        verification_db = self.Session()
+        try:
+            deleted = verification_db.get(User, self.community_admin.id)
+            assert deleted.is_active is False
+            assert deleted.deleted_at is not None
+            assert verification_db.get(Organization, self.community.id) is not None
+            assert verification_db.get(Team, self.team.id) is not None
+            assert verification_db.get(HostLocation, self.facility.id) is not None
+        finally:
+            verification_db.close()

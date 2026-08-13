@@ -7813,7 +7813,7 @@ def _user_read(user: User) -> UserRead:
                     organization_id=user.organization_id, is_active=user.is_active, deleted_at=user.deleted_at)
 
 
-@router.get('/users', response_model=PagedResponse[UserRead], dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+@router.get('/users', response_model=PagedResponse[UserRead], dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
 def list_users(search: str | None = None, role: str | None = None, organization_id: uuid.UUID | None = None,
                is_active: bool | None = None, page: int = 1, page_size: int = 20, db: Session = Depends(get_db)):
     q = db.query(User).join(User.role).filter(User.deleted_at.is_(None))
@@ -7855,8 +7855,9 @@ def reset_user_password(user_id: uuid.UUID, payload: UserPasswordReset, db: Sess
     return {'message': 'Temporary password reset successfully.'}
 
 
-@router.delete('/users/{user_id}', status_code=204, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+@router.delete('/users/{user_id}', status_code=204, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
 def delete_user(user_id: uuid.UUID, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    logger.info('DELETE USER START acting_user_id=%s target_user_id=%s', current_user.id, user_id)
     target = db.query(User).filter(User.id == user_id).first()
     if not target or target.deleted_at is not None:
         raise HTTPException(404, 'User not found')
@@ -7866,14 +7867,17 @@ def delete_user(user_id: uuid.UUID, current_user: User = Depends(get_current_use
                'target_role': normalize_role_name(target.role.name),
                'target_community_id': str(target.organization_id) if target.organization_id else None,
                'action': 'delete_user'}
+    logger.info('DELETE USER TARGET FOUND context=%s', context)
     try:
         target.is_active = False
         target.deleted_at = datetime.now(timezone.utc)
+        logger.info('DELETE USER COMMIT START context=%s', context)
         db.commit()
-        logger.info('user_delete result=success context=%s', context)
-    except SQLAlchemyError:
+        logger.info('DELETE USER COMMIT SUCCESS context=%s', context)
+    except SQLAlchemyError as exc:
         db.rollback()
-        logger.exception('user_delete result=database_error context=%s', context)
+        logger.exception('DELETE USER FAILED context=%s exception_type=%s exception_message=%s',
+                         context, type(exc).__name__, str(exc))
         raise HTTPException(500, 'Unable to delete the user because of an unexpected server error.')
 
 @router.post('/organizations', response_model=OrganizationRead, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
