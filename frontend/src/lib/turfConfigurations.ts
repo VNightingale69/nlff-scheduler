@@ -9,12 +9,28 @@ export type TurfConfiguration = {
 
 export const APPROVED_TURF_CONFIGURATIONS: TurfConfiguration[] = [
   {
+    code: 'THREE_SMALL',
+    displayName: 'Three Small Fields',
+    availableFields: ['SMALL', 'SMALL', 'SMALL'],
+    supportedDivisions: ['Coed K-1', 'Coed 2-3', 'Girls K-2'],
+    maxFieldsPerWave: 3,
+    schedulingNote: 'Alternative layout for three simultaneous Small games.',
+  },
+  {
+    code: 'TWO_MEDIUM',
+    displayName: 'Two Medium Fields',
+    availableFields: ['MEDIUM', 'MEDIUM'],
+    supportedDivisions: ['Coed 4-5', 'Girls 3-5'],
+    maxFieldsPerWave: 2,
+    schedulingNote: 'Alternative layout for two simultaneous Medium games.',
+  },
+  {
     code: 'ONE_LARGE_ONE_SMALL',
     displayName: 'One Large Field + One Small Field',
     availableFields: ['SMALL', 'LARGE'],
     supportedDivisions: ['Coed K-1', 'Coed 2-3', 'Girls K-2', 'Coed 6-7', 'Coed 8', 'Girls 6-8'],
     maxFieldsPerWave: 2,
-    schedulingNote: 'Canonical league-wide Turf Stadium layout: one Large game and one Small game may run simultaneously.',
+    schedulingNote: 'Alternative layout for one Large and one Small game simultaneously.',
   },
 ];
 
