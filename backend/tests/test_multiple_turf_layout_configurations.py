@@ -10,7 +10,7 @@ from app.database import Base
 from app.models import Field, HostLocation, HostLocationConfiguration, Organization, Role, TimeslotFieldConfiguration, User
 from app.routes.api import create_host_location_configuration
 from app.schemas import HostLocationConfigurationCreate
-from app.services.facility_layout_validation import select_supported_layout
+from app.services.facility_layout_validation import active_layout_capacities, get_active_supported_layouts, select_supported_layout
 
 
 @pytest.fixture()
@@ -48,14 +48,54 @@ def test_three_alternative_layouts_remain_active_and_match_whole_waves(facility)
     _add(db, host, user, {name: fields[name] for name in ('Medium 1', 'Medium 2')}, 'TWO_MEDIUM')
     _add(db, host, user, {name: fields[name] for name in ('Large Field 1', 'Small Field 1')}, 'ONE_LARGE_ONE_SMALL')
 
-    layouts = db.query(HostLocationConfiguration).filter_by(host_location_id=host.id, is_active=True).all()
+    layouts = get_active_supported_layouts(db, host.id)
+    assert len(layouts) == 3
     assert {layout.configuration_name for layout in layouts} == {
         'THREE_SMALL', 'TWO_MEDIUM', 'ONE_LARGE_ONE_SMALL',
     }
     assert select_supported_layout(db, host.id, None, None, ['SMALL'] * 3)[1].configuration_name == 'THREE_SMALL'
     assert select_supported_layout(db, host.id, None, None, ['MEDIUM'] * 2)[1].configuration_name == 'TWO_MEDIUM'
+    assert select_supported_layout(db, host.id, None, None, ['MEDIUM'])[1].configuration_name == 'TWO_MEDIUM'
     assert select_supported_layout(db, host.id, None, None, ['LARGE', 'SMALL'])[1].configuration_name == 'ONE_LARGE_ONE_SMALL'
     assert not select_supported_layout(db, host.id, None, None, ['LARGE', 'MEDIUM'])[2]
+    assert {row['code'] for row in active_layout_capacities(db, host.id)} == {
+        'THREE_SMALL', 'TWO_MEDIUM', 'ONE_LARGE_ONE_SMALL',
+    }
+
+
+def test_new_layout_is_visible_immediately_without_slot_regeneration_or_cache_clear(facility):
+    db, host, user, fields = facility
+    _add(db, host, user, {'Large Field 1': fields['Large Field 1'],
+                         'Small Field 1': fields['Small Field 1']}, 'ONE_LARGE_ONE_SMALL')
+    assert [layout.configuration_name for layout in get_active_supported_layouts(db, host.id)] == [
+        'ONE_LARGE_ONE_SMALL',
+    ]
+
+    two_medium = _add(db, host, user, {'Medium 1': fields['Medium 1'], 'Medium 2': fields['Medium 2']},
+                      'TWO_MEDIUM')
+
+    layouts = get_active_supported_layouts(db, host.id)
+    assert {layout.configuration_name for layout in layouts} == {'ONE_LARGE_ONE_SMALL', 'TWO_MEDIUM'}
+    assert select_supported_layout(db, host.id, date(2026, 8, 23), time(13), ['MEDIUM'])[1].id == two_medium.id
+
+
+def test_layout_records_persist_selected_canonical_fields(facility):
+    db, host, user, fields = facility
+    three_small = _add(db, host, user, {name: fields[name] for name in
+                                       ('Small Field 1', 'Small Field 2', 'Small Field 3')}, 'THREE_SMALL')
+    two_medium = _add(db, host, user, {name: fields[name] for name in ('Medium 1', 'Medium 2')}, 'TWO_MEDIUM')
+    large_small = _add(db, host, user, {name: fields[name] for name in
+                                       ('Large Field 1', 'Small Field 1')}, 'ONE_LARGE_ONE_SMALL')
+
+    persisted = {layout.configuration_name: layout for layout in get_active_supported_layouts(db, host.id)}
+    assert all(layout.host_location_id == host.id and layout.is_active for layout in persisted.values())
+    assert {member.field.name for member in persisted[three_small.configuration_name].members} == {
+        'Small Field 1', 'Small Field 2', 'Small Field 3',
+    }
+    assert {member.field.name for member in persisted[two_medium.configuration_name].members} == {'Medium 1', 'Medium 2'}
+    assert {member.field.name for member in persisted[large_small.configuration_name].members} == {
+        'Large Field 1', 'Small Field 1',
+    }
 
 
 def test_validation_and_host_scoped_code_uniqueness(facility):

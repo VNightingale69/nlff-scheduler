@@ -7,12 +7,13 @@ from datetime import date, datetime, time, timedelta
 from openpyxl import load_workbook
 
 from app.models import (Division, Field, FieldInstance, Game, GameSlot, HostLocation,
-                        HostLocationConfiguration, Season, Week)
+                        Season, Week)
 from app.teams import resolve_roster_team, season_roster
 from app.facility_layouts import (JOHNSBURG_APPROVED_LAYOUT_CODES_BY_LOCATION,
                                   johnsburg_field_templates,
                                   johnsburg_location_name)
 from app.services.field_resolution import resolve_active_field
+from app.services.facility_layout_validation import get_active_supported_layouts
 
 REQUIRED = ('week', 'date', 'kickoff', 'site', 'field', 'fieldtype', 'division', 'hometeam', 'awayteam')
 
@@ -103,9 +104,7 @@ def _configuration_candidates(db, site, field_name, field_type):
     site's active/default ``HostLocationConfiguration`` (the import may be the
     reason the facility is reconfigured for that wave).
     """
-    active = db.query(HostLocationConfiguration).filter_by(
-        host_location_id=site.id, is_active=True,
-    ).all()
+    active = get_active_supported_layouts(db, site.id)
     configured_by_code = {
         configuration.configuration_name.strip().upper().replace('-', '_').replace(' ', '_'): configuration
         for configuration in active

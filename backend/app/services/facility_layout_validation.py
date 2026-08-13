@@ -1,6 +1,8 @@
 """Resolve and validate supported facility layouts for scheduled kickoff waves."""
 from collections import Counter
 
+from sqlalchemy.orm import selectinload
+
 from app.models import Field, FieldConfigurationMember, HostLocationConfiguration, TimeslotFieldConfiguration
 
 
@@ -14,6 +16,42 @@ def _size(value):
 
 def _capacity(configuration):
     return {size: int(getattr(configuration, f'{size.lower()}_field_count', 0) or 0) for size in SIZES}
+
+
+def active_supported_layouts_query(db, host_location_id):
+    """Build the uncached authoritative query shared by API and schedulers."""
+    return (
+        db.query(HostLocationConfiguration)
+        .options(
+            selectinload(HostLocationConfiguration.members)
+            .selectinload(FieldConfigurationMember.field)
+        )
+        .filter(
+            HostLocationConfiguration.host_location_id == host_location_id,
+            HostLocationConfiguration.is_active.is_(True),
+        )
+    )
+
+
+def get_active_supported_layouts(db, host_location_id):
+    """Load every current alternative layout for one host location.
+
+    ``host_location_configurations`` and its ``field_configuration_members``
+    relationship are the physical-layout authority.  This intentionally does
+    not inspect generated slots, turf waves, a default timeslot selection, or
+    process-local configuration, and it deliberately executes a fresh query on
+    every call so an administrator's committed change is visible immediately.
+    Members and canonical fields are eagerly loaded for all downstream users.
+    """
+    return (
+        active_supported_layouts_query(db, host_location_id)
+        .order_by(
+            HostLocationConfiguration.sort_order,
+            HostLocationConfiguration.configuration_name,
+            HostLocationConfiguration.id,
+        )
+        .all()
+    )
 
 
 def validate_timeslot_demands(demands, available_layouts):
@@ -61,9 +99,7 @@ def select_supported_layout(db, host_id, game_date, kickoff, required_sizes, *, 
     existing = db.query(TimeslotFieldConfiguration).filter_by(
         host_location_id=host_id, configuration_date=game_date, kickoff_time=kickoff,
     ).first()
-    configurations = db.query(HostLocationConfiguration).filter_by(
-        host_location_id=host_id, is_active=True,
-    ).order_by(HostLocationConfiguration.configuration_name).all()
+    configurations = get_active_supported_layouts(db, host_id)
     supported = [configuration for configuration in configurations
                  if validate_timeslot_demands(
                      {(game_date, host_id, kickoff): demand},
@@ -98,9 +134,7 @@ def select_supported_layout(db, host_id, game_date, kickoff, required_sizes, *, 
 
 def active_layout_capacities(db, host_id):
     """Return the current host-scoped layouts considered by validation."""
-    configurations = db.query(HostLocationConfiguration).filter_by(
-        host_location_id=host_id, is_active=True,
-    ).order_by(HostLocationConfiguration.configuration_name).all()
+    configurations = get_active_supported_layouts(db, host_id)
     return [
         {'code': configuration.configuration_name, 'capacity': _capacity(configuration)}
         for configuration in configurations
@@ -121,7 +155,7 @@ def validate_field_combination(db, host_id, field_ids):
     facilities remain schedulable while administrators migrate their setup.
     """
     used = {field_id for field_id in field_ids if field_id}
-    configurations = db.query(HostLocationConfiguration).filter_by(host_location_id=host_id, is_active=True).all()
+    configurations = get_active_supported_layouts(db, host_id)
     layouts = []
     for configuration in configurations:
         members = {
