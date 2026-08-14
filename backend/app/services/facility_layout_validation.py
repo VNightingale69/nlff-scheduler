@@ -201,7 +201,12 @@ def validate_field_combination(db, host_id, field_ids):
     facilities remain schedulable while administrators migrate their setup.
     """
     used = {field_id for field_id in field_ids if field_id}
-    configurations = get_active_supported_layouts(db, host_id)
+    # Physical coexistence is defined only by persisted join-table membership,
+    # including at facilities that also use synthetic turf capacity layouts.
+    configurations = active_supported_layouts_query(db, host_id).order_by(
+        HostLocationConfiguration.sort_order,
+        HostLocationConfiguration.configuration_name,
+    ).all()
     layouts = []
     for configuration in configurations:
         members = {
@@ -210,13 +215,17 @@ def validate_field_combination(db, host_id, field_ids):
             .join(Field, Field.id == FieldConfigurationMember.field_id)
             .filter(
                 FieldConfigurationMember.field_configuration_id == configuration.id,
+                Field.host_location_id == host_id,
                 Field.is_active.is_(True),
                 Field.deleted_at.is_(None),
             )
         }
         if members:
             layouts.append((configuration, members))
-    if not layouts:
+    # An active empty configuration is an error, not permission for every
+    # active field to operate together. Preserve the fallback only for hosts
+    # that have never adopted the configuration table.
+    if not configurations:
         active = {
             row.id
             for row in db.query(Field.id).filter(
@@ -227,4 +236,41 @@ def validate_field_combination(db, host_id, field_ids):
         }
         return used.issubset(active), [], active
     matching = [configuration for configuration, members in layouts if used.issubset(members)]
-    return bool(matching), [configuration.configuration_name for configuration, _members in layouts], used
+    return bool(matching), [configuration.configuration_name for configuration in configurations], used
+
+
+def field_combination_diagnostics(db, host_id, field_ids):
+    """Describe the persisted, host-ID-scoped membership decision."""
+    used = {field_id for field_id in field_ids if field_id}
+    evaluations = []
+    matching_name = None
+    configurations = active_supported_layouts_query(db, host_id).order_by(
+        HostLocationConfiguration.sort_order,
+        HostLocationConfiguration.configuration_name,
+    ).all()
+    for configuration in configurations:
+        fields = (
+            db.query(Field)
+            .join(FieldConfigurationMember, FieldConfigurationMember.field_id == Field.id)
+            .filter(
+                FieldConfigurationMember.field_configuration_id == configuration.id,
+                Field.host_location_id == host_id,
+                Field.is_active.is_(True),
+                Field.deleted_at.is_(None),
+            )
+            .order_by(Field.name)
+            .all()
+        )
+        member_ids = {field.id for field in fields}
+        compatible = bool(member_ids) and used.issubset(member_ids)
+        if compatible and matching_name is None:
+            matching_name = configuration.configuration_name
+        evaluations.append({
+            'id': str(configuration.id) if configuration.id else None,
+            'name': configuration.configuration_name,
+            'field_ids': [str(field.id) for field in fields],
+            'fields': [field.name for field in fields],
+            'status': 'VALID' if compatible else ('ACTIVE BUT INVALID' if not member_ids else 'INCOMPATIBLE'),
+            'reason': 'Configuration contains no assigned physical fields.' if not member_ids else None,
+        })
+    return {'configurations': evaluations, 'compatible_configuration': matching_name}

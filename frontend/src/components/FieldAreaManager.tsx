@@ -513,8 +513,9 @@ export default function FieldAreaManager() {
           <button className='mt-3 rounded bg-emerald-700 px-3 py-2 text-sm text-white' onClick={saveConfiguration}>{editingConfigurationId ? 'Update Configuration' : 'Add Configuration'}</button>
         </div>}
         <div className='mt-3 grid gap-3 md:grid-cols-2'>{(hostConfigsByHost[hostId] || []).filter((config: any) => showInactiveLayouts || config.is_active).map((config: any) => <article key={config.id} className='rounded border p-3'>
-          <div className='flex justify-between'><strong>{config.configuration_name}</strong><span className='text-xs'>{config.is_active ? 'Active' : 'Inactive'}</span></div>
+          <div className='flex justify-between'><strong>{config.configuration_name}</strong><span className={`text-xs ${config.is_active && !(config.field_ids || []).length ? 'font-semibold text-rose-700' : ''}`}>{config.is_active && !(config.field_ids || []).length ? 'Active — Configuration Error: No fields assigned' : (config.is_active ? 'Active' : 'Inactive')}</span></div>
           <ul className='mt-2 list-disc pl-5 text-sm'>{(config.field_instances || []).map((name: string) => <li key={name}>{name}</li>)}</ul>
+          {!(config.field_ids || []).length && <p className='mt-2 rounded border border-rose-300 bg-rose-50 p-2 text-sm font-semibold text-rose-800'>⚠ No physical fields assigned</p>}
           {canManageFieldDefinitions && <div className='mt-2 flex flex-wrap gap-2'><button className='rounded border px-2 py-1 text-xs' onClick={() => { setEditingConfigurationId(config.id); setConfigurationForm({name: config.configuration_name, field_ids: config.field_ids || [], is_active: config.is_active}); }}>Edit / Assign Fields</button><button className='rounded border px-2 py-1 text-xs' onClick={() => setConfigurationActive(config, !config.is_active)}>{config.is_active ? 'Deactivate' : 'Activate'}</button>{canDeleteFieldDefinitions && <button className='rounded border border-rose-700 bg-rose-600 px-2 py-1 text-xs font-semibold text-white hover:bg-rose-700' onClick={() => setLayoutDeleteTarget(config)}>Delete Layout</button>}</div>}
         </article>)}</div>
       </div>}
