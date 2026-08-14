@@ -23,7 +23,12 @@ assert.match(loginSource, /setTokens\(data\.access_token, data\.refresh_token, b
 assert.match(shellSource, /clearTokens\(\); router\.push\('\/login'\)/);
 assert.match(authSource, /function canManageFields/);
 assert.match(authSource, /role === 'LEAGUE_ADMIN' \|\| role === 'COMMUNITY_ADMIN' \|\| role === 'SCHEDULING_ADMIN'/);
+assert.match(authSource, /function canDeleteFields/);
+assert.match(authSource, /return role === 'LEAGUE_ADMIN' \|\| role === 'SCHEDULING_ADMIN'/);
 assert.match(fieldsSource, /canManageFields\(authUser\)/);
+assert.match(fieldsSource, /canDeleteFields\(authUser\)/);
+assert.match(fieldsSource, /role='dialog'/);
+assert.match(fieldsSource, /Field deleted successfully\./);
 assert.match(fieldsSource, /'Activate Field'/);
 assert.match(fieldsSource, /'Deactivate Field'/);
 assert.match(fieldsSource, />Edit Field</);

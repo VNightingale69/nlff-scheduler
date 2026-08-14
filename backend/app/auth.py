@@ -26,6 +26,7 @@ SCORE_APPROVAL_ROLES = SCORE_MANAGEMENT_ROLES
 # policy was centralized; preserve that behavior while explicitly including
 # league administrators.
 FIELD_MANAGEMENT_ROLES = {ROLE_LEAGUE_ADMIN, ROLE_COMMUNITY_ADMIN, ROLE_SCHEDULING_ADMIN}
+FIELD_DELETION_ROLES = {ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN}
 
 _ROLE_ALIASES = {
     'ADMIN': ROLE_LEAGUE_ADMIN,
@@ -120,6 +121,18 @@ def can_manage_fields(current_user: User | None) -> bool:
 
 def require_field_manager(current_user: User = Depends(get_current_user)) -> User:
     if not can_manage_fields(current_user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Insufficient role')
+    return current_user
+
+
+def can_delete_fields(current_user: User | None) -> bool:
+    if not current_user or not getattr(current_user, 'role', None):
+        return False
+    return normalize_role_name(current_user.role.name) in FIELD_DELETION_ROLES
+
+
+def require_field_deleter(current_user: User = Depends(get_current_user)) -> User:
+    if not can_delete_fields(current_user):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Insufficient role')
     return current_user
 

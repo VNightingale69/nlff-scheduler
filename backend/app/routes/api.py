@@ -19,7 +19,7 @@ from sqlalchemy.exc import IntegrityError, ProgrammingError, SQLAlchemyError
 from sqlalchemy.orm import Session, aliased
 
 from app.config import ADMIN_SEED_EMAIL, COMMUNITY_LOGO_MAX_SIZE_BYTES, COMMUNITY_LOGO_UPLOAD_DIR, ENABLE_SCHEDULE_QUALITY_REPORT, ENABLE_TURF_OPTIMIZATION, RULEBOOK_MAX_SIZE_BYTES, RULEBOOK_UPLOAD_DIR, UPLOAD_STORAGE_DIR
-from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN, can_manage_fields, can_manage_schedule, enforce_organization_scope, get_current_user, get_optional_current_user, is_community_admin, is_league_admin, is_scheduling_admin, normalize_role_name, require_field_manager, require_roles, require_schedule_admin, require_schedule_publisher, role_by_name
+from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN, can_manage_fields, can_manage_schedule, enforce_organization_scope, get_current_user, get_optional_current_user, is_community_admin, is_league_admin, is_scheduling_admin, normalize_role_name, require_field_deleter, require_field_manager, require_roles, require_schedule_admin, require_schedule_publisher, role_by_name
 from app.database import get_db
 from app.organizations import active_organization_filter, normalize_organization_name
 from app.models import Division, Field, FieldConfigurationMember, FieldConfigurationOption, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostPlanSelection, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Rulebook, LoginAuditLog, ScheduleChangeLog, ScheduleImport, SchedulePublicationEvent, ScoreHistory, ScoreSubmission, Season, Team, TimeslotFieldConfiguration, Tournament, TournamentDivision, TournamentGame, TournamentTeam, TurfWave, User, Week
@@ -11799,14 +11799,14 @@ def upd_field(item_id: uuid.UUID, payload: FieldCreate, current_user: User = Dep
     for k, v in {**payload.model_dump(), 'layout_type': _normalize_field_size(payload.layout_type)}.items(): setattr(x, k, v)
     db.commit(); db.refresh(x); return x
 
-@router.get('/fields/{item_id}/delete-impact', dependencies=[Depends(require_field_manager)])
+@router.get('/fields/{item_id}/delete-impact', dependencies=[Depends(require_field_deleter)])
 def get_field_delete_impact(item_id: uuid.UUID, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     x = db.query(Field).filter(Field.id == item_id, Field.deleted_at.is_(None)).first()
     if not x: raise HTTPException(404, 'Field not found')
     _field_delete_allowed(current_user, x.host_location)
     return _field_delete_response(x, x.host_location, _field_delete_impact_counts(db, x))
 
-@router.delete('/fields/{item_id}', dependencies=[Depends(require_field_manager)])
+@router.delete('/fields/{item_id}', dependencies=[Depends(require_field_deleter)])
 def del_field(item_id: uuid.UUID, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     x = db.query(Field).filter(Field.id == item_id, Field.deleted_at.is_(None)).first()
     if not x: raise HTTPException(404, 'Field not found')
@@ -11814,6 +11814,13 @@ def del_field(item_id: uuid.UUID, current_user: User = Depends(get_current_user)
     _field_delete_allowed(current_user, host_location)
     deleted_at = datetime.now(timezone.utc)
     counts = _field_delete_impact_counts(db, x)
+    if counts.get('active_layout_names'):
+        layout_names = counts['active_layout_names']
+        raise HTTPException(status_code=409, detail={
+            'code': 'FIELD_USED_BY_ACTIVE_LAYOUT',
+            'message': f"This field is used by the following field layouts: {', '.join(layout_names)}. Remove the field from those layouts before deleting it.",
+            'layout_names': layout_names,
+        })
     instance_ids = list(counts.get('affected_field_instance_ids') or [])
     affected_game_ids = [uuid.UUID(str(game_id)) for game_id in (counts.get('affected_game_ids') or [])]
     try:
@@ -11872,13 +11879,16 @@ def del_field(item_id: uuid.UUID, current_user: User = Depends(get_current_user)
         logger.exception('field_delete_failed field_id=%s user_id=%s', item_id, current_user.id)
         raise HTTPException(status_code=500, detail='Field delete failed and was rolled back.')
     db.refresh(x)
+    logger.info(
+        'action=FIELD_DELETE user_id=%s user_role=%s field_id=%s field_name=%s host_location_id=%s timestamp=%s',
+        current_user.id, normalize_role_name(current_user.role.name), x.id, x.name,
+        host_location.id, deleted_at.isoformat(),
+    )
     return _field_delete_response(x, host_location, counts)
 
 
 def _field_delete_allowed(current_user: User, host_location: HostLocation) -> None:
-    if can_manage_fields(current_user) and not is_community_admin(current_user):
-        return
-    if is_community_admin(current_user) and current_user.organization_id and host_location.organization_id == current_user.organization_id:
+    if is_league_admin(current_user) or is_scheduling_admin(current_user):
         return
     raise HTTPException(status_code=403, detail='Insufficient role')
 
@@ -11905,12 +11915,20 @@ def _field_delete_impact_counts(db: Session, field: Field) -> dict[str, object]:
         HostingAvailability.field_id == field.id,
         HostingAvailability.available_date >= date.today(),
     ).count()
+    active_layout_names = [row[0] for row in db.query(HostLocationConfiguration.configuration_name).join(
+        FieldConfigurationMember,
+        FieldConfigurationMember.field_configuration_id == HostLocationConfiguration.id,
+    ).filter(
+        FieldConfigurationMember.field_id == field.id,
+        HostLocationConfiguration.is_active.is_(True),
+    ).order_by(HostLocationConfiguration.configuration_name).all()]
     return {
         'affected_scheduled_games_count': len(scheduled_game_ids),
         'affected_game_ids': [str(game_id) for game_id in scheduled_game_ids],
         'affected_generated_slots_count': generated_slot_count,
         'affected_hosting_availability_count': hosting_availability_count,
         'affected_field_instance_ids': instance_ids,
+        'active_layout_names': active_layout_names,
     }
 
 
@@ -11927,6 +11945,8 @@ def _field_delete_response(field: Field, host_location: HostLocation, counts: di
         'affected_generated_slots_count': int(counts.get('affected_generated_slots_count') or 0),
         'affected_hosting_availability_count': int(counts.get('affected_hosting_availability_count') or 0),
         'affected_game_ids': counts.get('affected_game_ids') or [],
+        'can_delete': not bool(counts.get('active_layout_names')),
+        'active_layout_names': counts.get('active_layout_names') or [],
         'message': f'Field deleted. {affected_scheduled_games_count} scheduled game(s) were flagged as missing a field assignment.',
     }
 
