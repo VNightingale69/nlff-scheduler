@@ -2752,7 +2752,13 @@ def _game_doubleheader_pair_context(db: Session, game: Game | None) -> dict[str,
     return None
 
 
-def _raise_if_single_doubleheader_manual_move(db: Session, game: Game | None, *, action_source: str) -> None:
+def _raise_if_single_doubleheader_manual_move(db: Session, game: Game | None, *, action_source: str, current_user: User | None = None) -> None:
+    # Doubleheader validation is a guardrail, not an authorization boundary.
+    # League/scheduling administrators deliberately reach these mutations through
+    # require_schedule_admin and may split a pair; the derived validation below is
+    # rebuilt from the resulting schedule, so no persisted pair can become stale.
+    if can_manage_schedule(current_user):
+        return
     pair = _game_doubleheader_pair_context(db, game)
     if not pair:
         return
@@ -30331,13 +30337,23 @@ def manual_edit_history(game_id: uuid.UUID, db: Session = Depends(get_db)):
     rows = db.query(ScheduleChangeLog).filter(ScheduleChangeLog.game_id == game_id).order_by(ScheduleChangeLog.changed_at.desc()).all()
     return [_schedule_change_log_read(row) for row in rows]
 
-@router.patch('/schedule-management/games/{game_id}/move', dependencies=[Depends(require_schedule_admin)])
-def move_game_schedule(game_id: uuid.UUID, payload: dict, db: Session = Depends(get_db)):
+@router.patch('/schedule-management/games/{game_id}/move')
+def move_game_schedule(game_id: uuid.UUID, payload: dict, current_user: User = Depends(require_schedule_admin), db: Session = Depends(get_db)):
     game = db.query(Game).filter(Game.id == game_id).first()
     if not game: raise HTTPException(404, 'Game not found')
-    _raise_if_single_doubleheader_manual_move(db, game, action_source='schedule-management-move')
+    original_pair = _game_doubleheader_pair_context(db, game)
+    _raise_if_single_doubleheader_manual_move(db, game, action_source='schedule-management-move', current_user=current_user)
     new_slot = db.query(GameSlot).join(GameSlot.field_instance).filter(GameSlot.id == payload.get('generated_slot_id')).first()
-    if not new_slot or new_slot.status != 'OPEN': raise HTTPException(400, 'Selected slot must be OPEN')
+    if not new_slot: raise HTTPException(400, 'Selected slot was not found')
+    displaced_game = db.get(Game, new_slot.assigned_game_id) if new_slot.assigned_game_id and new_slot.assigned_game_id != game.id else None
+    if displaced_game and payload.get('occupied_slot_action') != 'replace':
+        raise HTTPException(status_code=409, detail={
+            'error': 'SLOT_ALREADY_OCCUPIED', 'message': 'A game is already scheduled in this slot.',
+            'existing_game_id': str(displaced_game.id), 'proposed_game_id': str(game.id),
+            'existing_game_doubleheader': bool(_game_doubleheader_pair_context(db, displaced_game)),
+        })
+    if new_slot.status != 'OPEN' and not displaced_game and new_slot.assigned_game_id != game.id:
+        raise HTTPException(400, 'Selected slot must be OPEN')
     division = db.query(Division).join(Team, Team.division_id == Division.id).filter(Team.id == game.home_team_id).first()
     if new_slot.field_type != _required_field_type_for_division(division): raise HTTPException(400, 'Selected slot field type must match division requirement')
     home_team = db.query(Team).filter(Team.id == game.home_team_id).first()
@@ -30350,6 +30366,14 @@ def move_game_schedule(game_id: uuid.UUID, payload: dict, db: Session = Depends(
         if adjustment_reason:
             logger.info(adjustment_reason)
     old_slot = db.query(GameSlot).filter(GameSlot.assigned_game_id == game.id).first()
+    if displaced_game:
+        new_slot.assigned_game_id = None
+        new_slot.status = 'OPEN'
+        displaced_game.host_location_id = None
+        displaced_game.field_instance_id = None
+        displaced_game.game_date = None
+        displaced_game.kickoff_time = None
+        displaced_game.placement_status = 'TBD'
     if old_slot: old_slot.status = 'OPEN'; old_slot.assigned_game_id = None
     new_slot.status = 'ASSIGNED'; new_slot.assigned_game_id = game.id
     game.host_location_id = new_slot.host_location_id
@@ -30362,23 +30386,35 @@ def move_game_schedule(game_id: uuid.UUID, payload: dict, db: Session = Depends(
         db.rollback()
         raise HTTPException(status_code=400, detail={'error': 'GENERATED_SLOT_INTEGRITY_FAILURE', 'failure_reasons': integrity_failures})
     final_doubleheader = _build_global_doubleheader_validation(db, game.season_id)
-    if any(str(game.id) in {str(row.get('game_1_id')), str(row.get('game_2_id'))} for row in final_doubleheader.get('failures') or []):
-        db.rollback()
-        raise HTTPException(status_code=400, detail={'error': 'DOUBLEHEADER_PAIR_VALIDATION_FAILED', 'doubleheader_validation': final_doubleheader})
     db.commit()
-    return {'ok': True, 'doubleheader_validation': final_doubleheader}
+    logger.info('scheduling_admin_doubleheader_override administrator=%s game_id=%s action=move original_pair=%s displaced_game_id=%s', current_user.id, game.id, original_pair, displaced_game.id if displaced_game else None)
+    return {'ok': True, 'doubleheader_relationship_broken': bool(original_pair and not _game_doubleheader_pair_context(db, game)), 'displaced_game_id': str(displaced_game.id) if displaced_game else None, 'doubleheader_validation': final_doubleheader}
 
-@router.patch('/schedule-management/games/{game_id}/unschedule', dependencies=[Depends(require_schedule_admin)])
-def unschedule_game(game_id: uuid.UUID, db: Session = Depends(get_db)):
+@router.patch('/schedule-management/games/{game_id}/unschedule')
+def unschedule_game(game_id: uuid.UUID, delete_both: bool = False, current_user: User = Depends(require_schedule_admin), db: Session = Depends(get_db)):
     game = db.query(Game).filter(Game.id == game_id).first()
     if not game: raise HTTPException(404, 'Game not found')
-    _raise_if_single_doubleheader_manual_move(db, game, action_source='schedule-management-unschedule')
+    original_pair = _game_doubleheader_pair_context(db, game)
+    _raise_if_single_doubleheader_manual_move(db, game, action_source='schedule-management-unschedule', current_user=current_user)
     division_id = db.query(Team.division_id).filter(Team.id == game.home_team_id).scalar()
     week_id = game.week_id
     slot = db.query(GameSlot).filter(GameSlot.assigned_game_id == game.id).first()
     if slot: slot.status='OPEN'; slot.assigned_game_id=None
+    deleted_ids = [game.id]
+    if delete_both and original_pair:
+        partner_id = next((uuid.UUID(str(value)) for value in (original_pair.get('game_1_id'), original_pair.get('game_2_id')) if value and str(value) != str(game.id)), None)
+        partner = db.get(Game, partner_id) if partner_id else None
+        if partner:
+            partner_slot = db.query(GameSlot).filter(GameSlot.assigned_game_id == partner.id).first()
+            if partner_slot: partner_slot.status = 'OPEN'; partner_slot.assigned_game_id = None
+            deleted_ids.append(partner.id)
+            db.delete(partner)
     db.delete(game)
-    db.commit()
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
     active_remaining = 0
     if division_id and week_id:
         active_remaining = db.query(Game).join(Game.home_team).join(Game.status).filter(
@@ -30396,7 +30432,8 @@ def unschedule_game(game_id: uuid.UUID, db: Session = Depends(get_db)):
         division_id,
         week_id,
     )
-    return {'ok': True}
+    logger.info('scheduling_admin_doubleheader_override administrator=%s action=unschedule deleted_game_ids=%s original_pair=%s delete_both=%s', current_user.id, deleted_ids, original_pair, delete_both)
+    return {'ok': True, 'deleted_game_ids': [str(value) for value in deleted_ids], 'doubleheader_relationship_broken': bool(original_pair and not delete_both)}
 
 
 @router.post('/schedule-management/cleanup-unscheduled-games', dependencies=[Depends(require_schedule_admin)])
@@ -30610,10 +30647,6 @@ def create_game(payload:GameCreate, db:Session=Depends(get_db)):
     if str(status.code or '').strip().upper() in FINAL_SCHEDULE_EXCLUDED_STATUS_CODES: raise HTTPException(400, 'Draft schedule game statuses are disabled; save games as scheduled records.')
     if validation.hard_conflicts: raise HTTPException(status_code=400, detail={'error':'hard_conflicts','validation':validation.model_dump()})
     obj=Game(**payload.model_dump(exclude={'division_id'})); db.add(obj); db.flush()
-    final_doubleheader = _build_global_doubleheader_validation(db, obj.season_id)
-    if any(str(obj.id) in {str(row.get('game_1_id')), str(row.get('game_2_id'))} or str(obj.id) in {str(value) for value in (row.get('game_ids') or [])} for row in final_doubleheader.get('failures') or []):
-        db.rollback()
-        raise HTTPException(status_code=400, detail={'error': 'DOUBLEHEADER_PAIR_VALIDATION_FAILED', 'doubleheader_validation': final_doubleheader})
     db.commit(); db.refresh(obj)
     return GameSaveResponse(game=_to_game_read(obj, db=db), validation=validation)
 
@@ -30621,7 +30654,6 @@ def create_game(payload:GameCreate, db:Session=Depends(get_db)):
 def update_game(game_id:uuid.UUID,payload:GameCreate, db:Session=Depends(get_db)):
     obj=db.query(Game).filter(Game.id==game_id).first()
     if not obj: raise HTTPException(404,'Game not found')
-    _raise_if_single_doubleheader_manual_move(db, obj, action_source='admin-game-update')
     validation=validate_game(db,payload,game_id=game_id); status=db.query(GameStatus).filter(GameStatus.id==payload.game_status_id).first()
     _raise_if_invalid_scheduled_game_payload(db, payload, game_id=game_id)
     if not status: raise HTTPException(400,'Invalid game status')
@@ -30629,10 +30661,6 @@ def update_game(game_id:uuid.UUID,payload:GameCreate, db:Session=Depends(get_db)
     if validation.hard_conflicts: raise HTTPException(status_code=400, detail={'error':'hard_conflicts','validation':validation.model_dump()})
     for k,v in payload.model_dump(exclude={'division_id'}).items(): setattr(obj,k,v)
     db.flush()
-    final_doubleheader = _build_global_doubleheader_validation(db, obj.season_id)
-    if any(str(obj.id) in {str(row.get('game_1_id')), str(row.get('game_2_id'))} or str(obj.id) in {str(value) for value in (row.get('game_ids') or [])} for row in final_doubleheader.get('failures') or []):
-        db.rollback()
-        raise HTTPException(status_code=400, detail={'error': 'DOUBLEHEADER_PAIR_VALIDATION_FAILED', 'doubleheader_validation': final_doubleheader})
     db.commit(); db.refresh(obj)
     return GameSaveResponse(game=_to_game_read(obj, db=db), validation=validation)
 
@@ -30647,7 +30675,6 @@ def delete_game(game_id: uuid.UUID, db: Session = Depends(get_db)):
     obj = db.query(Game).filter(Game.id == game_id).first()
     if not obj:
         raise HTTPException(404, 'Game not found')
-    _raise_if_single_doubleheader_manual_move(db, obj, action_source='admin-game-delete')
     slot = db.query(GameSlot).filter(GameSlot.assigned_game_id == game_id).first()
     if slot:
         slot.status = 'OPEN'
