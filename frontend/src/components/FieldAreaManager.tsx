@@ -133,6 +133,8 @@ export default function FieldAreaManager() {
   const [deleteTarget, setDeleteTarget] = useState<any | null>(null);
   const [deleteImpact, setDeleteImpact] = useState<any | null>(null);
   const [deletingField, setDeletingField] = useState(false);
+  const [layoutDeleteTarget, setLayoutDeleteTarget] = useState<any | null>(null);
+  const [deletingLayout, setDeletingLayout] = useState(false);
 
   const resetFieldForm = () => {
     setFieldForm({ name: '', layout_type: '', is_active: true });
@@ -270,6 +272,25 @@ export default function FieldAreaManager() {
       setType('ok'); setMessage(`Supported layout ${isActive ? 'activated' : 'deactivated'}.`);
       await loadOrgData(orgId, hostId);
     } catch (e: any) { setType('err'); setMessage(e.message || `Unable to ${isActive ? 'activate' : 'deactivate'} supported layout`); }
+  };
+
+  const confirmLayoutDeletion = async () => {
+    if (!layoutDeleteTarget) return;
+    try {
+      setDeletingLayout(true);
+      await apiFetch(`/host-location-configurations/${layoutDeleteTarget.id}`, { method: 'DELETE' }, token);
+      if (editingConfigurationId === layoutDeleteTarget.id) {
+        setEditingConfigurationId(null);
+        setConfigurationForm({ name: '', field_ids: [], is_active: true });
+      }
+      setLayoutDeleteTarget(null);
+      setType('ok');
+      setMessage('Field layout deleted successfully.');
+      await loadOrgData(orgId, hostId);
+    } catch (e: any) {
+      setType('err');
+      setMessage(e.message || 'This field layout cannot be deleted because it is currently being used by hosting or scheduling data. Deactivate the layout instead, or remove the dependent records first.');
+    } finally { setDeletingLayout(false); }
   };
 
   const requestFieldDeletion = async (field: any) => {
@@ -494,7 +515,7 @@ export default function FieldAreaManager() {
         <div className='mt-3 grid gap-3 md:grid-cols-2'>{(hostConfigsByHost[hostId] || []).filter((config: any) => showInactiveLayouts || config.is_active).map((config: any) => <article key={config.id} className='rounded border p-3'>
           <div className='flex justify-between'><strong>{config.configuration_name}</strong><span className='text-xs'>{config.is_active ? 'Active' : 'Inactive'}</span></div>
           <ul className='mt-2 list-disc pl-5 text-sm'>{(config.field_instances || []).map((name: string) => <li key={name}>{name}</li>)}</ul>
-          {canManageFieldDefinitions && <div className='mt-2 flex gap-2'><button className='rounded border px-2 py-1 text-xs' onClick={() => { setEditingConfigurationId(config.id); setConfigurationForm({name: config.configuration_name, field_ids: config.field_ids || [], is_active: config.is_active}); }}>Edit / Assign Fields</button><button className='rounded border px-2 py-1 text-xs' onClick={() => setConfigurationActive(config, !config.is_active)}>{config.is_active ? 'Deactivate' : 'Activate'}</button></div>}
+          {canManageFieldDefinitions && <div className='mt-2 flex flex-wrap gap-2'><button className='rounded border px-2 py-1 text-xs' onClick={() => { setEditingConfigurationId(config.id); setConfigurationForm({name: config.configuration_name, field_ids: config.field_ids || [], is_active: config.is_active}); }}>Edit / Assign Fields</button><button className='rounded border px-2 py-1 text-xs' onClick={() => setConfigurationActive(config, !config.is_active)}>{config.is_active ? 'Deactivate' : 'Activate'}</button>{canDeleteFieldDefinitions && <button className='rounded border border-rose-700 bg-rose-600 px-2 py-1 text-xs font-semibold text-white hover:bg-rose-700' onClick={() => setLayoutDeleteTarget(config)}>Delete Layout</button>}</div>}
         </article>)}</div>
       </div>}
     </section>}
@@ -517,6 +538,19 @@ export default function FieldAreaManager() {
         <div className='mt-6 flex justify-end gap-3'>
           <button className='rounded border px-4 py-2 text-sm' disabled={deletingField} onClick={() => { setDeleteTarget(null); setDeleteImpact(null); }}>Cancel</button>
           <button className='rounded bg-rose-700 px-4 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50' disabled={deletingField || deleteImpact?.can_delete === false} onClick={confirmFieldDeletion}>{deletingField ? 'Deleting…' : 'Delete Field'}</button>
+        </div>
+      </div>
+    </div>}
+
+    {layoutDeleteTarget && <div className='fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4' role='dialog' aria-modal='true' aria-labelledby='delete-layout-title'>
+      <div className='w-full max-w-lg rounded-lg bg-white p-6 shadow-xl'>
+        <h2 id='delete-layout-title' className='text-lg font-semibold'>Delete field layout?</h2>
+        <p className='mt-3 text-sm text-slate-800'>Delete <strong>{layoutDeleteTarget.configuration_name}</strong>?</p>
+        <p className='mt-3 text-sm text-slate-700'>This permanently removes this field configuration from the host location. It will no longer be available for hosting availability or scheduling.</p>
+        <p className='mt-2 text-sm font-semibold text-rose-700'>This action cannot be undone.</p>
+        <div className='mt-6 flex justify-end gap-3'>
+          <button className='rounded border px-4 py-2 text-sm' disabled={deletingLayout} onClick={() => setLayoutDeleteTarget(null)}>Cancel</button>
+          <button className='rounded bg-rose-700 px-4 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50' disabled={deletingLayout} onClick={confirmLayoutDeletion}>{deletingLayout ? 'Deleting…' : 'Delete Layout'}</button>
         </div>
       </div>
     </div>}
