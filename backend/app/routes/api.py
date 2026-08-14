@@ -11568,18 +11568,40 @@ def set_host_location_configuration_active(item_id: uuid.UUID, is_active: bool, 
     db.commit(); db.refresh(x); return _attach_configuration_instances(x)
 
 
-@router.delete('/host-location-configurations/{item_id}', dependencies=[Depends(get_current_user)])
+@router.delete('/host-location-configurations/{item_id}', dependencies=[Depends(require_field_deleter)])
 def del_host_location_configuration(item_id: uuid.UUID, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     x = db.query(HostLocationConfiguration).join(HostLocationConfiguration.host_location).filter(HostLocationConfiguration.id == item_id).first()
     if not x: raise HTTPException(404, 'Host location configuration not found')
-    enforce_organization_scope(x.host_location.organization_id, current_user)
-    in_use = (db.query(HostingAvailability).filter(HostingAvailability.selected_configuration_id == item_id).count()
-              + db.query(TimeslotFieldConfiguration).filter(TimeslotFieldConfiguration.configuration_id == item_id).count())
-    if in_use:
-        x.is_active = False
-    else:
-        db.delete(x)
-    db.commit(); return {'ok': True}
+    host_location = x.host_location
+    availability = db.query(HostingAvailability).filter(
+        HostingAvailability.selected_configuration_id == item_id,
+    ).order_by(HostingAvailability.available_date, HostingAvailability.start_time).first()
+    timeslot = db.query(TimeslotFieldConfiguration).filter(
+        TimeslotFieldConfiguration.configuration_id == item_id,
+    ).order_by(TimeslotFieldConfiguration.configuration_date, TimeslotFieldConfiguration.kickoff_time).first()
+    if availability or timeslot:
+        dependency = None
+        if availability:
+            week_label = availability.week.label if availability.week else None
+            date_label = availability.available_date.strftime('%B %-d, %Y')
+            dependency = f"hosting availability for {week_label} — {date_label}" if week_label else f"hosting availability on {date_label}"
+        elif timeslot:
+            dependency = f"a scheduling configuration on {timeslot.configuration_date.strftime('%B %-d, %Y')} at {timeslot.kickoff_time.strftime('%-I:%M %p')}"
+        raise HTTPException(status_code=409, detail={
+            'code': 'FIELD_LAYOUT_IN_USE',
+            'message': f'This layout is currently used by {dependency}. Deactivate the layout instead, or remove the dependent records first.',
+            'dependency': dependency,
+        })
+    deleted_at = datetime.now(timezone.utc)
+    layout_id, layout_name = x.id, x.configuration_name
+    db.delete(x)
+    db.commit()
+    logger.info(
+        'action=FIELD_LAYOUT_DELETE user_id=%s user_role=%s layout_id=%s layout_name=%s host_location_id=%s host_location_name=%s timestamp=%s',
+        current_user.id, normalize_role_name(current_user.role.name), layout_id, layout_name,
+        host_location.id, host_location.name, deleted_at.isoformat(),
+    )
+    return {'ok': True, 'deleted_layout_id': str(layout_id), 'message': 'Field layout deleted successfully.'}
 
 
 @router.get('/host-locations/{item_id}/delete-check', dependencies=[Depends(get_current_user)])
