@@ -16,7 +16,7 @@ const statusTone = (status: string) => status === 'PUBLISHED' ? 'bg-emerald-100 
 
 export default function ScheduleReviewPage() {
   const [payload, setPayload] = useState<Payload>({ season: null, weeks: [] });
-  const [scope, setScope] = useState('my_organization');
+  const [scope] = useState('league');
   const [view, setView] = useState<View>('date');
   const [filters, setFilters] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
@@ -31,12 +31,14 @@ export default function ScheduleReviewPage() {
     if (!response.ok) setError(body.detail || 'Unable to load schedule review.'); else setPayload(body);
     setLoading(false);
   };
-  useEffect(() => { load('my_organization', {}); }, []);
+  useEffect(() => { load('league', {}); }, []);
   const games = useMemo(() => payload.weeks.flatMap((week) => week.games.map((game) => ({ ...game, week }))), [payload]);
   const hasDrafts = payload.weeks.some((week) => week.publication_status !== 'PUBLISHED');
   const option = (key: string, label: string) => <select aria-label={label} className='h-10 rounded border bg-white px-3' value={filters[key] || ''} onChange={(event) => setFilters({ ...filters, [key]: event.target.value })}><option value=''>All {label}</option>{(payload.options?.[key.replace('_id', '') + 's'] || []).map((item) => <option key={item.id} value={item.id}>{item.label || item.name}</option>)}</select>;
   const download = async () => {
-    const response = await fetch(`${API_URL}/schedule-review/export.csv?scope=${scope}`, { headers: { Authorization: `Bearer ${getToken()}` } });
+    const query = new URLSearchParams({ scope });
+    Object.entries(filters).forEach(([key, value]) => value && query.set(key, value));
+    const response = await fetch(`${API_URL}/schedule-review/export.csv?${query}`, { headers: { Authorization: `Bearer ${getToken()}` } });
     if (!response.ok) { setError('Unable to export schedule review.'); return; }
     const url = URL.createObjectURL(await response.blob());
     const anchor = document.createElement('a'); anchor.href = url; anchor.download = 'schedule-review.csv'; anchor.click(); URL.revokeObjectURL(url);
@@ -48,8 +50,7 @@ export default function ScheduleReviewPage() {
     {hasDrafts && <div className='hidden text-center text-lg font-bold print:block'>PREPUBLISHED SCHEDULE — SUBJECT TO CHANGE</div>}
     <section className='space-y-3 rounded border bg-white p-4 print:hidden'>
       <div className='grid gap-3 sm:grid-cols-2 lg:grid-cols-7'>
-        <select aria-label='Organization scope' className='h-10 rounded border px-3' value={scope} onChange={(e) => { setScope(e.target.value); load(e.target.value, filters); }}><option value='my_organization'>My Organization{payload.my_organization?.name ? ` — ${payload.my_organization.name}` : ''}</option><option value='league'>Entire League</option></select>
-        {option('week_id', 'Weeks')}{option('division_id', 'Divisions')}{option('host_location_id', 'Host Locations')}{option('team_id', 'Teams')}{option('field_id', 'Fields')}
+        {option('organization_id', 'Communities')}{option('week_id', 'Weeks')}{option('division_id', 'Divisions')}{option('host_location_id', 'Host Locations')}{option('team_id', 'Teams')}{option('field_id', 'Fields')}
         <input aria-label='Date' type='date' className='h-10 rounded border px-3' value={filters.date || ''} onChange={(e) => setFilters({ ...filters, date: e.target.value })} />
       </div>
       <div className='flex flex-wrap gap-2'><button className='rounded bg-slate-800 px-4 py-2 text-white' onClick={() => load()}>Apply Filters</button><button className='rounded border px-4 py-2' onClick={() => { setFilters({}); load(scope, {}); }}>Reset</button><button className='rounded border px-4 py-2' onClick={download}>Export CSV</button><button className='rounded border px-4 py-2' onClick={() => window.print()}>Print</button></div>

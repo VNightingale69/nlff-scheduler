@@ -25653,13 +25653,16 @@ def _schedule_review_publication_status(db: Session, season: Season, week: Week)
     return 'PUBLISHED'
 
 
-def _schedule_review_rows(db: Session, season: Season, current_user: User, *, scope: str, date_value: date | None = None, division_id: uuid.UUID | None = None, host_location_id: uuid.UUID | None = None, field_id: uuid.UUID | None = None, team_id: uuid.UUID | None = None, week_id: uuid.UUID | None = None):
+def _schedule_review_rows(db: Session, season: Season, current_user: User, *, scope: str, organization_id: uuid.UUID | None = None, date_value: date | None = None, division_id: uuid.UUID | None = None, host_location_id: uuid.UUID | None = None, field_id: uuid.UUID | None = None, team_id: uuid.UUID | None = None, week_id: uuid.UUID | None = None):
     if scope not in {'my_organization', 'league'}:
         raise HTTPException(400, "scope must be 'my_organization' or 'league'")
     filters = _scheduled_games_filters(season.id, date=date_value, division_id=division_id, host_location_id=host_location_id, field_id=field_id, team_id=team_id, week_id=week_id)
-    if scope == 'my_organization' and is_community_admin(current_user):
-        # Never trust a browser-provided organization identifier for this scope.
-        filters['organization_id'] = current_user.organization_id
+    # Schedule review is a league-wide read permission for every authorized
+    # role.  Organization is only an explicit display filter; it must never be
+    # inferred from a community administrator's membership.  Mutation routes
+    # retain their separate, narrower authorization checks.
+    if organization_id:
+        filters['organization_id'] = organization_id
     return get_saved_scheduled_game_rows_for_export(db, season.id, filters, organization_filter_any_team=True)
 
 
@@ -25680,12 +25683,12 @@ def _schedule_review_game(row, publication_status: str) -> dict:
 
 
 @router.get('/schedule-review', dependencies=[Depends(require_roles(*SCHEDULE_REVIEW_ROLES))])
-def schedule_review(season_id: uuid.UUID | None = None, scope: str = 'my_organization', date: date | None = None, division_id: uuid.UUID | None = None, host_location_id: uuid.UUID | None = None, field_id: uuid.UUID | None = None, team_id: uuid.UUID | None = None, week_id: uuid.UUID | None = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def schedule_review(season_id: uuid.UUID | None = None, scope: str = 'league', organization_id: uuid.UUID | None = None, date: date | None = None, division_id: uuid.UUID | None = None, host_location_id: uuid.UUID | None = None, field_id: uuid.UUID | None = None, team_id: uuid.UUID | None = None, week_id: uuid.UUID | None = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Return a deliberately limited, read-only projection of saved games."""
     season = _get_schedule_scope_season(db, season_id)
     if not season:
         return {'season': None, 'weeks': [], 'options': {}, 'scope': scope}
-    rows = _schedule_review_rows(db, season, current_user, scope=scope, date_value=date, division_id=division_id, host_location_id=host_location_id, field_id=field_id, team_id=team_id, week_id=week_id)
+    rows = _schedule_review_rows(db, season, current_user, scope=scope, organization_id=organization_id, date_value=date, division_id=division_id, host_location_id=host_location_id, field_id=field_id, team_id=team_id, week_id=week_id)
     all_rows = get_saved_scheduled_game_rows_for_export(db, season.id, {'season_id': season.id})
     weeks = db.query(Week).filter(Week.season_id == season.id).order_by(Week.week_number).all()
     statuses = {week.id: _schedule_review_publication_status(db, season, week) for week in weeks}
@@ -25699,6 +25702,7 @@ def schedule_review(season_id: uuid.UUID | None = None, scope: str = 'my_organiz
         'weeks': [{'week_id': str(week.id), 'week_number': week.week_number, 'label': week.label or f'Week {week.week_number}', 'date': (week.primary_game_date or week.start_date).isoformat(), 'publication_status': statuses[week.id], 'games': games_by_week[week.id]} for week in weeks if not week_id or week.id == week_id],
         'options': {
             'weeks': [{'id': str(week.id), 'label': week.label or f'Week {week.week_number}'} for week in weeks],
+            'organizations': [{'id': str(x.id), 'name': x.name} for x in sorted({t.organization.id: t.organization for r in all_rows for t in (r[4], r[5]) if t.organization}.values(), key=lambda x: x.name)],
             'divisions': [{'id': str(x.id), 'name': x.name} for x in sorted({r[6].id: r[6] for r in all_rows}.values(), key=lambda x: x.name)],
             'host_locations': [{'id': str(x.id), 'name': x.name} for x in sorted({r[3].id: r[3] for r in all_rows if r[3]}.values(), key=lambda x: x.name)],
             'teams': [{'id': str(x.id), 'name': x.name} for x in sorted({t.id: t for r in all_rows for t in (r[4], r[5])}.values(), key=lambda x: x.name)],
@@ -25708,11 +25712,11 @@ def schedule_review(season_id: uuid.UUID | None = None, scope: str = 'my_organiz
 
 
 @router.get('/schedule-review/export.csv', dependencies=[Depends(require_roles(*SCHEDULE_REVIEW_ROLES))])
-def export_schedule_review_csv(season_id: uuid.UUID | None = None, scope: str = 'my_organization', current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def export_schedule_review_csv(season_id: uuid.UUID | None = None, scope: str = 'league', organization_id: uuid.UUID | None = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     season = _get_schedule_scope_season(db, season_id)
     if not season:
         raise HTTPException(404, 'No saved schedule is currently available.')
-    rows = _schedule_review_rows(db, season, current_user, scope=scope)
+    rows = _schedule_review_rows(db, season, current_user, scope=scope, organization_id=organization_id)
     weeks = {week.id: week for week in db.query(Week).filter(Week.season_id == season.id).all()}
     statuses = {week.id: _schedule_review_publication_status(db, season, week) for week in weeks.values()}
     out = io.StringIO(); writer = csv.writer(out)

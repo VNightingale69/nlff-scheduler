@@ -7,8 +7,9 @@ const shell = fs.readFileSync(new URL('../src/components/DashboardShell.tsx', im
 assert.match(shell, /'schedule-review'/, 'Community navigation should expose Schedule Review');
 assert.match(page, /Read Only/);
 assert.match(page, /Draft games, times, fields, and matchups may change/);
-assert.match(page, /My Organization/);
-assert.match(page, /Entire League/);
+assert.match(page, /useState\('league'\)/, 'Schedule review defaults to the entire league');
+assert.match(page, /organization_id.*Communities/, 'Community is an optional display filter');
+assert.doesNotMatch(page, /setScope/, 'Users cannot accidentally default back to an organization-scoped view');
 assert.match(page, /By Date/);
 assert.match(page, /By Host Location/);
 assert.match(page, /By Team/);
