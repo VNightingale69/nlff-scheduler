@@ -10,7 +10,7 @@ from sqlalchemy.pool import StaticPool
 from app.auth import LEGACY_ROLE_LEAGUE_ADMIN, ROLE_COMMUNITY_ADMIN, ROLE_SCHEDULING_ADMIN
 from app.database import Base, get_db
 from app.main import app
-from app.models import Division, Field, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, HostingAvailability, Organization, Role, ScoreHistory, Season, Team, User, Week
+from app.models import Division, Field, FieldConfigurationMember, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostingAvailability, Organization, Role, ScoreHistory, Season, Team, User, Week
 from app.security import create_access_token, hash_password
 
 
@@ -110,13 +110,45 @@ class FieldDeleteImpactTest(unittest.TestCase):
         self.assertIn('Field Not Assigned', export.text)
         self.assertNotIn('Small Field 1', export.text)
 
-    def test_community_admin_can_delete_own_field_but_not_other_community_field(self):
+    def test_community_admin_cannot_delete_fields(self):
         own = self.client.delete(f'/api/fields/{self.unused_field.id}', headers=self._token(self.home_user))
-        self.assertEqual(own.status_code, 200, own.text)
-        self.assertEqual(own.json()['affected_scheduled_games_count'], 0)
+        self.assertEqual(own.status_code, 403, own.text)
 
         forbidden = self.client.delete(f'/api/fields/{self.other_field.id}', headers=self._token(self.home_user))
         self.assertEqual(forbidden.status_code, 403, forbidden.text)
+
+    def test_scheduling_admin_can_delete_unused_field(self):
+        response = self.client.delete(f'/api/fields/{self.unused_field.id}', headers=self._token(self.scheduling_user))
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()['deleted_field_id'], str(self.unused_field.id))
+
+        fields = self.client.get(f'/api/fields?host_location_id={self.host.id}&page_size=50', headers=self._token(self.scheduling_user))
+        self.assertNotIn(str(self.unused_field.id), [item['id'] for item in fields.json()['items']])
+
+    def test_active_layout_blocks_delete_without_corrupting_layout(self):
+        layout = HostLocationConfiguration(
+            id=uuid.uuid4(), host_location_id=self.host.id, configuration_name='4 Small',
+            surface_type='GRASS_FIELD', is_active=True,
+        )
+        member = FieldConfigurationMember(field_configuration_id=layout.id, field_id=self.unused_field.id)
+        self.db.add_all([layout, member])
+        self.db.commit()
+
+        impact = self.client.get(f'/api/fields/{self.unused_field.id}/delete-impact', headers=self._token(self.scheduling_user))
+        self.assertEqual(impact.status_code, 200, impact.text)
+        self.assertFalse(impact.json()['can_delete'])
+        self.assertEqual(impact.json()['active_layout_names'], ['4 Small'])
+
+        response = self.client.delete(f'/api/fields/{self.unused_field.id}', headers=self._token(self.scheduling_user))
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertIn('4 Small', response.json()['detail']['message'])
+
+        db = self.SessionLocal()
+        try:
+            self.assertIsNone(db.get(Field, self.unused_field.id).deleted_at)
+            self.assertEqual(db.query(FieldConfigurationMember).filter_by(field_id=self.unused_field.id).count(), 1)
+        finally:
+            db.close()
 
     def test_delete_rolls_back_when_cleanup_fails(self):
         original_commit = self.SessionLocal.class_.commit

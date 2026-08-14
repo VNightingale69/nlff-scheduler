@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from 'react';
 import Toast from './Toast';
 import { apiFetch } from '@/lib/api';
 import { useAuthSession } from '@/components/AuthGate';
-import { canManageFields } from '@/lib/auth';
+import { canDeleteFields, canManageFields } from '@/lib/auth';
 import { APPROVED_TURF_CONFIGURATIONS, turfAvailableFieldsLabel, turfConfigurationLabel, turfConfigurationsForHost, type TurfConfiguration } from '@/lib/turfConfigurations';
 
 const TURF_STADIUM = 'TURF_STADIUM';
@@ -111,6 +111,7 @@ export default function FieldAreaManager() {
   const { accessToken: token, currentUser: authUser } = useAuthSession();
   const isCommunityAdmin = authUser?.role_name === 'COMMUNITY_ADMIN';
   const canManageFieldDefinitions = canManageFields(authUser);
+  const canDeleteFieldDefinitions = canDeleteFields(authUser);
   const [message, setMessage] = useState('');
   const [type, setType] = useState<'ok' | 'err'>('ok');
   const [orgs, setOrgs] = useState<any[]>([]);
@@ -129,6 +130,9 @@ export default function FieldAreaManager() {
   const [showInactiveLayouts, setShowInactiveLayouts] = useState(false);
   const [facilityForm, setFacilityForm] = useState('');
   const [savingFacility, setSavingFacility] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<any | null>(null);
+  const [deleteImpact, setDeleteImpact] = useState<any | null>(null);
+  const [deletingField, setDeletingField] = useState(false);
 
   const resetFieldForm = () => {
     setFieldForm({ name: '', layout_type: '', is_active: true });
@@ -268,35 +272,32 @@ export default function FieldAreaManager() {
     } catch (e: any) { setType('err'); setMessage(e.message || `Unable to ${isActive ? 'activate' : 'deactivate'} supported layout`); }
   };
 
-  const deleteField = async (field: any) => {
+  const requestFieldDeletion = async (field: any) => {
     try {
       const impact = await apiFetch(`/fields/${field.id}/delete-impact`, {}, token) as any;
-      const scheduledCount = Number(impact?.affected_scheduled_games_count || 0);
-      const availabilityCount = Number(impact?.affected_hosting_availability_count || 0);
-      const generatedSlotCount = Number(impact?.affected_generated_slots_count || 0);
-      const communityName = impact?.community?.name || orgNameById[selectedHost?.organization_id] || 'Unknown community';
-      const hostName = impact?.host_location?.name || selectedHost?.name || 'Unknown host location';
-      const warning = scheduledCount > 0
-        ? `This field is assigned to ${scheduledCount} scheduled game(s). Deleting it will remove the field from those games and flag them as missing a field assignment. Continue?`
-        : 'Delete this field? This will remove the field from active use. Any scheduled games currently assigned to this field will remain scheduled but will be flagged as missing a field assignment and must be reviewed.';
-      const details = [
-        warning,
-        '',
-        `Field: ${field.name}`,
-        `Host location: ${hostName}`,
-        `Community: ${communityName}`,
-        `Scheduled games affected: ${scheduledCount}`,
-        `Future hosting availability records affected: ${availabilityCount}`,
-        `Generated slots affected: ${generatedSlotCount}`,
-      ].join('\n');
-      if (!window.confirm(details)) return;
-      const response = await apiFetch(`/fields/${field.id}`, { method: 'DELETE' }, token) as any;
-      const affected = Number(response?.affected_scheduled_games_count ?? scheduledCount);
+      setDeleteTarget(field);
+      setDeleteImpact(impact);
+    } catch (e: any) {
+      setType('err');
+      setMessage(e.message || 'Unable to check whether this field can be deleted');
+    }
+  };
+
+  const confirmFieldDeletion = async () => {
+    if (!deleteTarget || deleteImpact?.can_delete === false) return;
+    try {
+      setDeletingField(true);
+      await apiFetch(`/fields/${deleteTarget.id}`, { method: 'DELETE' }, token);
       setType('ok');
-      setMessage(`Field deleted. ${affected} scheduled game(s) were flagged as missing a field assignment.${affected ? ' Review affected games in Manual Schedule Builder using the Missing Field filter.' : ''}`);
-      if (editingFieldId === field.id) resetFieldForm();
+      setMessage('Field deleted successfully.');
+      if (editingFieldId === deleteTarget.id) resetFieldForm();
+      setDeleteTarget(null);
+      setDeleteImpact(null);
       await loadOrgData(orgId, hostId);
-    } catch (e: any) { setType('err'); setMessage(e.message || 'Unable to delete field'); }
+    } catch (e: any) {
+      setType('err');
+      setMessage(e.message || 'This field cannot be deleted because it is currently referenced by scheduling data. Deactivate the field instead, or remove the dependent scheduling records first.');
+    } finally { setDeletingField(false); }
   };
 
 
@@ -472,7 +473,7 @@ export default function FieldAreaManager() {
       <div className='mt-4 overflow-x-auto'>
         <table className='w-full text-sm'>
           <thead><tr><th className='border p-2 text-left'>Field Name</th><th className='border p-2 text-left'>Field Type</th><th className='border p-2 text-left'>Active</th><th className='border p-2 text-left'>Actions</th></tr></thead>
-          <tbody>{fieldLoadError ? <tr><td className='border p-3 text-center text-rose-700' colSpan={4}>Field configurations failed to load: {fieldLoadError}</td></tr> : selectedHostFields.length ? selectedHostFields.map((field: any) => <tr key={field.id}><td className='border p-2'>{field.name}</td><td className='border p-2'>{fieldTypeLabel(field.layout_type)}</td><td className='border p-2'>{field.is_active ? 'Active' : 'Inactive'}</td><td className='border p-2'>{canManageFieldDefinitions && <div className='flex gap-2'><button className='rounded border px-2 py-1 text-xs' onClick={() => { setFieldForm({ name: field.name || '', layout_type: field.layout_type || '', is_active: Boolean(field.is_active) }); setEditingFieldId(field.id); }}>Edit Field</button><button className='rounded border px-2 py-1 text-xs' onClick={() => setFieldActive(field, !field.is_active)}>{field.is_active ? 'Deactivate Field' : 'Activate Field'}</button><button className='rounded border border-rose-700 bg-rose-600 px-2 py-1 text-xs font-semibold text-white hover:bg-rose-700' onClick={() => deleteField(field)}>Delete Field</button></div>}</td></tr>) : <tr><td className='border p-3 text-center text-slate-500' colSpan={4}>No fields configured.</td></tr>}</tbody>
+          <tbody>{fieldLoadError ? <tr><td className='border p-3 text-center text-rose-700' colSpan={4}>Field configurations failed to load: {fieldLoadError}</td></tr> : selectedHostFields.length ? selectedHostFields.map((field: any) => <tr key={field.id}><td className='border p-2'>{field.name}</td><td className='border p-2'>{fieldTypeLabel(field.layout_type)}</td><td className='border p-2'>{field.is_active ? 'Active' : 'Inactive'}</td><td className='border p-2'>{canManageFieldDefinitions && <div className='flex gap-2'><button className='rounded border px-2 py-1 text-xs' onClick={() => { setFieldForm({ name: field.name || '', layout_type: field.layout_type || '', is_active: Boolean(field.is_active) }); setEditingFieldId(field.id); }}>Edit Field</button><button className='rounded border px-2 py-1 text-xs' onClick={() => setFieldActive(field, !field.is_active)}>{field.is_active ? 'Deactivate Field' : 'Activate Field'}</button>{canDeleteFieldDefinitions && <button className='rounded border border-rose-700 bg-rose-600 px-2 py-1 text-xs font-semibold text-white hover:bg-rose-700' onClick={() => requestFieldDeletion(field)}>Delete Field</button>}</div>}</td></tr>) : <tr><td className='border p-3 text-center text-slate-500' colSpan={4}>No fields configured.</td></tr>}</tbody>
         </table>
       </div>
       <div className='mt-3 rounded bg-slate-50 p-3 text-xs text-slate-700'>
@@ -497,6 +498,28 @@ export default function FieldAreaManager() {
         </article>)}</div>
       </div>}
     </section>}
+
+    {deleteTarget && <div className='fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4' role='dialog' aria-modal='true' aria-labelledby='delete-field-title'>
+      <div className='w-full max-w-lg rounded-lg bg-white p-6 shadow-xl'>
+        <h2 id='delete-field-title' className='text-lg font-semibold'>Delete field <strong>{deleteTarget.name}</strong>?</h2>
+        <p className='mt-3 text-sm text-slate-700'>This removes the field from future use. Existing schedule assignments or configuration dependencies may prevent deletion.</p>
+        <p className='mt-2 text-sm font-semibold text-rose-700'>This action cannot be undone.</p>
+        {deleteImpact?.active_layout_names?.length > 0 && <div className='mt-4 rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950'>
+          <p className='font-semibold'>This field is used by the following field layouts:</p>
+          <ul className='mt-1 list-disc pl-5'>{deleteImpact.active_layout_names.map((name: string) => <li key={name}>{name}</li>)}</ul>
+          <p className='mt-2'>Remove the field from those layouts before deleting it.</p>
+        </div>}
+        <div className='mt-4 text-xs text-slate-600'>
+          <p>Scheduled games affected: {Number(deleteImpact?.affected_scheduled_games_count || 0)}</p>
+          <p>Future hosting availability records affected: {Number(deleteImpact?.affected_hosting_availability_count || 0)}</p>
+          <p>Generated slots affected: {Number(deleteImpact?.affected_generated_slots_count || 0)}</p>
+        </div>
+        <div className='mt-6 flex justify-end gap-3'>
+          <button className='rounded border px-4 py-2 text-sm' disabled={deletingField} onClick={() => { setDeleteTarget(null); setDeleteImpact(null); }}>Cancel</button>
+          <button className='rounded bg-rose-700 px-4 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50' disabled={deletingField || deleteImpact?.can_delete === false} onClick={confirmFieldDeletion}>{deletingField ? 'Deleting…' : 'Delete Field'}</button>
+        </div>
+      </div>
+    </div>}
 
     <section className='rounded border p-4'>
       <h2 className='mb-2 font-semibold'>Facility Capability Summary</h2>

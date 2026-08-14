@@ -73,6 +73,11 @@ export function canManageFields(user: AuthUser | null | undefined): boolean {
   return role === 'LEAGUE_ADMIN' || role === 'COMMUNITY_ADMIN' || role === 'SCHEDULING_ADMIN';
 }
 
+export function canDeleteFields(user: AuthUser | null | undefined): boolean {
+  const role = normalizeRoleName(user?.role_name);
+  return role === 'LEAGUE_ADMIN' || role === 'SCHEDULING_ADMIN';
+}
+
 /** Centralized ownership check for community-scoped hosting mutations. */
 export function canManageCommunityHosting(user: AuthUser | null | undefined, communityId?: string | null): boolean {
   const role = normalizeRoleName(user?.role_name);
