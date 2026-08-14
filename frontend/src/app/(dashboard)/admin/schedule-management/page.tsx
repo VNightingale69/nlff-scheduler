@@ -258,6 +258,7 @@ export default function ScheduleManagementPage() {
             <div><strong>Configuration basis:</strong> {evaluation.configuration_basis}</div>
             <div><strong>Compatible configuration:</strong> {evaluation.matched_layout || 'None confirmed'}</div>
             <div><strong>Assigned fields:</strong> {evaluation.assigned_fields?.join(', ') || 'None'}</div>
+            {evaluation.active_configurations?.length ? <div className='mt-1'><strong>Active configurations evaluated:</strong><ul className='list-disc pl-5'>{evaluation.active_configurations.map((configuration: any) => <li key={configuration.id || configuration.name}><span className={configuration.status === 'ACTIVE BUT INVALID' ? 'font-semibold text-rose-700' : ''}>{configuration.name} — {configuration.status}</span>{configuration.fields?.length ? `: ${configuration.fields.join(', ')}` : ''}{configuration.reason ? ` (${configuration.reason})` : ''}</li>)}</ul></div> : null}
             <div><strong>Result:</strong> {evaluation.result}</div>
           </div>)}
         </div> : null}

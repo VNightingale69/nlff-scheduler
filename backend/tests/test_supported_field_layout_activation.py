@@ -9,7 +9,7 @@ from sqlalchemy.orm import sessionmaker
 from app.database import Base
 from app.models import Field, FieldConfigurationMember, HostLocation, HostLocationConfiguration, Organization, Role, User
 from app.routes.api import _validate_configuration_activation, list_host_location_configurations
-from app.services.facility_layout_validation import validate_field_combination
+from app.services.facility_layout_validation import field_combination_diagnostics, validate_field_combination
 
 
 class SupportedFieldLayoutActivationTest(unittest.TestCase):
@@ -63,6 +63,46 @@ class SupportedFieldLayoutActivationTest(unittest.TestCase):
         valid, layouts, _used = validate_field_combination(self.db, self.host.id, [self.fields[0].id, self.fields[1].id])
         self.assertTrue(valid)
         self.assertIn('4 Small', layouts)
+
+    def test_scheduler_accepts_all_four_physical_field_ids(self):
+        valid, layouts, _used = validate_field_combination(
+            self.db, self.host.id, [field.id for field in self.fields],
+        )
+        diagnostics = field_combination_diagnostics(
+            self.db, self.host.id, [field.id for field in self.fields],
+        )
+
+        self.assertTrue(valid)
+        self.assertIn('4 Small', layouts)
+        self.assertEqual('4 Small', diagnostics['compatible_configuration'])
+
+    def test_active_empty_layout_is_not_legacy_all_fields_fallback(self):
+        for configuration in [self.canonical, *self.alternatives]:
+            configuration.is_active = False
+        empty = HostLocationConfiguration(
+            host_location_id=self.host.id, configuration_name='Empty active layout', is_active=True,
+        )
+        self.db.add(empty)
+        self.db.commit()
+
+        valid, layouts, _used = validate_field_combination(self.db, self.host.id, [self.fields[0].id])
+        diagnostics = field_combination_diagnostics(self.db, self.host.id, [self.fields[0].id])
+
+        self.assertFalse(valid)
+        self.assertEqual(['Empty active layout'], layouts)
+        self.assertEqual('ACTIVE BUT INVALID', diagnostics['configurations'][0]['status'])
+        self.assertEqual('Configuration contains no assigned physical fields.', diagnostics['configurations'][0]['reason'])
+
+    def test_activation_error_uses_administrator_guidance(self):
+        empty = HostLocationConfiguration(
+            host_location_id=self.host.id, configuration_name='Empty', is_active=True,
+        )
+        with self.assertRaises(HTTPException) as raised:
+            _validate_configuration_activation(self.db, empty)
+        self.assertEqual(
+            'A field layout must contain at least one physical field before it can be activated.',
+            raised.exception.detail['message'],
+        )
 
     def test_scheduler_accepts_an_alternative_active_configuration(self):
         valid, layouts, _used = validate_field_combination(

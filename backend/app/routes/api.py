@@ -23,7 +23,7 @@ from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_AD
 from app.database import get_db
 from app.organizations import active_organization_filter, normalize_organization_name
 from app.models import Division, Field, FieldConfigurationMember, FieldConfigurationOption, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostPlanSelection, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Rulebook, LoginAuditLog, ScheduleChangeLog, ScheduleImport, SchedulePublicationEvent, ScoreHistory, ScoreSubmission, Season, Team, TimeslotFieldConfiguration, Tournament, TournamentDivision, TournamentGame, TournamentTeam, TurfWave, User, Week
-from app.services.facility_layout_validation import active_layout_capacities, active_supported_layouts_query, get_active_supported_layouts, layout_label, select_supported_layout, validate_field_combination, validate_timeslot_demands
+from app.services.facility_layout_validation import active_layout_capacities, active_supported_layouts_query, field_combination_diagnostics, get_active_supported_layouts, layout_label, select_supported_layout, validate_field_combination, validate_timeslot_demands
 from app.services.division_field_types import required_field_type_for_division
 from app.services.schedule_import import build_preview, parse_schedule_file
 from app.schemas import (
@@ -5624,9 +5624,9 @@ def _ensure_approved_turf_configurations(db: Session, host: HostLocation) -> boo
 def _attach_configuration_instances(config: HostLocationConfiguration) -> HostLocationConfiguration:
     member_fields = [member.field for member in config.members if member.field and member.field.deleted_at is None]
     config.field_ids = [field.id for field in member_fields]
-    config.field_instances = [field.name for field in member_fields] or [
-        field_name for field_name, _field_type in _configuration_field_templates_for_host(config.host_location, config.configuration_name)
-    ]
+    # Membership is authoritative. Synthesizing names from the layout label
+    # hid empty/corrupt layouts from administrators.
+    config.field_instances = [field.name for field in member_fields]
     return config
 
 
@@ -5647,7 +5647,8 @@ def _validate_configuration_activation(db: Session, config: HostLocationConfigur
     """Validate an explicitly assigned layout before it becomes schedulable."""
     fields = [member.field for member in config.members if member.field and member.field.deleted_at is None]
     if not fields:
-        raise HTTPException(400, detail={'code': 'EMPTY_FIELD_CONFIGURATION', 'message': 'An active layout must have at least one assigned field.'})
+        raise HTTPException(400, detail={'code': 'EMPTY_FIELD_CONFIGURATION',
+                                         'message': 'A field layout must contain at least one physical field before it can be activated.'})
     if any(field.host_location_id != config.host_location_id for field in fields):
         raise HTTPException(400, detail={'code': 'MIXED_HOST_FIELD_CONFIGURATION', 'message': 'Every assigned field must belong to this host location.'})
     if any(not field.is_active for field in fields):
@@ -11466,9 +11467,9 @@ def create_host_location_configuration(payload: HostLocationConfigurationCreate,
     enforce_organization_scope(host.organization_id, current_user)
     config_name = _normalize_configuration_name(payload.configuration_name)
     if not config_name: raise HTTPException(400, 'Configuration name is required')
-    if not payload.field_ids:
+    if payload.is_active and not payload.field_ids:
         raise HTTPException(400, detail={'code': 'EMPTY_FIELD_CONFIGURATION',
-                                         'message': 'Select at least one active field.'})
+                                         'message': 'A field layout must contain at least one physical field before it can be activated.'})
     duplicate = db.query(HostLocationConfiguration.id).filter(
         HostLocationConfiguration.host_location_id == payload.host_location_id,
         HostLocationConfiguration.configuration_name == config_name,
@@ -11543,9 +11544,9 @@ def upd_host_location_configuration(item_id: uuid.UUID, payload: HostLocationCon
     x.configuration_name = _normalize_configuration_name(payload.configuration_name)
     if not x.configuration_name:
         raise HTTPException(400, 'Configuration name is required')
-    if not payload.field_ids:
+    if payload.is_active and not payload.field_ids:
         raise HTTPException(400, detail={'code': 'EMPTY_FIELD_CONFIGURATION',
-                                         'message': 'Select at least one active field.'})
+                                         'message': 'A field layout must contain at least one physical field before it can be activated.'})
     duplicate = db.query(HostLocationConfiguration.id).filter(
         HostLocationConfiguration.host_location_id == payload.host_location_id,
         HostLocationConfiguration.configuration_name == x.configuration_name,
@@ -16379,14 +16380,29 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
             physical_waves.setdefault((game.host_location_id, game.game_date, game.kickoff_time), {'host': host, 'fields': set(), 'game': game})['fields'].add(game.field_id)
     for (_host_id, game_date, kickoff), wave in physical_waves.items():
         valid, supported_layouts, _used = validate_field_combination(db, _host_id, wave['fields'])
+        names = [name for (name,) in db.query(Field.name).filter(Field.id.in_(wave['fields'])).all()]
+        membership = field_combination_diagnostics(db, _host_id, wave['fields'])
+        layout_evaluations.append({
+            'host_location_id': str(_host_id),
+            'host_location_name': getattr(wave['host'], 'name', None),
+            'date': game_date.isoformat(),
+            'time': kickoff.isoformat(),
+            'required_field_ids': sorted(str(field_id) for field_id in wave['fields']),
+            'assigned_fields': sorted(names),
+            'active_configurations': membership['configurations'],
+            'matched_layout': membership['compatible_configuration'],
+            'configuration_basis': 'Persisted physical field memberships (field IDs)',
+            'result': 'Valid' if valid else 'Blocking conflict',
+        })
         if valid:
             continue
-        names = [name for (name,) in db.query(Field.name).filter(Field.id.in_(wave['fields'])).all()]
         errors.append({
             'issue_code': 'FIELD_LAYOUT_CONFLICT', 'scheduled_game_id': str(wave['game'].id),
             'date': game_date.isoformat(), 'time': kickoff.isoformat(),
             'location': getattr(wave['host'], 'name', None), 'scheduled_fields': sorted(names),
             'supported_layouts': supported_layouts,
+            'active_configurations': membership['configurations'],
+            'compatible_configuration': membership['compatible_configuration'],
             'summary': 'No supported field configuration allows these fields to operate simultaneously.',
             'recommended_action': 'Move a game or choose fields that are contained together in one active supported layout.',
         })
