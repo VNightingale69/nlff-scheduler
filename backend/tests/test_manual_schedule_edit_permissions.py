@@ -101,31 +101,66 @@ class ManualScheduleEditPermissionsTest(unittest.TestCase):
         payload.update(overrides)
         return payload
 
-    def test_community_admin_reviews_draft_and_entire_league_saved_schedule(self):
-        self.week.publication_status = 'UNPUBLISHED'
+    def _add_other_community_game(self):
+        game = Game(
+            id=uuid.uuid4(), season_id=self.season.id, week_id=self.week.id,
+            home_team_id=self.away_team.id, away_team_id=self.other_team.id,
+            host_location_id=self.host.id, field_instance_id=self.field.id,
+            game_status_id=self.status.id, game_date=date(2026, 8, 9),
+            kickoff_time=time(10, 0),
+        )
+        self.db.add(game)
         self.db.commit()
-        mine = self.client.get('/api/schedule-review', headers=self._token(self.community_user.id))
-        assert mine.status_code == 200
-        assert mine.json()['weeks'][0]['publication_status'] == 'DRAFT'
-        assert len(mine.json()['weeks'][0]['games']) == 1
-        league = self.client.get('/api/schedule-review?scope=league', headers=self._token(self.community_user.id))
-        assert league.status_code == 200
-        assert len(league.json()['weeks'][0]['games']) == 1
-        game = league.json()['weeks'][0]['games'][0]
+        return game
+
+    def test_community_admin_can_read_full_prepublished_schedule(self):
+        self.week.publication_status = 'UNPUBLISHED'
+        self._add_other_community_game()
+        self.db.commit()
+        response = self.client.get('/api/schedule-review', headers=self._token(self.community_user.id))
+        assert response.status_code == 200
+        assert response.json()['weeks'][0]['publication_status'] == 'DRAFT'
+        games = response.json()['weeks'][0]['games']
+        assert len(games) == 2
+        assert {game['home_team'] for game in games} == {self.home_team.name, self.away_team.name}
+        game = games[0]
         assert 'id' not in game and 'internal_admin_notes' not in game and 'slot_id' not in game
 
-    def test_public_schedule_does_not_return_draft_week(self):
+    def test_community_admin_schedule_read_is_not_org_scoped(self):
+        self._add_other_community_game()
+        legacy_scope = self.client.get('/api/schedule-review?scope=my_organization', headers=self._token(self.community_user.id))
+        assert legacy_scope.status_code == 200
+        assert len(legacy_scope.json()['weeks'][0]['games']) == 2
+
+        voluntary_filter = self.client.get(
+            f'/api/schedule-review?organization_id={self.home_org.id}',
+            headers=self._token(self.community_user.id),
+        )
+        assert voluntary_filter.status_code == 200
+        assert len(voluntary_filter.json()['weeks'][0]['games']) == 1
+
+    def test_public_user_cannot_read_prepublished_schedule(self):
         self.week.publication_status = 'UNPUBLISHED'
         self.db.commit()
         response = self.client.get('/api/public/schedule')
         assert response.status_code == 200
         assert response.json()['items'] == []
 
-    def test_schedule_review_allows_existing_schedule_admin_roles(self):
-        for user in (self.league_user, self.scheduling_user):
-            response = self.client.get('/api/schedule-review?scope=league', headers=self._token(user.id))
-            assert response.status_code == 200
-            assert len(response.json()['weeks'][0]['games']) == 1
+    def test_scheduling_admin_can_read_full_schedule(self):
+        self._add_other_community_game()
+        response = self.client.get('/api/schedule-review', headers=self._token(self.scheduling_user.id))
+        assert response.status_code == 200
+        assert len(response.json()['weeks'][0]['games']) == 2
+
+    def test_league_admin_can_read_full_schedule(self):
+        self._add_other_community_game()
+        response = self.client.get('/api/schedule-review', headers=self._token(self.league_user.id))
+        assert response.status_code == 200
+        assert len(response.json()['weeks'][0]['games']) == 2
+
+    def test_anonymous_user_cannot_read_schedule_review(self):
+        response = self.client.get('/api/schedule-review')
+        assert response.status_code in {401, 403}
 
     def test_community_admin_review_export_has_draft_marking_without_admin_data(self):
         self.week.publication_status = 'UNPUBLISHED'
@@ -268,16 +303,17 @@ class ManualScheduleEditPermissionsTest(unittest.TestCase):
             public_response = request({})
             self.assertEqual(public_response.status_code, 403, public_response.text)
 
-    def test_community_admin_direct_edit_api_is_forbidden_and_data_unchanged(self):
+    def test_community_admin_cannot_edit_other_community_games(self):
+        other_game = self._add_other_community_game()
         response = self.client.patch(
-            f'/api/schedule-management/games/{self.game.id}/manual-edit',
+            f'/api/schedule-management/games/{other_game.id}/manual-edit',
             headers=self._token(self.community_user.id),
             json=self._payload(),
         )
         self.assertEqual(response.status_code, 403)
         self.db.expire_all()
-        game = self.db.get(Game, self.game.id)
-        self.assertEqual(game.away_team_id, self.away_team.id)
+        game = self.db.get(Game, other_game.id)
+        self.assertEqual(game.away_team_id, self.other_team.id)
         self.assertFalse(game.is_manual_edit)
         self.assertEqual(self.db.query(ScheduleChangeLog).count(), 0)
 

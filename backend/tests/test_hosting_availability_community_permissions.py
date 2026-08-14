@@ -89,7 +89,7 @@ class HostingAvailabilityCommunityPermissionsTest(unittest.TestCase):
         payload.update(overrides)
         return payload
 
-    def test_community_admin_bulk_upsert_forces_own_organization_and_generated_slots_refresh_is_allowed(self):
+    def test_community_admin_can_edit_authorized_own_community_records(self):
         response = self.client.post(
             '/api/hosting-availabilities/bulk-upsert',
             headers=self._token(self.community_user.id),
