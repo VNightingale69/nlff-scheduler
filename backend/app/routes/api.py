@@ -30174,6 +30174,7 @@ def schedule_management_games(season_id: uuid.UUID | None = None, date: date | N
             'field_id': str(g.field_id) if g.field_id else None,
             'field': getattr(canonical_field, 'name', None) or _field_export_display_label(slot, fi, db),
             'field_type': getattr(canonical_field, 'layout_type', None) or ((slot.field_type if slot else None) or (fi.field_type if fi else None)),
+            'physical_area_id': str(physical_area.id) if physical_area else None,
             'physical_area_name': getattr(physical_area, 'name', None),
             'home_team_logo_url': _community_logo_browser_url(getattr(home, 'organization', None)),
             'home_team_logo_alt_text': _community_logo_alt_text(getattr(home, 'organization', None), home.name),
