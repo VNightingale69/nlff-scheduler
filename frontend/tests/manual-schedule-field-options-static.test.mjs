@@ -4,7 +4,8 @@ import { readFileSync } from 'node:fs';
 const page = readFileSync(new URL('../src/app/(dashboard)/admin/manual-schedule-builder/page.tsx', import.meta.url), 'utf8');
 
 assert.match(page, /\(options\.fields \|\| \[\]\)/, 'uses canonical fields returned by the API');
-assert.match(page, /String\(field\.host_location_id \|\| ''\) === selectedHostId && field\.is_active/, 'filters active fields by selected host location');
+assert.match(page, /String\(field\.host_location_id \|\| ''\) === selectedHostId && field\.is_active/, 'filters active fields by selected host location ID');
+assert.match(page, /String\(field\.field_type \|\| ''\)\.toUpperCase\(\) === requiredFieldType/, 'filters options by the division-compatible physical field type');
 assert.match(page, /field\.display_name \|\| field\.name/, 'renders the canonical short display name');
 assert.match(page, /value=\{pendingEdit\.field_id \|\| ''\}/, 'select value is the persisted canonical field ID');
 assert.match(page, /value=\{field\.field_id \|\| field\.id\}/, 'option values are canonical field IDs');
@@ -24,7 +25,8 @@ assert.doesNotMatch(page, /await saveBulkInlineEdits\(true\)/, 'warning retry ca
 assert.match(page, /Object\.entries\(editableGameSnapshot\(edit\)\)/, 'success verifies every editable canonical value, including fields and notes, returned by the server');
 assert.match(page, /Unable to save schedule changes\. \$\{edits\.length\}/, 'bulk failures remain visible with affected-game context and the backend reason');
 assert.doesNotMatch(page, /setIsBulkEditMode\(false\);\s*await load/, 'successful saves leave global edit mode active');
-assert.doesNotMatch(page, /required_field_type[^\n]+\.filter/, 'field type compatibility does not remove physical fields');
+assert.match(page, /No active \$\{divisionDefaultFieldType \|\| 'compatible'\} fields are available at/, 'explains when a host has fields but none match the division type');
+assert.match(page, /No active fields configured for \$\{selectedHost\?\.name/, 'explains when the selected host has no active fields');
 assert.match(page, /setPendingGameEdits\(Object\.fromEntries\(games\.map/, 'global edit mode initializes every existing row immediately');
 
 console.log('manual schedule canonical field option checks passed');

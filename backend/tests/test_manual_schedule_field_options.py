@@ -1,9 +1,10 @@
 import uuid
+from datetime import datetime, timezone
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.models import Base, Field, HostLocation, HostLocationConfiguration, Organization
+from app.models import Base, Field, FieldConfigurationOption, HostLocation, HostLocationConfiguration, Organization, PhysicalFieldArea
 from app.routes.api import manual_schedule_builder_options
 
 
@@ -89,4 +90,57 @@ def test_manual_builder_materializes_turf_layout_positions_without_generated_slo
     # Repeated option loads reuse the stable canonical records and IDs.
     second = manual_schedule_builder_options(db)
     assert {field['field_id'] for field in second['fields']} == {field['field_id'] for field in stadium_fields}
+    db.close()
+
+
+def test_tim_osmond_options_traverse_active_areas_and_materialize_physical_fields():
+    engine = create_engine('sqlite+pysqlite:///:memory:', future=True)
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    organization = Organization(id=uuid.uuid4(), name='Antioch', is_active=True)
+    host = HostLocation(
+        id=uuid.uuid4(), organization_id=organization.id,
+        name='Tim Osmond Sports Complex', surface_type='GRASS_FIELD', is_active=True,
+    )
+    other_host = HostLocation(
+        id=uuid.uuid4(), organization_id=organization.id,
+        name='Another Antioch Park', surface_type='GRASS_FIELD', is_active=True,
+    )
+    db.add_all([organization, host, other_host]); db.flush()
+    areas = [
+        PhysicalFieldArea(
+            id=uuid.uuid4(), host_location_id=host.id, name=name,
+            field_space_type='FULL_SIZE_FIELD', supports_dynamic_configuration=True,
+            is_active=True,
+        )
+        for name in ('Football Field 1', 'Football Field 2', 'Soccer Field')
+    ]
+    db.add_all(areas); db.flush()
+    for area in areas:
+        db.add_all([
+            FieldConfigurationOption(physical_field_area_id=area.id, name='1 Large + 1 Small', configuration_name='1 Large + 1 Small', large_field_count=1, small_field_count=1, is_active=True),
+            FieldConfigurationOption(physical_field_area_id=area.id, name='2 Medium', configuration_name='2 Medium', medium_field_count=2, is_active=True),
+            FieldConfigurationOption(physical_field_area_id=area.id, name='3 Small', configuration_name='3 Small', small_field_count=3, is_active=True),
+        ])
+    inactive = Field(host_location_id=host.id, name='Inactive Field', layout_type='SMALL', is_active=False)
+    deleted = Field(host_location_id=host.id, name='Deleted Field', layout_type='LARGE', is_active=True, deleted_at=datetime.now(timezone.utc))
+    other = Field(host_location_id=other_host.id, name='Other Small 1', layout_type='SMALL', is_active=True)
+    db.add_all([inactive, deleted, other]); db.commit()
+
+    result = manual_schedule_builder_options(db)
+    fields = [item for item in result['fields'] if item['host_location_id'] == host.id]
+
+    assert {item['field_type'] for item in fields} == {'LARGE', 'MEDIUM', 'SMALL'}
+    assert len([item for item in fields if item['field_type'] == 'LARGE']) == 3
+    assert len([item for item in fields if item['field_type'] == 'MEDIUM']) == 6
+    assert len([item for item in fields if item['field_type'] == 'SMALL']) == 9
+    assert all(item['physical_area_id'] for item in fields)
+    assert 'Soccer Field — Small 3' in {item['display_name'] for item in fields}
+    assert not {'Inactive Field', 'Deleted Field'} & {item['name'] for item in fields}
+    assert all(item['host_location_id'] != other_host.id for item in fields)
+    # Loading options again preserves the selected-value IDs.
+    second = manual_schedule_builder_options(db)
+    assert {item['id'] for item in fields} == {
+        item['id'] for item in second['fields'] if item['host_location_id'] == host.id
+    }
     db.close()

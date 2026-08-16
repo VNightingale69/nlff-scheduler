@@ -17217,12 +17217,14 @@ def manual_schedule_builder_options(db: Session = Depends(get_db)):
         # Canonical grass field names commonly carry community, facility, and
         # size prefixes.  The final segment is the administrator-facing name.
         segments = [segment.strip() for segment in (field.name or '').split(' - ') if segment.strip()]
-        return segments[-1] if len(segments) > 1 else field.name
+        local_name = segments[-1] if len(segments) > 1 else field.name
+        area = field.physical_field_area
+        return f'{area.name} — {local_name}' if area else local_name
     return {
         'divisions': [{'id': d.id, 'name': d.name, 'division_group': d.division_group, 'sort_order': d.sort_order, 'required_field_layout_type': d.required_field_layout_type, 'required_field_type': _required_field_type_for_division(d)} for d in divisions],
         'teams': [{'id': t.id, 'name': t.name, 'division_id': t.division_id, 'is_active': t.is_active} for t in teams],
         'host_locations': [{'id': h.id, 'name': h.name, 'surface_type': h.surface_type} for h in host_locations],
-        'fields': [{'id': f.id, 'field_id': f.id, 'host_location_id': f.host_location_id, 'name': f.name, 'display_name': field_display_name(f), 'field_type': f.layout_type, 'is_active': f.is_active} for f in fields],
+        'fields': [{'id': f.id, 'field_id': f.id, 'host_location_id': f.host_location_id, 'name': f.name, 'display_name': field_display_name(f), 'field_type': f.layout_type, 'physical_area_id': f.physical_field_area_id, 'physical_area_name': f.physical_field_area.name if f.physical_field_area else None, 'is_active': f.is_active} for f in fields],
         'field_instances': [{'id': fi.id, 'field_instance_id': fi.id, 'field_id': getattr(fi.hosting_availability, 'field_id', None), 'host_location_id': fi.host_location_id, 'field_instance_name': _field_export_display_label(None, fi, db), 'field_name': _field_export_display_label(None, fi, db), 'field_type': fi.field_type, 'field_size': fi.field_type, 'instance_date': fi.instance_date, 'game_date': fi.instance_date, 'available_date': fi.instance_date, 'is_active': fi.is_active} for fi in field_instances],
         'seasons': [{'id': s.id, 'name': s.name, 'start_date': s.start_date, 'end_date': s.end_date, 'is_active': s.is_active} for s in seasons],
         'weeks': [{'id': w.id, 'season_id': w.season_id, 'week_number': w.week_number, 'label': w.label or f'Week {w.week_number}', 'start_date': w.start_date, 'end_date': w.end_date, 'primary_game_date': w.primary_game_date or w.start_date, 'status': w.status} for w in weeks],
@@ -17250,16 +17252,74 @@ def get_active_fields_for_host_locations(
         HostLocation.id.in_(requested_ids),
         HostLocation.is_active.is_(True),
     ).all()
-    existing = db.query(Field).filter(
+    # Configurable physical areas store supported layouts separately. Create
+    # stable, assignable field positions from each area's maximum active
+    # capacity; layout names such as "3 Small" must never become game fields.
+    active_areas = db.query(PhysicalFieldArea).filter(
+        PhysicalFieldArea.host_location_id.in_(requested_ids),
+        PhysicalFieldArea.is_active.is_(True),
+    ).all()
+    active_area_ids = {area.id for area in active_areas}
+    area_options = db.query(FieldConfigurationOption).filter(
+        FieldConfigurationOption.physical_field_area_id.in_(active_area_ids),
+        FieldConfigurationOption.is_active.is_(True),
+    ).all() if active_area_ids else []
+    options_by_area: dict[uuid.UUID, list[FieldConfigurationOption]] = {}
+    for option in area_options:
+        options_by_area.setdefault(option.physical_field_area_id, []).append(option)
+
+    all_area_fields = db.query(Field).filter(
+        Field.host_location_id.in_(requested_ids),
+        Field.physical_field_area_id.in_(active_area_ids),
+    ).all() if active_area_ids else []
+    existing_names_by_host = {
+        (host_id, name) for host_id, name in db.query(Field.host_location_id, Field.name)
+        .filter(Field.host_location_id.in_(requested_ids)).all()
+    }
+    area_fields_by_key = {
+        (field.physical_field_area_id, field.name, _normalize_field_size(field.layout_type)): field
+        for field in all_area_fields
+    }
+    changed = False
+    for area in active_areas:
+        options = options_by_area.get(area.id, [])
+        capacities = {
+            'LARGE': max((max(option.large_field_count, option.fifty_three_yard_capacity) for option in options), default=0),
+            'MEDIUM': max((option.medium_field_count for option in options), default=0),
+            'SMALL': max((max(option.small_field_count, option.thirty_yard_capacity) for option in options), default=0),
+        }
+        for field_type, count in capacities.items():
+            for index in range(1, count + 1):
+                name = f'{area.name} - {field_type.title()} {index}'
+                if ((area.id, name, field_type) in area_fields_by_key
+                        or (area.host_location_id, name) in existing_names_by_host):
+                    continue
+                field = Field(
+                    host_location_id=area.host_location_id,
+                    physical_field_area_id=area.id,
+                    name=name,
+                    layout_type=field_type,
+                    is_active=True,
+                )
+                db.add(field)
+                area_fields_by_key[(area.id, name, field_type)] = field
+                existing_names_by_host.add((area.host_location_id, name))
+                changed = True
+    if changed:
+        db.flush()
+
+    existing = db.query(Field).outerjoin(
+        PhysicalFieldArea, PhysicalFieldArea.id == Field.physical_field_area_id,
+    ).filter(
         Field.host_location_id.in_(requested_ids),
         Field.is_active.is_(True),
         Field.deleted_at.is_(None),
+        or_(Field.physical_field_area_id.is_(None), PhysicalFieldArea.is_active.is_(True)),
     ).all()
     fields_by_host: dict[uuid.UUID, list[Field]] = {}
     for field in existing:
         fields_by_host.setdefault(field.host_location_id, []).append(field)
 
-    changed = False
     for host in hosts:
         if (host.surface_type or 'GRASS_FIELD') != 'TURF_STADIUM':
             continue
