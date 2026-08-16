@@ -459,6 +459,30 @@ def build_preview(db, season_id, raw_rows):
                                                    _date(row['date']), _time(row['kickoff']))
                     if instance:
                         staged_row['field_instance_id'] = str(instance.id)
+                        # Physical-area slots are generated resources rather
+                        # than permanent ``Field`` rows.  Persist the complete
+                        # generated assignment selected by the grouped layout:
+                        # its dated instance and its exact kickoff slot.
+                        slot = db.query(GameSlot).filter_by(
+                            field_instance_id=instance.id,
+                            slot_date=_date(row['date']),
+                            start_time=_time(row['kickoff']),
+                        ).first()
+                        if slot:
+                            staged_row['game_slot_id'] = str(slot.id)
+                            availability_field_id = getattr(
+                                instance.hosting_availability, 'field_id', None)
+                            if availability_field_id:
+                                staged_row['resolved_field_id'] = str(availability_field_id)
+                                staged_row['field_id'] = str(availability_field_id)
+                    if not instance or not staged_row.get('game_slot_id'):
+                        row['status'] = 'ERROR'
+                        row['message'] = (
+                            f'Generated slot "{row["field"]}" is not available for '
+                            f'{area.name} at {kickoff.strftime("%-I:%M %p")}.'
+                        )
+                        invalid_staged_ids.add(id(staged_row))
+                        continue
                 else:
                     staged_row['configuration_id'] = str(selected.id) if selected else None
                     staged_row['configuration_name'] = selected_code

@@ -8,10 +8,11 @@ from openpyxl import Workbook
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.models import (Base, Division, Field, FieldConfigurationOption, Game, GameStatus, HostLocation,
-                        HostLocationConfiguration, Organization, PhysicalFieldArea,
+from app.models import (Base, Division, Field, FieldConfigurationOption, FieldInstance, Game, GameSlot,
+                        GameStatus, HostLocation, HostLocationConfiguration, HostingAvailability,
+                        Organization, PhysicalFieldArea,
                         OrganizationDivisionParticipation, ScheduleImport, Season, Team, Week)
-from app.routes.api import confirm_schedule_import
+from app.routes.api import confirm_schedule_import, list_games
 from app.services.field_resolution import resolve_active_field
 from app.services.schedule_import import build_preview, parse_schedule_file, _date, _time, _week_number
 
@@ -150,14 +151,42 @@ def _physical_area_context():
                                  field_space_type='FULL_SIZE_FIELD',
                                  supports_dynamic_configuration=True, is_active=True)
         db.add(area); db.flush()
-        db.add_all([
+        options = [
             FieldConfigurationOption(physical_field_area_id=area.id, name='1 Large + 1 Small',
                                      large_field_count=1, small_field_count=1, is_active=True),
             FieldConfigurationOption(physical_field_area_id=area.id, name='2 Medium',
                                      medium_field_count=2, is_active=True),
             FieldConfigurationOption(physical_field_area_id=area.id, name='3 Small',
                                      small_field_count=3, is_active=True),
-        ])
+        ]
+        db.add_all(options); db.flush()
+        for option in options:
+            availability = HostingAvailability(
+                season_id=season.id, week_id=db.query(Week).filter_by(season_id=season.id).one().id,
+                organization_id=site.organization_id, host_location_id=site.id,
+                physical_field_area_id=area.id, field_configuration_option_id=option.id,
+                layout_type=option.name, slot_index=1, available_date=_date('2026-08-16'),
+                start_time=_time('9:00 AM'), end_time=_time('10:00 AM'), active=True,
+                is_available=True,
+            )
+            db.add(availability); db.flush()
+            for size, count in (('Large', option.large_field_count),
+                                ('Medium', option.medium_field_count),
+                                ('Small', option.small_field_count)):
+                for index in range(1, count + 1):
+                    instance = FieldInstance(
+                        host_location_id=site.id, hosting_availability_id=availability.id,
+                        instance_date=_date('2026-08-16'),
+                        field_name=f'{area.name} / {size} {index}', field_type=size.upper(),
+                        is_active=True,
+                    )
+                    db.add(instance); db.flush()
+                    db.add(GameSlot(
+                        field_instance_id=instance.id, host_location_id=site.id,
+                        season_id=season.id, week_id=availability.week_id,
+                        slot_date=_date('2026-08-16'), start_time=_time('9:00 AM'),
+                        end_time=_time('10:00 AM'), field_type=size.upper(), status='OPEN',
+                    ))
     db.commit()
     return db, season, teams, site
 
@@ -187,6 +216,50 @@ def test_schedule_import_resolves_generated_slot_within_area():
     assert preview['blocking_errors'] == 0
     assert {row['field'] for row in staged} == {'Medium 1', 'Medium 2'}
     assert {row['configuration'] for row in preview['rows']} == {'2 Medium'}
+
+
+def test_physical_area_group_round_trip_persists_each_generated_slot():
+    db, season, teams, site = _physical_area_context()
+    rows = [
+        _area_row(teams, 'Football Field 1', 'Large 1', 'Large'),
+        _area_row(teams, 'Football Field 1', 'Small 1', 'Small', index=2),
+    ]
+    preview, staged = build_preview(db, season.id, rows)
+
+    assert preview['rows_uploaded'] == preview['importable_games'] == 2
+    assert preview['warning_count'] == preview['blocking_errors'] == 0
+    assert {row['configuration'] for row in preview['rows']} == {'1 Large + 1 Small'}
+    assert all(row['physical_area_id'] for row in staged)
+    assert all(row['field_configuration_option_id'] for row in staged)
+    assert all(row['field_instance_id'] for row in staged)
+    assert all(row['game_slot_id'] for row in staged)
+
+    user_id = uuid.uuid4()
+    record = ScheduleImport(
+        season_id=season.id, imported_by_user_id=user_id,
+        source_filename='08232026 Flag Schedule.xlsx',
+        weeks_replaced=json.dumps(preview['weeks']), status='PREVIEW',
+        staged_rows=json.dumps(staged), preview_summary=json.dumps(preview),
+    )
+    db.add(record); db.commit()
+
+    result = confirm_schedule_import(
+        record.id, {'confirmation': 'Replace Existing Schedule Games'},
+        db, SimpleNamespace(id=user_id),
+    )
+
+    games = db.query(Game).filter_by(season_id=season.id).all()
+    assigned = db.query(GameSlot).filter(GameSlot.assigned_game_id.in_([game.id for game in games])).all()
+    assert result['games_imported'] == len(games) == len(assigned) == 2
+    assert {slot.field_instance.field_name for slot in assigned} == {
+        'Football Field 1 / Large 1', 'Football Field 1 / Small 1'}
+    assert all(game.field_instance_id for game in games)
+    assert all(not game.missing_field_assignment for game in games)
+    response = list_games(week_id=games[0].week_id, page=1, page_size=50, db=db)
+    assert response.total == 2
+    assert {item.field_instance_name for item in response.items} == {
+        'Football Field 1 / Large 1', 'Football Field 1 / Small 1'}
+    assert all(not item.missing_field_assignment for item in response.items)
 
 
 def test_schedule_import_supports_compound_area_slot_name():
