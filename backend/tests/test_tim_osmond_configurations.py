@@ -4,8 +4,8 @@ import uuid
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.models import Base, FieldConfigurationOption, HostLocation, HostLocationConfiguration, Organization, PhysicalFieldArea
-from app.services.tosc_field_areas import TOSC_AREAS, ensure_tosc_physical_areas
+from app.models import Base, Field, FieldConfigurationMember, FieldConfigurationOption, HostLocation, HostLocationConfiguration, Organization, PhysicalFieldArea
+from app.services.tosc_field_areas import LEGACY_FIELD_NAMES, TOSC_AREAS, ensure_tosc_physical_areas
 
 
 class TimOsmondConfigurationTest(unittest.TestCase):
@@ -19,7 +19,11 @@ class TimOsmondConfigurationTest(unittest.TestCase):
         self.db.add_all([organization, self.host]); self.db.flush()
         self.legacy = HostLocationConfiguration(id=uuid.uuid4(), host_location_id=self.host.id,
             configuration_name='4 Small', surface_type='TURF_STADIUM', small_field_count=4, is_active=True)
-        self.db.add(self.legacy); self.db.commit()
+        self.legacy_fields = [Field(host_location_id=self.host.id, name=name.title(), layout_type='SMALL', is_active=True)
+                              for name in LEGACY_FIELD_NAMES]
+        self.db.add_all([self.legacy, *self.legacy_fields]); self.db.flush()
+        self.db.add(FieldConfigurationMember(field_configuration_id=self.legacy.id, field_id=self.legacy_fields[0].id))
+        self.db.commit()
         ensure_tosc_physical_areas(self.db, self.host); self.db.commit()
 
     def tearDown(self): self.db.close()
@@ -36,6 +40,16 @@ class TimOsmondConfigurationTest(unittest.TestCase):
         self.assertFalse(self.legacy.is_active)
         self.assertTrue(self.legacy.is_legacy)
         self.assertEqual(self.db.query(HostLocationConfiguration).filter_by(host_location_id=self.host.id, is_active=True).count(), 0)
+
+    def test_antioch_tosc_legacy_fields_deleted(self):
+        self.assertEqual(self.db.query(Field).filter_by(host_location_id=self.host.id, is_active=True).count(), 0)
+        self.assertTrue(all(field.deleted_at is not None for field in self.legacy_fields))
+        self.assertEqual(self.db.query(FieldConfigurationMember).count(), 0)
+
+    def test_tosc_generated_slots_are_not_physical_fields(self):
+        self.assertEqual(self.db.query(Field).filter_by(host_location_id=self.host.id, is_active=True).count(), 0)
+        self.assertEqual(self.db.query(PhysicalFieldArea).filter_by(host_location_id=self.host.id, is_active=True).count(), 3)
+        self.assertEqual(self.db.query(FieldConfigurationOption).filter_by(is_active=True).count(), 11)
 
     def test_tosc_has_three_physical_areas(self):
         self.assertEqual({a.name for a in self.db.query(PhysicalFieldArea).filter_by(host_location_id=self.host.id, is_active=True)}, set(TOSC_AREAS))

@@ -1,7 +1,9 @@
 """Canonical, independently configurable playing areas at Antioch TOSC."""
+from datetime import datetime, timezone
+
 from sqlalchemy.orm import Session
 
-from app.models import FieldConfigurationOption, HostLocation, HostLocationConfiguration, PhysicalFieldArea
+from app.models import Field, FieldConfigurationMember, FieldConfigurationOption, HostLocation, HostLocationConfiguration, PhysicalFieldArea
 
 TOSC_LOCATION_NAMES = {"TIM OSMOND SPORTS COMPLEX", "ANTIOCH - TIM OSMOND SPORTS COMPLEX", "ANTIOCH - TOSC"}
 TOSC_ORGANIZATIONS = {"ANTIOCH", "ANTIOCH VIKINGS"}
@@ -10,6 +12,11 @@ TOSC_AREAS = {
     "Football Field 1": COMMON_LAYOUTS,
     "Football Field 2": COMMON_LAYOUTS,
     "Soccer Field": COMMON_LAYOUTS + (("1 Medium + 1 Small", 0, 1, 1), ("1 Large", 1, 0, 0)),
+}
+LEGACY_FIELD_NAMES = {
+    "ANTIOCH TOSC LARGE - 1", "ANTIOCH TOSC MEDIUM - 1",
+    "ANTIOCH TOSC SMALL - 1", "ANTIOCH TOSC SMALL - 2",
+    "ANTIOCH TOSC SMALL - 3", "ANTIOCH TOSC SMALL - 4",
 }
 
 
@@ -25,10 +32,28 @@ def ensure_tosc_physical_areas(db: Session, host: HostLocation) -> bool:
     changed = False
     if host.surface_type != "GRASS_FIELD":
         host.surface_type = "GRASS_FIELD"; changed = True
+    # These rows represented generated slots in the superseded, flat model.  A
+    # tombstone preserves foreign-key history while making the rows impossible
+    # to return from /fields or participate in any active-field query.
+    legacy_fields = db.query(Field).filter(Field.host_location_id == host.id).all()
+    legacy_ids = [field.id for field in legacy_fields if str(field.name or "").strip().upper() in LEGACY_FIELD_NAMES]
+    if legacy_ids:
+        changed = bool(db.query(FieldConfigurationMember).filter(FieldConfigurationMember.field_id.in_(legacy_ids)).delete(synchronize_session=False)) or changed
+    for field in legacy_fields:
+        if str(field.name or "").strip().upper() in LEGACY_FIELD_NAMES and (field.is_active or field.deleted_at is None):
+            field.is_active = False
+            field.deleted_at = field.deleted_at or datetime.now(timezone.utc)
+            changed = True
     for legacy in db.query(HostLocationConfiguration).filter_by(host_location_id=host.id).all():
         if legacy.is_active or not legacy.is_legacy:
             legacy.is_active = False; legacy.is_legacy = True; changed = True
     existing_areas = {area.name: area for area in db.query(PhysicalFieldArea).filter_by(host_location_id=host.id)}
+    for area_name, area in existing_areas.items():
+        if area_name not in TOSC_AREAS and area.is_active:
+            area.is_active = False
+            for option in db.query(FieldConfigurationOption).filter_by(physical_field_area_id=area.id, is_active=True):
+                option.is_active = False
+            changed = True
     for name, layouts in TOSC_AREAS.items():
         area = existing_areas.get(name)
         if area is None:

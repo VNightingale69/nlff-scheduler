@@ -118,6 +118,8 @@ export default function FieldAreaManager() {
   const [hosts, setHosts] = useState<any[]>([]);
   const [fields, setFields] = useState<any[]>([]);
   const [hostConfigs, setHostConfigs] = useState<any[]>([]);
+  const [physicalAreas, setPhysicalAreas] = useState<any[]>([]);
+  const [areaLayouts, setAreaLayouts] = useState<any[]>([]);
   const [orgId, setOrgId] = useState('');
   const [hostId, setHostId] = useState('');
   const [loadingOrgData, setLoadingOrgData] = useState(false);
@@ -154,6 +156,8 @@ export default function FieldAreaManager() {
     setHosts([]);
     setFields([]);
     setHostConfigs([]);
+    setPhysicalAreas([]);
+    setAreaLayouts([]);
     if (!nextOrgId) return;
 
     setLoadingOrgData(true);
@@ -173,12 +177,16 @@ export default function FieldAreaManager() {
     }
 
     try {
-      const [fieldData, configData] = await Promise.all([
+      const [fieldData, configData, areaData, layoutData] = await Promise.all([
         apiFetch(`/fields?${query}&page_size=5000`, {}, token),
         apiFetch(`/host-location-configurations?${query}&page_size=5000${showInactiveLayouts ? '&include_inactive_legacy=true' : ''}`, {}, token),
+        apiFetch(`/physical-field-areas?${query}&page_size=5000`, {}, token),
+        apiFetch('/field-configuration-options?page_size=5000', {}, token),
       ]);
       setFields((fieldData as any).items || []);
       setHostConfigs((configData as any).items || []);
+      setPhysicalAreas((areaData as any).items || []);
+      setAreaLayouts((layoutData as any).items || []);
     } catch (e: any) {
       const msg = errorMessage(e, 'Failed to load field configurations.');
       setFieldLoadError(msg);
@@ -197,6 +205,10 @@ export default function FieldAreaManager() {
   const hostOptions = useMemo(() => hosts.filter((h: any) => !orgId || h.organization_id === orgId), [hosts, orgId]);
   const selectedHost = useMemo(() => hosts.find((h: any) => h.id === hostId), [hosts, hostId]);
   const selectedOrganization = orgs.find((org: any) => org.id === orgId);
+  const isTosc = Boolean(selectedHost && ['TIM OSMOND SPORTS COMPLEX', 'ANTIOCH - TIM OSMOND SPORTS COMPLEX', 'ANTIOCH - TOSC'].includes(String(selectedHost.name || '').trim().toUpperCase())
+    && ['ANTIOCH', 'ANTIOCH VIKINGS'].includes(String(selectedOrganization?.name || '').trim().toUpperCase()));
+  const selectedPhysicalAreas = physicalAreas.filter((area: any) => area.host_location_id === hostId && area.is_active);
+  const layoutsForArea = (areaId: string) => areaLayouts.filter((layout: any) => layout.physical_field_area_id === areaId && layout.is_active);
   const selectedTurfLayouts = turfConfigurationsForHost(selectedHost?.name, selectedOrganization?.name).map((config) => (
     TURF_LAYOUTS.find((layout) => layout.name === config.code)!
   )).filter(Boolean);
@@ -471,7 +483,25 @@ export default function FieldAreaManager() {
       <p className='mt-3 rounded bg-emerald-50 p-3 text-sm text-emerald-900'>This turf location supports {selectedTurfLayouts.length} approved physical layout{selectedTurfLayouts.length === 1 ? '' : 's'}. During scheduling, each one-hour wave will use one configured layout. Unused field slots are not inferred as additional fields.</p>
     </section>}
 
-    {selectedHost && <section className='rounded border p-4'>
+    {selectedHost && isTosc && <section className='rounded border p-4' data-testid='tosc-physical-areas'>
+      <h2 className='text-lg font-semibold'>{selectedHost.name}</h2>
+      <p className='mt-1 text-sm text-slate-600'>Physical playing areas are permanent resources. Generated Large, Medium, and Small slots exist only for the selected layout and are not separate physical fields.</p>
+      <div className='mt-4 grid gap-4 lg:grid-cols-3'>
+        {selectedPhysicalAreas.map((area: any) => <article key={area.id} className='rounded-lg border border-slate-300 p-4'>
+          <p className='text-xs font-bold uppercase tracking-wide text-emerald-700'>Physical Area</p>
+          <div className='mt-1 flex items-start justify-between gap-2'><h3 className='font-semibold'>{area.name}</h3><span className='rounded bg-emerald-100 px-2 py-1 text-xs text-emerald-800'>Active</span></div>
+          {area.notes && <p className='mt-1 text-xs text-slate-500'>{area.notes}</p>}
+          <p className='mt-3 text-sm font-semibold'>Supported Layouts</p>
+          <ul className='mt-1 space-y-1 text-sm'>{layoutsForArea(area.id).map((layout: any, index: number) => <li key={layout.id} className='rounded bg-slate-50 px-2 py-1'>
+            {index > 0 && <span className='mr-2 text-xs font-semibold text-slate-500'>OR</span>}{layout.name || layout.configuration_name}
+          </li>)}</ul>
+          {canManageFieldDefinitions && <div className='mt-4 flex flex-wrap gap-2'><button className='rounded border px-2 py-1 text-xs'>Edit Physical Area</button><button className='rounded border px-2 py-1 text-xs'>Manage Layouts</button></div>}
+        </article>)}
+      </div>
+      {!selectedPhysicalAreas.length && <p className='mt-4 rounded bg-amber-50 p-3 text-sm text-amber-900'>No active physical areas are configured. Reload after the corrective migration has run.</p>}
+    </section>}
+
+    {selectedHost && !isTosc && <section className='rounded border p-4'>
       <div className='flex flex-wrap items-center justify-between gap-2'>
         <div>
           <h2 className='font-semibold'>{selectedHost.surface_type === TURF_STADIUM ? '3. Logical / Configurable Fields' : 'Field Setup Guidance'}</h2>
@@ -556,7 +586,15 @@ export default function FieldAreaManager() {
       </div>
     </div>}
 
-    <section className='rounded border p-4'>
+    {isTosc ? <section className='rounded border p-4' data-testid='tosc-capability-summary'>
+      <h2 className='mb-2 font-semibold'>Facility Capability Summary</h2>
+      <p className='text-sm'><strong>Physical Areas: {selectedPhysicalAreas.length}</strong></p>
+      <p className='mt-1 text-xs text-slate-600'>Capacity is configuration-dependent. Layouts within each physical area are mutually exclusive per scheduling block.</p>
+      <div className='mt-3 grid gap-3 md:grid-cols-3'>{selectedPhysicalAreas.map((area: any) => <div key={area.id} className='rounded border p-3'>
+        <strong className='text-sm'>{area.name}</strong>
+        <ul className='mt-2 text-sm'>{layoutsForArea(area.id).map((layout: any, index: number) => <li key={layout.id}>{index ? 'OR ' : ''}{layout.name || layout.configuration_name}</li>)}</ul>
+      </div>)}</div>
+    </section> : <section className='rounded border p-4'>
       <h2 className='mb-2 font-semibold'>Facility Capability Summary</h2>
       <div className='overflow-x-auto'>
         <table className='w-full text-sm'>
@@ -564,6 +602,6 @@ export default function FieldAreaManager() {
           <tbody>{renderSetupRows()}</tbody>
         </table>
       </div>
-    </section>
+    </section>}
   </div>;
 }
