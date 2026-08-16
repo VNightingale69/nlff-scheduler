@@ -92,6 +92,30 @@ def resolve_roster_team(teams: list[Team], division: Division | None, imported_n
 
     parsed_identities = {(organization.id, normalize_team_identity(specific))
                          for organization, specific in parsed}
+    # A division's display punctuation (and, historically, its terminal grade)
+    # is not part of a team's identity.  Once the caller has resolved the
+    # configured Division relationship, allow an exact community prefix and
+    # team-specific suffix to bridge legacy division labels such as
+    # ``Coed 6, 7, 8`` and the canonical import label ``Coed 6-7``.  Both ends
+    # must be exact and the result must be unique; this never searches another
+    # division.
+    if not parsed_identities:
+        structured = []
+        for team in division_teams:
+            community_tokens = _identity_tokens(team.organization.name)
+            specific_tokens = _identity_tokens(team_specific_name(team))
+            if (imported_tokens[:len(community_tokens)] == community_tokens
+                    and specific_tokens
+                    and imported_tokens[-len(specific_tokens):] == specific_tokens
+                    and len(imported_tokens) > len(community_tokens) + len(specific_tokens)):
+                structured.append(team)
+        identities = {(team.organization_id, normalize_team_identity(team_specific_name(team)))
+                      for team in structured}
+        if len(structured) == 1 and len(identities) == 1:
+            team = structured[0]
+            return TeamResolution(team, team.organization.name, team_specific_name(team), 1)
+        if len(structured) > 1:
+            return TeamResolution(None, None, None, len(structured))
     if len(parsed_identities) != 1:
         return TeamResolution(None, None, None)
     organization_id, specific_key = parsed_identities.pop()

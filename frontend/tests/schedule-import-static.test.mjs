@@ -14,4 +14,7 @@ assert.match(page, /Warnings do not prevent import/);
 assert.doesNotMatch(page, /disabled=\{preview\.(?:invalid_rows|warning_count|valid_games)/);
 assert.match(page, /r\.status==='WARNING'/);
 assert.match(page, /\.csv,\.xlsx/);
+assert.match(page, /'Physical Area'/);
+assert.match(page, /'Configuration'/);
+assert.match(page, /r\.physical_area/);
 console.log('schedule import staged confirmation UI checks passed');
