@@ -9,6 +9,7 @@ import { getDivisionLabel } from '@/lib/divisionLabel';
 import { formatDisplayDate, formatDisplayTime } from '@/lib/displayFormat';
 import CommunityLogo from '@/components/CommunityLogo';
 import { getScheduledGameLabel } from '@/lib/scheduledGameLabel';
+import HostingView, { HostingViewGame } from '@/components/schedule/HostingView';
 
 const tabs = ['By Date', 'By Host Location', 'By Team', 'By Division'] as const;
 type TabKey = (typeof tabs)[number];
@@ -18,6 +19,7 @@ export default function ScheduleManagementPage() {
   const canControlSchedulePublication = canPublishSchedule(authUser);
   const searchParams = useSearchParams();
   const [tab, setTab] = useState<TabKey>('By Date');
+  const [view, setView] = useState<'schedule' | 'hosting'>(searchParams.get('view') === 'hosting' ? 'hosting' : 'schedule');
   const [options, setOptions] = useState<any>({
     divisions: [],
     teams: [],
@@ -169,14 +171,31 @@ export default function ScheduleManagementPage() {
     return Object.entries(by);
   }, [games, tab]);
 
+  const hostingGames: HostingViewGame[] = games.map((game) => ({
+    id: game.id, date: game.date, time: game.time, hostLocation: game.host_location_name || 'Host Location Unassigned',
+    physicalArea: game.physical_area_name || game.field_area_name || game.field_name || game.field || 'Field Area Unassigned',
+    fieldLane: game.turf_field_slot || game.field || game.field_name || 'Field Unassigned', fieldType: game.field_type,
+    division: game.division_name || 'Division', homeTeam: game.home_team_name || 'TBD', awayTeam: game.away_team_name || 'TBD',
+    homeLogoUrl: game.home_team_logo_url, homeLogoAlt: game.home_team_logo_alt_text, awayLogoUrl: game.away_team_logo_url, awayLogoAlt: game.away_team_logo_alt_text,
+  }));
+
+  const selectView = (next: 'schedule' | 'hosting') => { setView(next); const url = new URL(window.location.href); next === 'hosting' ? url.searchParams.set('view', 'hosting') : url.searchParams.delete('view'); window.history.replaceState({}, '', url); };
+
   return (
     <div className='space-y-4'>
       <h1 className='text-2xl font-bold'>Schedule Management</h1>
 
+      <div className='schedule-view-toggle flex flex-wrap items-center gap-2 print:hidden' aria-label='Schedule presentation'>
+        <span className='mr-1 text-sm font-semibold text-slate-600'>View:</span>
+        <button type='button' aria-pressed={view === 'schedule'} onClick={() => selectView('schedule')} className={`rounded px-4 py-2 font-semibold ${view === 'schedule' ? 'bg-slate-800 text-white' : 'border bg-white'}`}>Schedule View</button>
+        <button type='button' aria-pressed={view === 'hosting'} onClick={() => selectView('hosting')} className={`rounded px-4 py-2 font-semibold ${view === 'hosting' ? 'bg-slate-800 text-white' : 'border bg-white'}`}>Hosting View</button>
+        {view === 'hosting' && <button type='button' className='ml-auto rounded border bg-white px-4 py-2 font-semibold' onClick={() => window.print()}>Print Hosting View</button>}
+      </div>
+
       {error ? <div className='whitespace-pre-line rounded border border-red-300 bg-red-50 p-2 text-red-700'>{error}</div> : null}
       {publicationMessage ? <div className='rounded border border-emerald-300 bg-emerald-50 p-2 text-emerald-800'>{publicationMessage}</div> : null}
 
-      {publishDiagnostics ? <div className='rounded border bg-slate-50 p-3 text-sm'>
+      {view === 'schedule' && publishDiagnostics ? <div className='rounded border bg-slate-50 p-3 text-sm'>
         <div className='flex flex-wrap items-start justify-between gap-3'>
           <div>
             <div className='font-semibold'>Season: {publishDiagnostics.season_name}</div>
@@ -326,24 +345,24 @@ export default function ScheduleManagementPage() {
 
       </div>
 
-      <div className='flex flex-wrap gap-2'>
+      {view === 'schedule' && <div className='flex flex-wrap gap-2'>
         {tabs.map((tabName) => (
           <button key={tabName} onClick={() => setTab(tabName)} className={`rounded px-3 py-1 ${tab === tabName ? 'bg-blue-600 text-white' : 'bg-slate-200'}`}>
             {tabName}
           </button>
         ))}
-      </div>
+      </div>}
 
       <div className='flex flex-wrap gap-2'>
         <button className='inline-block rounded bg-emerald-600 px-3 py-2 text-white' onClick={exportCsv}>Export CSV</button>
       </div>
 
-      <div className='rounded border p-3'>
+      {view === 'schedule' && <div className='rounded border p-3'>
         <h2 className='mb-2 font-semibold'>Schedule Conflicts</h2>
         {conflicts.length === 0 ? <p>No schedule conflicts found.</p> : <ul className='list-disc pl-6'>{conflicts.map((conflict: any, index: number) => <li key={index}>{conflict.message}</li>)}</ul>}
-      </div>
+      </div>}
 
-      <div className='space-y-3'>
+      {view === 'hosting' ? <HostingView games={hostingGames} mode='unpublished' /> : <div className='space-y-3'>
         {grouped.map(([groupName, groupGames]) => (
           <div key={groupName} className='rounded border p-3'>
             <h3 className='mb-2 text-lg font-semibold'>{groupName}</h3>
@@ -359,7 +378,7 @@ export default function ScheduleManagementPage() {
             ))}
           </div>
         ))}
-      </div>
+      </div>}
     </div>
   );
 }

@@ -10,6 +10,11 @@ body {
   @apply bg-slate-50 text-slate-900;
 }
 
+@media (max-width: 640px) {
+  .hosting-view .hosting-grid-scroll { display: none; }
+  .hosting-view .hosting-mobile-list { display: block; }
+}
+
 /* Location accents supplement (rather than replace) the field-size backgrounds. */
 .location-accent-1 { --location-border: #47816b; --location-tint: #e7f2ed; }
 .location-accent-2 { --location-border: #507da3; --location-tint: #e8f0f7; }
@@ -68,6 +73,11 @@ body {
   .schedule-view-toggle {
     display: none !important;
   }
+
+  aside, nav, .unpublished-hosting-view ~ *, .hosting-mobile-list { display: none !important; }
+  .unpublished-hosting-view .unpublished-banner { display: block !important; }
+  .hosting-location-section { break-inside: avoid-page; box-shadow: none !important; }
+  .hosting-game-cell { break-inside: avoid; page-break-inside: avoid; }
 
   /* Only Hosting View suppresses the branded heading; List View keeps it. */
   .public-schedule.hosting-view-active .public-schedule-header {

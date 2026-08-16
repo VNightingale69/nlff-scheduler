@@ -26031,6 +26031,7 @@ def _schedule_review_rows(db: Session, season: Season, current_user: User, *, sc
 def _schedule_review_game(row, publication_status: str) -> dict:
     game, _slot, field_instance, host, home, away, division, _home_org, _status = row
     canonical_field = getattr(game, 'field', None)
+    physical_area = getattr(canonical_field, 'physical_field_area', None) or getattr(getattr(field_instance, 'hosting_availability', None), 'physical_field_area', None)
     return {
         'date': game.game_date.isoformat(), 'kickoff': game.kickoff_time.strftime('%H:%M:%S'),
         'division': division.name, 'home_team': home.name, 'away_team': away.name,
@@ -26040,6 +26041,11 @@ def _schedule_review_game(row, publication_status: str) -> dict:
         'host_location': host.name if host else None,
         'field': resolve_game_field_display(game, field_instance=field_instance, generated_slot=_slot).name or 'Not assigned',
         'field_type': getattr(canonical_field, 'layout_type', None) or getattr(field_instance, 'field_type', None),
+        'physical_area': getattr(physical_area, 'name', None),
+        'home_team_logo_url': _community_logo_browser_url(getattr(home, 'organization', None)),
+        'home_team_logo_alt_text': _community_logo_alt_text(getattr(home, 'organization', None), home.name),
+        'away_team_logo_url': _community_logo_browser_url(getattr(away, 'organization', None)),
+        'away_team_logo_alt_text': _community_logo_alt_text(getattr(away, 'organization', None), away.name),
         'publication_status': publication_status,
     }
 
@@ -30098,6 +30104,7 @@ def schedule_management_games(season_id: uuid.UUID | None = None, date: date | N
         wave = slot.turf_wave if slot and slot.turf_wave_id else None
         canonical_field = getattr(g, 'field', None)
         turf_configuration_code = _normalize_configuration_name(wave.preferred_layout_code) if wave else None
+        physical_area = getattr(canonical_field, 'physical_field_area', None) or getattr(getattr(fi, 'hosting_availability', None), 'physical_field_area', None)
         items.append({
             'id': str(g.id), 'date': g.game_date.isoformat(), 'time': g.kickoff_time.strftime('%H:%M:%S'), 'division_id': str(div.id), 'division_name': div.name,
             'home_team_id': str(home.id), 'home_team_name': home.name, 'away_team_id': str(away.id), 'away_team_name': away.name,
@@ -30107,6 +30114,11 @@ def schedule_management_games(season_id: uuid.UUID | None = None, date: date | N
             'field_id': str(g.field_id) if g.field_id else None,
             'field': getattr(canonical_field, 'name', None) or _field_export_display_label(slot, fi, db),
             'field_type': getattr(canonical_field, 'layout_type', None) or ((slot.field_type if slot else None) or (fi.field_type if fi else None)),
+            'physical_area_name': getattr(physical_area, 'name', None),
+            'home_team_logo_url': _community_logo_browser_url(getattr(home, 'organization', None)),
+            'home_team_logo_alt_text': _community_logo_alt_text(getattr(home, 'organization', None), home.name),
+            'away_team_logo_url': _community_logo_browser_url(getattr(away, 'organization', None)),
+            'away_team_logo_alt_text': _community_logo_alt_text(getattr(away, 'organization', None), away.name),
             'status': status.code, 'slot_id': (str(slot.id) if slot else None),
             'is_slot_active': bool(getattr(canonical_field, 'is_active', False) or (fi.is_active if fi else False)),
             'turf_wave_id': str(slot.turf_wave_id) if slot and slot.turf_wave_id else None,
