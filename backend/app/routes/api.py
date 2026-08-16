@@ -152,6 +152,15 @@ def confirm_schedule_import(
                     raise ValueError(
                         f'Canonical field instance is no longer valid for imported row {row.get("row")}.'
                     )
+                if row.get('physical_area_id'):
+                    availability = canonical_instance.hosting_availability
+                    expected_area_id = uuid.UUID(row['physical_area_id'])
+                    expected_option_id = uuid.UUID(row['field_configuration_option_id'])
+                    if (availability.physical_field_area_id != expected_area_id
+                            or availability.field_configuration_option_id != expected_option_id):
+                        raise ValueError(
+                            f'Physical-area layout assignment is no longer valid for imported row {row.get("row")}.'
+                        )
             if (row.get('resolved_field_id') or row.get('field_id')) and not resolved_field_id:
                 raise ValueError(f'Imported row {row.get("row")} lost its resolved field assignment.')
             resolved_slot_id = uuid.UUID(row['game_slot_id']) if row.get('game_slot_id') else None
@@ -160,6 +169,8 @@ def confirm_schedule_import(
                     GameSlot.id == resolved_slot_id,
                     GameSlot.field_instance_id == resolved_instance_id,
                     GameSlot.host_location_id == site_id,
+                    GameSlot.slot_date == date.fromisoformat(row['date']),
+                    GameSlot.start_time == time.fromisoformat(row['kickoff']),
                 ).first()
                 if not canonical_slot:
                     raise ValueError(f'Canonical game slot is no longer valid for imported row {row.get("row")}.')
