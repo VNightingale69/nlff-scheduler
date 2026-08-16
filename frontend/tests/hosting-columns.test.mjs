@@ -11,7 +11,16 @@ const warnings = [];
 const duplicates = buildHostingColumns([field(), field({ physicalFieldId: 'duplicate-id' })], (message) => warnings.push(message));
 assert.equal(duplicates.length, 2);
 assert.equal(warnings.length, 1);
-assert.match(warnings[0], /field_id A: field-small-1[\s\S]*field_id B: duplicate-id[\s\S]*physical_area_id: football-2/);
+assert.match(warnings[0], /Duplicate physical field identity detected[\s\S]*Field ID A: field-small-1[\s\S]*Field ID B: duplicate-id/);
+
+// Formatting from different sources cannot create another identity or label.
+const differentlyFormatted = buildHostingColumns([
+  field({ physicalFieldId: '123', fieldLane: 'Football Field 2 / Small 1' }),
+  field({ physicalFieldId: '123', fieldLane: 'Football Field 2 - Small 1' }),
+]);
+assert.equal(differentlyFormatted.length, 1);
+assert.equal(differentlyFormatted[0].label, 'Football Field 2 - Small 1');
+assert.equal(hostingFieldKey(field({ physicalFieldId: null, fieldLane: 'Football Field 2 / Small 1' })), hostingFieldKey(field({ physicalFieldId: null, fieldLane: 'Football Field 2 - Small 1' })));
 
 assert.deepEqual(buildHostingColumns([
   field({ physicalFieldId: 'small-3', physicalArea: 'Soccer Field', physicalAreaId: 'soccer', fieldLane: 'Small 3' }),

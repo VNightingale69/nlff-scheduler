@@ -2,6 +2,7 @@
 
 import CommunityLogo from '@/components/CommunityLogo';
 import { formatDisplayDate, formatDisplayTime } from '@/lib/displayFormat';
+import { formatPhysicalFieldLabel } from '@/lib/physicalField';
 import { buildHostingCells, buildHostingColumns, hostingFieldKey } from './hostingColumns';
 
 export type HostingViewGame = {
@@ -33,7 +34,7 @@ function GameCard({ game }: { game: HostingViewGame }) {
     <div className='mt-2 flex items-center gap-2 font-semibold'><CommunityLogo src={game.homeLogoUrl} name={game.homeTeam} altText={game.homeLogoAlt} size={22} /><span>{game.homeTeam}</span></div>
     <div className='pl-7 text-[11px] font-semibold uppercase text-slate-500'>vs</div>
     <div className='flex items-center gap-2 font-semibold'><CommunityLogo src={game.awayLogoUrl} name={game.awayTeam} altText={game.awayLogoAlt} size={22} /><span>{game.awayTeam}</span></div>
-    <div className='mt-2 border-t border-slate-200 pt-1 text-xs font-bold text-slate-600'>{game.fieldLane}</div>
+    <div className='mt-2 border-t border-slate-200 pt-1 text-xs font-bold text-slate-600'>{formatPhysicalFieldLabel(game.physicalArea, game.fieldLane)}</div>
   </article>;
 }
 
@@ -56,11 +57,11 @@ export default function HostingView({ games, mode = 'published' }: { games: Host
             <header className='hosting-location-heading border-b bg-slate-800 px-4 py-3 text-white'><h2 className='text-lg font-extrabold'>{host}</h2><p className='text-sm font-medium text-slate-200'>{formatDisplayDate(date)}</p></header>
             <div className='hosting-grid-scroll overflow-x-auto'>
               <table className='hosting-grid w-full border-collapse text-sm' style={{ minWidth: `${Math.max(760, 120 + lanes.length * 210)}px` }}>
-                <thead><tr><th className='hosting-time-cell sticky left-0 z-20 w-[120px] border-b border-r bg-slate-100 p-3 text-left'>Time</th>{lanes.map((lane) => <th key={lane.key} className='min-w-[210px] border-b border-r bg-slate-100 p-3 text-left'><span className='block font-bold'>{lane.area}</span><span className='text-xs text-slate-600'>{lane.lane}</span></th>)}</tr></thead>
+                <thead><tr><th className='hosting-time-cell sticky left-0 z-20 w-[120px] border-b border-r bg-slate-100 p-3 text-left'>Time</th>{lanes.map((lane) => <th key={lane.key} className='min-w-[210px] border-b border-r bg-slate-100 p-3 text-left'><span className='block font-bold'>{lane.label}</span></th>)}</tr></thead>
                 <tbody>{times.map((time) => <tr key={time}><th className='hosting-time-cell sticky left-0 z-10 border-b border-r bg-white p-3 text-left align-top font-bold'>{formatDisplayTime(time)}</th>{lanes.map((lane) => { const matches = cells.get(`${date}:${time}:${lane.key}`) || []; return <td key={lane.key} className='border-b border-r p-2 align-top'>{matches.map((game, index) => <GameCard key={game.id || `${lane.key}-${index}`} game={game} />)}{!matches.length && <span className='text-slate-300'>—</span>}</td>; })}</tr>)}</tbody>
               </table>
             </div>
-            <div className='hosting-mobile-list hidden p-3'>{times.map((time) => <section key={time} className='mb-5'><h3 className='mb-2 border-b pb-1 text-lg font-extrabold'>{formatDisplayTime(time)}</h3><div className='space-y-2'>{hostGames.filter((game) => game.time === time).map((game, index) => <div key={game.id || `${key(game)}-${index}`}><div className='mb-1 text-xs font-bold text-slate-600'>{game.physicalArea} · {game.fieldLane}</div><GameCard game={game} /></div>)}</div></section>)}</div>
+            <div className='hosting-mobile-list hidden p-3'>{times.map((time) => <section key={time} className='mb-5'><h3 className='mb-2 border-b pb-1 text-lg font-extrabold'>{formatDisplayTime(time)}</h3><div className='space-y-2'>{hostGames.filter((game) => game.time === time).map((game, index) => <div key={game.id || `${key(game)}-${index}`}><div className='mb-1 text-xs font-bold text-slate-600'>{formatPhysicalFieldLabel(game.physicalArea, game.fieldLane)}</div><GameCard game={game} /></div>)}</div></section>)}</div>
           </section>;
         })}
       </section>;
