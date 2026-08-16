@@ -52,22 +52,40 @@ export const formatDisplayDateTime = (date: string | null | undefined, time: str
   return `${displayDate} ${displayTime}`;
 };
 
-export const formatDisplayTimestamp = (value: string | null | undefined) => {
-  if (!value) return '-';
+export const LEAGUE_TIME_ZONE = process.env.NEXT_PUBLIC_LEAGUE_TIME_ZONE || 'America/Chicago';
+
+export type DisplayDateTimeParts = {
+  dateText: string;
+  timeText: string;
+};
+
+/** Formats an API timestamp in the league timezone without changing its stored value. */
+export const formatDateTimeParts = (value: string | null | undefined): DisplayDateTimeParts | null => {
+  if (!value) return null;
 
   const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return String(value);
+  if (Number.isNaN(parsed.getTime())) return null;
 
-  const date = new Intl.DateTimeFormat('en-US', {
-    month: '2-digit',
-    day: '2-digit',
-    year: 'numeric',
-  }).format(parsed);
-  const time = new Intl.DateTimeFormat('en-US', {
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: true,
-  }).format(parsed);
+  return {
+    dateText: new Intl.DateTimeFormat('en-US', {
+      timeZone: LEAGUE_TIME_ZONE,
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+    }).format(parsed),
+    timeText: new Intl.DateTimeFormat('en-US', {
+      timeZone: LEAGUE_TIME_ZONE,
+      hour: 'numeric',
+      minute: '2-digit',
+    }).format(parsed),
+  };
+};
 
-  return `${date} ${time}`;
+export const formatDateTime = (value: string | null | undefined) => {
+  const parts = formatDateTimeParts(value);
+  return parts ? `${parts.dateText} ${parts.timeText}` : '—';
+};
+
+export const formatDisplayTimestamp = (value: string | null | undefined) => {
+  return formatDateTime(value);
 };
