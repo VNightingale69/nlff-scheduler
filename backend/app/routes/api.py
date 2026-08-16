@@ -38,6 +38,7 @@ from app.security import access_token_expires_at, auth_invalid_token_exception, 
 from app.services.game_statuses import REQUIRED_GAME_STATUSES, ensure_required_game_statuses
 from app.services.organization_cleanup import cleanup_organization_dependencies, collect_organization_delete_inventory
 from app.services.scheduling_validation import validate_game
+from app.services.tosc_field_areas import ensure_tosc_physical_areas
 from app.turf_configurations import INVALID_TURF_CONFIGURATION_MESSAGE, BACKWARD_COMPATIBLE_TURF_CONFIGURATION_ALIASES, turf_configuration_legacy_metadata
 from app.teams import eligible_team_query, log_schedule_roster_exclusions, season_roster, season_roster_query
 from app.facility_layouts import (JOHNSBURG_APPROVED_LAYOUT_CODES_BY_LOCATION, JOHNSBURG_FIELD_TEMPLATES_BY_LOCATION, JOHNSBURG_ORGANIZATION_NAMES, johnsburg_field_templates, johnsburg_location_name)
@@ -11417,6 +11418,7 @@ def list_host_locations(search: str | None = None, organization_id: uuid.UUID | 
     page_data = paginate(q.order_by(HostLocation.name), page, page_size)
     ensured_any = False
     for item in page_data.items:
+        ensured_any = ensure_tosc_physical_areas(db, item) or ensured_any
         ensured_any = _ensure_approved_turf_configurations(db, item) or ensured_any
     if ensured_any:
         db.commit()
@@ -11502,6 +11504,7 @@ def list_host_location_configurations(host_location_id: uuid.UUID | None = None,
          if host_location_id and not include_inactive_legacy
          else db.query(HostLocationConfiguration))
     q = q.join(HostLocationConfiguration.host_location)
+    q = q.filter(~HostLocation.name.in_(['Tim Osmond Sports Complex', 'Antioch - Tim Osmond Sports Complex', 'Antioch - TOSC']))
     if not include_inactive_legacy:
         q = q.filter(HostLocationConfiguration.is_legacy.is_(False))
     if organization_id:
@@ -11691,9 +11694,10 @@ def create_physical_field_area(payload: PhysicalFieldAreaCreate, current_user: U
     x = PhysicalFieldArea(**payload.model_dump()); db.add(x); db.commit(); db.refresh(x); return x
 
 @router.get('/physical-field-areas', response_model=PagedResponse[PhysicalFieldAreaRead], dependencies=[Depends(get_current_user)])
-def list_physical_field_areas(host_location_id: uuid.UUID | None = None, page: int = 1, page_size: int = 50, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def list_physical_field_areas(host_location_id: uuid.UUID | None = None, include_inactive: bool = False, page: int = 1, page_size: int = 50, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     q = db.query(PhysicalFieldArea).join(PhysicalFieldArea.host_location)
     if host_location_id: q = q.filter(PhysicalFieldArea.host_location_id == host_location_id)
+    if not include_inactive: q = q.filter(PhysicalFieldArea.is_active.is_(True))
     return paginate(q.order_by(PhysicalFieldArea.name), page, page_size)
 
 @router.put('/physical-field-areas/{item_id}', response_model=PhysicalFieldAreaRead, dependencies=[Depends(get_current_user)])
@@ -11733,9 +11737,10 @@ def create_field_configuration_option(payload: FieldConfigurationOptionCreate, c
     x = FieldConfigurationOption(**data); db.add(x); db.commit(); db.refresh(x); return x
 
 @router.get('/field-configuration-options', response_model=PagedResponse[FieldConfigurationOptionRead], dependencies=[Depends(get_current_user)])
-def list_field_configuration_options(physical_field_area_id: uuid.UUID | None = None, page: int = 1, page_size: int = 50, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def list_field_configuration_options(physical_field_area_id: uuid.UUID | None = None, include_inactive: bool = False, page: int = 1, page_size: int = 50, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     q = db.query(FieldConfigurationOption).join(FieldConfigurationOption.physical_field_area).join(PhysicalFieldArea.host_location)
     if physical_field_area_id: q = q.filter(FieldConfigurationOption.physical_field_area_id == physical_field_area_id)
+    if not include_inactive: q = q.filter(FieldConfigurationOption.is_active.is_(True), PhysicalFieldArea.is_active.is_(True))
     return paginate(q.order_by(FieldConfigurationOption.name), page, page_size)
 
 @router.put('/field-configuration-options/{item_id}', response_model=FieldConfigurationOptionRead, dependencies=[Depends(get_current_user)])

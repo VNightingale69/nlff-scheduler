@@ -4,12 +4,8 @@ import uuid
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.models import Base, HostLocation, HostLocationConfiguration, Organization
-from app.routes.api import (
-    _configuration_field_templates,
-    _ensure_approved_turf_configurations,
-    _select_turf_wave_configuration,
-)
+from app.models import Base, FieldConfigurationOption, HostLocation, HostLocationConfiguration, Organization, PhysicalFieldArea
+from app.services.tosc_field_areas import TOSC_AREAS, ensure_tosc_physical_areas
 
 
 class TimOsmondConfigurationTest(unittest.TestCase):
@@ -18,76 +14,68 @@ class TimOsmondConfigurationTest(unittest.TestCase):
         Base.metadata.create_all(engine)
         self.db: Session = sessionmaker(bind=engine)()
         organization = Organization(id=uuid.uuid4(), name='Antioch', is_active=True)
-        self.host = HostLocation(
-            id=uuid.uuid4(), organization_id=organization.id,
-            name='Tim Osmond Sports Complex', surface_type='TURF_STADIUM', is_active=True,
-        )
-        self.db.add_all([organization, self.host])
-        self.db.commit()
+        self.host = HostLocation(id=uuid.uuid4(), organization=organization,
+            name='Tim Osmond Sports Complex', surface_type='TURF_STADIUM', is_active=True)
+        self.db.add_all([organization, self.host]); self.db.flush()
+        self.legacy = HostLocationConfiguration(id=uuid.uuid4(), host_location_id=self.host.id,
+            configuration_name='4 Small', surface_type='TURF_STADIUM', small_field_count=4, is_active=True)
+        self.db.add(self.legacy); self.db.commit()
+        ensure_tosc_physical_areas(self.db, self.host); self.db.commit()
 
-    def tearDown(self):
-        self.db.close()
+    def tearDown(self): self.db.close()
 
-    def test_exposes_only_consolidated_approved_physical_layouts(self):
-        _ensure_approved_turf_configurations(self.db, self.host)
-        self.db.flush()
+    def _area(self, name):
+        return self.db.query(PhysicalFieldArea).filter_by(host_location_id=self.host.id, name=name, is_active=True).one()
 
-        rows = self.db.query(HostLocationConfiguration).filter_by(
-            host_location_id=self.host.id, is_active=True,
-        ).all()
-        mixes = {
-            row.configuration_name: (row.small_field_count, row.medium_field_count, row.large_field_count)
-            for row in rows
-        }
-        self.assertEqual(mixes, {
-            'FOUR_SMALL': (4, 0, 0),
-            'TWO_SMALL_ONE_MEDIUM': (2, 1, 0),
-            'ONE_LARGE_ONE_MEDIUM': (0, 1, 1),
-        })
-        self.assertNotIn((3, 0, 0), mixes.values())
-        self.assertNotIn((0, 2, 0), mixes.values())
-        self.assertNotIn((0, 0, 1), mixes.values())
-        self.assertNotIn((1, 0, 1), mixes.values())
+    def _layouts(self, area):
+        return {o.name: (o.large_field_count, o.medium_field_count, o.small_field_count)
+                for o in self.db.query(FieldConfigurationOption).filter_by(physical_field_area_id=area.id, is_active=True)}
 
-    def test_generated_field_templates_match_each_physical_mix(self):
-        expected = {
-            'FOUR_SMALL': ['SMALL'] * 4,
-            'TWO_SMALL_ONE_MEDIUM': ['SMALL', 'SMALL', 'MEDIUM'],
-            'ONE_LARGE_ONE_MEDIUM': ['MEDIUM', 'LARGE'],
-        }
-        for code, sizes in expected.items():
-            with self.subTest(code=code):
-                self.assertEqual([size for _name, size in _configuration_field_templates(code)], sizes)
+    def test_tosc_old_configurations_removed(self):
+        self.db.refresh(self.legacy)
+        self.assertFalse(self.legacy.is_active)
+        self.assertTrue(self.legacy.is_legacy)
+        self.assertEqual(self.db.query(HostLocationConfiguration).filter_by(host_location_id=self.host.id, is_active=True).count(), 0)
 
-    def test_auto_select_chooses_layout_by_weekly_size_demand(self):
-        approved = {'FOUR_SMALL', 'TWO_SMALL_ONE_MEDIUM', 'ONE_LARGE_ONE_MEDIUM'}
-        cases = [
-            ({'SMALL': 4, 'MEDIUM': 0, 'LARGE': 0}, 'FOUR_SMALL'),
-            ({'SMALL': 2, 'MEDIUM': 1, 'LARGE': 0}, 'TWO_SMALL_ONE_MEDIUM'),
-            ({'SMALL': 0, 'MEDIUM': 1, 'LARGE': 1}, 'ONE_LARGE_ONE_MEDIUM'),
-        ]
-        for demand, expected in cases:
-            with self.subTest(demand=demand):
-                self.assertEqual(_select_turf_wave_configuration(demand, approved), expected)
+    def test_tosc_has_three_physical_areas(self):
+        self.assertEqual({a.name for a in self.db.query(PhysicalFieldArea).filter_by(host_location_id=self.host.id, is_active=True)}, set(TOSC_AREAS))
 
-    def test_other_stadiums_keep_standard_approved_layouts(self):
-        other = HostLocation(
-            id=uuid.uuid4(), organization_id=self.host.organization_id,
-            name='Johnsburg Stadium', surface_type='TURF_STADIUM', is_active=True,
-        )
-        self.db.add(other)
-        self.db.flush()
-        _ensure_approved_turf_configurations(self.db, other)
-        active = {
-            row.configuration_name for row in self.db.query(HostLocationConfiguration).filter_by(
-                host_location_id=other.id, is_active=True,
-            )
-        }
-        self.assertEqual(active, {
-            'THREE_SMALL', 'TWO_SMALL_ONE_MEDIUM', 'TWO_MEDIUM',
-            'ONE_SMALL_ONE_LARGE', 'ONE_LARGE',
-        })
+    def test_tosc_football_fields_support_required_layouts(self):
+        expected = {'1 Large + 1 Small': (1, 0, 1), '2 Medium': (0, 2, 0), '3 Small': (0, 0, 3)}
+        self.assertEqual(self._layouts(self._area('Football Field 1')), expected)
+        self.assertEqual(self._layouts(self._area('Football Field 2')), expected)
+
+    def test_tosc_soccer_field_supports_all_layouts(self):
+        self.assertEqual(self._layouts(self._area('Soccer Field')), {
+            '1 Large + 1 Small': (1, 0, 1), '2 Medium': (0, 2, 0), '3 Small': (0, 0, 3),
+            '1 Medium + 1 Small': (0, 1, 1), '1 Large': (1, 0, 0)})
+        self.assertIn('120 yards × 75 yards', self._area('Soccer Field').notes)
+
+    def test_tosc_areas_can_use_different_layouts_same_hour(self):
+        chosen = [self._layouts(self._area('Football Field 1'))['1 Large + 1 Small'],
+                  self._layouts(self._area('Football Field 2'))['1 Large + 1 Small'],
+                  self._layouts(self._area('Soccer Field'))['2 Medium']]
+        self.assertEqual(tuple(map(sum, zip(*chosen))), (2, 2, 2))
+        self.assertEqual(sum(sum(x) for x in chosen), 6)
+
+    def test_tosc_soccer_field_can_reconfigure_between_hours(self):
+        layouts = self._layouts(self._area('Soccer Field'))
+        self.assertEqual(layouts['2 Medium'], (0, 2, 0))
+        self.assertEqual(layouts['3 Small'], (0, 0, 3))
+
+    def test_tosc_capacity_validation_is_per_physical_area(self):
+        ff1 = self._layouts(self._area('Football Field 1'))['1 Large + 1 Small']
+        soccer = self._layouts(self._area('Soccer Field'))['3 Small']
+        self.assertTrue((1, 0, 1) <= ff1)
+        self.assertFalse(2 <= ff1[0])
+        self.assertEqual(soccer[2], 3)
+        self.assertFalse(4 <= soccer[2])
+
+    def test_tosc_seed_is_idempotent_and_history_survives(self):
+        legacy_id = self.legacy.id
+        ensure_tosc_physical_areas(self.db, self.host); self.db.commit()
+        self.assertEqual(self.db.query(PhysicalFieldArea).filter_by(host_location_id=self.host.id).count(), 3)
+        self.assertIsNotNone(self.db.get(HostLocationConfiguration, legacy_id))
 
 
-if __name__ == '__main__':
-    unittest.main()
+if __name__ == '__main__': unittest.main()
