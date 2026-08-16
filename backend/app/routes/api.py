@@ -36,6 +36,7 @@ from app.schemas import (
 )
 from app.security import access_token_expires_at, auth_invalid_token_exception, create_access_token, create_refresh_token, hash_password, validate_password_strength, verify_password, decode_token
 from app.services.game_statuses import REQUIRED_GAME_STATUSES, ensure_required_game_statuses
+from app.services.generated_field_names import get_field_display_name, retire_generated_field
 from app.services.organization_cleanup import cleanup_organization_dependencies, collect_organization_delete_inventory
 from app.services.scheduling_validation import validate_game
 from app.services.tosc_field_areas import ensure_tosc_physical_areas
@@ -6810,9 +6811,7 @@ def _regenerate_generated_slots(
         diagnostics['field_instances_deleted'] = db.query(FieldInstance).filter(FieldInstance.id.in_(deletable_instance_ids)).delete(synchronize_session=False)
     for instance in retired_instances:
         old_name = instance.field_name
-        retired_name = f'__retired_generated__{str(instance.id)[:8]}__{old_name}'[:120]
-        instance.field_name = retired_name
-        instance.is_active = False
+        retire_generated_field(instance)
         diagnostics.setdefault('retired_referenced_field_instances', []).append({
             **_field_instance_diag(instance),
             'previous_field_name': old_name,
@@ -12913,7 +12912,7 @@ def list_field_instances(host_location_id: uuid.UUID | None = None, available_da
     if available_date:
         q = q.filter(func.cast(FieldInstance.instance_date, str) == available_date)
     rows = q.order_by(FieldInstance.instance_date, HostLocation.name, FieldInstance.field_name).all()
-    return [{'id': r.FieldInstance.id, 'date': r.FieldInstance.instance_date, 'host_location_name': r.host_location_name, 'field_instance_name': r.FieldInstance.field_name, 'field_type': r.FieldInstance.field_type, 'hosting_availability_id': r.FieldInstance.hosting_availability_id} for r in rows]
+    return [{'id': r.FieldInstance.id, 'date': r.FieldInstance.instance_date, 'host_location_name': r.host_location_name, 'field_instance_name': get_field_display_name(r.FieldInstance), 'field_type': r.FieldInstance.field_type, 'hosting_availability_id': r.FieldInstance.hosting_availability_id} for r in rows]
 
 
 @router.get('/generated-game-slots', response_model=list[GeneratedSlotRead], dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_COMMUNITY_ADMIN, ROLE_SCHEDULING_ADMIN))])
@@ -16188,7 +16187,7 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
                 'date': game.game_date.isoformat() if game.game_date else None,
                 'time': game.kickoff_time.isoformat() if game.kickoff_time else None,
                 'location': getattr(host, 'name', None),
-                'field': getattr(canonical_field, 'name', None) or getattr(field_instance, 'field_name', None) or 'Not Assigned',
+                'field': get_field_display_name(getattr(canonical_field, 'name', None) or getattr(field_instance, 'field_name', None)) or 'Not Assigned',
                 'division': f'{getattr(division, "division_group", "") or ""} {getattr(division, "name", "") or ""}'.strip(),
                 'required_field_type': issue_required_type,
                 'selected_layout': layout_label(issue_configuration),
@@ -16365,7 +16364,7 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
                 'date': game.game_date.isoformat() if game.game_date else None,
                 'time': game.kickoff_time.isoformat() if game.kickoff_time else None,
                 'location': getattr(host, 'name', None),
-                'field': getattr(canonical_field, 'name', None) or getattr(field_instance, 'field_name', None) or 'Not Assigned',
+                'field': get_field_display_name(getattr(canonical_field, 'name', None) or getattr(field_instance, 'field_name', None)) or 'Not Assigned',
                 'canonical_field_type': canonical_type, 'required_field_type': required_type,
                 'selected_layout': layout_label(configuration), 'field_layout_type_override': getattr(game, 'field_layout_type_override', None),
                 'timeslot_configuration_id': str(getattr(game, 'timeslot_configuration_id', None) or getattr(override, 'id', None) or '') or None,
@@ -16727,6 +16726,11 @@ def _to_game_read(
     division_name: str | None = None,
     division_group: str | None = None,
 ) -> GameRead:
+    # Query projections may provide a stored instance name directly.  Resolve
+    # it here so every GameRead consumer (manual builder, management, and
+    # published/prepublished views) receives presentation-safe text.
+    if field_instance_name is not None:
+        field_instance_name = get_field_display_name(field_instance_name)
     if generated_slot and getattr(generated_slot, 'turf_wave_id', None):
         slot_field_instance = getattr(generated_slot, 'field_instance', None)
         try:
@@ -16798,7 +16802,7 @@ def _to_game_read(
         needs_schedule_review=bool(getattr(g, 'needs_schedule_review', False)),
         field_deleted_from_game=bool(getattr(g, 'field_deleted_from_game', False)),
         previous_field_id=getattr(g, 'previous_field_id', None),
-        previous_field_name=getattr(g, 'previous_field_name', None),
+        previous_field_name=(get_field_display_name(g.previous_field_name) if getattr(g, 'previous_field_name', None) else None),
         field_deleted_at=getattr(g, 'field_deleted_at', None),
         field_assignment_status=getattr(g, 'field_assignment_status', None),
     )
@@ -18434,7 +18438,7 @@ def auto_fill_preview(payload: dict, db: Session = Depends(get_db)):
             'host_location_id': str(slot_for_output.host_location_id) if slot_for_output and slot_for_output.host_location_id else None,
             'host_location': slot_for_output.host_location.name if slot_for_output and slot_for_output.host_location else None,
             'field_instance_id': str(slot_for_output.field_instance_id) if slot_for_output and slot_for_output.field_instance_id else None,
-            'field': slot_for_output.field_instance.field_name if slot_for_output and slot_for_output.field_instance else None,
+            'field': get_field_display_name(slot_for_output.field_instance) if slot_for_output and slot_for_output.field_instance else None,
             'field_type': _normalize_field_size(slot_for_output.field_type) if slot_for_output else None,
         })
 
@@ -25681,7 +25685,7 @@ def _schedule_review_game(row, publication_status: str) -> dict:
         'away_organization': away.organization.name if away.organization else None,
         'host_organization': host.organization.name if host and host.organization else None,
         'host_location': host.name if host else None,
-        'field': getattr(canonical_field, 'name', None) or getattr(field_instance, 'field_name', None) or 'Not assigned',
+        'field': get_field_display_name(getattr(canonical_field, 'name', None) or getattr(field_instance, 'field_name', None)) or 'Not assigned',
         'field_type': getattr(canonical_field, 'layout_type', None) or getattr(field_instance, 'field_type', None),
         'publication_status': publication_status,
     }
@@ -29080,7 +29084,7 @@ def _extract_explicit_field_slot_label(value: object | None, field_type: str | N
 
 def _clean_explicit_field_slot_label(value: object | None, field_type: str | None = None) -> str:
     """Return the public/export field-slot label without turf wave/layout terms."""
-    raw = str(value or '').strip()
+    raw = get_field_display_name(str(value or '').strip())
     explicit = _extract_explicit_field_slot_label(raw, field_type)
     if explicit:
         return explicit
@@ -29116,7 +29120,7 @@ def _is_turf_stadium_display_context(slot: GameSlot | None = None, field_instanc
 
 
 def _strip_internal_field_label_terms(value: object | None) -> str:
-    raw = str(value or '').strip()
+    raw = get_field_display_name(str(value or '').strip())
     cleaned = re.sub(r'^\s*Wave\s+\d+\s+', '', raw, flags=re.IGNORECASE)
     cleaned = re.sub(r'\b(?:THREE_SMALL|TWO_MEDIUM|TWO_SMALL_ONE_MEDIUM|ONE_SMALL_ONE_LARGE|ONE_LARGE|ONE_MEDIUM_TWO_SMALL|ONE_LARGE_ONE_MEDIUM|TWO_LARGE)\b\s*', '', cleaned, flags=re.IGNORECASE)
     return ' '.join(cleaned.split())
@@ -29211,7 +29215,7 @@ def _public_game_read_from_schedule_row(row, db: Session | None = None, current_
         host_location_id=host.id if host else None,
         host_location_name=host.name if host else '',
         field_id=g.field_id,
-        field_name=(canonical_field.name if canonical_field else ('Field unavailable' if g.field_id else 'Field Not Assigned')),
+        field_name=(get_field_display_name(canonical_field.name) if canonical_field else (_field_export_display_label(slot, fi, db) if fi else ('Field unavailable' if g.field_id else 'Field Not Assigned'))),
         # Generated/turf schedules assign the physical component through the
         # published game slot rather than a canonical ``Field`` row.  Expose
         # that authoritative size so public reports can label the assignment
@@ -29337,7 +29341,7 @@ def _build_turf_stadium_utilization_diagnostics(db: Session, season_id: uuid.UUI
                 'game_id': str(game.id),
                 'slot_id': str(slot.id),
                 'field_type': _normalize_field_size(slot.field_type),
-                'field': slot.field_instance.field_name if slot.field_instance else None,
+                'field': get_field_display_name(slot.field_instance) if slot.field_instance else None,
                 'field_slot': _turf_field_slot_label(slot),
                 'configuration_code': layout_code,
                 'home_team': home.name if home else None,
