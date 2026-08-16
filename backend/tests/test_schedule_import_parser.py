@@ -8,7 +8,7 @@ from openpyxl import Workbook
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.models import (Base, Division, Field, FieldConfigurationOption, FieldInstance, Game, GameSlot,
+from app.models import (Base, Division, Field, FieldConfigurationMember, FieldConfigurationOption, FieldInstance, Game, GameSlot,
                         GameStatus, HostLocation, HostLocationConfiguration, HostingAvailability,
                         Organization, PhysicalFieldArea,
                         OrganizationDivisionParticipation, ScheduleImport, Season, Team, Week)
@@ -195,6 +195,154 @@ def _area_row(teams, area, slot, field_type, kickoff='9:00 AM', index=0):
     row = _hiller_row(kickoff, slot, field_type, teams[index], teams[index + 1])
     row.update({'site': 'Tim Osmond Sports Complex', 'physicalarea': area})
     return row
+
+
+def _legacy_field_context():
+    db, season, teams = _hiller_import_context()
+    site = db.query(HostLocation).filter_by(name='Hiller Stadium').one()
+    site.name = 'Prairie Ridge High School Jr Wolves'
+    site.surface_type = 'GRASS_FIELD'
+    db.query(HostLocationConfiguration).delete()
+    db.query(Field).delete()
+    db.flush()
+    fields = {}
+    for size, count in (('Large', 1), ('Medium', 2), ('Small', 3)):
+        for index in range(1, count + 1):
+            field = Field(host_location_id=site.id, name=f'{size} - {index}',
+                          layout_type=size.upper(), is_active=True)
+            db.add(field); db.flush()
+            fields[field.name] = field
+    for name, members in (
+        ('1 Large', ('Large - 1',)),
+        ('2 Medium', ('Medium - 1', 'Medium - 2')),
+        ('3 Small', ('Small - 1', 'Small - 2', 'Small - 3')),
+    ):
+        configuration = HostLocationConfiguration(
+            host_location_id=site.id, configuration_name=name, is_active=True)
+        db.add(configuration); db.flush()
+        db.add_all([FieldConfigurationMember(
+            field_configuration_id=configuration.id, field_id=fields[item].id)
+            for item in members])
+    db.commit()
+    return db, season, teams, site, fields
+
+
+def _legacy_row(teams, physical_area, field, field_type, index=0):
+    row = _hiller_row('9:00 AM', field, field_type, teams[index], teams[index + 1])
+    row.update({'site': 'Prairie Ridge High School Jr Wolves',
+                'physicalarea': physical_area})
+    return row
+
+
+def test_legacy_site_resolves_and_normalizes_fields_from_both_columns():
+    db, season, teams, _site, fields = _legacy_field_context()
+    rows = [
+        _legacy_row(teams, 'Medium - 1', 'Medium 1', 'Medium'),
+        _legacy_row(teams, '', 'Medium-2', 'Medium', index=2),
+    ]
+
+    preview, staged = build_preview(db, season.id, rows)
+
+    assert preview['blocking_errors'] == 0
+    assert {row['field'] for row in preview['rows']} == {'Medium - 1', 'Medium - 2'}
+    assert all(row['physical_area'] is None for row in preview['rows'])
+    assert all(row['field_architecture'] == 'legacy_field' for row in preview['rows'])
+    assert {row['resolved_field_id'] for row in staged} == {
+        str(fields['Medium - 1'].id), str(fields['Medium - 2'].id)}
+    assert {row['configuration'] for row in preview['rows']} == {'2 Medium'}
+
+
+@pytest.mark.parametrize(('names', 'size', 'layout'), [
+    (('Medium - 1', 'Medium - 2'), 'Medium', '2 Medium'),
+    (('Small - 1', 'Small - 2', 'Small - 3'), 'Small', '3 Small'),
+])
+def test_legacy_site_group_validates_active_custom_layout(names, size, layout):
+    db, season, teams, _site, _fields = _legacy_field_context()
+    rows = [_legacy_row(teams, name, name.replace(' - ', ' '), size, index=index * 2)
+            for index, name in enumerate(names)]
+
+    preview, staged = build_preview(db, season.id, rows)
+
+    assert len(staged) == len(names)
+    assert preview['blocking_errors'] == 0
+    assert {row['configuration'] for row in preview['rows']} == {layout}
+
+
+def test_legacy_site_rejects_invalid_field_combination():
+    db, season, teams, _site, _fields = _legacy_field_context()
+    rows = [
+        _legacy_row(teams, 'Large - 1', 'Large 1', 'Large'),
+        _legacy_row(teams, 'Medium - 1', 'Medium 1', 'Medium', index=2),
+        _legacy_row(teams, 'Small - 1', 'Small 1', 'Small', index=4),
+    ]
+
+    preview, staged = build_preview(db, season.id, rows)
+
+    assert staged == []
+    assert preview['blocking_errors'] == 3
+    assert all('do not match any supported layout' in row['message']
+               for row in preview['rows'])
+
+
+def test_legacy_import_commit_persists_existing_field_id():
+    db, season, teams, site, fields = _legacy_field_context()
+    preview, staged = build_preview(db, season.id, [
+        _legacy_row(teams, 'Large - 1', 'Large 1', 'Large')])
+    user_id = uuid.uuid4()
+    record = ScheduleImport(
+        season_id=season.id, imported_by_user_id=user_id,
+        source_filename='legacy.xlsx', weeks_replaced=json.dumps(preview['weeks']),
+        status='PREVIEW', staged_rows=json.dumps(staged),
+        preview_summary=json.dumps(preview),
+    )
+    db.add(record); db.commit()
+
+    confirm_schedule_import(record.id, {'confirmation': 'Replace Existing Schedule Games'},
+                            db, SimpleNamespace(id=user_id))
+
+    game = db.query(Game).filter_by(season_id=season.id).one()
+    assert game.host_location_id == site.id
+    assert game.field_id == fields['Large - 1'].id
+    assert game.field_instance_id is None
+    assert not game.missing_field_assignment
+
+
+def test_mixed_import_supports_physical_area_and_legacy_field_sites():
+    db, season, teams, _physical_site = _physical_area_context()
+    organization_id = db.query(Organization).filter_by(name='Johnsburg').one().id
+    legacy_site = HostLocation(
+        organization_id=organization_id,
+        name='Prairie Ridge High School Jr Wolves',
+        surface_type='GRASS_FIELD', is_active=True,
+    )
+    db.add(legacy_site); db.flush()
+    legacy_field = Field(
+        host_location_id=legacy_site.id, name='Medium - 1',
+        layout_type='MEDIUM', is_active=True,
+    )
+    db.add(legacy_field); db.flush()
+    legacy_layout = HostLocationConfiguration(
+        host_location_id=legacy_site.id, configuration_name='1 Medium',
+        medium_field_count=1, is_active=True,
+    )
+    db.add(legacy_layout); db.flush()
+    db.add(FieldConfigurationMember(
+        field_configuration_id=legacy_layout.id, field_id=legacy_field.id))
+    db.commit()
+    rows = [
+        _area_row(teams, 'Football Field 1', 'Large 1', 'Large'),
+        _legacy_row(teams, 'Medium - 1', 'Medium 1', 'Medium', index=2),
+    ]
+
+    preview, staged = build_preview(db, season.id, rows)
+
+    assert preview['blocking_errors'] == 0
+    assert len(staged) == 2
+    assert {row['field_architecture'] for row in staged} == {
+        'physical_area', 'legacy_field'}
+    legacy = next(row for row in staged
+                  if row['field_architecture'] == 'legacy_field')
+    assert legacy['resolved_field_id'] == str(legacy_field.id)
 
 
 def test_schedule_import_resolves_physical_area():
