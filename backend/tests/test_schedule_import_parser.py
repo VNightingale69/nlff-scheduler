@@ -11,7 +11,8 @@ from sqlalchemy.orm import sessionmaker
 from app.models import (Base, Division, Field, FieldConfigurationMember, FieldConfigurationOption, FieldInstance, Game, GameSlot,
                         GameStatus, HostLocation, HostLocationConfiguration, HostingAvailability,
                         Organization, PhysicalFieldArea,
-                        OrganizationDivisionParticipation, ScheduleImport, Season, Team, Week)
+                        OrganizationDivisionParticipation, ScheduleImport, Season, Team,
+                        TimeslotFieldConfiguration, Week)
 from app.routes.api import confirm_schedule_import, list_games
 from app.services.field_resolution import resolve_active_field
 from app.services.schedule_import import build_preview, parse_schedule_file, _date, _time, _week_number
@@ -305,6 +306,51 @@ def test_legacy_import_commit_persists_existing_field_id():
     assert game.field_id == fields['Large - 1'].id
     assert game.field_instance_id is None
     assert not game.missing_field_assignment
+
+
+def test_legacy_layout_multiple_games_share_one_timeslot_config():
+    db, season, teams, site, _fields = _legacy_field_context()
+    preview, staged = build_preview(db, season.id, [
+        _legacy_row(teams, 'Medium - 1', 'Medium 1', 'Medium'),
+        _legacy_row(teams, 'Medium - 2', 'Medium 2', 'Medium', index=2),
+    ])
+    assert preview['blocking_errors'] == 0
+    assert len({row['configuration_group_key'] for row in staged}) == 1
+    user_id = uuid.uuid4()
+    record = ScheduleImport(
+        season_id=season.id, imported_by_user_id=user_id,
+        source_filename='duplicate-layout.xlsx',
+        weeks_replaced=json.dumps(preview['weeks']), status='PREVIEW',
+        staged_rows=json.dumps(staged), preview_summary=json.dumps(preview),
+    )
+    db.add(record); db.commit()
+
+    confirm_schedule_import(record.id, {'confirmation': 'Replace Existing Schedule Games'},
+                            db, SimpleNamespace(id=user_id))
+
+    assert db.query(Game).filter_by(season_id=season.id).count() == 2
+    assert db.query(TimeslotFieldConfiguration).filter_by(
+        host_location_id=site.id).count() == 1
+
+
+def test_different_existing_config_blocks_during_preview():
+    db, season, teams, site, _fields = _legacy_field_context()
+    existing_layout = db.query(HostLocationConfiguration).filter_by(
+        host_location_id=site.id, configuration_name='1 Large').one()
+    db.add(TimeslotFieldConfiguration(
+        host_location_id=site.id, configuration_id=existing_layout.id,
+        configuration_date=_date('2026-08-16'), kickoff_time=_time('9:00 AM')))
+    db.commit()
+
+    preview, staged = build_preview(db, season.id, [
+        _legacy_row(teams, 'Medium - 1', 'Medium 1', 'Medium'),
+        _legacy_row(teams, 'Medium - 2', 'Medium 2', 'Medium', index=2),
+    ])
+
+    assert staged == []
+    assert preview['blocking_errors'] == 2
+    assert all('already has configuration "1 Large"' in row['message']
+               for row in preview['rows'])
 
 
 def test_mixed_import_supports_physical_area_and_legacy_field_sites():

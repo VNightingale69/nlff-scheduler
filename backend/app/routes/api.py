@@ -123,7 +123,113 @@ def confirm_schedule_import(
     week_ids=[uuid.UUID(x['week_id']) for x in staged]
     active_row = None
     active_phase = 'preparing the import transaction'
+    configuration_records = {}
     try:
+        # Phase 1: resolve each staged scheduling block exactly once.  Rows in
+        # a block share the resulting object; no game row independently
+        # inserts configuration state.
+        configuration_groups = {}
+        for row in staged:
+            architecture = row.get('resolved_configuration_architecture')
+            if not architecture:
+                architecture = ('physical_area' if row.get('physical_area_id')
+                                else 'legacy_layout' if (row.get('configuration_id')
+                                                         or row.get('configuration_name')) else None)
+            if not architecture:
+                continue
+            group_key = row.get('configuration_group_key') or '|'.join(str(value or '') for value in (
+                record.season_id, row.get('date'), row.get('kickoff'), row.get('site_id'),
+                row.get('physical_area_id') if architecture == 'physical_area' else '',
+            ))
+            row['configuration_group_key'] = group_key
+            identity = (row.get('field_configuration_option_id') if architecture == 'physical_area'
+                        else row.get('configuration_id') or row.get('configuration_name'))
+            previous = configuration_groups.get(group_key)
+            if previous and previous['identity'] != identity:
+                raise ValueError(f'Imported configuration group {group_key} contains conflicting layouts.')
+            configuration_groups[group_key] = {
+                'row': row, 'architecture': architecture, 'identity': identity,
+            }
+
+        configuration_records = {}
+        for group_key, group in configuration_groups.items():
+            row = group['row']; active_row = row
+            active_phase = 'persisting the timeslot configuration'
+            site_id = uuid.UUID(row['site_id'])
+            game_date = date.fromisoformat(row['date'])
+            kickoff = time.fromisoformat(row['kickoff'])
+            if group['architecture'] == 'physical_area':
+                area_id = uuid.UUID(row['physical_area_id'])
+                option_id = uuid.UUID(row['field_configuration_option_id'])
+                availability = db.query(HostingAvailability).filter(
+                    HostingAvailability.season_id == record.season_id,
+                    HostingAvailability.host_location_id == site_id,
+                    HostingAvailability.physical_field_area_id == area_id,
+                    HostingAvailability.field_configuration_option_id == option_id,
+                    HostingAvailability.available_date == game_date,
+                    HostingAvailability.active.is_(True),
+                    HostingAvailability.is_available.is_(True),
+                    HostingAvailability.start_time <= kickoff,
+                    HostingAvailability.end_time > kickoff,
+                ).first()
+                if not availability:
+                    source = db.query(HostingAvailability).filter(
+                        HostingAvailability.season_id == record.season_id,
+                        HostingAvailability.host_location_id == site_id,
+                        HostingAvailability.physical_field_area_id == area_id,
+                        HostingAvailability.available_date == game_date,
+                        HostingAvailability.active.is_(True),
+                        HostingAvailability.is_available.is_(True),
+                        HostingAvailability.start_time <= kickoff,
+                        HostingAvailability.end_time > kickoff,
+                    ).order_by(HostingAvailability.start_time.desc()).first()
+                    if not source:
+                        raise ValueError(f'{row.get("physical_area")} is no longer available for hosting.')
+                    option = db.get(FieldConfigurationOption, option_id)
+                    availability = HostingAvailability(
+                        season_id=record.season_id, week_id=uuid.UUID(row['week_id']),
+                        organization_id=source.organization_id, host_location_id=site_id,
+                        physical_field_area_id=area_id, field_configuration_option_id=option_id,
+                        layout_type=option.name, slot_index=source.slot_index,
+                        available_date=game_date, start_time=kickoff,
+                        end_time=min((datetime.combine(game_date, kickoff) + GAME_DURATION).time(), source.end_time),
+                        active=True, is_available=True, notes='Materialized by schedule import.',
+                    )
+                    db.add(availability)
+                configuration_records[group_key] = availability
+                continue
+
+            configuration_value = row.get('configuration_id')
+            if not configuration_value and row.get('configuration_name'):
+                configuration_name = str(row['configuration_name']).strip().upper()
+                supported = db.query(HostLocationConfiguration).filter_by(
+                    host_location_id=site_id, configuration_name=configuration_name).first()
+                if not supported:
+                    number_words = {'ONE': 1, 'TWO': 2, 'THREE': 3, 'FOUR': 4}
+                    counts = {'small_field_count': 0, 'medium_field_count': 0, 'large_field_count': 0}
+                    tokens = configuration_name.split('_')
+                    for index, token in enumerate(tokens[:-1]):
+                        size = tokens[index + 1]
+                        if token in number_words and size in {'SMALL', 'MEDIUM', 'LARGE'}:
+                            counts[f'{size.lower()}_field_count'] += number_words[token]
+                    supported = HostLocationConfiguration(
+                        host_location_id=site_id, configuration_name=configuration_name,
+                        is_active=True, **counts)
+                    db.add(supported); db.flush()
+                configuration_value = str(supported.id)
+            existing_override = db.query(TimeslotFieldConfiguration).filter_by(
+                host_location_id=site_id, configuration_date=game_date,
+                kickoff_time=kickoff).first()
+            if existing_override and str(existing_override.configuration_id) != configuration_value:
+                raise ValueError(f'{row.get("site")} already has a different configuration for {row.get("date")} at {row.get("kickoff")}')
+            if not existing_override:
+                existing_override = TimeslotFieldConfiguration(
+                    host_location_id=site_id, configuration_date=game_date,
+                    kickoff_time=kickoff, configuration_id=uuid.UUID(configuration_value))
+                db.add(existing_override)
+            configuration_records[group_key] = existing_override
+        db.flush()
+
         # Resolve and validate every staged canonical field before removing the
         # old schedule.  Older PREVIEW records used ``field_id``; new previews
         # make the distinction explicit with ``resolved_field_id``.
@@ -157,52 +263,7 @@ def confirm_schedule_import(
                 site_id = uuid.UUID(row['site_id'])
                 game_date = date.fromisoformat(row['date'])
                 kickoff = time.fromisoformat(row['kickoff'])
-                source_availability = db.query(HostingAvailability).filter(
-                    HostingAvailability.season_id == record.season_id,
-                    HostingAvailability.host_location_id == site_id,
-                    HostingAvailability.physical_field_area_id == area_id,
-                    HostingAvailability.available_date == game_date,
-                    HostingAvailability.active.is_(True),
-                    HostingAvailability.is_available.is_(True),
-                    HostingAvailability.start_time <= kickoff,
-                    HostingAvailability.end_time > kickoff,
-                ).order_by(HostingAvailability.start_time.desc()).first()
-                if not source_availability:
-                    raise ValueError(
-                        f'{row.get("physical_area")} is no longer available for hosting '
-                        f'on {game_date.strftime("%m/%d/%Y")} at {kickoff.strftime("%I:%M %p")}.'
-                    )
-                availability = db.query(HostingAvailability).filter(
-                    HostingAvailability.season_id == record.season_id,
-                    HostingAvailability.host_location_id == site_id,
-                    HostingAvailability.physical_field_area_id == area_id,
-                    HostingAvailability.field_configuration_option_id == option_id,
-                    HostingAvailability.available_date == game_date,
-                    HostingAvailability.active.is_(True),
-                    HostingAvailability.is_available.is_(True),
-                    HostingAvailability.start_time <= kickoff,
-                    HostingAvailability.end_time > kickoff,
-                ).first()
-                if not availability:
-                    option = db.get(FieldConfigurationOption, option_id)
-                    slot_end = (datetime.combine(game_date, kickoff) + GAME_DURATION).time()
-                    availability = HostingAvailability(
-                        season_id=record.season_id,
-                        week_id=uuid.UUID(row['week_id']),
-                        organization_id=source_availability.organization_id,
-                        host_location_id=site_id,
-                        physical_field_area_id=area_id,
-                        field_configuration_option_id=option_id,
-                        layout_type=option.name,
-                        slot_index=source_availability.slot_index,
-                        available_date=game_date,
-                        start_time=kickoff,
-                        end_time=min(slot_end, source_availability.end_time),
-                        active=True,
-                        is_available=True,
-                        notes='Materialized by schedule import.',
-                    )
-                    db.add(availability); db.flush()
+                availability = configuration_records[row['configuration_group_key']]
                 area = db.get(PhysicalFieldArea, area_id)
                 field_name = f'{area.name} / {row["field"]}'
                 instance = db.query(FieldInstance).filter_by(
@@ -303,48 +364,13 @@ def confirm_schedule_import(
             db.query(GameSlot).filter(GameSlot.assigned_game_id.in_(existing_ids)).update({GameSlot.assigned_game_id:None, GameSlot.status:'OPEN'}, synchronize_session=False)
             for game in existing: db.delete(game)
             db.flush()
-        timeslot_overrides = {}
-        for row, *_resolved in resolved_rows:
-            active_row = row
-            active_phase = 'persisting the timeslot configuration'
-            configuration_value = row.get('configuration_id')
-            if not configuration_value and row.get('configuration_name'):
-                configuration_name = str(row['configuration_name']).strip().upper()
-                supported_configuration = db.query(HostLocationConfiguration).filter_by(
-                    host_location_id=uuid.UUID(row['site_id']), configuration_name=configuration_name,
-                ).first()
-                if not supported_configuration:
-                    number_words = {'ONE': 1, 'TWO': 2, 'THREE': 3, 'FOUR': 4}
-                    counts = {'small_field_count': 0, 'medium_field_count': 0, 'large_field_count': 0}
-                    tokens = configuration_name.split('_')
-                    for index, token in enumerate(tokens[:-1]):
-                        size = tokens[index + 1]
-                        if token in number_words and size in {'SMALL', 'MEDIUM', 'LARGE'}:
-                            counts[f'{size.lower()}_field_count'] += number_words[token]
-                    supported_configuration = HostLocationConfiguration(
-                        host_location_id=uuid.UUID(row['site_id']), configuration_name=configuration_name,
-                        is_active=True, **counts,
-                    )
-                    db.add(supported_configuration); db.flush()
-                configuration_value = str(supported_configuration.id)
-            if not configuration_value:
-                continue
-            key = (uuid.UUID(row['site_id']), date.fromisoformat(row['date']), time.fromisoformat(row['kickoff']))
-            override = db.query(TimeslotFieldConfiguration).filter_by(
-                host_location_id=key[0], configuration_date=key[1], kickoff_time=key[2],
-            ).first()
-            if override and override.configuration_id != uuid.UUID(configuration_value):
-                raise ValueError(f'Imported row {row.get("row")} conflicts with the persisted timeslot layout.')
-            if not override:
-                override = TimeslotFieldConfiguration(host_location_id=key[0], configuration_date=key[1], kickoff_time=key[2],
-                                                      configuration_id=uuid.UUID(configuration_value))
-                db.add(override); db.flush()
-            timeslot_overrides[key] = override
+        # Phase 2: games only reference the already flushed group result.
         created_games = []
         for row, resolved_field_id, resolved_instance_id, resolved_slot_id in resolved_rows:
             active_row = row
             active_phase = 'creating the scheduled game'
-            override = timeslot_overrides.get((uuid.UUID(row['site_id']), date.fromisoformat(row['date']), time.fromisoformat(row['kickoff'])))
+            group_record = configuration_records.get(row.get('configuration_group_key'))
+            override = (group_record if isinstance(group_record, TimeslotFieldConfiguration) else None)
             game = Game(season_id=record.season_id, week_id=uuid.UUID(row['week_id']), home_team_id=uuid.UUID(row['home_team_id']), away_team_id=uuid.UUID(row['away_team_id']), field_id=resolved_field_id, field_instance_id=resolved_instance_id, field_layout_type_override=row.get('field_layout_type_override'), timeslot_configuration_id=override.id if override else None, host_location_id=uuid.UUID(row['site_id']), game_status_id=uuid.UUID(row['game_status_id']), game_date=date.fromisoformat(row['date']), kickoff_time=time.fromisoformat(row['kickoff']), internal_admin_notes=row.get('notes'), is_manual_edit=True, manual_updated_by_user_id=current_user.id, manual_updated_at=datetime.now(timezone.utc))
             db.add(game)
             created_games.append((row, game, resolved_field_id, resolved_instance_id, resolved_slot_id))
@@ -385,12 +411,16 @@ def confirm_schedule_import(
         logger.info('schedule_import_field_persistence import_id=%s diagnostics=%s', import_id, field_persistence_diagnostics)
         if season: season.schedule_modified_after_publish = bool(season.last_published_at)
         db.commit()
-    except Exception:
+    except Exception as exc:
         db.rollback()
+        database_error = getattr(exc, 'orig', exc)
+        constraint_name = getattr(getattr(database_error, 'diag', None), 'constraint_name', None)
         logger.exception(
             'Schedule import transaction rolled back import_id=%s source_row=%s week=%s '
             'date=%s kickoff=%s site=%s architecture=%s field_id=%s physical_area_id=%s '
-            'configuration_id=%s slot_id=%s home_team_id=%s away_team_id=%s phase=%s',
+            'configuration_id=%s configuration_group_key=%s existing_configuration_id=%s '
+            'slot_id=%s home_team_id=%s away_team_id=%s phase=%s database_exception=%r '
+            'constraint_name=%s',
             import_id, active_row.get('row') if active_row else None,
             active_row.get('week') if active_row else None,
             active_row.get('date') if active_row else None,
@@ -400,15 +430,24 @@ def confirm_schedule_import(
             (active_row.get('resolved_field_id') or active_row.get('field_id')) if active_row else None,
             active_row.get('physical_area_id') if active_row else None,
             (active_row.get('field_configuration_option_id') or active_row.get('configuration_id')) if active_row else None,
+            active_row.get('configuration_group_key') if active_row else None,
+            (str(configuration_records.get(active_row.get('configuration_group_key')).id)
+             if active_row and active_row.get('configuration_group_key') in configuration_records
+             and getattr(configuration_records.get(active_row.get('configuration_group_key')), 'id', None)
+             else None),
             active_row.get('game_slot_id') if active_row else None,
             active_row.get('home_team_id') if active_row else None,
             active_row.get('away_team_id') if active_row else None, active_phase,
+            database_error, constraint_name,
         )
         row_label = active_row.get('row') if active_row else 'unknown'
+        block_label = ((active_row.get('physical_area') or active_row.get('site'))
+                       if active_row else 'field')
+        kickoff_label = active_row.get('kickoff') if active_row else ''
         raise HTTPException(
             500,
-            f'Schedule import failed while committing source row {row_label} during {active_phase}. '
-            'All schedule changes were rolled back. See server logs for the detailed error.',
+            f'Import failed while saving the {block_label} {kickoff_label} field configuration '
+            f'(source row {row_label}). No schedule changes were made.',
         )
     return {'import_id':str(record.id),'status':'COMPLETED','weeks_replaced':preview['weeks'],'existing_games_removed':len(existing),'games_imported':len(staged),'warning_count':preview['warning_count'],'field_persistence_diagnostics':field_persistence_diagnostics}
 
