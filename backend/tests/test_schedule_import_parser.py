@@ -199,6 +199,35 @@ def _area_row(teams, area, slot, field_type, kickoff='9:00 AM', index=0):
     return row
 
 
+def _confirm_rows(db, season, rows, filename='08232026 Flag Schedule.xlsx'):
+    preview, staged = build_preview(db, season.id, rows)
+    user_id = uuid.uuid4()
+    record = ScheduleImport(
+        season_id=season.id, imported_by_user_id=user_id, source_filename=filename,
+        weeks_replaced=json.dumps(preview['weeks']), status='PREVIEW',
+        staged_rows=json.dumps(staged), preview_summary=json.dumps(preview))
+    db.add(record); db.commit()
+    result = confirm_schedule_import(
+        record.id, {'confirmation': 'Replace Existing Schedule Games'}, db,
+        SimpleNamespace(id=user_id))
+    return preview, staged, result
+
+
+def _move_physical_fixture_to_production_timeslot(db):
+    production_date = _date('2026-08-23')
+    kickoff = _time('12:00 PM')
+    ending = _time('1:00 PM')
+    db.query(Week).update({'start_date': production_date, 'end_date': production_date,
+                           'primary_game_date': production_date})
+    db.query(HostingAvailability).update({
+        'available_date': production_date, 'primary_game_date': production_date,
+        'start_time': kickoff, 'end_time': ending})
+    db.query(FieldInstance).update({'instance_date': production_date})
+    db.query(GameSlot).update({
+        'slot_date': production_date, 'start_time': kickoff, 'end_time': ending})
+    db.commit()
+
+
 def _legacy_field_context():
     db, season, teams = _hiller_import_context()
     site = db.query(HostLocation).filter_by(name='Hiller Stadium').one()
@@ -530,6 +559,68 @@ def test_schedule_import_resolves_generated_slot_within_area():
     assert preview['blocking_errors'] == 0
     assert {row['field'] for row in staged} == {'Medium 1', 'Medium 2'}
     assert {row['configuration'] for row in preview['rows']} == {'2 Medium'}
+
+
+def test_tosc_soccer_three_small_persists_once_with_three_games():
+    db, season, teams, site = _physical_area_context()
+    _move_physical_fixture_to_production_timeslot(db)
+    rows = [_area_row(teams, 'Soccer Field', f'Small {number}', 'Small',
+                      kickoff='12:00 PM', index=number * 2)
+            for number in range(1, 4)]
+    for row in rows:
+        row['date'] = '2026-08-23'
+
+    preview, staged, result = _confirm_rows(db, season, rows)
+
+    assert preview['blocking_errors'] == preview['warning_count'] == 0
+    assert preview['importable_games'] == result['games_imported'] == 3
+    assert len({row['configuration_group_key'] for row in staged}) == 1
+    games = db.query(Game).filter_by(season_id=season.id).all()
+    assert len(games) == 3
+    assert len({game.field_instance.hosting_availability_id for game in games}) == 1
+    assignment = games[0].field_instance.hosting_availability
+    assert assignment.physical_field_area.name == 'Soccer Field'
+    assert assignment.field_configuration_option.name == '3 Small'
+
+
+def test_tosc_replacement_updates_soccer_timeslot_from_medium_to_three_small():
+    db, season, teams, _site = _physical_area_context()
+    medium_rows = [_area_row(teams, 'Soccer Field', f'Medium {number}', 'Medium', index=number * 2)
+                   for number in range(1, 3)]
+    _confirm_rows(db, season, medium_rows, 'existing-medium.xlsx')
+    old_game_ids = {game.id for game in db.query(Game).filter_by(season_id=season.id)}
+    small_rows = [_area_row(teams, 'Soccer Field', f'Small {number}', 'Small', index=10 + number * 2)
+                  for number in range(1, 4)]
+
+    _preview, _staged, result = _confirm_rows(db, season, small_rows)
+
+    games = db.query(Game).filter_by(season_id=season.id).all()
+    assert result['existing_games_removed'] == 2
+    assert len(games) == 3
+    assert old_game_ids.isdisjoint({game.id for game in games})
+    assert len({game.field_instance.hosting_availability_id for game in games}) == 1
+    assert games[0].field_instance.hosting_availability.field_configuration_option.name == '3 Small'
+
+
+def test_same_layout_name_is_scoped_to_each_physical_area():
+    db, season, teams, _site = _physical_area_context()
+    rows = []
+    for area_index, area in enumerate(('Football Field 1', 'Soccer Field')):
+        rows.extend(_area_row(teams, area, f'Small {number}', 'Small',
+                              index=area_index * 8 + number * 2)
+                    for number in range(1, 4))
+
+    preview, staged, result = _confirm_rows(db, season, rows)
+
+    assert preview['blocking_errors'] == 0
+    assert result['games_imported'] == 6
+    assert len({row['physical_area_id'] for row in staged}) == 2
+    games = db.query(Game).filter_by(season_id=season.id).all()
+    assignments = {game.field_instance.hosting_availability for game in games}
+    assert len(assignments) == 2
+    assert {item.physical_field_area.name for item in assignments} == {
+        'Football Field 1', 'Soccer Field'}
+    assert {item.field_configuration_option.name for item in assignments} == {'3 Small'}
 
 
 def test_import_does_not_require_pregenerated_runtime_slot_and_commit_materializes_it():
