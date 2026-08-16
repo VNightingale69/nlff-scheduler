@@ -180,6 +180,18 @@ class ScheduleManagementExportTest(unittest.TestCase):
         self.assertEqual(_field_export_display_issue('Wave 1 Small Field 1'), 'Export display issue: Field column contains Wave terminology.')
         self.assertEqual(_field_export_display_issue('TWO_MEDIUM Medium Field 2'), 'Export display issue: Field column should show explicit field slot only.')
 
+    def test_schedule_export_uses_clean_retired_field_name(self):
+        values = _schedule_export_row_values(
+            SimpleNamespace(game_date=date(2026, 8, 16), kickoff_time=time(9, 0)),
+            SimpleNamespace(field_type='MEDIUM'),
+            SimpleNamespace(field_name='__retired_generated__f9ac615f__retired_generated__f9ac615f__Medium Field 1'),
+            SimpleNamespace(name='Hiller Stadium'),
+            SimpleNamespace(name='Home'), SimpleNamespace(name='Away'),
+            SimpleNamespace(division_group='Coed', name='4-5'),
+            SimpleNamespace(code='SCHEDULED'),
+        )
+        self.assertEqual(values[6], 'Medium Field 1')
+
 
 class ScheduleManagementExportIntegrityGuardTest(unittest.TestCase):
     def test_export_row_downgrades_scheduled_without_complete_assignment(self):
