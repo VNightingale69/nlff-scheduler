@@ -28065,10 +28065,14 @@ def _ensure_scheduled_game(db: Session, game_id: uuid.UUID) -> Game:
 def _ensure_community_can_score(game: Game, current_user: User) -> uuid.UUID:
     if not current_user.organization_id:
         raise HTTPException(403, 'User has no community scope')
-    org_id = current_user.organization_id
-    if game.home_team.organization_id != org_id and game.away_team.organization_id != org_id:
-        raise HTTPException(403, 'Community admins may only submit scores for games involving their community.')
-    return org_id
+    # This community identifies the actor in the score audit trail; it does not
+    # own score entry for either team. Other community resources remain scoped.
+    return current_user.organization_id
+
+
+def _ensure_game_in_active_score_season(game: Game) -> None:
+    if not game.season or not game.season.is_active:
+        raise HTTPException(403, 'Scores may only be managed in the active league season.')
 
 
 def _get_or_create_game_score(db: Session, game: Game) -> GameScore:
@@ -28573,10 +28577,13 @@ def public_standings(season_id: uuid.UUID | None = None, division_id: uuid.UUID 
 
 @router.get('/scores/my-community', dependencies=[Depends(require_roles(ROLE_COMMUNITY_ADMIN))])
 @router.get('/community/scores', dependencies=[Depends(require_roles(ROLE_COMMUNITY_ADMIN))])
-def community_scores(week_id: uuid.UUID | None = None, division_id: uuid.UUID | None = None, team_id: uuid.UUID | None = None, host_location_id: uuid.UUID | None = None, status: str | None = None, published: str | None = None, missing: bool = False, flagged: bool = False, conflicts: bool = False, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def community_scores(season_id: uuid.UUID | None = None, week_id: uuid.UUID | None = None, division_id: uuid.UUID | None = None, team_id: uuid.UUID | None = None, host_location_id: uuid.UUID | None = None, status: str | None = None, published: str | None = None, missing: bool = False, flagged: bool = False, conflicts: bool = False, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     if not current_user.organization_id:
         raise HTTPException(403, 'User has no community scope')
-    rows = _score_rows(db, {'organization_id': current_user.organization_id, 'week_id': week_id, 'division_id': division_id, 'team_id': team_id, 'host_location_id': host_location_id}, organization_filter_any_team=True)
+    season = _get_schedule_scope_season(db, season_id)
+    if not season or not season.is_active:
+        raise HTTPException(404, 'Active score-entry season not found.')
+    rows = _score_rows(db, {'season_id': season.id, 'week_id': week_id, 'division_id': division_id, 'team_id': team_id, 'host_location_id': host_location_id})
     rows = _apply_score_filters(rows, status, published, missing, flagged, conflicts)
     return {'items': [_score_game_dict(row, include_history=True, db=db) for row in rows], 'total': len(rows)}
 
@@ -28586,6 +28593,7 @@ def community_scores(week_id: uuid.UUID | None = None, division_id: uuid.UUID | 
 def submit_community_score(game_id: uuid.UUID, payload: ScorePayload, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     home_score, away_score, home_forfeit, away_forfeit, normalization_note = _normalize_score_input(payload.home_score, payload.away_score)
     game = _ensure_scheduled_game(db, game_id)
+    _ensure_game_in_active_score_season(game)
     community_id = _ensure_community_can_score(game, current_user)
     active_score = _get_or_create_game_score(db, game)
     if active_score.score_status in {SCORE_STATUS_APPROVED, SCORE_STATUS_PUBLISHED} or active_score.is_published:
@@ -28632,6 +28640,7 @@ def submit_community_score(game_id: uuid.UUID, payload: ScorePayload, current_us
 @router.post('/scores/{game_id}/flag', dependencies=[Depends(require_roles(ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
 def flag_community_score(game_id: uuid.UUID, payload: ScoreApprovePayload | None = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     game = _ensure_scheduled_game(db, game_id)
+    _ensure_game_in_active_score_season(game)
     role_name = normalize_role_name(current_user.role.name)
     community_id = _ensure_community_can_score(game, current_user) if role_name == ROLE_COMMUNITY_ADMIN else current_user.organization_id
     active_score = _get_or_create_game_score(db, game)

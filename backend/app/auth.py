@@ -168,15 +168,9 @@ def can_approve_publish_scores(current_user: User | None) -> bool:
 def can_submit_community_scores(current_user: User | None, game) -> bool:
     if not current_user or not getattr(current_user, 'role', None):
         return False
-    if normalize_role_name(current_user.role.name) != ROLE_COMMUNITY_ADMIN or not current_user.organization_id:
-        return False
-    organization_id = current_user.organization_id
-    home_team = getattr(game, 'home_team', None)
-    away_team = getattr(game, 'away_team', None)
-    return bool(
-        (home_team and getattr(home_team, 'organization_id', None) == organization_id)
-        or (away_team and getattr(away_team, 'organization_id', None) == organization_id)
-    )
+    # Score entry is a league workflow, not an organization-owned resource.
+    # Team/field/hosting authorization remains organization-scoped elsewhere.
+    return normalize_role_name(current_user.role.name) == ROLE_COMMUNITY_ADMIN
 
 
 def require_schedule_admin(current_user: User = Depends(get_current_user)) -> User:
