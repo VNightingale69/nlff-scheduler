@@ -9,7 +9,8 @@ assert.equal(buildHostingColumns([field({ physicalFieldId: 'football-1-small-1',
 
 const warnings = [];
 const duplicates = buildHostingColumns([field(), field({ physicalFieldId: 'duplicate-id' })], (message) => warnings.push(message));
-assert.equal(duplicates.length, 2);
+assert.equal(duplicates.length, 1);
+assert.deepEqual(duplicates[0].physicalFieldIds, ['field-small-1', 'duplicate-id']);
 assert.equal(warnings.length, 1);
 assert.match(warnings[0], /Duplicate physical field identity detected[\s\S]*Field ID A: field-small-1[\s\S]*Field ID B: duplicate-id/);
 
@@ -31,6 +32,13 @@ assert.deepEqual(buildHostingColumns([
 console.log('hosting column regression checks passed');
 
 const game = (overrides = {}) => ({ id: 'grey-gold', date: '2026-08-23', time: '12:00:00', ...field(), ...overrides });
+// Legacy duplicate database IDs share one canonical column without losing games.
+const duplicateIdGames = [game({ id: 'canonical-game' }), game({ id: 'duplicate-game', physicalFieldId: 'duplicate-id' })];
+const repairedColumns = buildHostingColumns(duplicateIdGames, () => {});
+const repairedCells = buildHostingCells(duplicateIdGames, () => {}, repairedColumns);
+assert.equal(repairedColumns.length, 1);
+assert.deepEqual(repairedCells.get(`2026-08-23:12:00:00:${repairedColumns[0].key}`)?.map(({ id }) => id), ['canonical-game', 'duplicate-game']);
+
 const targeted = game({ homeTeam: 'Antioch Coed 2-3 Grey', awayTeam: 'Jbrg Coed 2-3 Gold' });
 const targetedCells = buildHostingCells([targeted]);
 assert.equal(hostingCellKey(targeted), '2026-08-23:12:00:00:field:field-small-1');

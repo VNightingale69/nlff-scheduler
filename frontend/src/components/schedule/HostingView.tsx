@@ -15,6 +15,9 @@ export type HostingViewGame = {
   physicalArea: string;
   fieldLane: string;
   fieldType?: string | null;
+  active?: boolean | null;
+  deletedAt?: string | null;
+  source?: string | null;
   division: string;
   homeTeam: string;
   awayTeam: string;
@@ -41,7 +44,6 @@ function GameCard({ game }: { game: HostingViewGame }) {
 /** Read-only host report. Its caller supplies either saved draft games or public snapshot games. */
 export default function HostingView({ games, mode = 'published' }: { games: HostingViewGame[]; mode?: 'published' | 'unpublished' }) {
   const warn = process.env.NODE_ENV === 'production' ? () => {} : console.warn;
-  const cells = buildHostingCells(games, warn);
   const dates = Array.from(new Set(games.map((game) => game.date))).sort();
   return <div className={`hosting-view ${mode === 'unpublished' ? 'unpublished-hosting-view' : ''} space-y-8`}>
     {mode === 'unpublished' && <div className='unpublished-banner rounded border-2 border-amber-400 bg-amber-50 p-3 text-amber-950'><strong className='block uppercase tracking-wide'>Pre-published schedule</strong><span className='text-sm'>Unpublished schedule preview — not visible to the public. Read only and subject to change.</span></div>}
@@ -53,6 +55,18 @@ export default function HostingView({ games, mode = 'published' }: { games: Host
           const hostGames = dateGames.filter((game) => (game.hostLocation || 'Host Location Unassigned') === host);
           const times = Array.from(new Set(hostGames.map((game) => game.time))).sort();
           const lanes = buildHostingColumns(hostGames, warn);
+          const cells = buildHostingCells(hostGames, warn, lanes);
+          console.table(lanes.map((column) => ({
+            physicalFieldId: column.physicalFieldId,
+            physicalFieldIds: column.physicalFieldIds.join(', '),
+            physicalAreaId: column.physicalAreaId,
+            physicalAreaName: column.area,
+            fieldName: column.lane,
+            fieldType: column.fieldType,
+            active: hostGames.find((game) => game.physicalFieldId === column.physicalFieldId)?.active,
+            deletedAt: hostGames.find((game) => game.physicalFieldId === column.physicalFieldId)?.deletedAt,
+            source: hostGames.find((game) => game.physicalFieldId === column.physicalFieldId)?.source || 'scheduled games',
+          })));
           return <section key={host} className='hosting-location-section break-inside-avoid-page rounded-lg border bg-white shadow-sm'>
             <header className='hosting-location-heading border-b bg-slate-800 px-4 py-3 text-white'><h2 className='text-lg font-extrabold'>{host}</h2><p className='text-sm font-medium text-slate-200'>{formatDisplayDate(date)}</p></header>
             <div className='hosting-grid-scroll overflow-x-auto'>
