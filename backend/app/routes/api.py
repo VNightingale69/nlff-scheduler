@@ -39,6 +39,7 @@ from app.schemas import (
 from app.security import access_token_expires_at, auth_invalid_token_exception, create_access_token, create_refresh_token, hash_password, validate_password_strength, verify_password, decode_token
 from app.services.game_statuses import REQUIRED_GAME_STATUSES, ensure_required_game_statuses
 from app.services.generated_field_names import get_field_display_name, retire_generated_field
+from app.services.field_resolution import resolve_game_field_display, snapshot_game_field_display
 from app.services.organization_cleanup import cleanup_organization_dependencies, collect_organization_delete_inventory
 from app.services.scheduling_validation import validate_game
 from app.services.tosc_field_areas import ensure_tosc_physical_areas
@@ -387,7 +388,10 @@ def confirm_schedule_import(
             active_phase = 'creating the scheduled game'
             group_record = configuration_records.get(row.get('configuration_group_key'))
             override = (group_record if isinstance(group_record, TimeslotFieldConfiguration) else None)
-            game = Game(season_id=record.season_id, week_id=uuid.UUID(row['week_id']), home_team_id=uuid.UUID(row['home_team_id']), away_team_id=uuid.UUID(row['away_team_id']), field_id=resolved_field_id, field_instance_id=resolved_instance_id, field_layout_type_override=row.get('field_layout_type_override'), timeslot_configuration_id=override.id if override else None, host_location_id=uuid.UUID(row['site_id']), game_status_id=uuid.UUID(row['game_status_id']), game_date=date.fromisoformat(row['date']), kickoff_time=time.fromisoformat(row['kickoff']), internal_admin_notes=row.get('notes'), is_manual_edit=True, manual_updated_by_user_id=current_user.id, manual_updated_at=datetime.now(timezone.utc))
+            field_record = db.get(Field, resolved_field_id) if resolved_field_id else None
+            instance_record = db.get(FieldInstance, resolved_instance_id) if resolved_instance_id else None
+            site_record = db.get(HostLocation, uuid.UUID(row['site_id']))
+            game = Game(season_id=record.season_id, week_id=uuid.UUID(row['week_id']), home_team_id=uuid.UUID(row['home_team_id']), away_team_id=uuid.UUID(row['away_team_id']), field_id=resolved_field_id, field_instance_id=resolved_instance_id, field_layout_type_override=row.get('field_layout_type_override'), timeslot_configuration_id=override.id if override else None, host_location_id=uuid.UUID(row['site_id']), game_status_id=uuid.UUID(row['game_status_id']), game_date=date.fromisoformat(row['date']), kickoff_time=time.fromisoformat(row['kickoff']), internal_admin_notes=row.get('notes'), is_manual_edit=True, manual_updated_by_user_id=current_user.id, manual_updated_at=datetime.now(timezone.utc), field_display_name_snapshot=get_field_display_name(getattr(instance_record, 'field_name', None) or getattr(field_record, 'name', None) or row.get('imported_field_name')), physical_area_name_snapshot=getattr(getattr(field_record, 'physical_field_area', None), 'name', None), host_location_name_snapshot=getattr(site_record, 'name', None))
             db.add(game)
             created_games.append((row, game, resolved_field_id, resolved_instance_id, resolved_slot_id))
         db.flush()
@@ -12097,6 +12101,13 @@ def del_field(item_id: uuid.UUID, current_user: User = Depends(get_current_user)
                 previous_field_name = getattr(previous_instance, 'field_name', None)
             game.previous_field_id = previous_field_instance_id or x.id
             game.previous_field_name = previous_field_name or x.name
+            historical = resolve_game_field_display(
+                game,
+                db,
+                field_instance=(db.get(FieldInstance, previous_field_instance_id)
+                                if previous_field_instance_id else None),
+            )
+            snapshot_game_field_display(game, historical, host_location.name)
             game.field_id = None
             game.field_instance_id = None
             game.missing_field_assignment = True
@@ -16967,10 +16978,9 @@ def _to_game_read(
                 or field_instance_name
                 or getattr(slot_field_instance, 'field_name', None)
             )
-    if field_instance_name is None and getattr(g, 'field_instance', None):
-        field_instance_name = _clean_explicit_field_slot_label(g.field_instance.field_name, getattr(g.field_instance, 'field_type', None))
-    if field_instance_name is None and getattr(g, 'field', None):
-        field_instance_name = _clean_explicit_field_slot_label(g.field.name, getattr(g.field, 'layout_type', None))
+    historical_field = resolve_game_field_display(g, db, generated_slot=generated_slot)
+    if field_instance_name is None:
+        field_instance_name = historical_field.name
     if host_location_name is None and getattr(g, 'host_location', None):
         host_location_name = g.host_location.name
     return GameRead(
@@ -17441,6 +17451,8 @@ def assign_generated_slot(payload: dict, db: Session = Depends(get_db)):
         game_status_id=status.id,
         game_date=slot.slot_date,
         kickoff_time=slot.start_time,
+        field_display_name_snapshot=get_field_display_name(getattr(slot.field_instance, 'field_name', None)),
+        host_location_name_snapshot=host_location.name,
     )
     db.add(game); db.flush()
     slot.status = 'ASSIGNED'; slot.assigned_game_id = game.id
@@ -25901,7 +25913,7 @@ def _schedule_review_game(row, publication_status: str) -> dict:
         'away_organization': away.organization.name if away.organization else None,
         'host_organization': host.organization.name if host and host.organization else None,
         'host_location': host.name if host else None,
-        'field': get_field_display_name(getattr(canonical_field, 'name', None) or getattr(field_instance, 'field_name', None)) or 'Not assigned',
+        'field': resolve_game_field_display(game, field_instance=field_instance, generated_slot=_slot).name or 'Not assigned',
         'field_type': getattr(canonical_field, 'layout_type', None) or getattr(field_instance, 'field_type', None),
         'publication_status': publication_status,
     }
@@ -28199,7 +28211,8 @@ def _score_game_dict(row, include_history: bool = False, db: Session | None = No
     data = {
         'id': str(g.id), 'game_id': str(g.id), 'game_date': g.game_date.isoformat(), 'kickoff_time': g.kickoff_time.isoformat() if g.kickoff_time else None,
         'host_location_id': str(host.id) if host else None, 'host_location_name': host.name if host else '',
-        'field_id': str(fi.id) if fi else None, 'field_name': _field_export_display_label(slot, fi, db),
+        'field_id': str(fi.id) if fi else (str(g.field_id) if g.field_id else None),
+        'field_name': resolve_game_field_display(g, db, generated_slot=slot, field_instance=fi).name,
         'field_type': slot.field_type if slot else None, 'turf_wave_id': str(slot.turf_wave_id) if slot and slot.turf_wave_id else None,
         'turf_wave_start_time': wave.start_time.isoformat() if wave else None,
         'turf_configuration_code': turf_configuration_code if turf_configuration_code in TURF_APPROVED_LAYOUT_CODES else None,
@@ -29431,7 +29444,7 @@ def _public_game_read_from_schedule_row(row, db: Session | None = None, current_
         host_location_id=host.id if host else None,
         host_location_name=host.name if host else '',
         field_id=g.field_id,
-        field_name=(get_field_display_name(canonical_field.name) if canonical_field else (_field_export_display_label(slot, fi, db) if fi else ('Field unavailable' if g.field_id else 'Field Not Assigned'))),
+        field_name=resolve_game_field_display(g, db, generated_slot=slot, field_instance=fi).name or 'Field Not Assigned',
         # Generated/turf schedules assign the physical component through the
         # published game slot rather than a canonical ``Field`` row.  Expose
         # that authoritative size so public reports can label the assignment

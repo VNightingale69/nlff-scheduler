@@ -484,6 +484,12 @@ class Game(Base, TimestampMixin):
     field_deleted_from_game: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     previous_field_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     previous_field_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    # Immutable presentation evidence.  Field/slot rows are scheduling
+    # configuration and may be retired; a played/published game must not lose
+    # its historical meaning when that happens.
+    field_display_name_snapshot: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    physical_area_name_snapshot: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    host_location_name_snapshot: Mapped[str | None] = mapped_column(String(255), nullable=True)
     field_deleted_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     field_assignment_status: Mapped[str | None] = mapped_column(String(40), nullable=True)
     game_type: Mapped[str] = mapped_column(String(30), nullable=False, default='REGULAR_SEASON')
