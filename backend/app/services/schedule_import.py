@@ -1,6 +1,7 @@
 """Parsing and validation for staged CSV/XLSX schedule imports."""
 import csv
 import io
+import logging
 import re
 from datetime import date, datetime, time, timedelta
 
@@ -20,6 +21,7 @@ from app.services.facility_layout_validation import (get_active_supported_layout
                                                       layout_label)
 
 REQUIRED = ('week', 'date', 'kickoff', 'site', 'field', 'fieldtype', 'division', 'hometeam', 'awayteam')
+logger = logging.getLogger(__name__)
 
 
 def _key(value):
@@ -73,6 +75,53 @@ def configuration_supports_required_slots(existing_slot_ids, required_slot_ids):
     Extra IDs in the saved layout are unused capacity and are therefore valid.
     """
     return set(required_slot_ids) <= set(existing_slot_ids)
+
+
+def _layout_integrity_error(configuration, site, physical_area=None):
+    """Validate the complete persisted membership of a custom field layout.
+
+    Capacity columns are not a substitute for live member records.  In
+    particular, silently dropping a deleted member can make a stale layout
+    appear to support an import by name while its foreign keys cannot be used.
+    """
+    if not configuration or not configuration.is_active:
+        return 'Configuration could not be resolved or is inactive.'
+    members = list(configuration.members or [])
+    member_ids = [member.field_id for member in members]
+    if len(member_ids) != len(set(member_ids)):
+        return 'Configuration contains a duplicate physical field assignment.'
+    expected_by_type = {
+        size: int(getattr(configuration, f'{size.lower()}_field_count', 0) or 0)
+        for size in ('SMALL', 'MEDIUM', 'LARGE')
+    }
+    if not sum(expected_by_type.values()):
+        # Older custom layouts predate the capacity columns. Their canonical
+        # label still describes the required complete membership.
+        label = _text(configuration.configuration_name).upper().replace('_', ' ')
+        for count, size in re.findall(r'(\d+)\s+(SMALL|MEDIUM|LARGE)', label):
+            expected_by_type[size] += int(count)
+    expected = sum(expected_by_type.values())
+    if len(members) != expected:
+        return (f'Configuration is incomplete: it requires {expected} physical fields '
+                f'but has {len(members)} assigned.')
+    for member in members:
+        field = member.field
+        if not field:
+            return ('Configuration contains a reference to a physical field that no longer '
+                    'exists. Edit the configuration and reassign its fields before importing.')
+        if (field.deleted_at is not None or not field.is_active
+                or field.host_location_id != site.id
+                or (physical_area is not None
+                    and field.physical_field_area_id != physical_area.id)):
+            return (f'Configuration references field "{field.name}", but that field is inactive, '
+                    'deleted, or no longer assigned to this physical area.')
+        field_type = _normalized_field_type(field.layout_type)
+        configured_count = expected_by_type.get(field_type, 0)
+        actual_count = sum(1 for item in members if item.field and
+                           _normalized_field_type(item.field.layout_type) == field_type)
+        if not field_type or actual_count > configured_count:
+            return f'Configuration references field "{field.name}" with an incompatible field type.'
+    return None
 
 
 def _area_slot_candidates(db, area, slot_name, field_type):
@@ -443,10 +492,10 @@ def build_preview(db, season_id, raw_rows):
     for group_key, grouped in timeslot_rows.items():
         kickoff = group_key[-1]
         is_area_group = len(group_key) == 4
+        site = db.get(HostLocation, grouped[0][1]['site_id'])
         if is_area_group:
             sample_staged = grouped[0][1]
             area = db.get(PhysicalFieldArea, sample_staged['physical_area_id'])
-            site = db.get(HostLocation, sample_staged['site_id'])
             game_date = _date(grouped[0][0]['date'])
             availability = _area_hosting_availability(
                 db, season_id, site, area, game_date, kickoff)
@@ -487,6 +536,17 @@ def build_preview(db, season_id, raw_rows):
                             sum(capacity.values()) - sum(imported_counts.values()))
                 best_rank = min(map(inference_rank, common_ids))
                 exact_ids = {code for code in common_ids if inference_rank(code) == best_rank}
+            explicit_labels = {_normalized_name(row.get('configuration'))
+                               for row, *_ in grouped if _text(row.get('configuration'))}
+            if len(explicit_labels) > 1:
+                message = (f'Conflicting configurations were specified for '
+                           f'{grouped[0][0].get("physical_area") or grouped[0][0]["site"]} '
+                           f'at {kickoff.strftime("%-I:%M %p")}. All games using the same '
+                           'physical area during a timeslot must use the same field layout.')
+                for row, staged_row, _ in grouped:
+                    row['status'] = 'ERROR'; row['message'] = message
+                    invalid_staged_ids.add(id(staged_row))
+                continue
             explicit = _text(grouped[0][0].get('configuration'))
             if explicit:
                 exact_ids = {code for code in common_ids if
@@ -537,6 +597,16 @@ def build_preview(db, season_id, raw_rows):
                         selected_code = existing_code
             selected = grouped[0][2][selected_code]
             layout = getattr(selected, 'name', None) or selected.configuration_name.replace('_', ' ').title()
+            if not is_area_group and (site.surface_type or '').upper() != 'TURF_STADIUM':
+                integrity_error = _layout_integrity_error(selected, site)
+                if integrity_error:
+                    message = f'Configuration "{layout}" for {site.name} is invalid. {integrity_error}'
+                    for row, staged_row, _ in grouped:
+                        row['status'] = 'ERROR'; row['message'] = message
+                        invalid_staged_ids.add(id(staged_row))
+                    continue
+            resolved_member_ids = ([str(member.field_id) for member in selected.members]
+                                   if not is_area_group else [])
             for row, staged_row, _candidates in grouped:
                 # This is the canonical scheduling-block identity used by
                 # confirmation.  Persist it in staging so commit never has to
@@ -580,9 +650,19 @@ def build_preview(db, season_id, raw_rows):
                 else:
                     staged_row['configuration_id'] = str(selected.id) if selected else None
                     staged_row['configuration_name'] = selected_code
+                    staged_row['layout_field_ids'] = resolved_member_ids
                 layout_message = f'{row.get("physical_area") or row["site"]} will use its {layout} configuration for this timeslot.'
                 row['message'] = (f'{row["message"]} {layout_message}' if row['status'] == 'WARNING'
                                   else f'Ready to import. {layout_message}')
+            logger.info(
+                'schedule_import_timeslot_resolved host_location_id=%s physical_area_id=%s '
+                'physical_area_name=%s date=%s kickoff=%s layout_id=%s layout_name=%s '
+                'resolved_field_ids=%s source_rows=%s',
+                grouped[0][1]['site_id'], grouped[0][1].get('physical_area_id'),
+                grouped[0][0].get('physical_area'), grouped[0][0]['date'],
+                grouped[0][0]['kickoff'], selected.id, layout, resolved_member_ids,
+                [row['row'] for row, *_ in grouped],
+            )
 
     # A persisted legacy layout is authoritative.  Compare its canonical field
     # membership with all assignments in the imported wave; layout labels are
@@ -599,6 +679,16 @@ def build_preview(db, season_id, raw_rows):
             kickoff_time=_time(kickoff_value)).first()
         if not existing:
             continue
+        existing_integrity_error = _layout_integrity_error(
+            existing.configuration, db.get(HostLocation, site_id))
+        if existing_integrity_error:
+            message = (f'Existing configuration "{layout_label(existing.configuration)}" is invalid. '
+                       f'{existing_integrity_error}')
+            for staged_row in grouped_rows:
+                matching_result = next(item for item in results if item['row'] == staged_row['row'])
+                matching_result['status'] = 'ERROR'; matching_result['message'] = message
+                invalid_staged_ids.add(id(staged_row))
+            continue
         available_ids = {str(member.field_id) for member in existing.configuration.members
                          if member.field and member.field.is_active and member.field.deleted_at is None}
         required_ids = {row.get('resolved_field_id') or row.get('field_id') for row in grouped_rows}
@@ -608,6 +698,7 @@ def build_preview(db, season_id, raw_rows):
             for staged_row in grouped_rows:
                 staged_row['configuration_id'] = str(existing.configuration_id)
                 staged_row['configuration_name'] = existing.configuration.configuration_name
+                staged_row['layout_field_ids'] = sorted(available_ids)
                 matching_result = next(item for item in results if item['row'] == staged_row['row'])
                 matching_result['configuration'] = current_label
                 matching_result['message'] = (

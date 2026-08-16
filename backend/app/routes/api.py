@@ -26,6 +26,7 @@ from app.models import Division, Field, FieldConfigurationMember, FieldConfigura
 from app.services.facility_layout_validation import active_layout_capacities, active_supported_layouts_query, field_combination_diagnostics, get_active_supported_layouts, layout_label, select_supported_layout, validate_field_combination, validate_timeslot_demands
 from app.services.division_field_types import required_field_type_for_division
 from app.services.schedule_import import (build_preview,
+                                          _layout_integrity_error,
                                           configuration_supports_required_slots,
                                           parse_schedule_file)
 from app.schemas import (
@@ -207,6 +208,22 @@ def confirm_schedule_import(
                 continue
 
             configuration_value = row.get('configuration_id')
+            if configuration_value:
+                supported = db.query(HostLocationConfiguration).filter(
+                    HostLocationConfiguration.id == uuid.UUID(configuration_value),
+                    HostLocationConfiguration.host_location_id == site_id,
+                    HostLocationConfiguration.is_active.is_(True),
+                ).first()
+                integrity_error = _layout_integrity_error(supported, db.get(HostLocation, site_id))
+                if integrity_error:
+                    raise ValueError(integrity_error)
+                planned_field_ids = set(row.get('layout_field_ids') or [])
+                current_field_ids = {str(member.field_id) for member in supported.members}
+                if planned_field_ids and current_field_ids != planned_field_ids:
+                    raise ValueError(
+                        f'Configuration "{row.get("configuration") or row.get("configuration_name")}" '
+                        'changed after preview; preview the schedule again.'
+                    )
             if not configuration_value and row.get('configuration_name'):
                 configuration_name = str(row['configuration_name']).strip().upper()
                 supported = db.query(HostLocationConfiguration).filter_by(
@@ -464,10 +481,18 @@ def confirm_schedule_import(
         block_label = ((active_row.get('physical_area') or active_row.get('site'))
                        if active_row else 'field')
         kickoff_label = active_row.get('kickoff') if active_row else ''
+        configuration_label = ((active_row.get('configuration')
+                                or active_row.get('area_configuration_name')
+                                or active_row.get('configuration_name')) if active_row else None)
+        if isinstance(exc, ValueError):
+            sanitized_reason = str(exc).replace('\n', ' ')[:300]
+        else:
+            sanitized_reason = 'The resolved configuration could not be persisted. Please preview the import again.'
         raise HTTPException(
             500,
-            f'Import failed while saving the {block_label} {kickoff_label} field configuration '
-            f'(source row {row_label}). No schedule changes were made.',
+            f'Import failed while saving the {block_label} {kickoff_label} configuration. '
+            f'Configuration: {configuration_label or "Unknown"}. Source row: {row_label}. '
+            f'Reason: {sanitized_reason} No schedule changes were made.',
         )
     return {'import_id':str(record.id),'status':'COMPLETED','weeks_replaced':preview['weeks'],'existing_games_removed':len(existing),'games_imported':len(staged),'warning_count':preview['warning_count'],'field_persistence_diagnostics':field_persistence_diagnostics}
 
