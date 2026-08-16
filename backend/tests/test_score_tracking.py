@@ -187,7 +187,7 @@ class ScoreTrackingTest(unittest.TestCase):
         self.assertEqual(item['away_score'], 'F')
         self.assertEqual(item['public_score_status'], 'PUBLISHED')
 
-    def test_community_admin_can_submit_when_home_or_away_but_not_unrelated(self):
+    def test_community_admin_can_submit_and_edit_unrelated_league_game(self):
         home_response = self._submit(self.home_user)
         self.assertEqual(home_response.status_code, 200, home_response.text)
         self.assertEqual(home_response.json()['score']['score_status'], 'SUBMITTED')
@@ -198,9 +198,33 @@ class ScoreTrackingTest(unittest.TestCase):
         self.assertEqual(away_response.json()['score']['submitted_by_community_id'], str(self.away_org.id))
 
         unrelated = self._submit(self.other_user, self.game.id)
-        self.assertEqual(unrelated.status_code, 403)
+        self.assertEqual(unrelated.status_code, 200, unrelated.text)
+        self.assertEqual(unrelated.json()['score']['submitted_by_user_id'], str(self.other_user.id))
+        self.assertEqual(unrelated.json()['score']['submitted_by_community_id'], str(self.other_org.id))
+        edited = self._submit(self.other_user, self.game.id, home=22, away=14)
+        self.assertEqual(edited.status_code, 200, edited.text)
+        self.assertEqual(edited.json()['score']['home_score'], 22)
         self.db.expire_all()
         self.assertEqual(self.db.query(GameScore).filter(GameScore.game_id == self.game.id).count(), 1)
+
+    def test_community_admin_sees_and_can_flag_all_active_season_games(self):
+        response = self.client.get('/api/scores/my-community', headers=self._token(self.home_user.id))
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual({item['game_id'] for item in response.json()['items']}, {str(self.game.id), str(self.other_game.id)})
+
+        flagged = self.client.post(
+            f'/api/scores/{self.other_game.id}/flag',
+            headers=self._token(self.home_user.id),
+            json={'reason': 'score needs review'},
+        )
+        self.assertEqual(flagged.status_code, 200, flagged.text)
+        self.assertEqual(flagged.json()['score']['score_status'], 'FLAGGED')
+
+    def test_community_admin_cannot_write_score_outside_active_season(self):
+        self.season.is_active = False
+        self.db.commit()
+        response = self._submit(self.other_user, self.game.id)
+        self.assertEqual(response.status_code, 403, response.text)
 
     def test_community_admin_cannot_administer_scores(self):
         self._submit(self.home_user)
