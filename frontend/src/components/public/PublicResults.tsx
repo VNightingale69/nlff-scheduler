@@ -29,7 +29,7 @@ export default function PublicResults({ view }: { view: 'standings' | 'scores' }
       {view === 'scores' && <p className='text-sm text-slate-600'>{payload.official_score_note || 'Published scores only.'}</p>}
       <label className='text-sm font-semibold text-slate-700'>Division <select aria-label='Division' className='ml-2 rounded-md border bg-white px-3 py-2 font-normal' value={division} onChange={event => setDivision(event.target.value)}><option value=''>All divisions</option>{divisions.map(item => <option key={item.division.id} value={item.division.id}>{item.division.division_group ? `${item.division.division_group} ` : ''}{item.division.name}</option>)}</select></label>
     </div>
-    {view === 'standings' ? <div className='space-y-7'>{visibleDivisions.map(block => <section key={block.division.id} className='overflow-hidden rounded-xl border bg-white shadow-sm'>
+    {view === 'standings' ? <div className='grid items-start gap-5 xl:grid-cols-2'>{visibleDivisions.map(block => <section key={block.division.id} className='w-full max-w-[760px] overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm'>
       <div className='flex items-center justify-between gap-3 bg-slate-100 px-4 py-3 sm:px-5'><h2 className='text-lg font-bold'>{block.division.division_group} {block.division.name}</h2><span className='text-sm font-medium text-slate-500'>{block.standings.length} {block.standings.length === 1 ? 'Team' : 'Teams'}</span></div>
       <StandingsTable rows={block.standings} divisionId={block.division.id} />
     </section>)}{visibleDivisions.length === 0 && <p className='rounded-lg border bg-white p-5'>No published standings are available.</p>}</div>

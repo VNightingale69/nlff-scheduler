@@ -5,7 +5,7 @@ const page = readFileSync(new URL('../src/app/standings/page.tsx', import.meta.u
 const results = readFileSync(new URL('../src/components/public/PublicResults.tsx', import.meta.url), 'utf8');
 const table = readFileSync(new URL('../src/components/StandingsTable.tsx', import.meta.url), 'utf8');
 
-assert.match(page, /max-w-5xl/, 'public standings uses a readable bounded container');
+assert.match(page, /max-w-\[1500px\]/, 'public standings uses a centered bounded page container');
 assert.match(results, /<StandingsTable rows=\{block\.standings\}/, 'public standings uses the shared table');
 assert.match(table, /<CommunityLogo src=\{row\.community_logo_url\}/, 'standings renders the logo included in its response');
 assert.match(table, /row\.organization_name \|\| row\.community_name/, 'standings provides the API community name to the logo fallback');
