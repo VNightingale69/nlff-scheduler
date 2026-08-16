@@ -16,7 +16,7 @@ export default function PublicHeader() {
   const pathname = usePathname();
   const [open, setOpen] = useState(false);
   return <header className='public-header border-b border-slate-200 bg-white print:hidden'>
-    <div className='mx-auto max-w-7xl px-4 py-3 sm:px-6'>
+    <div className='mx-auto w-full max-w-[1500px] px-4 py-3 sm:px-6 lg:px-8'>
       <div className='flex items-center justify-between gap-4'>
         <Link href='/' className='rounded text-lg font-extrabold tracking-tight text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-600 focus:ring-offset-2'>Community Flag Football</Link>
         <div className='flex items-center gap-2'>
