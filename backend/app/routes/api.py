@@ -126,6 +126,8 @@ def confirm_schedule_import(
         raise HTTPException(409, 'Unpublish the active schedule before importing a replacement.')
     week_ids=[uuid.UUID(x['week_id']) for x in staged]
     active_row = None
+    active_group_rows = []
+    active_existing_configuration_id = None
     active_phase = 'preparing the import transaction'
     configuration_records = {}
     try:
@@ -162,6 +164,8 @@ def confirm_schedule_import(
         configuration_records = {}
         for group_key, group in configuration_groups.items():
             row = group['row']; active_row = row
+            active_group_rows = group['rows']
+            active_existing_configuration_id = None
             active_phase = 'persisting the timeslot configuration'
             site_id = uuid.UUID(row['site_id'])
             game_date = date.fromisoformat(row['date'])
@@ -169,6 +173,30 @@ def confirm_schedule_import(
             if group['architecture'] == 'physical_area':
                 area_id = uuid.UUID(row['physical_area_id'])
                 option_id = uuid.UUID(row['field_configuration_option_id'])
+                area = db.get(PhysicalFieldArea, area_id)
+                option = db.get(FieldConfigurationOption, option_id)
+                if not area or area.host_location_id != site_id:
+                    raise ValueError(
+                        f'The {row.get("configuration") or "selected"} layout is not associated '
+                        f'with {row.get("physical_area") or "the selected physical area"}.')
+                if not option or option.physical_field_area_id != area_id or not option.is_active:
+                    raise ValueError(
+                        f'The {row.get("configuration") or "selected"} layout is not associated '
+                        f'with {area.name}.')
+                # An exact, materialized availability is the physical-area
+                # timeslot assignment.  Find it independently of its current
+                # layout so replacement imports update rather than INSERT a
+                # second assignment for the same area and kickoff.
+                assignment_end = (datetime.combine(game_date, kickoff) + GAME_DURATION).time()
+                assignment = db.query(HostingAvailability).filter(
+                    HostingAvailability.season_id == record.season_id,
+                    HostingAvailability.host_location_id == site_id,
+                    HostingAvailability.physical_field_area_id == area_id,
+                    HostingAvailability.available_date == game_date,
+                    HostingAvailability.start_time == kickoff,
+                    HostingAvailability.active.is_(True),
+                    HostingAvailability.is_available.is_(True),
+                ).order_by(HostingAvailability.updated_at.desc()).first()
                 availability = db.query(HostingAvailability).filter(
                     HostingAvailability.season_id == record.season_id,
                     HostingAvailability.host_location_id == site_id,
@@ -180,7 +208,20 @@ def confirm_schedule_import(
                     HostingAvailability.start_time <= kickoff,
                     HostingAvailability.end_time > kickoff,
                 ).first()
-                if not availability:
+                # Prefer an already-valid assignment/capability for this
+                # layout.  This avoids rewriting another configured option
+                # when administrators intentionally publish multiple layout
+                # capabilities for the same physical area and time window.
+                if availability:
+                    assignment = availability
+                if assignment:
+                    active_existing_configuration_id = assignment.id
+                    assignment.field_configuration_option_id = option_id
+                    assignment.layout_type = option.name
+                    assignment.week_id = uuid.UUID(row['week_id'])
+                    assignment.end_time = min(assignment_end, assignment.end_time)
+                    availability = assignment
+                elif not availability:
                     source = db.query(HostingAvailability).filter(
                         HostingAvailability.season_id == record.season_id,
                         HostingAvailability.host_location_id == site_id,
@@ -193,7 +234,6 @@ def confirm_schedule_import(
                     ).order_by(HostingAvailability.start_time.desc()).first()
                     if not source:
                         raise ValueError(f'{row.get("physical_area")} is no longer available for hosting.')
-                    option = db.get(FieldConfigurationOption, option_id)
                     availability = HostingAvailability(
                         season_id=record.season_id, week_id=uuid.UUID(row['week_id']),
                         organization_id=source.organization_id, host_location_id=site_id,
@@ -454,28 +494,33 @@ def confirm_schedule_import(
         constraint_name = getattr(getattr(database_error, 'diag', None), 'constraint_name', None)
         logger.exception(
             'Schedule import transaction rolled back import_id=%s source_row=%s week=%s '
-            'date=%s kickoff=%s site=%s architecture=%s field_id=%s physical_area_id=%s '
-            'configuration_id=%s configuration_group_key=%s existing_configuration_id=%s '
+            'date=%s kickoff=%s host_location_id=%s host_location_name=%s architecture=%s '
+            'physical_field_ids=%s physical_area_id=%s physical_area_name=%s '
+            'layout_id=%s layout_name=%s source_rows=%s configuration_group_key=%s '
+            'existing_configuration_id=%s '
             'slot_id=%s home_team_id=%s away_team_id=%s phase=%s database_exception=%r '
-            'constraint_name=%s',
+            'database_exception_type=%s constraint_name=%s',
             import_id, active_row.get('row') if active_row else None,
             active_row.get('week') if active_row else None,
             active_row.get('date') if active_row else None,
             active_row.get('kickoff') if active_row else None,
+            active_row.get('site_id') if active_row else None,
             active_row.get('site') if active_row else None,
             active_row.get('field_architecture') if active_row else None,
-            (active_row.get('resolved_field_id') or active_row.get('field_id')) if active_row else None,
+            [(item.get('resolved_field_id') or item.get('field_id') or item.get('field_instance_id'))
+             for item in active_group_rows],
             active_row.get('physical_area_id') if active_row else None,
+            active_row.get('physical_area') if active_row else None,
             (active_row.get('field_configuration_option_id') or active_row.get('configuration_id')) if active_row else None,
+            ((active_row.get('configuration') or active_row.get('area_configuration_name')
+              or active_row.get('configuration_name')) if active_row else None),
+            [item.get('row') for item in active_group_rows],
             active_row.get('configuration_group_key') if active_row else None,
-            (str(configuration_records.get(active_row.get('configuration_group_key')).id)
-             if active_row and active_row.get('configuration_group_key') in configuration_records
-             and getattr(configuration_records.get(active_row.get('configuration_group_key')), 'id', None)
-             else None),
+            str(active_existing_configuration_id) if active_existing_configuration_id else None,
             active_row.get('game_slot_id') if active_row else None,
             active_row.get('home_team_id') if active_row else None,
             active_row.get('away_team_id') if active_row else None, active_phase,
-            database_error, constraint_name,
+            database_error, type(database_error).__name__, constraint_name,
         )
         row_label = active_row.get('row') if active_row else 'unknown'
         block_label = ((active_row.get('physical_area') or active_row.get('site'))
@@ -486,6 +531,21 @@ def confirm_schedule_import(
                                 or active_row.get('configuration_name')) if active_row else None)
         if isinstance(exc, ValueError):
             sanitized_reason = str(exc).replace('\n', ' ')[:300]
+        elif isinstance(exc, IntegrityError):
+            sqlstate = (getattr(database_error, 'sqlstate', None)
+                        or getattr(database_error, 'pgcode', None))
+            if sqlstate == '23503':
+                sanitized_reason = (
+                    f'The {configuration_label or "selected"} layout references a field or '
+                    'physical area that no longer exists. Please preview the import again.')
+            elif sqlstate == '23502':
+                sanitized_reason = (
+                    f'The {configuration_label or "selected"} layout is missing a required '
+                    'physical-area relationship. Please preview the import again.')
+            else:
+                sanitized_reason = (
+                    f'The {block_label} already has a field configuration assignment for '
+                    f'{kickoff_label}. The replacement import could not update the existing assignment.')
         else:
             sanitized_reason = 'The resolved configuration could not be persisted. Please preview the import again.'
         raise HTTPException(
