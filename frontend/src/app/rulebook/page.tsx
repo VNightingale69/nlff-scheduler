@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { API_URL } from '@/lib/api';
 import { APP_NAME } from '@/config/branding';
+import PublicLayout from '@/components/public/PublicLayout';
 
 type Rulebook = {
   original_filename: string;
@@ -57,7 +58,7 @@ export default function PublicRulebookPage() {
   }, []);
 
   return (
-    <main className='mx-auto max-w-4xl space-y-4 p-4'>
+    <PublicLayout><main className='mx-auto max-w-4xl space-y-4 p-4'>
       <div className='flex flex-wrap items-center justify-between gap-3'>
         <div>
           <h1 className='text-2xl font-bold'>Rulebook</h1>
@@ -72,7 +73,6 @@ export default function PublicRulebookPage() {
         <section className='rounded border bg-white p-4 shadow-sm'>
           <h2 className='text-lg font-semibold'>{rulebook.original_filename}</h2>
           <dl className='mt-3 grid gap-2 text-sm sm:grid-cols-2'>
-            <div><dt className='font-medium text-slate-500'>Uploaded</dt><dd>{new Date(rulebook.uploaded_at).toLocaleString()}</dd></div>
             <div><dt className='font-medium text-slate-500'>File size</dt><dd>{formatBytes(rulebook.file_size_bytes)}</dd></div>
           </dl>
           <div className='mt-4 flex flex-wrap gap-2'>
@@ -81,6 +81,6 @@ export default function PublicRulebookPage() {
           </div>
         </section>
       )}
-    </main>
+    </main></PublicLayout>
   );
 }
