@@ -1,10 +1,12 @@
-"""Site-scoped resolution of human-readable field identifiers."""
+"""Scheduling lookups and lifecycle-independent historical game display."""
 
 import re
+from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
-from app.models import Field, HostLocation
+from app.models import Field, FieldInstance, Game, GameSlot, HostLocation
+from app.services.generated_field_names import get_field_display_name
 
 
 _CANONICAL_COMPONENT_SEPARATOR = re.compile(r'\s+(?:-|\u2013|\u2014)\s+')
@@ -97,3 +99,73 @@ def resolve_active_field(db: Session, site: HostLocation, identifier: object) ->
         return canonical[0]
     logical = [field for field in fields if requested in logical_field_identifiers(field)]
     return logical[0] if len(logical) == 1 else None
+
+
+@dataclass(frozen=True)
+class HistoricalFieldDisplay:
+    """A display value plus the stable historical source that supplied it."""
+
+    name: str | None
+    source: str
+    field_id: object | None = None
+    field_instance_id: object | None = None
+    physical_area_name: str | None = None
+
+
+def resolve_game_field_display(
+    game: Game,
+    db: Session | None = None,
+    *,
+    generated_slot: GameSlot | None = None,
+    field_instance: FieldInstance | None = None,
+) -> HistoricalFieldDisplay:
+    """Resolve an assigned game's field without applying schedulability rules.
+
+    This is deliberately separate from :func:`resolve_active_field`.  Stable
+    IDs on old games remain readable even when their rows are inactive,
+    retired, or soft-deleted.  Snapshots are evidence of last resort, never an
+    identity that can be selected for a new game.
+    """
+    instance = field_instance or getattr(generated_slot, 'field_instance', None)
+    if instance is None:
+        instance = getattr(game, 'field_instance', None)
+    instance_id = (
+        getattr(generated_slot, 'field_instance_id', None)
+        or getattr(game, 'field_instance_id', None)
+    )
+    if instance is None and db is not None and instance_id:
+        instance = db.get(FieldInstance, instance_id)
+    if instance is not None:
+        name = get_field_display_name(getattr(instance, 'field_name', None))
+        if name:
+            return HistoricalFieldDisplay(name, 'generated_slot' if generated_slot else 'field_instance',
+                                          field_instance_id=getattr(instance, 'id', instance_id))
+
+    field_id = getattr(game, 'field_id', None)
+    field = getattr(game, 'field', None)
+    if field is None and db is not None and field_id:
+        # db.get intentionally has no active/deleted predicate.
+        field = db.get(Field, field_id)
+    if field is not None:
+        name = get_field_display_name(getattr(field, 'name', None))
+        area = getattr(field, 'physical_field_area', None)
+        if name:
+            return HistoricalFieldDisplay(name, 'field', field_id=getattr(field, 'id', field_id),
+                                          physical_area_name=getattr(area, 'name', None))
+
+    snapshot = getattr(game, 'field_display_name_snapshot', None) or getattr(game, 'previous_field_name', None)
+    snapshot = get_field_display_name(snapshot)
+    if snapshot:
+        return HistoricalFieldDisplay(snapshot, 'snapshot', field_id=field_id or getattr(game, 'previous_field_id', None),
+                                      physical_area_name=getattr(game, 'physical_area_name_snapshot', None))
+    return HistoricalFieldDisplay(None, 'unassigned')
+
+
+def snapshot_game_field_display(game: Game, resolved: HistoricalFieldDisplay, host_name: str | None = None) -> None:
+    """Persist durable display evidence without changing scheduling identity."""
+    if resolved.name and not getattr(game, 'field_display_name_snapshot', None):
+        game.field_display_name_snapshot = resolved.name
+    if resolved.physical_area_name and not getattr(game, 'physical_area_name_snapshot', None):
+        game.physical_area_name_snapshot = resolved.physical_area_name
+    if host_name and not getattr(game, 'host_location_name_snapshot', None):
+        game.host_location_name_snapshot = host_name
