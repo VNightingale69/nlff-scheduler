@@ -602,6 +602,33 @@ def test_tosc_replacement_updates_soccer_timeslot_from_medium_to_three_small():
     assert games[0].field_instance.hosting_availability.field_configuration_option.name == '3 Small'
 
 
+def test_tosc_replacement_restores_retired_exact_timeslot_assignment():
+    """A soft-retired parent is reconciled, not duplicated on replacement."""
+    db, season, teams, _site = _physical_area_context()
+    medium_rows = [_area_row(teams, 'Soccer Field', f'Medium {number}', 'Medium',
+                             index=number * 2)
+                   for number in range(1, 3)]
+    _confirm_rows(db, season, medium_rows, 'existing-medium.xlsx')
+    old_assignment = db.query(Game).filter_by(season_id=season.id).first().field_instance.hosting_availability
+    old_assignment.active = False
+    old_assignment.is_available = False
+    old_assignment.notes = 'Materialized by schedule import.'
+    old_assignment_id = old_assignment.id
+    db.commit()
+    small_rows = [_area_row(teams, 'Soccer Field', f'Small {number}', 'Small',
+                            index=10 + number * 2)
+                  for number in range(1, 4)]
+
+    _preview, _staged, result = _confirm_rows(db, season, small_rows)
+
+    restored = db.get(HostingAvailability, old_assignment_id)
+    assert result['games_imported'] == 3
+    assert restored.active and restored.is_available
+    assert restored.field_configuration_option.name == '3 Small'
+    assert {game.field_instance.hosting_availability_id
+            for game in db.query(Game).filter_by(season_id=season.id)} == {restored.id}
+
+
 def test_same_layout_name_is_scoped_to_each_physical_area():
     db, season, teams, _site = _physical_area_context()
     rows = []

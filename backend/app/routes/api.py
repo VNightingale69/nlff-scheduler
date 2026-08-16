@@ -194,9 +194,14 @@ def confirm_schedule_import(
                     HostingAvailability.physical_field_area_id == area_id,
                     HostingAvailability.available_date == game_date,
                     HostingAvailability.start_time == kickoff,
-                    HostingAvailability.active.is_(True),
-                    HostingAvailability.is_available.is_(True),
-                ).order_by(HostingAvailability.updated_at.desc()).first()
+                ).order_by(
+                    # A prior import assignment is the canonical parent even
+                    # when it was subsequently retired.  Restore/update it;
+                    # inserting beside it can collide with
+                    # uq_field_availability_slot on PostgreSQL.
+                    (HostingAvailability.notes == 'Materialized by schedule import.').desc(),
+                    HostingAvailability.updated_at.desc(),
+                ).first()
                 availability = db.query(HostingAvailability).filter(
                     HostingAvailability.season_id == record.season_id,
                     HostingAvailability.host_location_id == site_id,
@@ -212,13 +217,15 @@ def confirm_schedule_import(
                 # layout.  This avoids rewriting another configured option
                 # when administrators intentionally publish multiple layout
                 # capabilities for the same physical area and time window.
-                if availability:
+                if availability and not assignment:
                     assignment = availability
                 if assignment:
                     active_existing_configuration_id = assignment.id
                     assignment.field_configuration_option_id = option_id
                     assignment.layout_type = option.name
                     assignment.week_id = uuid.UUID(row['week_id'])
+                    assignment.active = True
+                    assignment.is_available = True
                     assignment.end_time = min(assignment_end, assignment.end_time)
                     availability = assignment
                 elif not availability:
@@ -302,7 +309,35 @@ def confirm_schedule_import(
                     kickoff_time=kickoff, configuration_id=uuid.UUID(configuration_value))
                 db.add(existing_override)
             configuration_records[group_key] = existing_override
-        db.flush()
+        # Keep this flush at the configuration boundary.  In particular, do
+        # not let a failure here get attributed to whichever game row happens
+        # to be processed last.  PostgreSQL's original exception (including
+        # ``diag.constraint_name``) is logged before the transaction is rolled
+        # back by the outer handler.
+        try:
+            db.flush()
+        except Exception as exc:
+            database_error = getattr(exc, 'orig', exc)
+            constraint_name = getattr(
+                getattr(database_error, 'diag', None), 'constraint_name', None)
+            logger.exception(
+                'Schedule import configuration persistence failed '
+                'model=%s table=%s host_location_id=%s physical_area_id=%s '
+                'date=%s kickoff=%s layout_id=%s field_ids=%s source_rows=%s '
+                'database_exception_type=%s constraint_name=%s',
+                ('HostingAvailability' if group['architecture'] == 'physical_area'
+                 else 'TimeslotFieldConfiguration'),
+                ('hosting_availabilities' if group['architecture'] == 'physical_area'
+                 else 'timeslot_field_configurations'),
+                row.get('site_id'), row.get('physical_area_id'), row.get('date'),
+                row.get('kickoff'),
+                row.get('field_configuration_option_id') or row.get('configuration_id'),
+                [item.get('resolved_field_id') or item.get('field_id')
+                 for item in active_group_rows],
+                [item.get('row') for item in active_group_rows],
+                type(database_error).__name__, constraint_name,
+            )
+            raise
 
         # Resolve and validate every staged canonical field before removing the
         # old schedule.  Older PREVIEW records used ``field_id``; new previews
@@ -330,14 +365,19 @@ def confirm_schedule_import(
                 raise ValueError(f'Imported row {row.get("row")} lost its physical area assignment.')
             if architecture == 'legacy_field' and not (row.get('resolved_field_id') or row.get('field_id')):
                 raise ValueError(f'Imported row {row.get("row")} lost its legacy field assignment.')
-            if architecture == 'physical_area' and (not row.get('field_instance_id')
-                                                 or not row.get('game_slot_id')):
+            staged_instance = (db.get(FieldInstance, uuid.UUID(row['field_instance_id']))
+                               if architecture == 'physical_area'
+                               and row.get('field_instance_id') else None)
+            group_availability = configuration_records.get(row.get('configuration_group_key'))
+            if architecture == 'physical_area' and (
+                    not staged_instance or not row.get('game_slot_id')
+                    or staged_instance.hosting_availability_id != group_availability.id):
                 area_id = uuid.UUID(row['physical_area_id'])
                 option_id = uuid.UUID(row['field_configuration_option_id'])
                 site_id = uuid.UUID(row['site_id'])
                 game_date = date.fromisoformat(row['date'])
                 kickoff = time.fromisoformat(row['kickoff'])
-                availability = configuration_records[row['configuration_group_key']]
+                availability = group_availability
                 area = db.get(PhysicalFieldArea, area_id)
                 field_name = f'{area.name} / {row["field"]}'
                 instance = db.query(FieldInstance).filter_by(
