@@ -6,6 +6,9 @@ export type HostingField = {
   physicalArea: string;
   fieldLane: string;
   fieldType?: string | null;
+  active?: boolean | null;
+  deletedAt?: string | null;
+  source?: string | null;
 };
 
 export type HostingColumn = {
@@ -16,6 +19,8 @@ export type HostingColumn = {
   lane: string;
   fieldType?: string | null;
   label: string;
+  /** Every database identity folded into this canonical logical column. */
+  physicalFieldIds: string[];
 };
 
 export type HostingPlacement = HostingField & {
@@ -32,11 +37,13 @@ export const hostingFieldKey = (field: HostingField) => field.physicalFieldId
 /** The saved physical field assignment is the complete identity of a hosting cell. */
 export const hostingCellKey = (game: HostingPlacement) => `${game.date}:${game.time}:${hostingFieldKey(game)}`;
 
-export function buildHostingCells<T extends HostingPlacement>(games: T[], warn: (message: string) => void = console.warn): Map<string, T[]> {
+export function buildHostingCells<T extends HostingPlacement>(games: T[], warn: (message: string) => void = console.warn, columns?: HostingColumn[]): Map<string, T[]> {
   const cells = new Map<string, T[]>();
+  const canonicalKeyById = new Map(columns?.flatMap((column) => column.physicalFieldIds.map((id) => [id, column.key] as const)) || []);
   const seenIds = new Set<string>();
   for (const game of games) {
-    const cellKey = hostingCellKey(game);
+    const fieldKey = game.physicalFieldId ? canonicalKeyById.get(game.physicalFieldId) : undefined;
+    const cellKey = `${game.date}:${game.time}:${fieldKey || hostingFieldKey(game)}`;
     const contents = cells.get(cellKey) || [];
     contents.push(game);
     cells.set(cellKey, contents);
@@ -56,18 +63,23 @@ const naturalCompare = new Intl.Collator(undefined, { numeric: true, sensitivity
 
 export function buildHostingColumns(fields: HostingField[], warn: (message: string) => void = console.warn): HostingColumn[] {
   const columnsByField = new Map<string, HostingColumn>();
-  const idsByAreaAndLabel = new Map<string, string>();
+  const columnsByLogicalIdentity = new Map<string, HostingColumn>();
   for (const field of fields) {
     const parts = physicalFieldLabelParts({ physicalAreaName: field.physicalArea, fieldName: field.fieldLane });
     const label = formatPhysicalFieldLabel(parts.physicalAreaName, parts.fieldName);
-    const columnKey = hostingFieldKey(field);
-    if (!columnsByField.has(columnKey)) columnsByField.set(columnKey, { key: columnKey, physicalFieldId: field.physicalFieldId, physicalAreaId: field.physicalAreaId, area: parts.physicalAreaName, lane: parts.fieldName, label, fieldType: field.fieldType });
-    if (field.physicalFieldId) {
-      const labelKey = normalizeFieldIdentity(parts.physicalAreaName, parts.fieldName);
-      const previousId = idsByAreaAndLabel.get(labelKey);
-      if (previousId && previousId !== field.physicalFieldId) warn(`Duplicate physical field identity detected\n\nPhysical Area: ${parts.physicalAreaName}\nField: ${parts.fieldName}\nField ID A: ${previousId}\nField ID B: ${field.physicalFieldId}\nPhysical Area ID: ${field.physicalAreaId || 'unknown'}`);
-      else idsByAreaAndLabel.set(labelKey, field.physicalFieldId);
+    const logicalKey = `${field.physicalAreaId || normalizeFieldIdentity(parts.physicalAreaName, '')}:${normalizeFieldIdentity('', parts.fieldName)}`;
+    const existingLogical = columnsByLogicalIdentity.get(logicalKey);
+    if (existingLogical) {
+      if (field.physicalFieldId && !existingLogical.physicalFieldIds.includes(field.physicalFieldId)) {
+        warn(`Duplicate physical field identity detected\n\nPhysical Area: ${parts.physicalAreaName}\nField: ${parts.fieldName}\nField ID A: ${existingLogical.physicalFieldId}\nField ID B: ${field.physicalFieldId}\nPhysical Area ID: ${field.physicalAreaId || 'unknown'}\n\nBoth IDs were folded into canonical column ${existingLogical.key}.`);
+        existingLogical.physicalFieldIds.push(field.physicalFieldId);
+      }
+      continue;
     }
+    const columnKey = hostingFieldKey(field);
+    const column = { key: columnKey, physicalFieldId: field.physicalFieldId, physicalAreaId: field.physicalAreaId, area: parts.physicalAreaName, lane: parts.fieldName, label, fieldType: field.fieldType, physicalFieldIds: field.physicalFieldId ? [field.physicalFieldId] : [] };
+    columnsByField.set(columnKey, column);
+    columnsByLogicalIdentity.set(logicalKey, column);
   }
   return Array.from(columnsByField.values()).sort((a, b) => naturalCompare(a.area, b.area) || naturalCompare(a.fieldType || '', b.fieldType || '') || naturalCompare(a.lane, b.lane) || naturalCompare(a.key, b.key));
 }
