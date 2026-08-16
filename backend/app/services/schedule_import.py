@@ -8,14 +8,16 @@ from openpyxl import load_workbook
 
 from app.models import (Division, Field, FieldConfigurationOption, FieldInstance,
                         Game, GameSlot, HostLocation, HostingAvailability,
-                        PhysicalFieldArea, Season, Week)
+                        HostLocationConfiguration, PhysicalFieldArea, Season,
+                        TimeslotFieldConfiguration, Week)
 from app.teams import resolve_roster_team, season_roster
 from app.facility_layouts import (JOHNSBURG_APPROVED_LAYOUT_CODES_BY_LOCATION,
                                   johnsburg_field_templates,
                                   johnsburg_location_name)
 from app.services.field_resolution import (resolve_active_field,
                                             resolve_legacy_import_field)
-from app.services.facility_layout_validation import get_active_supported_layouts
+from app.services.facility_layout_validation import (get_active_supported_layouts,
+                                                      layout_label)
 
 REQUIRED = ('week', 'date', 'kickoff', 'site', 'field', 'fieldtype', 'division', 'hometeam', 'awayteam')
 
@@ -496,6 +498,16 @@ def build_preview(db, season_id, raw_rows):
             selected = grouped[0][2][selected_code]
             layout = getattr(selected, 'name', None) or selected.configuration_name.replace('_', ' ').title()
             for row, staged_row, _candidates in grouped:
+                # This is the canonical scheduling-block identity used by
+                # confirmation.  Persist it in staging so commit never has to
+                # infer a layout again from display labels.
+                staged_row['configuration_group_key'] = '|'.join(str(value) for value in (
+                    season_id, staged_row['date'], staged_row['kickoff'],
+                    staged_row['site_id'],
+                    staged_row.get('physical_area_id') if is_area_group else '',
+                ))
+                staged_row['resolved_configuration_architecture'] = (
+                    'physical_area' if is_area_group else 'legacy_layout')
                 if row.get('physical_area'):
                     staged_row['field_configuration_option_id'] = str(selected.id)
                     staged_row['area_configuration_name'] = layout
@@ -531,6 +543,30 @@ def build_preview(db, season_id, raw_rows):
                 layout_message = f'{row.get("physical_area") or row["site"]} will use its {layout} configuration for this timeslot.'
                 row['message'] = (f'{row["message"]} {layout_message}' if row['status'] == 'WARNING'
                                   else f'Ready to import. {layout_message}')
+
+    # A persisted legacy layout is authoritative.  Surface a changed-layout
+    # conflict in preview, before confirmation can remove any schedule games.
+    for staged_row in staged:
+        if (id(staged_row) in invalid_staged_ids
+                or staged_row.get('resolved_configuration_architecture') != 'legacy_layout'
+                or not staged_row.get('configuration_id')):
+            continue
+        existing = db.query(TimeslotFieldConfiguration).filter_by(
+            host_location_id=staged_row['site_id'],
+            configuration_date=_date(staged_row['date']),
+            kickoff_time=_time(staged_row['kickoff']),
+        ).first()
+        if existing and str(existing.configuration_id) != staged_row['configuration_id']:
+            required = db.get(HostLocationConfiguration, staged_row['configuration_id'])
+            current = existing.configuration
+            message = (
+                f'{staged_row["site"]} already has configuration '
+                f'"{layout_label(current)}" for {staged_row["date"]} at '
+                f'{_time(staged_row["kickoff"]).strftime("%-I:%M %p")}, but the import '
+                f'requires "{layout_label(required)}".')
+            matching_result = next(item for item in results if item['row'] == staged_row['row'])
+            matching_result['status'] = 'ERROR'; matching_result['message'] = message
+            invalid_staged_ids.add(id(staged_row))
     staged = [row for row in staged if id(row) not in invalid_staged_ids]
 
     affected = sorted({x['week_number'] for x in staged})
