@@ -344,6 +344,31 @@ def test_mixed_import_supports_physical_area_and_legacy_field_sites():
                   if row['field_architecture'] == 'legacy_field')
     assert legacy['resolved_field_id'] == str(legacy_field.id)
 
+    user_id = uuid.uuid4()
+    record = ScheduleImport(
+        season_id=season.id, imported_by_user_id=user_id,
+        source_filename='09132026 Schedule.xlsx',
+        weeks_replaced=json.dumps(preview['weeks']), status='PREVIEW',
+        staged_rows=json.dumps(staged), preview_summary=json.dumps(preview),
+    )
+    db.add(record); db.commit()
+
+    result = confirm_schedule_import(
+        record.id, {'confirmation': 'Replace Existing Schedule Games'},
+        db, SimpleNamespace(id=user_id),
+    )
+
+    games = db.query(Game).filter_by(season_id=season.id).all()
+    legacy_game = next(game for game in games if game.host_location_id == legacy_site.id)
+    configurable_game = next(game for game in games if game.host_location_id != legacy_site.id)
+    assert result['games_imported'] == len(games) == 2
+    assert legacy_game.field_id == legacy_field.id
+    assert legacy_game.field_instance_id is None
+    assert configurable_game.field_id is None
+    assert configurable_game.field_instance_id is not None
+    slot = db.query(GameSlot).filter_by(assigned_game_id=configurable_game.id).one()
+    assert slot.field_instance.field_name == 'Football Field 1 / Large 1'
+
 
 def test_schedule_import_resolves_physical_area():
     db, season, teams, _ = _physical_area_context()
@@ -703,7 +728,7 @@ def test_confirm_rolls_back_replacement_when_canonical_field_is_invalid():
     )
     db.add(record); db.commit()
 
-    with pytest.raises(Exception, match='Schedule import failed'):
+    with pytest.raises(Exception, match='source row 2'):
         confirm_schedule_import(record.id, {'confirmation': 'Replace Existing Schedule Games'},
                                 db, SimpleNamespace(id=user_id))
 

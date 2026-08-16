@@ -389,7 +389,7 @@ def build_preview(db, season_id, raw_rows):
         results.append(row)
         if not errors:
             resolved_slot = None
-            if field_instance and game_date and kickoff:
+            if physical_area and field_instance and game_date and kickoff:
                 resolved_slot = db.query(GameSlot).filter(
                     GameSlot.field_instance_id == field_instance.id,
                     GameSlot.slot_date == game_date,
@@ -407,7 +407,7 @@ def build_preview(db, season_id, raw_rows):
                            'resolved_field_id': str(field.id) if field else None,
                            'field_id': str(field.id) if field else None,
                            'field_layout_type_override': field_type if type_mismatch else None,
-                           'field_instance_id': str(field_instance.id) if field_instance else None,
+                           'field_instance_id': str(field_instance.id) if physical_area and field_instance else None,
                            'game_slot_id': str(resolved_slot.id) if resolved_slot else None,
                            'home_team_id': str(home.id), 'away_team_id': str(away.id),
                            'game_status_id': str(scheduled_status.id) if scheduled_status else None}

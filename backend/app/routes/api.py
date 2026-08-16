@@ -121,13 +121,36 @@ def confirm_schedule_import(
     if season and str(season.schedule_status).lower() == 'published':
         raise HTTPException(409, 'Unpublish the active schedule before importing a replacement.')
     week_ids=[uuid.UUID(x['week_id']) for x in staged]
+    active_row = None
+    active_phase = 'preparing the import transaction'
     try:
         # Resolve and validate every staged canonical field before removing the
         # old schedule.  Older PREVIEW records used ``field_id``; new previews
         # make the distinction explicit with ``resolved_field_id``.
         resolved_rows = []
         for row in staged:
-            if row.get('physical_area_id') and (not row.get('field_instance_id')
+            active_row = row
+            active_phase = 'persisting the resolved field assignment'
+            architecture = row.get('field_architecture') or (
+                'physical_area' if row.get('physical_area_id') else 'legacy_field')
+            logger.info(
+                'schedule_import_staged_row import_id=%s source_row=%s week=%s date=%s '
+                'kickoff=%s site=%s architecture=%s field_id=%s physical_area_id=%s '
+                'configuration_id=%s slot_id=%s home_team_id=%s away_team_id=%s',
+                import_id, row.get('row'), row.get('week'), row.get('date'),
+                row.get('kickoff'), row.get('site'), architecture,
+                row.get('resolved_field_id') or row.get('field_id'),
+                row.get('physical_area_id'),
+                row.get('field_configuration_option_id') or row.get('configuration_id'),
+                row.get('game_slot_id'), row.get('home_team_id'), row.get('away_team_id'),
+            )
+            if architecture not in {'legacy_field', 'physical_area'}:
+                raise ValueError(f'Imported row {row.get("row")} has an invalid field architecture.')
+            if architecture == 'physical_area' and not row.get('physical_area_id'):
+                raise ValueError(f'Imported row {row.get("row")} lost its physical area assignment.')
+            if architecture == 'legacy_field' and not (row.get('resolved_field_id') or row.get('field_id')):
+                raise ValueError(f'Imported row {row.get("row")} lost its legacy field assignment.')
+            if architecture == 'physical_area' and (not row.get('field_instance_id')
                                                  or not row.get('game_slot_id')):
                 area_id = uuid.UUID(row['physical_area_id'])
                 option_id = uuid.UUID(row['field_configuration_option_id'])
@@ -221,9 +244,14 @@ def confirm_schedule_import(
                     db.add(slot); db.flush()
                 row['field_instance_id'] = str(instance.id)
                 row['game_slot_id'] = str(slot.id)
-            resolved_field_value = row.get('resolved_field_id') or row.get('field_id')
+            # Configurable fields are represented by the dated FieldInstance and
+            # GameSlot.  A compatibility Field on an availability record must
+            # never turn that assignment into a legacy field relationship.
+            resolved_field_value = ((row.get('resolved_field_id') or row.get('field_id'))
+                                    if architecture == 'legacy_field' else None)
             resolved_field_id = uuid.UUID(resolved_field_value) if resolved_field_value else None
-            resolved_instance_id = uuid.UUID(row['field_instance_id']) if row.get('field_instance_id') else None
+            resolved_instance_id = (uuid.UUID(row['field_instance_id'])
+                                    if architecture == 'physical_area' and row.get('field_instance_id') else None)
             site_id = uuid.UUID(row['site_id'])
             if resolved_field_id:
                 canonical_field = db.query(Field).filter(
@@ -255,9 +283,8 @@ def confirm_schedule_import(
                         raise ValueError(
                             f'Physical-area layout assignment is no longer valid for imported row {row.get("row")}.'
                         )
-            if (row.get('resolved_field_id') or row.get('field_id')) and not resolved_field_id:
-                raise ValueError(f'Imported row {row.get("row")} lost its resolved field assignment.')
-            resolved_slot_id = uuid.UUID(row['game_slot_id']) if row.get('game_slot_id') else None
+            resolved_slot_id = (uuid.UUID(row['game_slot_id'])
+                                if architecture == 'physical_area' and row.get('game_slot_id') else None)
             if resolved_slot_id:
                 canonical_slot = db.query(GameSlot).filter(
                     GameSlot.id == resolved_slot_id,
@@ -278,6 +305,8 @@ def confirm_schedule_import(
             db.flush()
         timeslot_overrides = {}
         for row, *_resolved in resolved_rows:
+            active_row = row
+            active_phase = 'persisting the timeslot configuration'
             configuration_value = row.get('configuration_id')
             if not configuration_value and row.get('configuration_name'):
                 configuration_name = str(row['configuration_name']).strip().upper()
@@ -313,12 +342,16 @@ def confirm_schedule_import(
             timeslot_overrides[key] = override
         created_games = []
         for row, resolved_field_id, resolved_instance_id, resolved_slot_id in resolved_rows:
+            active_row = row
+            active_phase = 'creating the scheduled game'
             override = timeslot_overrides.get((uuid.UUID(row['site_id']), date.fromisoformat(row['date']), time.fromisoformat(row['kickoff'])))
             game = Game(season_id=record.season_id, week_id=uuid.UUID(row['week_id']), home_team_id=uuid.UUID(row['home_team_id']), away_team_id=uuid.UUID(row['away_team_id']), field_id=resolved_field_id, field_instance_id=resolved_instance_id, field_layout_type_override=row.get('field_layout_type_override'), timeslot_configuration_id=override.id if override else None, host_location_id=uuid.UUID(row['site_id']), game_status_id=uuid.UUID(row['game_status_id']), game_date=date.fromisoformat(row['date']), kickoff_time=time.fromisoformat(row['kickoff']), internal_admin_notes=row.get('notes'), is_manual_edit=True, manual_updated_by_user_id=current_user.id, manual_updated_at=datetime.now(timezone.utc))
             db.add(game)
             created_games.append((row, game, resolved_field_id, resolved_instance_id, resolved_slot_id))
         db.flush()
         for row, game, _resolved_field_id, _resolved_instance_id, resolved_slot_id in created_games:
+            active_row = row
+            active_phase = 'assigning the generated slot'
             if resolved_slot_id:
                 slot = db.get(GameSlot, resolved_slot_id)
                 if slot.assigned_game_id and slot.assigned_game_id != game.id:
@@ -330,6 +363,8 @@ def confirm_schedule_import(
         # the flushed Game objects here makes a lost relationship abort and
         # roll back the replacement rather than producing "Missing Field".
         for row, game, resolved_field_id, resolved_instance_id, resolved_slot_id in created_games:
+            active_row = row
+            active_phase = 'verifying the resolved field assignment'
             db.expire(game, ['field_id', 'field_instance_id'])
             if resolved_field_id is not None and game.field_id != resolved_field_id:
                 raise RuntimeError(f'Field assignment failed to persist for imported row {row.get("row")}.')
@@ -352,8 +387,29 @@ def confirm_schedule_import(
         db.commit()
     except Exception:
         db.rollback()
-        logger.exception('Schedule import transaction rolled back (import_id=%s)', import_id)
-        raise HTTPException(500, 'Schedule import failed and all schedule changes were rolled back.')
+        logger.exception(
+            'Schedule import transaction rolled back import_id=%s source_row=%s week=%s '
+            'date=%s kickoff=%s site=%s architecture=%s field_id=%s physical_area_id=%s '
+            'configuration_id=%s slot_id=%s home_team_id=%s away_team_id=%s phase=%s',
+            import_id, active_row.get('row') if active_row else None,
+            active_row.get('week') if active_row else None,
+            active_row.get('date') if active_row else None,
+            active_row.get('kickoff') if active_row else None,
+            active_row.get('site') if active_row else None,
+            active_row.get('field_architecture') if active_row else None,
+            (active_row.get('resolved_field_id') or active_row.get('field_id')) if active_row else None,
+            active_row.get('physical_area_id') if active_row else None,
+            (active_row.get('field_configuration_option_id') or active_row.get('configuration_id')) if active_row else None,
+            active_row.get('game_slot_id') if active_row else None,
+            active_row.get('home_team_id') if active_row else None,
+            active_row.get('away_team_id') if active_row else None, active_phase,
+        )
+        row_label = active_row.get('row') if active_row else 'unknown'
+        raise HTTPException(
+            500,
+            f'Schedule import failed while committing source row {row_label} during {active_phase}. '
+            'All schedule changes were rolled back. See server logs for the detailed error.',
+        )
     return {'import_id':str(record.id),'status':'COMPLETED','weeks_replaced':preview['weeks'],'existing_games_removed':len(existing),'games_imported':len(staged),'warning_count':preview['warning_count'],'field_persistence_diagnostics':field_persistence_diagnostics}
 
 
