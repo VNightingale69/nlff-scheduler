@@ -2,12 +2,15 @@
 
 import CommunityLogo from '@/components/CommunityLogo';
 import { formatDisplayDate, formatDisplayTime } from '@/lib/displayFormat';
+import { buildHostingColumns, hostingFieldKey } from './hostingColumns';
 
 export type HostingViewGame = {
   id?: string;
   date: string;
   time: string;
   hostLocation: string;
+  physicalFieldId?: string | null;
+  physicalAreaId?: string | null;
   physicalArea: string;
   fieldLane: string;
   fieldType?: string | null;
@@ -22,7 +25,7 @@ export type HostingViewGame = {
 
 const laneType = (game: HostingViewGame) => (game.fieldType || game.fieldLane || '').toUpperCase();
 const tint = (game: HostingViewGame) => laneType(game).includes('SMALL') ? 'bg-emerald-50' : laneType(game).includes('MEDIUM') ? 'bg-sky-50' : laneType(game).includes('LARGE') ? 'bg-rose-50' : 'bg-slate-50';
-const key = (game: HostingViewGame) => `${game.physicalArea} · ${game.fieldLane}`;
+const key = (game: HostingViewGame) => hostingFieldKey(game);
 
 function GameCard({ game }: { game: HostingViewGame }) {
   return <article className={`hosting-game-cell rounded border border-slate-200 p-2 ${tint(game)}`}>
@@ -46,7 +49,7 @@ export default function HostingView({ games, mode = 'published' }: { games: Host
         {hosts.map((host) => {
           const hostGames = dateGames.filter((game) => (game.hostLocation || 'Host Location Unassigned') === host);
           const times = Array.from(new Set(hostGames.map((game) => game.time))).sort();
-          const lanes = Array.from(new Map(hostGames.map((game) => [key(game), { key: key(game), area: game.physicalArea, lane: game.fieldLane }])).values());
+          const lanes = buildHostingColumns(hostGames, process.env.NODE_ENV === 'production' ? () => {} : console.warn);
           return <section key={host} className='hosting-location-section break-inside-avoid-page rounded-lg border bg-white shadow-sm'>
             <header className='hosting-location-heading border-b bg-slate-800 px-4 py-3 text-white'><h2 className='text-lg font-extrabold'>{host}</h2><p className='text-sm font-medium text-slate-200'>{formatDisplayDate(date)}</p></header>
             <div className='hosting-grid-scroll overflow-x-auto'>
