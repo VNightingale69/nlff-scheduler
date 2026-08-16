@@ -1,3 +1,5 @@
+import { formatPhysicalFieldLabel, normalizeFieldIdentity, physicalFieldLabelParts } from '../../lib/physicalField.ts';
+
 export type HostingField = {
   physicalFieldId?: string | null;
   physicalAreaId?: string | null;
@@ -13,6 +15,7 @@ export type HostingColumn = {
   area: string;
   lane: string;
   fieldType?: string | null;
+  label: string;
 };
 
 export type HostingPlacement = HostingField & {
@@ -24,7 +27,7 @@ export type HostingPlacement = HostingField & {
 /** A physical field is a column; dated slots and layout memberships are not. */
 export const hostingFieldKey = (field: HostingField) => field.physicalFieldId
   ? `field:${field.physicalFieldId}`
-  : `unassigned:${field.physicalAreaId || field.physicalArea}:${field.fieldLane}`;
+  : `legacy:${field.physicalAreaId || 'area'}:${normalizeFieldIdentity(field.physicalArea, field.fieldLane)}`;
 
 /** The saved physical field assignment is the complete identity of a hosting cell. */
 export const hostingCellKey = (game: HostingPlacement) => `${game.date}:${game.time}:${hostingFieldKey(game)}`;
@@ -55,12 +58,14 @@ export function buildHostingColumns(fields: HostingField[], warn: (message: stri
   const columnsByField = new Map<string, HostingColumn>();
   const idsByAreaAndLabel = new Map<string, string>();
   for (const field of fields) {
+    const parts = physicalFieldLabelParts({ physicalAreaName: field.physicalArea, fieldName: field.fieldLane });
+    const label = formatPhysicalFieldLabel(parts.physicalAreaName, parts.fieldName);
     const columnKey = hostingFieldKey(field);
-    if (!columnsByField.has(columnKey)) columnsByField.set(columnKey, { key: columnKey, physicalFieldId: field.physicalFieldId, physicalAreaId: field.physicalAreaId, area: field.physicalArea, lane: field.fieldLane, fieldType: field.fieldType });
+    if (!columnsByField.has(columnKey)) columnsByField.set(columnKey, { key: columnKey, physicalFieldId: field.physicalFieldId, physicalAreaId: field.physicalAreaId, area: parts.physicalAreaName, lane: parts.fieldName, label, fieldType: field.fieldType });
     if (field.physicalFieldId) {
-      const labelKey = `${field.physicalAreaId || field.physicalArea}:${field.physicalArea} - ${field.fieldLane}`;
+      const labelKey = normalizeFieldIdentity(parts.physicalAreaName, parts.fieldName);
       const previousId = idsByAreaAndLabel.get(labelKey);
-      if (previousId && previousId !== field.physicalFieldId) warn(`Duplicate field display label detected:\n${field.physicalArea} - ${field.fieldLane}\n\nfield_id A: ${previousId}\nfield_id B: ${field.physicalFieldId}\nphysical_area_id: ${field.physicalAreaId || 'unknown'}`);
+      if (previousId && previousId !== field.physicalFieldId) warn(`Duplicate physical field identity detected\n\nPhysical Area: ${parts.physicalAreaName}\nField: ${parts.fieldName}\nField ID A: ${previousId}\nField ID B: ${field.physicalFieldId}\nPhysical Area ID: ${field.physicalAreaId || 'unknown'}`);
       else idsByAreaAndLabel.set(labelKey, field.physicalFieldId);
     }
   }

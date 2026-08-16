@@ -10,6 +10,7 @@ import Link from 'next/link';
 import CommunityLogo from '@/components/CommunityLogo';
 import PublicLayout from '@/components/public/PublicLayout';
 import { APP_SCHEDULE_NAME, APP_SUBTITLE } from '@/config/branding';
+import { formatPhysicalFieldLabel, normalizeFieldIdentity } from '@/lib/physicalField';
 
 type Game = {
   id: string;
@@ -17,6 +18,9 @@ type Game = {
   kickoff_time: string;
   host_location_name: string;
   field_name: string;
+  field_id?: string | null;
+  physical_area_id?: string | null;
+  physical_area_name?: string | null;
   field_type?: string | null;
   turf_configuration_code?: string | null;
   turf_field_slot?: string | null;
@@ -65,7 +69,8 @@ const locationEdge = (fieldIndex: number, fieldCount: number) => [
 const gameField = (game: Game): HostingField => {
   const assignedName = game.turf_field_slot || (game.field_name && !/not assigned|unavailable/i.test(game.field_name) ? game.field_name : 'Unassigned');
   const type = assignedName === 'Unassigned' ? 'UNASSIGNED' : normalizeFieldType(game.field_type || assignedName);
-  return { key: assignedName, name: assignedName, type };
+  const key = game.field_id ? `field:${game.field_id}` : `legacy:${game.physical_area_id || 'area'}:${normalizeFieldIdentity(game.physical_area_name, assignedName)}`;
+  return { key, name: formatPhysicalFieldLabel(game.physical_area_name, assignedName), type };
 };
 
 function HostingSchedule({ games }: { games: Game[] }) {

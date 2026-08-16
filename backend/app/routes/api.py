@@ -29632,6 +29632,7 @@ def _can_view_game_coach_emails(current_user: User | None, home: Team, away: Tea
 def _public_game_read_from_schedule_row(row, db: Session | None = None, current_user: User | None = None) -> PublicGameRead:
     g, slot, fi, host, home, away, div, org, status = row
     canonical_field = getattr(g, 'field', None)
+    physical_area = getattr(canonical_field, 'physical_field_area', None) or getattr(getattr(fi, 'hosting_availability', None), 'physical_field_area', None)
     if g.field_id and canonical_field is None:
         logger.error(
             'public_schedule_field_integrity_error game_id=%s field_id=%s host_location_id=%s',
@@ -29648,6 +29649,8 @@ def _public_game_read_from_schedule_row(row, db: Session | None = None, current_
         host_location_name=host.name if host else '',
         field_id=g.field_id,
         field_name=resolve_game_field_display(g, db, generated_slot=slot, field_instance=fi).name or 'Field Not Assigned',
+        physical_area_id=getattr(physical_area, 'id', None),
+        physical_area_name=getattr(physical_area, 'name', None),
         # Generated/turf schedules assign the physical component through the
         # published game slot rather than a canonical ``Field`` row.  Expose
         # that authoritative size so public reports can label the assignment

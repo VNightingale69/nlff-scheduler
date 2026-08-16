@@ -926,6 +926,8 @@ class PublicGameRead(BaseModel):
     host_location_name: str
     field_id: uuid.UUID | None
     field_name: str
+    physical_area_id: uuid.UUID | None = None
+    physical_area_name: str | None = None
     field_type: str | None = None
     turf_wave_id: uuid.UUID | None = None
     turf_wave_start_time: time | None = None
