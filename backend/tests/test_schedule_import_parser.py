@@ -1,6 +1,7 @@
 import io
 import json
 import uuid
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -234,6 +235,47 @@ def _legacy_row(teams, physical_area, field, field_type, index=0):
     row.update({'site': 'Prairie Ridge High School Jr Wolves',
                 'physicalarea': physical_area})
     return row
+
+
+def test_custom_three_small_layout_resolves_complete_canonical_membership():
+    db, season, teams, _site, fields = _legacy_field_context()
+    rows = [_legacy_row(teams, '', f'Small - {number}', 'Small', index=(number - 1) * 2)
+            for number in range(1, 4)]
+
+    preview, staged = build_preview(db, season.id, rows)
+
+    assert preview['blocking_errors'] == 0
+    assert preview['importable_games'] == 3
+    assert len({row['configuration_group_key'] for row in staged}) == 1
+    assert all(set(row['layout_field_ids']) == {str(field.id) for name, field in fields.items()
+                                               if name.startswith('Small')}
+               for row in staged)
+
+
+@pytest.mark.parametrize('invalid_kind', ['inactive', 'deleted', 'missing_member'])
+def test_custom_layout_with_unusable_or_missing_member_is_blocking(invalid_kind):
+    db, season, teams, _site, fields = _legacy_field_context()
+    small_three = fields['Small - 3']
+    if invalid_kind == 'inactive':
+        small_three.is_active = False
+    elif invalid_kind == 'deleted':
+        small_three.deleted_at = datetime.now(timezone.utc)
+    else:
+        configuration = db.query(HostLocationConfiguration).filter_by(
+            configuration_name='3 Small').one()
+        db.query(FieldConfigurationMember).filter_by(
+            field_configuration_id=configuration.id, field_id=small_three.id).delete()
+    db.commit()
+
+    preview, staged = build_preview(db, season.id, [
+        _legacy_row(teams, '', 'Small - 1', 'Small'),
+        _legacy_row(teams, '', 'Small - 2', 'Small', index=2),
+    ])
+
+    assert staged == []
+    assert preview['blocking_errors'] == 2
+    assert all(row['status'] == 'ERROR' for row in preview['rows'])
+    assert all('Configuration "3 Small"' in row['message'] for row in preview['rows'])
 
 
 def test_legacy_site_resolves_and_normalizes_fields_from_both_columns():
