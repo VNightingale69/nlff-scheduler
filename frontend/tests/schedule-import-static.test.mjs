@@ -17,4 +17,5 @@ assert.match(page, /\.csv,\.xlsx/);
 assert.match(page, /'Physical Area'/);
 assert.match(page, /'Configuration'/);
 assert.match(page, /r\.physical_area/);
+assert.match(page, /See server logs for the detailed error/);
 console.log('schedule import staged confirmation UI checks passed');
