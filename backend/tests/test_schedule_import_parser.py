@@ -8,8 +8,8 @@ from openpyxl import Workbook
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.models import (Base, Division, Field, Game, GameStatus, HostLocation,
-                        HostLocationConfiguration, Organization,
+from app.models import (Base, Division, Field, FieldConfigurationOption, Game, GameStatus, HostLocation,
+                        HostLocationConfiguration, Organization, PhysicalFieldArea,
                         OrganizationDivisionParticipation, ScheduleImport, Season, Team, Week)
 from app.routes.api import confirm_schedule_import
 from app.services.field_resolution import resolve_active_field
@@ -138,6 +138,86 @@ def _hiller_row(kickoff, field, field_type, home, away):
             'division': 'Girls 6-8',
             'hometeam': f'{home_community} Girls 6-8 {home.name}',
             'awayteam': f'{away_community} Girls 6-8 {away.name}'}
+
+
+def _physical_area_context():
+    db, season, teams = _hiller_import_context()
+    site = db.query(HostLocation).filter_by(name='Hiller Stadium').one()
+    site.name = 'Tim Osmond Sports Complex'; site.surface_type = 'GRASS_FIELD'
+    db.query(Field).delete(); db.query(HostLocationConfiguration).delete()
+    for area_name in ('Football Field 1', 'Football Field 2', 'Soccer Field'):
+        area = PhysicalFieldArea(host_location_id=site.id, name=area_name,
+                                 field_space_type='FULL_SIZE_FIELD',
+                                 supports_dynamic_configuration=True, is_active=True)
+        db.add(area); db.flush()
+        db.add_all([
+            FieldConfigurationOption(physical_field_area_id=area.id, name='1 Large + 1 Small',
+                                     large_field_count=1, small_field_count=1, is_active=True),
+            FieldConfigurationOption(physical_field_area_id=area.id, name='2 Medium',
+                                     medium_field_count=2, is_active=True),
+            FieldConfigurationOption(physical_field_area_id=area.id, name='3 Small',
+                                     small_field_count=3, is_active=True),
+        ])
+    db.commit()
+    return db, season, teams, site
+
+
+def _area_row(teams, area, slot, field_type, kickoff='9:00 AM', index=0):
+    row = _hiller_row(kickoff, slot, field_type, teams[index], teams[index + 1])
+    row.update({'site': 'Tim Osmond Sports Complex', 'physicalarea': area})
+    return row
+
+
+def test_schedule_import_resolves_physical_area():
+    db, season, teams, _ = _physical_area_context()
+    preview, staged = build_preview(db, season.id, [
+        _area_row(teams, 'Football Field 1', 'Large 1', 'Large'),
+        _area_row(teams, 'Football Field 1', 'Small 1', 'Small', index=2),
+    ])
+    assert preview['blocking_errors'] == 0
+    assert all(row['physical_area'] == 'Football Field 1' for row in staged)
+
+
+def test_schedule_import_resolves_generated_slot_within_area():
+    db, season, teams, _ = _physical_area_context()
+    preview, staged = build_preview(db, season.id, [
+        _area_row(teams, 'Soccer Field', 'Medium 1', 'Medium'),
+        _area_row(teams, 'Soccer Field', 'Medium 2', 'Medium', index=2),
+    ])
+    assert preview['blocking_errors'] == 0
+    assert {row['field'] for row in staged} == {'Medium 1', 'Medium 2'}
+    assert {row['configuration'] for row in preview['rows']} == {'2 Medium'}
+
+
+def test_schedule_import_supports_compound_area_slot_name():
+    db, season, teams, _ = _physical_area_context()
+    rows = [_area_row(teams, '', 'Football Field 1 / Large 1', 'Large'),
+            _area_row(teams, '', 'Football Field 1 / Small 1', 'Small', index=2)]
+    preview, staged = build_preview(db, season.id, rows)
+    assert preview['blocking_errors'] == 0
+    assert all(row['physical_area'] == 'Football Field 1' for row in staged)
+
+
+@pytest.mark.parametrize(('slots', 'types', 'expected'), [
+    (('Large 1', 'Small 1'), ('Large', 'Small'), '1 Large + 1 Small'),
+    (('Medium 1', 'Medium 2'), ('Medium', 'Medium'), '2 Medium'),
+    (('Small 1', 'Small 2', 'Small 3'), ('Small', 'Small', 'Small'), '3 Small'),
+])
+def test_schedule_import_infers_area_layout(slots, types, expected):
+    db, season, teams, _ = _physical_area_context()
+    rows = [_area_row(teams, 'Soccer Field', slot, kind, index=index * 2)
+            for index, (slot, kind) in enumerate(zip(slots, types))]
+    preview, _ = build_preview(db, season.id, rows)
+    assert preview['blocking_errors'] == 0
+    assert {row['configuration'] for row in preview['rows']} == {expected}
+
+
+def test_schedule_import_rejects_ambiguous_slot_without_area():
+    db, season, teams, _ = _physical_area_context()
+    preview, staged = build_preview(db, season.id, [
+        _area_row(teams, '', 'Large 1', 'Large')])
+    assert staged == []
+    assert 'ambiguous' in preview['rows'][0]['message']
 
 
 def _canonical_hiller_park_context():

@@ -6,8 +6,9 @@ from datetime import date, datetime, time, timedelta
 
 from openpyxl import load_workbook
 
-from app.models import (Division, Field, FieldInstance, Game, GameSlot, HostLocation,
-                        Season, Week)
+from app.models import (Division, Field, FieldConfigurationOption, FieldInstance,
+                        Game, GameSlot, HostLocation, HostingAvailability,
+                        PhysicalFieldArea, Season, Week)
 from app.teams import resolve_roster_team, season_roster
 from app.facility_layouts import (JOHNSBURG_APPROVED_LAYOUT_CODES_BY_LOCATION,
                                   johnsburg_field_templates,
@@ -34,6 +35,65 @@ def _normalized_field_type(value):
     """Return a canonical individual field type, independent of layout labels."""
     normalized = _text(value).casefold()
     return normalized.upper() if normalized in {'small', 'medium', 'large'} else None
+
+
+def _division_alias(value):
+    """Normalize known legacy spelling of the configured Coed 6-7 division."""
+    text = _text(value).casefold()
+    text = re.sub(r'\bco\s*-?\s*ed\b', 'coed', text)
+    text = re.sub(r'\b6\s*(?:-|,|/|and)\s*7(?:\s*,\s*8)?\b', '6-7', text)
+    return _key(text)
+
+
+def _split_area_slot(raw):
+    area = _text(raw.get('physicalarea'))
+    slot = _text(raw.get('field'))
+    if not area and '/' in slot:
+        area, slot = (_text(part) for part in slot.split('/', 1))
+    return area, slot
+
+
+def _slot_signature(slot_name, field_type):
+    match = re.fullmatch(r'(small|medium|large)(?:\s+field)?\s*(\d+)',
+                         _text(slot_name), re.IGNORECASE)
+    if not match:
+        return None
+    size = match.group(1).upper()
+    return (size, int(match.group(2))) if not field_type or size == field_type else None
+
+
+def _area_slot_candidates(db, area, slot_name, field_type):
+    signature = _slot_signature(slot_name, field_type)
+    if not signature:
+        return []
+    size, index = signature
+    return [option for option in db.query(FieldConfigurationOption).filter_by(
+        physical_field_area_id=area.id, is_active=True).all()
+            if index <= int(getattr(option, f'{size.lower()}_field_count', 0) or 0)]
+
+
+def _find_area_instance(db, site, area, option, slot_name, game_date, kickoff):
+    """Resolve a generated slot only through its physical-area ancestry."""
+    query = (db.query(FieldInstance).join(
+        HostingAvailability, FieldInstance.hosting_availability_id == HostingAvailability.id
+    ).filter(FieldInstance.host_location_id == site.id,
+             FieldInstance.instance_date == game_date,
+             FieldInstance.is_active.is_(True),
+             HostingAvailability.physical_field_area_id == area.id))
+    instances = query.all()
+    requested = _normalized_name(slot_name)
+    matches = [item for item in instances
+               if (_normalized_name(item.field_name) == requested
+                   or _normalized_name(item.field_name).endswith(' ' + requested))]
+    if option:
+        option_matches = [item for item in matches if
+                          item.hosting_availability.field_configuration_option_id == option.id]
+        if option_matches:
+            matches = option_matches
+    timed = [item for item in matches if db.query(GameSlot).filter_by(
+        field_instance_id=item.id, slot_date=game_date, start_time=kickoff).first()]
+    matches = timed or matches
+    return matches[0] if len(matches) == 1 else None
 
 
 def _week_number(value):
@@ -138,6 +198,12 @@ def build_preview(db, season_id, raw_rows):
     all_divisions = db.query(Division).all()
     divisions = {_key(f'{x.division_group or ""} {x.name}'.strip()): x for x in all_divisions}
     divisions.update({_key(x.name): x for x in all_divisions})
+    alias_groups = {}
+    for candidate in all_divisions:
+        for label in (candidate.name, f'{candidate.division_group or ""} {candidate.name}'.strip()):
+            alias_groups.setdefault(_division_alias(label), []).append(candidate)
+    divisions.update({key: values[0] for key, values in alias_groups.items()
+                      if len({value.id for value in values}) == 1})
     teams = season_roster(db, season_id)
     status_model = __import__('app.models', fromlist=['GameStatus']).GameStatus
     scheduled_status = db.query(status_model).filter_by(code='SCHEDULED').first()
@@ -164,12 +230,38 @@ def build_preview(db, season_id, raw_rows):
         site = sites.get(_key(raw.get('site')))
         if not site:
             errors.append(f'Site "{_text(raw.get("site"))}" could not be found.')
-        field = field_instance = None
+        field = field_instance = physical_area = None
+        area_name, slot_name = _split_area_slot(raw)
+        area_configuration_candidates = []
         configuration_candidates = []
         if site:
-            field = resolve_active_field(db, site, raw.get('field'))
+            areas = db.query(PhysicalFieldArea).filter_by(
+                host_location_id=site.id, is_active=True).all()
+            if area_name:
+                area_matches = [item for item in areas
+                                if _normalized_name(item.name) == _normalized_name(area_name)]
+                physical_area = area_matches[0] if len(area_matches) == 1 else None
+                if not physical_area:
+                    errors.append(f'Physical Area "{area_name}" was not found at {site.name}.')
+                else:
+                    area_configuration_candidates = _area_slot_candidates(
+                        db, physical_area, slot_name, _normalized_field_type(raw.get('fieldtype')))
+                    if not area_configuration_candidates:
+                        errors.append(f'Generated slot "{slot_name}" is not supported by {physical_area.name}.')
+            elif areas and _slot_signature(slot_name, _normalized_field_type(raw.get('fieldtype'))):
+                supporting = [(area, _area_slot_candidates(
+                    db, area, slot_name, _normalized_field_type(raw.get('fieldtype')))) for area in areas]
+                supporting = [(area, choices) for area, choices in supporting if choices]
+                if len(supporting) == 1:
+                    physical_area, area_configuration_candidates = supporting[0]
+                    area_name = physical_area.name
+                elif len(supporting) > 1:
+                    errors.append(f'Generated slot "{slot_name}" is ambiguous at {site.name}; add a Physical Area column or use "Physical Area / Slot" in Field.')
+            if not physical_area:
+                field = resolve_active_field(db, site, raw.get('field'))
             instances = db.query(FieldInstance).filter(FieldInstance.host_location_id == site.id, FieldInstance.is_active.is_(True)).all()
-            field_instance = next((x for x in instances if _normalized_name(x.field_name) == _normalized_name(raw.get('field')) and (not game_date or x.instance_date == game_date)), None)
+            if not physical_area:
+                field_instance = next((x for x in instances if _normalized_name(x.field_name) == _normalized_name(raw.get('field')) and (not game_date or x.instance_date == game_date)), None)
             # Generated/manual scheduling persists the dated field instance as
             # the playable assignment.  Its display name can include layout
             # terms, so prefer its canonical availability -> Field relationship
@@ -183,7 +275,7 @@ def build_preview(db, season_id, raw_rows):
             # A dynamic position may exist only in a supported site layout.
             configuration_candidates = _configuration_candidates(
                 db, site, raw.get('field'), raw.get('fieldtype'))
-            if not field and not field_instance and not configuration_candidates:
+            if not physical_area and not field and not field_instance and not configuration_candidates and not errors:
                 errors.append(f'Field "{_text(raw.get("field"))}" could not be found at site "{_text(raw.get("site"))}".')
 
         field_type = _normalized_field_type(raw.get('fieldtype'))
@@ -212,7 +304,7 @@ def build_preview(db, season_id, raw_rows):
                         'reconfigured for this timeslot.'
                     )
 
-        division = divisions.get(_key(raw.get('division')))
+        division = divisions.get(_key(raw.get('division'))) or divisions.get(_division_alias(raw.get('division')))
         if not division:
             errors.append(f'Division "{_text(raw.get("division"))}" could not be found.')
 
@@ -238,8 +330,9 @@ def build_preview(db, season_id, raw_rows):
         if home and away and home.id == away.id:
             errors.append('Home Team and Away Team cannot be the same.')
 
-        if week and game_date and kickoff and site and (field or field_instance or configuration_candidates) and home and away:
-            identity = field.id if field else (field_instance.id if field_instance else _normalized_name(raw.get('field')))
+        if week and game_date and kickoff and site and (physical_area or field or field_instance or configuration_candidates) and home and away:
+            identity = ((physical_area.id, _normalized_name(slot_name)) if physical_area else
+                        field.id if field else (field_instance.id if field_instance else _normalized_name(raw.get('field'))))
             game_key = (week.id, game_date, kickoff, site.id, identity, home.id, away.id)
             field_key = (game_date, kickoff, site.id, identity)
             simultaneous = {(game_date, kickoff, home.id), (game_date, kickoff, away.id)}
@@ -254,7 +347,9 @@ def build_preview(db, season_id, raw_rows):
         row = {'row': number, 'week': f'Week {week_number}' if week_number else source_week,
                'date': game_date.isoformat() if game_date else _text(raw.get('date')),
                'kickoff': kickoff.strftime('%H:%M') if kickoff else _text(raw.get('kickoff')),
-               'site': _text(raw.get('site')), 'field': _text(raw.get('field')),
+               'site': _text(raw.get('site')), 'physical_area': area_name,
+               'field': slot_name if physical_area else _text(raw.get('field')),
+               'configuration': _text(raw.get('layout')) or None,
                'configured_field_type': configured_field_type,
                'imported_field_type': _text(raw.get('fieldtype')).title(),
                'division': _text(raw.get('division')), 'home_team': _text(raw.get('hometeam')),
@@ -276,6 +371,8 @@ def build_preview(db, season_id, raw_rows):
                            # Confirmation must never need to resolve a name after
                            # the schedule being replaced has been deleted.
                            'imported_field_name': _text(raw.get('field')),
+                           'physical_area_id': str(physical_area.id) if physical_area else None,
+                           'physical_area': physical_area.name if physical_area else None,
                            'resolved_field_id': str(field.id) if field else None,
                            'field_id': str(field.id) if field else None,
                            'field_layout_type_override': field_type if type_mismatch else None,
@@ -284,6 +381,11 @@ def build_preview(db, season_id, raw_rows):
                            'home_team_id': str(home.id), 'away_team_id': str(away.id),
                            'game_status_id': str(scheduled_status.id) if scheduled_status else None}
             staged.append(staged_row)
+            if physical_area and game_date and kickoff:
+                key = (site.id, physical_area.id, game_date, kickoff)
+                timeslot_rows.setdefault(key, []).append((
+                    row, staged_row, {str(option.id): option for option in area_configuration_candidates}
+                ))
             if configuration_candidates and game_date and kickoff:
                 key = (site.id, game_date, kickoff)
                 timeslot_rows.setdefault(key, []).append((
@@ -295,25 +397,72 @@ def build_preview(db, season_id, raw_rows):
     # whose physical footprints overlap (for example Hiller Field 1 / Large and
     # Field 2 / Medium), even though each assignment is possible by itself.
     invalid_staged_ids = set()
-    for (_site_id, _game_date, kickoff), grouped in timeslot_rows.items():
+    for group_key, grouped in timeslot_rows.items():
+        kickoff = group_key[-1]
         common_ids = set(grouped[0][2])
         for _row, _staged_row, candidates in grouped[1:]:
             common_ids.intersection_update(candidates)
         if not common_ids:
             site_name = grouped[0][0]['site']
-            message = (f'Imported assignments at {site_name} at {kickoff.strftime("%-I:%M %p")} '
-                       'cannot be supported by any configured field layout.')
+            area_label = grouped[0][0].get('physical_area')
+            slots = ' + '.join(row['field'] for row, _staged, _choices in grouped)
+            message = (f'The imported slots {slots} do not match any supported layout for '
+                       f'{area_label or site_name} at {kickoff.strftime("%-I:%M %p")}.')
             for row, staged_row, _candidates in grouped:
                 row['status'] = 'ERROR'; row['message'] = message
                 invalid_staged_ids.add(id(staged_row))
         else:
-            selected_code = sorted(common_ids)[0]
+            # Prefer an exact slot-count layout; a merely larger configuration
+            # is not valid inference for an incomplete imported wave.
+            is_area_group = len(group_key) == 4
+            imported_counts = {size: sum(1 for row, *_ in grouped
+                                          if _normalized_field_type(row['imported_field_type']) == size)
+                               for size in ('SMALL', 'MEDIUM', 'LARGE')}
+            exact_ids = common_ids
+            if is_area_group:
+                def inference_rank(code):
+                    option = grouped[0][2][code]
+                    capacity = {size: int(getattr(option, f'{size.lower()}_field_count', 0) or 0)
+                                for size in imported_counts}
+                    return (sum(capacity[size] for size, count in imported_counts.items() if not count),
+                            sum(capacity.values()) - sum(imported_counts.values()))
+                best_rank = min(map(inference_rank, common_ids))
+                exact_ids = {code for code in common_ids if inference_rank(code) == best_rank}
+            explicit = _text(grouped[0][0].get('configuration'))
+            if explicit:
+                exact_ids = {code for code in common_ids if
+                             _normalized_name(getattr(grouped[0][2][code], 'name', None)
+                                              or grouped[0][2][code].configuration_name) == _normalized_name(explicit)}
+            elif not is_area_group:
+                exact_ids = {sorted(common_ids)[0]}
+            if len(exact_ids) != 1:
+                slots = ' + '.join(row['field'] for row, *_ in grouped)
+                message = (f'The imported slots {slots} do not match any supported layout for '
+                           f'{grouped[0][0].get("physical_area") or grouped[0][0]["site"]} '
+                           f'at {kickoff.strftime("%-I:%M %p")}.' if not exact_ids else
+                           f'The imported slots are ambiguous; specify Layout for {grouped[0][0].get("physical_area")} at {kickoff.strftime("%-I:%M %p")}.')
+                for row, staged_row, _ in grouped:
+                    row['status'] = 'ERROR'; row['message'] = message
+                    invalid_staged_ids.add(id(staged_row))
+                continue
+            selected_code = next(iter(exact_ids))
             selected = grouped[0][2][selected_code]
-            layout = selected_code.replace('_', ' ').title()
+            layout = getattr(selected, 'name', None) or selected.configuration_name.replace('_', ' ').title()
             for row, staged_row, _candidates in grouped:
-                staged_row['configuration_id'] = str(selected.id) if selected else None
-                staged_row['configuration_name'] = selected_code
-                layout_message = f'{row["site"]} will use its {layout} configuration for this timeslot.'
+                if row.get('physical_area'):
+                    staged_row['field_configuration_option_id'] = str(selected.id)
+                    staged_row['area_configuration_name'] = layout
+                    row['configuration'] = layout
+                    area = db.get(PhysicalFieldArea, staged_row['physical_area_id'])
+                    group_site = db.get(HostLocation, staged_row['site_id'])
+                    instance = _find_area_instance(db, group_site, area, selected, row['field'],
+                                                   _date(row['date']), _time(row['kickoff']))
+                    if instance:
+                        staged_row['field_instance_id'] = str(instance.id)
+                else:
+                    staged_row['configuration_id'] = str(selected.id) if selected else None
+                    staged_row['configuration_name'] = selected_code
+                layout_message = f'{row.get("physical_area") or row["site"]} will use its {layout} configuration for this timeslot.'
                 row['message'] = (f'{row["message"]} {layout_message}' if row['status'] == 'WARNING'
                                   else f'Ready to import. {layout_message}')
     staged = [row for row in staged if id(row) not in invalid_staged_ids]
