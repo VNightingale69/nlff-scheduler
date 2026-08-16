@@ -15,10 +15,39 @@ export type HostingColumn = {
   fieldType?: string | null;
 };
 
+export type HostingPlacement = HostingField & {
+  id?: string;
+  date: string;
+  time: string;
+};
+
 /** A physical field is a column; dated slots and layout memberships are not. */
 export const hostingFieldKey = (field: HostingField) => field.physicalFieldId
   ? `field:${field.physicalFieldId}`
   : `unassigned:${field.physicalAreaId || field.physicalArea}:${field.fieldLane}`;
+
+/** The saved physical field assignment is the complete identity of a hosting cell. */
+export const hostingCellKey = (game: HostingPlacement) => `${game.date}:${game.time}:${hostingFieldKey(game)}`;
+
+export function buildHostingCells<T extends HostingPlacement>(games: T[], warn: (message: string) => void = console.warn): Map<string, T[]> {
+  const cells = new Map<string, T[]>();
+  const seenIds = new Set<string>();
+  for (const game of games) {
+    const cellKey = hostingCellKey(game);
+    const contents = cells.get(cellKey) || [];
+    contents.push(game);
+    cells.set(cellKey, contents);
+    if (!game.physicalFieldId) warn(`Hosting View game ${game.id || '(unknown id)'} has no physical_field_id; its saved field assignment cannot be verified.`);
+    if (game.id && seenIds.has(game.id)) warn(`Hosting View duplicate game id: ${game.id}`);
+    if (game.id) seenIds.add(game.id);
+  }
+  const renderedIds = new Set(Array.from(cells.values()).flat().map((game) => game.id).filter(Boolean));
+  const expectedIds = new Set(games.map((game) => game.id).filter(Boolean));
+  const missingIds = Array.from(expectedIds).filter((id) => !renderedIds.has(id));
+  const renderedCount = Array.from(cells.values()).reduce((count, cell) => count + cell.length, 0);
+  if (renderedCount !== games.length || missingIds.length) warn(`Hosting View rendering mismatch. Expected games: ${games.length}; rendered games: ${renderedCount}; missing game IDs: ${missingIds.join(', ') || 'none'}`);
+  return cells;
+}
 
 const naturalCompare = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' }).compare;
 
