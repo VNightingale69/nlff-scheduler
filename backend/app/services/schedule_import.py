@@ -65,6 +65,16 @@ def _slot_signature(slot_name, field_type):
     return (size, int(match.group(2))) if not field_type or size == field_type else None
 
 
+def configuration_supports_required_slots(existing_slot_ids, required_slot_ids):
+    """Return whether every imported slot is provided by a saved layout.
+
+    Callers deliberately pass canonical ``Field`` IDs (legacy layouts) or
+    generated ``GameSlot`` IDs (physical-area layouts), never display names.
+    Extra IDs in the saved layout are unused capacity and are therefore valid.
+    """
+    return set(required_slot_ids) <= set(existing_slot_ids)
+
+
 def _area_slot_candidates(db, area, slot_name, field_type):
     signature = _slot_signature(slot_name, field_type)
     if not signature:
@@ -495,6 +505,36 @@ def build_preview(db, season_id, raw_rows):
                     invalid_staged_ids.add(id(staged_row))
                 continue
             selected_code = next(iter(exact_ids))
+            # An already materialized physical-area availability is the
+            # authoritative layout for this wave.  Prefer it when its actual
+            # generated slots cover this import, even if inference selected a
+            # smaller layout.  This both preserves capacity and stages the
+            # stable instance/slot IDs belonging to the saved layout.
+            if is_area_group and availability.field_configuration_option_id:
+                existing_code = str(availability.field_configuration_option_id)
+                if existing_code in common_ids:
+                    required_slots = []
+                    for row, _staged_row, _candidates in grouped:
+                        instance = _find_area_instance(
+                            db, site, area, availability.field_configuration_option,
+                            row['field'], game_date, kickoff)
+                        slot = (db.query(GameSlot).filter_by(
+                            field_instance_id=instance.id, slot_date=game_date,
+                            start_time=kickoff).first() if instance else None)
+                        if slot:
+                            required_slots.append(slot.id)
+                    available_slots = {
+                        slot.id for slot in db.query(GameSlot).join(
+                            FieldInstance, GameSlot.field_instance_id == FieldInstance.id
+                        ).filter(
+                            FieldInstance.hosting_availability_id == availability.id,
+                            GameSlot.slot_date == game_date,
+                            GameSlot.start_time == kickoff,
+                        ).all()
+                    }
+                    if configuration_supports_required_slots(
+                            available_slots, required_slots) and len(required_slots) == len(grouped):
+                        selected_code = existing_code
             selected = grouped[0][2][selected_code]
             layout = getattr(selected, 'name', None) or selected.configuration_name.replace('_', ' ').title()
             for row, staged_row, _candidates in grouped:
@@ -544,26 +584,41 @@ def build_preview(db, season_id, raw_rows):
                 row['message'] = (f'{row["message"]} {layout_message}' if row['status'] == 'WARNING'
                                   else f'Ready to import. {layout_message}')
 
-    # A persisted legacy layout is authoritative.  Surface a changed-layout
-    # conflict in preview, before confirmation can remove any schedule games.
+    # A persisted legacy layout is authoritative.  Compare its canonical field
+    # membership with all assignments in the imported wave; layout labels are
+    # intentionally irrelevant and unused saved capacity is compatible.
+    legacy_groups = {}
     for staged_row in staged:
-        if (id(staged_row) in invalid_staged_ids
-                or staged_row.get('resolved_configuration_architecture') != 'legacy_layout'
-                or not staged_row.get('configuration_id')):
-            continue
+        if (id(staged_row) not in invalid_staged_ids
+                and staged_row.get('resolved_configuration_architecture') == 'legacy_layout'):
+            key = (staged_row['site_id'], staged_row['date'], staged_row['kickoff'])
+            legacy_groups.setdefault(key, []).append(staged_row)
+    for (site_id, configuration_date, kickoff_value), grouped_rows in legacy_groups.items():
         existing = db.query(TimeslotFieldConfiguration).filter_by(
-            host_location_id=staged_row['site_id'],
-            configuration_date=_date(staged_row['date']),
-            kickoff_time=_time(staged_row['kickoff']),
-        ).first()
-        if existing and str(existing.configuration_id) != staged_row['configuration_id']:
-            required = db.get(HostLocationConfiguration, staged_row['configuration_id'])
-            current = existing.configuration
-            message = (
-                f'{staged_row["site"]} already has configuration '
-                f'"{layout_label(current)}" for {staged_row["date"]} at '
-                f'{_time(staged_row["kickoff"]).strftime("%-I:%M %p")}, but the import '
-                f'requires "{layout_label(required)}".')
+            host_location_id=site_id, configuration_date=_date(configuration_date),
+            kickoff_time=_time(kickoff_value)).first()
+        if not existing:
+            continue
+        available_ids = {str(member.field_id) for member in existing.configuration.members
+                         if member.field and member.field.is_active and member.field.deleted_at is None}
+        required_ids = {row.get('resolved_field_id') or row.get('field_id') for row in grouped_rows}
+        required_ids.discard(None)
+        if configuration_supports_required_slots(available_ids, required_ids):
+            current_label = layout_label(existing.configuration)
+            for staged_row in grouped_rows:
+                staged_row['configuration_id'] = str(existing.configuration_id)
+                staged_row['configuration_name'] = existing.configuration.configuration_name
+                matching_result = next(item for item in results if item['row'] == staged_row['row'])
+                matching_result['configuration'] = current_label
+                matching_result['message'] = (
+                    f'Ready to import. Existing configuration "{current_label}" will be reused.')
+            continue
+        missing_ids = required_ids - available_ids
+        missing_fields = [db.get(Field, field_id) for field_id in missing_ids]
+        missing_label = ', '.join(f'"{field.name}"' for field in missing_fields if field)
+        message = (f'Existing configuration "{layout_label(existing.configuration)}" does not '
+                   f'provide required field {missing_label or "assignment"}.')
+        for staged_row in grouped_rows:
             matching_result = next(item for item in results if item['row'] == staged_row['row'])
             matching_result['status'] = 'ERROR'; matching_result['message'] = message
             invalid_staged_ids.add(id(staged_row))

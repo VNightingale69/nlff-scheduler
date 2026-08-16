@@ -25,7 +25,9 @@ from app.organizations import active_organization_filter, normalize_organization
 from app.models import Division, Field, FieldConfigurationMember, FieldConfigurationOption, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostPlanSelection, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Rulebook, LoginAuditLog, ScheduleChangeLog, ScheduleImport, SchedulePublicationEvent, ScoreHistory, ScoreSubmission, Season, Team, TimeslotFieldConfiguration, Tournament, TournamentDivision, TournamentGame, TournamentTeam, TurfWave, User, Week
 from app.services.facility_layout_validation import active_layout_capacities, active_supported_layouts_query, field_combination_diagnostics, get_active_supported_layouts, layout_label, select_supported_layout, validate_field_combination, validate_timeslot_demands
 from app.services.division_field_types import required_field_type_for_division
-from app.services.schedule_import import build_preview, parse_schedule_file
+from app.services.schedule_import import (build_preview,
+                                          configuration_supports_required_slots,
+                                          parse_schedule_file)
 from app.schemas import (
     DivisionCreate, DivisionRead, FieldConfigurationOptionCreate, FieldConfigurationOptionRead, FieldCreate, FieldRead, GameCreate, GameRead, GameSaveResponse, ManualGameBulkEditRequest, ManualGameBulkEditResponse, ManualGameEditRequest, ManualGameEditResponse, ScheduleChangeLogRead, ScheduleEditWarning,
     OrganizationDivisionParticipationBulkUpsertRequest, OrganizationDivisionParticipationRead,
@@ -147,9 +149,13 @@ def confirm_schedule_import(
             previous = configuration_groups.get(group_key)
             if previous and previous['identity'] != identity:
                 raise ValueError(f'Imported configuration group {group_key} contains conflicting layouts.')
-            configuration_groups[group_key] = {
-                'row': row, 'architecture': architecture, 'identity': identity,
-            }
+            if previous:
+                previous['rows'].append(row)
+            else:
+                configuration_groups[group_key] = {
+                    'row': row, 'rows': [row], 'architecture': architecture,
+                    'identity': identity,
+                }
 
         configuration_records = {}
         for group_key, group in configuration_groups.items():
@@ -221,7 +227,17 @@ def confirm_schedule_import(
                 host_location_id=site_id, configuration_date=game_date,
                 kickoff_time=kickoff).first()
             if existing_override and str(existing_override.configuration_id) != configuration_value:
-                raise ValueError(f'{row.get("site")} already has a different configuration for {row.get("date")} at {row.get("kickoff")}')
+                available_ids = {str(member.field_id)
+                                 for member in existing_override.configuration.members
+                                 if member.field and member.field.is_active
+                                 and member.field.deleted_at is None}
+                required_ids = {
+                    item.get('resolved_field_id') or item.get('field_id')
+                    for item in group['rows']
+                }
+                required_ids.discard(None)
+                if not configuration_supports_required_slots(available_ids, required_ids):
+                    raise ValueError(f'{row.get("site")} already has an incompatible configuration for {row.get("date")} at {row.get("kickoff")}')
             if not existing_override:
                 existing_override = TimeslotFieldConfiguration(
                     host_location_id=site_id, configuration_date=game_date,

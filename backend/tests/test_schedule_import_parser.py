@@ -215,6 +215,7 @@ def _legacy_field_context():
             fields[field.name] = field
     for name, members in (
         ('1 Large', ('Large - 1',)),
+        ('1 Small + 1 Large', ('Large - 1', 'Small - 1')),
         ('2 Medium', ('Medium - 1', 'Medium - 2')),
         ('3 Small', ('Small - 1', 'Small - 2', 'Small - 3')),
     ):
@@ -349,8 +350,60 @@ def test_different_existing_config_blocks_during_preview():
 
     assert staged == []
     assert preview['blocking_errors'] == 2
-    assert all('already has configuration "1 Large"' in row['message']
+    assert all('does not provide required field' in row['message']
                for row in preview['rows'])
+
+
+@pytest.mark.parametrize(('existing_name', 'imported_fields'), [
+    ('1 Small + 1 Large', (('Large - 1', 'Large'),)),
+    ('1 Small + 1 Large', (('Small - 1', 'Small'),)),
+    ('3 Small', (('Small - 1', 'Small'), ('Small - 2', 'Small'))),
+    ('2 Medium', (('Medium - 1', 'Medium'),)),
+])
+def test_existing_layout_accepts_imported_field_subset(existing_name, imported_fields):
+    db, season, teams, site, _fields = _legacy_field_context()
+    existing_layout = db.query(HostLocationConfiguration).filter_by(
+        host_location_id=site.id, configuration_name=existing_name).one()
+    saved = TimeslotFieldConfiguration(
+        host_location_id=site.id, configuration_id=existing_layout.id,
+        configuration_date=_date('2026-08-16'), kickoff_time=_time('9:00 AM'))
+    db.add(saved); db.commit()
+    rows = [_legacy_row(teams, name, name.replace(' - ', ' '), size, index=index * 2)
+            for index, (name, size) in enumerate(imported_fields)]
+
+    preview, staged = build_preview(db, season.id, rows)
+
+    assert preview['blocking_errors'] == 0
+    assert all('will be reused' in row['message'] for row in preview['rows'])
+    assert {row['configuration_id'] for row in staged} == {str(existing_layout.id)}
+
+
+def test_compatible_existing_config_is_reused_without_duplicate_timeslot():
+    db, season, teams, site, _fields = _legacy_field_context()
+    existing_layout = db.query(HostLocationConfiguration).filter_by(
+        host_location_id=site.id, configuration_name='1 Small + 1 Large').one()
+    saved = TimeslotFieldConfiguration(
+        host_location_id=site.id, configuration_id=existing_layout.id,
+        configuration_date=_date('2026-08-16'), kickoff_time=_time('9:00 AM'))
+    db.add(saved); db.commit()
+    preview, staged = build_preview(db, season.id, [
+        _legacy_row(teams, 'Large - 1', 'Large 1', 'Large')])
+    user_id = uuid.uuid4()
+    record = ScheduleImport(
+        season_id=season.id, imported_by_user_id=user_id,
+        source_filename='subset.xlsx', weeks_replaced=json.dumps(preview['weeks']),
+        status='PREVIEW', staged_rows=json.dumps(staged),
+        preview_summary=json.dumps(preview))
+    db.add(record); db.commit()
+
+    confirm_schedule_import(record.id, {'confirmation': 'Replace Existing Schedule Games'},
+                            db, SimpleNamespace(id=user_id))
+
+    game = db.query(Game).filter_by(season_id=season.id).one()
+    assert game.timeslot_configuration_id == saved.id
+    assert saved.configuration_id == existing_layout.id
+    assert db.query(TimeslotFieldConfiguration).filter_by(
+        host_location_id=site.id).count() == 1
 
 
 def test_mixed_import_supports_physical_area_and_legacy_field_sites():
