@@ -2,7 +2,7 @@
 
 import CommunityLogo from '@/components/CommunityLogo';
 import { formatDisplayDate, formatDisplayTime } from '@/lib/displayFormat';
-import { buildHostingColumns, hostingFieldKey } from './hostingColumns';
+import { buildHostingCells, buildHostingColumns, hostingFieldKey } from './hostingColumns';
 
 export type HostingViewGame = {
   id?: string;
@@ -39,6 +39,8 @@ function GameCard({ game }: { game: HostingViewGame }) {
 
 /** Read-only host report. Its caller supplies either saved draft games or public snapshot games. */
 export default function HostingView({ games, mode = 'published' }: { games: HostingViewGame[]; mode?: 'published' | 'unpublished' }) {
+  const warn = process.env.NODE_ENV === 'production' ? () => {} : console.warn;
+  const cells = buildHostingCells(games, warn);
   const dates = Array.from(new Set(games.map((game) => game.date))).sort();
   return <div className={`hosting-view ${mode === 'unpublished' ? 'unpublished-hosting-view' : ''} space-y-8`}>
     {mode === 'unpublished' && <div className='unpublished-banner rounded border-2 border-amber-400 bg-amber-50 p-3 text-amber-950'><strong className='block uppercase tracking-wide'>Pre-published schedule</strong><span className='text-sm'>Unpublished schedule preview — not visible to the public. Read only and subject to change.</span></div>}
@@ -49,13 +51,13 @@ export default function HostingView({ games, mode = 'published' }: { games: Host
         {hosts.map((host) => {
           const hostGames = dateGames.filter((game) => (game.hostLocation || 'Host Location Unassigned') === host);
           const times = Array.from(new Set(hostGames.map((game) => game.time))).sort();
-          const lanes = buildHostingColumns(hostGames, process.env.NODE_ENV === 'production' ? () => {} : console.warn);
+          const lanes = buildHostingColumns(hostGames, warn);
           return <section key={host} className='hosting-location-section break-inside-avoid-page rounded-lg border bg-white shadow-sm'>
             <header className='hosting-location-heading border-b bg-slate-800 px-4 py-3 text-white'><h2 className='text-lg font-extrabold'>{host}</h2><p className='text-sm font-medium text-slate-200'>{formatDisplayDate(date)}</p></header>
             <div className='hosting-grid-scroll overflow-x-auto'>
               <table className='hosting-grid w-full border-collapse text-sm' style={{ minWidth: `${Math.max(760, 120 + lanes.length * 210)}px` }}>
                 <thead><tr><th className='hosting-time-cell sticky left-0 z-20 w-[120px] border-b border-r bg-slate-100 p-3 text-left'>Time</th>{lanes.map((lane) => <th key={lane.key} className='min-w-[210px] border-b border-r bg-slate-100 p-3 text-left'><span className='block font-bold'>{lane.area}</span><span className='text-xs text-slate-600'>{lane.lane}</span></th>)}</tr></thead>
-                <tbody>{times.map((time) => <tr key={time}><th className='hosting-time-cell sticky left-0 z-10 border-b border-r bg-white p-3 text-left align-top font-bold'>{formatDisplayTime(time)}</th>{lanes.map((lane) => { const matches = hostGames.filter((game) => game.time === time && key(game) === lane.key); return <td key={lane.key} className='border-b border-r p-2 align-top'>{matches.map((game, index) => <GameCard key={game.id || `${lane.key}-${index}`} game={game} />)}{!matches.length && <span className='text-slate-300'>—</span>}</td>; })}</tr>)}</tbody>
+                <tbody>{times.map((time) => <tr key={time}><th className='hosting-time-cell sticky left-0 z-10 border-b border-r bg-white p-3 text-left align-top font-bold'>{formatDisplayTime(time)}</th>{lanes.map((lane) => { const matches = cells.get(`${date}:${time}:${lane.key}`) || []; return <td key={lane.key} className='border-b border-r p-2 align-top'>{matches.map((game, index) => <GameCard key={game.id || `${lane.key}-${index}`} game={game} />)}{!matches.length && <span className='text-slate-300'>—</span>}</td>; })}</tr>)}</tbody>
               </table>
             </div>
             <div className='hosting-mobile-list hidden p-3'>{times.map((time) => <section key={time} className='mb-5'><h3 className='mb-2 border-b pb-1 text-lg font-extrabold'>{formatDisplayTime(time)}</h3><div className='space-y-2'>{hostGames.filter((game) => game.time === time).map((game, index) => <div key={game.id || `${key(game)}-${index}`}><div className='mb-1 text-xs font-bold text-slate-600'>{game.physicalArea} · {game.fieldLane}</div><GameCard game={game} /></div>)}</div></section>)}</div>

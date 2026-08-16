@@ -15,7 +15,9 @@ assert.doesNotMatch(hosting, /fetch\(|apiFetch|drag/i, 'shared report must remai
 assert.match(hosting, /Pre-published schedule/);
 assert.match(hosting, /physicalArea/);
 assert.match(hosting, /fieldLane/);
-assert.match(hosting, /hostGames\.filter/, 'all simultaneous games in a lane must be retained');
+assert.match(hosting, /cells\.get/, 'cells must be populated by canonical saved field identity');
+assert.match(management, /physicalFieldId: game\.physical_field_id/);
+assert.match(review, /physicalFieldId: game\.physical_field_id/);
 assert.match(review, /HostingView mode='unpublished'/, 'community-visible review reuses the report');
 assert.match(css, /@media \(max-width: 640px\)[\s\S]*hosting-mobile-list/);
 assert.match(css, /hosting-game-cell[\s\S]*break-inside: avoid/);

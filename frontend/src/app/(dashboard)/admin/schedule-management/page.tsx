@@ -173,7 +173,7 @@ export default function ScheduleManagementPage() {
 
   const hostingGames: HostingViewGame[] = games.map((game) => ({
     id: game.id, date: game.date, time: game.time, hostLocation: game.host_location_name || 'Host Location Unassigned',
-    physicalFieldId: game.field_id, physicalAreaId: game.physical_area_id,
+    physicalFieldId: game.physical_field_id, physicalAreaId: game.physical_area_id,
     physicalArea: game.physical_area_name || game.field_area_name || game.field_name || game.field || 'Field Area Unassigned',
     fieldLane: game.turf_field_slot || game.field || game.field_name || 'Field Unassigned', fieldType: game.field_type,
     division: game.division_name || 'Division', homeTeam: game.home_team_name || 'TBD', awayTeam: game.away_team_name || 'TBD',
