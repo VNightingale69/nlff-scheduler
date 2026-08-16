@@ -68,18 +68,18 @@ export default function StandingsPage() {
 
   useEffect(() => { load(); }, []);
 
-  return <div className='space-y-5'>
-    <div>
+  return <div className='mx-auto w-full max-w-[1500px] space-y-5'>
+    <div className='flex flex-col items-start justify-between gap-3 sm:flex-row sm:items-center'>
       <h1 className='text-2xl font-bold'>Results & Standings</h1>
-      {canBuildTournament && payload?.season_id && <Link className='mt-3 inline-flex rounded bg-slate-800 px-3 py-2 text-sm text-white' href={`/admin/tournaments?season_id=${payload.season_id}`}>Create Tournament from Standings</Link>}
+      {canBuildTournament && payload?.season_id && <Link className='inline-flex rounded bg-slate-800 px-3 py-2 text-sm font-medium text-white hover:bg-slate-700' href={`/admin/tournaments?season_id=${payload.season_id}`}>Create Tournament from Standings</Link>}
     </div>
 
     {message && <div className='rounded border bg-red-50 p-3 text-sm text-red-700'>{message}</div>}
     {payload?.no_active_season && <div className='rounded border bg-amber-50 p-3 text-sm text-amber-800'>No active season selected.</div>}
 
-    {(payload?.divisions || []).map((division) => <section key={division.division.id} className='space-y-3 rounded border bg-white p-4'>
-      <h2 className='text-xl font-semibold'>{division.division.division_group} {division.division.name}</h2>
+    <div className='grid items-start gap-5 xl:grid-cols-2'>{(payload?.divisions || []).map((division) => <section key={division.division.id} className='w-full max-w-[760px] overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm'>
+      <div className='border-b border-slate-200 bg-slate-50 px-4 py-3'><h2 className='text-lg font-bold text-slate-900'>{division.division.division_group} {division.division.name}</h2></div>
       <StandingsTable rows={division.standings} divisionId={division.division.id} />
-    </section>)}
+    </section>)}</div>
   </div>;
 }

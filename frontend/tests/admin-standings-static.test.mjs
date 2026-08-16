@@ -14,5 +14,6 @@ for (const diagnostic of ['Official/Played', 'Missing:', 'Pending:', 'Flagged/Co
 assert.match(table, /size=\{28\}/, 'team logos remain mobile-friendly');
 assert.match(table, /whitespace-normal break-words/, 'team names may wrap rather than truncate');
 assert.doesNotMatch(table, /overflow-x-auto|min-w-\[/, 'shared standings fit mobile without horizontal scrolling');
+assert.match(page, /sm:flex-row sm:items-center/, 'heading and authorized action share a row when space allows');
 
 console.log('admin standings static checks passed');
