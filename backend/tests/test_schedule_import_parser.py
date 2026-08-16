@@ -218,6 +218,62 @@ def test_schedule_import_resolves_generated_slot_within_area():
     assert {row['configuration'] for row in preview['rows']} == {'2 Medium'}
 
 
+def test_import_does_not_require_pregenerated_runtime_slot_and_commit_materializes_it():
+    db, season, teams, _ = _physical_area_context()
+    db.query(GameSlot).delete()
+    db.query(FieldInstance).delete()
+    db.commit()
+    rows = [
+        _area_row(teams, 'Football Field 1', 'Large 1', 'Large'),
+        _area_row(teams, 'Football Field 1', 'Small 1', 'Small', index=2),
+    ]
+
+    preview, staged = build_preview(db, season.id, rows)
+
+    assert preview['importable_games'] == 2
+    assert preview['blocking_errors'] == 0
+    assert {row['configuration'] for row in preview['rows']} == {'1 Large + 1 Small'}
+    assert all(row['field_configuration_option_id'] for row in staged)
+    assert all(row['field_instance_id'] is None for row in staged)
+    assert all(row['game_slot_id'] is None for row in staged)
+
+    user_id = uuid.uuid4()
+    record = ScheduleImport(
+        season_id=season.id, imported_by_user_id=user_id,
+        source_filename='08232026 Flag Schedule.xlsx',
+        weeks_replaced=json.dumps(preview['weeks']), status='PREVIEW',
+        staged_rows=json.dumps(staged), preview_summary=json.dumps(preview),
+    )
+    db.add(record); db.commit()
+    result = confirm_schedule_import(
+        record.id, {'confirmation': 'Replace Existing Schedule Games'},
+        db, SimpleNamespace(id=user_id),
+    )
+
+    assert result['games_imported'] == 2
+    games = db.query(Game).filter_by(season_id=season.id).all()
+    assert all(game.field_instance_id for game in games)
+    assert db.query(GameSlot).filter(GameSlot.assigned_game_id.is_not(None)).count() == 2
+
+
+def test_unavailable_physical_area_is_blocking():
+    db, season, teams, _ = _physical_area_context()
+    area = db.query(PhysicalFieldArea).filter_by(name='Football Field 1').one()
+    db.query(HostingAvailability).filter_by(physical_field_area_id=area.id).update(
+        {'is_available': False})
+    db.commit()
+
+    preview, staged = build_preview(db, season.id, [
+        _area_row(teams, 'Football Field 1', 'Large 1', 'Large'),
+        _area_row(teams, 'Football Field 1', 'Small 1', 'Small', index=2),
+    ])
+
+    assert staged == []
+    assert preview['blocking_errors'] == 2
+    assert all('not marked available for hosting' in row['message']
+               for row in preview['rows'])
+
+
 def test_physical_area_group_round_trip_persists_each_generated_slot():
     db, season, teams, site = _physical_area_context()
     rows = [

@@ -127,6 +127,100 @@ def confirm_schedule_import(
         # make the distinction explicit with ``resolved_field_id``.
         resolved_rows = []
         for row in staged:
+            if row.get('physical_area_id') and (not row.get('field_instance_id')
+                                                 or not row.get('game_slot_id')):
+                area_id = uuid.UUID(row['physical_area_id'])
+                option_id = uuid.UUID(row['field_configuration_option_id'])
+                site_id = uuid.UUID(row['site_id'])
+                game_date = date.fromisoformat(row['date'])
+                kickoff = time.fromisoformat(row['kickoff'])
+                source_availability = db.query(HostingAvailability).filter(
+                    HostingAvailability.season_id == record.season_id,
+                    HostingAvailability.host_location_id == site_id,
+                    HostingAvailability.physical_field_area_id == area_id,
+                    HostingAvailability.available_date == game_date,
+                    HostingAvailability.active.is_(True),
+                    HostingAvailability.is_available.is_(True),
+                    HostingAvailability.start_time <= kickoff,
+                    HostingAvailability.end_time > kickoff,
+                ).order_by(HostingAvailability.start_time.desc()).first()
+                if not source_availability:
+                    raise ValueError(
+                        f'{row.get("physical_area")} is no longer available for hosting '
+                        f'on {game_date.strftime("%m/%d/%Y")} at {kickoff.strftime("%I:%M %p")}.'
+                    )
+                availability = db.query(HostingAvailability).filter(
+                    HostingAvailability.season_id == record.season_id,
+                    HostingAvailability.host_location_id == site_id,
+                    HostingAvailability.physical_field_area_id == area_id,
+                    HostingAvailability.field_configuration_option_id == option_id,
+                    HostingAvailability.available_date == game_date,
+                    HostingAvailability.active.is_(True),
+                    HostingAvailability.is_available.is_(True),
+                    HostingAvailability.start_time <= kickoff,
+                    HostingAvailability.end_time > kickoff,
+                ).first()
+                if not availability:
+                    option = db.get(FieldConfigurationOption, option_id)
+                    slot_end = (datetime.combine(game_date, kickoff) + GAME_DURATION).time()
+                    availability = HostingAvailability(
+                        season_id=record.season_id,
+                        week_id=uuid.UUID(row['week_id']),
+                        organization_id=source_availability.organization_id,
+                        host_location_id=site_id,
+                        physical_field_area_id=area_id,
+                        field_configuration_option_id=option_id,
+                        layout_type=option.name,
+                        slot_index=source_availability.slot_index,
+                        available_date=game_date,
+                        start_time=kickoff,
+                        end_time=min(slot_end, source_availability.end_time),
+                        active=True,
+                        is_available=True,
+                        notes='Materialized by schedule import.',
+                    )
+                    db.add(availability); db.flush()
+                area = db.get(PhysicalFieldArea, area_id)
+                field_name = f'{area.name} / {row["field"]}'
+                instance = db.query(FieldInstance).filter_by(
+                    hosting_availability_id=availability.id,
+                    field_name=field_name,
+                ).first()
+                if not instance:
+                    instance = FieldInstance(
+                        host_location_id=site_id,
+                        hosting_availability_id=availability.id,
+                        instance_date=game_date,
+                        field_name=field_name,
+                        field_type=str(row['imported_field_type']).upper(),
+                        is_active=True,
+                        is_generated=True,
+                    )
+                    db.add(instance); db.flush()
+                slot = db.query(GameSlot).filter_by(
+                    field_instance_id=instance.id,
+                    slot_date=game_date,
+                    start_time=kickoff,
+                ).first()
+                if not slot:
+                    slot_end = min(
+                        (datetime.combine(game_date, kickoff) + GAME_DURATION).time(),
+                        availability.end_time,
+                    )
+                    slot = GameSlot(
+                        field_instance_id=instance.id,
+                        host_location_id=site_id,
+                        season_id=record.season_id,
+                        week_id=uuid.UUID(row['week_id']),
+                        slot_date=game_date,
+                        start_time=kickoff,
+                        end_time=slot_end,
+                        field_type=str(row['imported_field_type']).upper(),
+                        status='OPEN',
+                    )
+                    db.add(slot); db.flush()
+                row['field_instance_id'] = str(instance.id)
+                row['game_slot_id'] = str(slot.id)
             resolved_field_value = row.get('resolved_field_id') or row.get('field_id')
             resolved_field_id = uuid.UUID(resolved_field_value) if resolved_field_value else None
             resolved_instance_id = uuid.UUID(row['field_instance_id']) if row.get('field_instance_id') else None

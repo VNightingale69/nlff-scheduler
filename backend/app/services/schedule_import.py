@@ -96,6 +96,20 @@ def _find_area_instance(db, site, area, option, slot_name, game_date, kickoff):
     return matches[0] if len(matches) == 1 else None
 
 
+def _area_hosting_availability(db, season_id, site, area, game_date, kickoff):
+    """Return area-level availability, independently of generated resources."""
+    return (db.query(HostingAvailability).filter(
+        HostingAvailability.season_id == season_id,
+        HostingAvailability.host_location_id == site.id,
+        HostingAvailability.physical_field_area_id == area.id,
+        HostingAvailability.available_date == game_date,
+        HostingAvailability.active.is_(True),
+        HostingAvailability.is_available.is_(True),
+        HostingAvailability.start_time <= kickoff,
+        HostingAvailability.end_time > kickoff,
+    ).order_by(HostingAvailability.start_time.desc()).first())
+
+
 def _week_number(value):
     """Parse spreadsheet numbers and human-readable labels such as ``Week 1``."""
     if isinstance(value, bool):
@@ -399,6 +413,23 @@ def build_preview(db, season_id, raw_rows):
     invalid_staged_ids = set()
     for group_key, grouped in timeslot_rows.items():
         kickoff = group_key[-1]
+        is_area_group = len(group_key) == 4
+        if is_area_group:
+            sample_staged = grouped[0][1]
+            area = db.get(PhysicalFieldArea, sample_staged['physical_area_id'])
+            site = db.get(HostLocation, sample_staged['site_id'])
+            game_date = _date(grouped[0][0]['date'])
+            availability = _area_hosting_availability(
+                db, season_id, site, area, game_date, kickoff)
+            if not availability:
+                message = (
+                    f'{area.name} is not marked available for hosting on '
+                    f'{game_date.strftime("%m/%d/%Y")} at {kickoff.strftime("%I:%M %p")}.'
+                )
+                for row, staged_row, _candidates in grouped:
+                    row['status'] = 'ERROR'; row['message'] = message
+                    invalid_staged_ids.add(id(staged_row))
+                continue
         common_ids = set(grouped[0][2])
         for _row, _staged_row, candidates in grouped[1:]:
             common_ids.intersection_update(candidates)
@@ -414,7 +445,6 @@ def build_preview(db, season_id, raw_rows):
         else:
             # Prefer an exact slot-count layout; a merely larger configuration
             # is not valid inference for an incomplete imported wave.
-            is_area_group = len(group_key) == 4
             imported_counts = {size: sum(1 for row, *_ in grouped
                                           if _normalized_field_type(row['imported_field_type']) == size)
                                for size in ('SMALL', 'MEDIUM', 'LARGE')}
@@ -475,14 +505,9 @@ def build_preview(db, season_id, raw_rows):
                             if availability_field_id:
                                 staged_row['resolved_field_id'] = str(availability_field_id)
                                 staged_row['field_id'] = str(availability_field_id)
-                    if not instance or not staged_row.get('game_slot_id'):
-                        row['status'] = 'ERROR'
-                        row['message'] = (
-                            f'Generated slot "{row["field"]}" is not available for '
-                            f'{area.name} at {kickoff.strftime("%-I:%M %p")}.'
-                        )
-                        invalid_staged_ids.add(id(staged_row))
-                        continue
+                    # Runtime instances/slots are derived resources.  Their
+                    # absence during preview is valid; confirmation
+                    # materializes them from this staged capability assignment.
                 else:
                     staged_row['configuration_id'] = str(selected.id) if selected else None
                     staged_row['configuration_name'] = selected_code
