@@ -13,7 +13,8 @@ from app.teams import resolve_roster_team, season_roster
 from app.facility_layouts import (JOHNSBURG_APPROVED_LAYOUT_CODES_BY_LOCATION,
                                   johnsburg_field_templates,
                                   johnsburg_location_name)
-from app.services.field_resolution import resolve_active_field
+from app.services.field_resolution import (resolve_active_field,
+                                            resolve_legacy_import_field)
 from app.services.facility_layout_validation import get_active_supported_layouts
 
 REQUIRED = ('week', 'date', 'kickoff', 'site', 'field', 'fieldtype', 'division', 'hometeam', 'awayteam')
@@ -248,10 +249,12 @@ def build_preview(db, season_id, raw_rows):
         area_name, slot_name = _split_area_slot(raw)
         area_configuration_candidates = []
         configuration_candidates = []
+        uses_physical_areas = False
         if site:
             areas = db.query(PhysicalFieldArea).filter_by(
                 host_location_id=site.id, is_active=True).all()
-            if area_name:
+            uses_physical_areas = bool(areas)
+            if uses_physical_areas and area_name:
                 area_matches = [item for item in areas
                                 if _normalized_name(item.name) == _normalized_name(area_name)]
                 physical_area = area_matches[0] if len(area_matches) == 1 else None
@@ -262,7 +265,7 @@ def build_preview(db, season_id, raw_rows):
                         db, physical_area, slot_name, _normalized_field_type(raw.get('fieldtype')))
                     if not area_configuration_candidates:
                         errors.append(f'Generated slot "{slot_name}" is not supported by {physical_area.name}.')
-            elif areas and _slot_signature(slot_name, _normalized_field_type(raw.get('fieldtype'))):
+            elif uses_physical_areas and _slot_signature(slot_name, _normalized_field_type(raw.get('fieldtype'))):
                 supporting = [(area, _area_slot_candidates(
                     db, area, slot_name, _normalized_field_type(raw.get('fieldtype')))) for area in areas]
                 supporting = [(area, choices) for area, choices in supporting if choices]
@@ -271,7 +274,15 @@ def build_preview(db, season_id, raw_rows):
                     area_name = physical_area.name
                 elif len(supporting) > 1:
                     errors.append(f'Generated slot "{slot_name}" is ambiguous at {site.name}; add a Physical Area column or use "Physical Area / Slot" in Field.')
-            if not physical_area:
+            if not uses_physical_areas:
+                field = resolve_legacy_import_field(
+                    db, site, raw.get('physicalarea'), raw.get('field'))
+                # In the flat architecture the Physical Area cell is another
+                # possible field label, not a separate hierarchy level.
+                area_name = ''
+                if field:
+                    slot_name = field.name
+            elif not physical_area:
                 field = resolve_active_field(db, site, raw.get('field'))
             instances = db.query(FieldInstance).filter(FieldInstance.host_location_id == site.id, FieldInstance.is_active.is_(True)).all()
             if not physical_area:
@@ -288,9 +299,13 @@ def build_preview(db, season_id, raw_rows):
                 ), None)
             # A dynamic position may exist only in a supported site layout.
             configuration_candidates = _configuration_candidates(
-                db, site, raw.get('field'), raw.get('fieldtype'))
+                db, site, field.name if field else raw.get('field'), raw.get('fieldtype'))
             if not physical_area and not field and not field_instance and not configuration_candidates and not errors:
-                errors.append(f'Field "{_text(raw.get("field"))}" could not be found at site "{_text(raw.get("site"))}".')
+                if not uses_physical_areas and _text(raw.get('physicalarea')):
+                    missing = _text(raw.get('physicalarea')) or _text(raw.get('field'))
+                    errors.append(f'Field "{missing}" was not found at {site.name}.')
+                else:
+                    errors.append(f'Field "{_text(raw.get("field"))}" could not be found at site "{_text(raw.get("site"))}".')
 
         field_type = _normalized_field_type(raw.get('fieldtype'))
         configured_field_type = None
@@ -361,8 +376,9 @@ def build_preview(db, season_id, raw_rows):
         row = {'row': number, 'week': f'Week {week_number}' if week_number else source_week,
                'date': game_date.isoformat() if game_date else _text(raw.get('date')),
                'kickoff': kickoff.strftime('%H:%M') if kickoff else _text(raw.get('kickoff')),
-               'site': _text(raw.get('site')), 'physical_area': area_name,
-               'field': slot_name if physical_area else _text(raw.get('field')),
+               'site': _text(raw.get('site')), 'physical_area': area_name or None,
+               'field': slot_name if physical_area else (field.name if field else _text(raw.get('field'))),
+               'field_architecture': 'physical_area' if uses_physical_areas else 'legacy_field',
                'configuration': _text(raw.get('layout')) or None,
                'configured_field_type': configured_field_type,
                'imported_field_type': _text(raw.get('fieldtype')).title(),
@@ -385,6 +401,7 @@ def build_preview(db, season_id, raw_rows):
                            # Confirmation must never need to resolve a name after
                            # the schedule being replaced has been deleted.
                            'imported_field_name': _text(raw.get('field')),
+                           'field_architecture': 'physical_area' if uses_physical_areas else 'legacy_field',
                            'physical_area_id': str(physical_area.id) if physical_area else None,
                            'physical_area': physical_area.name if physical_area else None,
                            'resolved_field_id': str(field.id) if field else None,
