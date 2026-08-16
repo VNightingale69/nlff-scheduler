@@ -8,6 +8,7 @@ import { getDivisionLabel } from '@/lib/divisionLabel';
 import { formatDisplayDate, formatDisplayTime } from '@/lib/displayFormat';
 import Link from 'next/link';
 import CommunityLogo from '@/components/CommunityLogo';
+import PublicLayout from '@/components/public/PublicLayout';
 import { APP_SCHEDULE_NAME, APP_SUBTITLE } from '@/config/branding';
 
 type Game = {
@@ -224,7 +225,7 @@ function PublicScheduleContent() {
   };
 
   return (
-    <div className={`public-schedule ${view === 'hosting' ? 'hosting-view-active' : 'list-view-active'} mx-auto w-[96%] max-w-[1800px] space-y-5 px-6 py-5`}>
+    <PublicLayout><div className={`public-schedule ${view === 'hosting' ? 'hosting-view-active' : 'list-view-active'} mx-auto w-[96%] max-w-[1800px] space-y-5 px-6 py-5`}>
       <div className='public-schedule-header flex flex-wrap items-start justify-between gap-3'><div><h1 className='text-[26px] font-bold leading-tight'>{APP_SCHEDULE_NAME}</h1><p className='mt-1 text-base font-medium text-slate-600'>{APP_SUBTITLE}</p></div><div className='public-navigation flex flex-wrap gap-2'><Link className='inline-flex h-11 items-center rounded border px-4 text-[15px] font-medium hover:bg-slate-50' href='/tournaments'>Tournament Bracket</Link><Link className='inline-flex h-11 items-center rounded border px-4 text-[15px] font-medium hover:bg-slate-50' href='/rulebook'>Rulebook</Link></div></div>
 
       <div className='schedule-filters grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5'>
@@ -305,7 +306,7 @@ function PublicScheduleContent() {
           </table>
         </div>
       )}
-    </div>
+    </div></PublicLayout>
   );
 }
 
