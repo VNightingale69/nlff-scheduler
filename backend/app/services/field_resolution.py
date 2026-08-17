@@ -102,6 +102,121 @@ def resolve_active_field(db: Session, site: HostLocation, identifier: object) ->
 
 
 @dataclass(frozen=True)
+class ResolvedFieldAssignment:
+    """The relational field assignment used by every scheduling validator.
+
+    ``issue_code`` describes an invalid *existing* assignment.  A ``None``
+    result is reserved for a game which has no saved assignment at all.
+    """
+
+    physical_field: Field | None
+    field_instance: FieldInstance | None
+    source: str
+    issue_code: str | None = None
+    repaired: bool = False
+
+    @property
+    def physical_field_id(self):
+        return getattr(self.physical_field, 'id', None)
+
+    @property
+    def field_instance_id(self):
+        return getattr(self.field_instance, 'id', None)
+
+    @property
+    def display_name(self) -> str | None:
+        return get_field_display_name(
+            getattr(self.physical_field, 'name', None)
+            or getattr(self.field_instance, 'field_name', None)
+        )
+
+    @property
+    def field_size(self) -> str | None:
+        return (getattr(self.physical_field, 'layout_type', None)
+                or getattr(self.field_instance, 'field_type', None))
+
+
+def resolve_game_field_assignment(
+    db: Session,
+    game: Game,
+    *,
+    field_instance: FieldInstance | None = None,
+    repair: bool = False,
+) -> ResolvedFieldAssignment | None:
+    """Resolve a saved game field by IDs, with a unique legacy-name repair.
+
+    The canonical ``Game.field_id`` relationship wins.  Older builder rows
+    may instead reference a ``FieldInstance``; its availability's ``field_id``
+    is the next stable relationship.  Name normalization is used only as a
+    migration bridge, is scoped to the saved host, and never chooses between
+    multiple matches.
+    """
+    saved_field_id = getattr(game, 'field_id', None)
+    field = getattr(game, 'field', None)
+    if field is None and saved_field_id:
+        field = db.get(Field, saved_field_id)
+    if saved_field_id:
+        if field is None:
+            return ResolvedFieldAssignment(None, field_instance, 'field_id',
+                                           'FIELD_CONFIGURATION_INVALID')
+        issue = None
+        if getattr(field, 'host_location_id', None) != getattr(game, 'host_location_id', None):
+            issue = 'FIELD_LOCATION_MISMATCH'
+        elif not bool(getattr(field, 'is_active', True)) or getattr(field, 'deleted_at', None) is not None:
+            issue = 'FIELD_CONFIGURATION_INVALID'
+        return ResolvedFieldAssignment(field, field_instance, 'field_id', issue)
+
+    instance = field_instance or getattr(game, 'field_instance', None)
+    instance_id = getattr(game, 'field_instance_id', None)
+    if instance is None and instance_id:
+        instance = db.get(FieldInstance, instance_id)
+    if instance_id and instance is None:
+        return ResolvedFieldAssignment(None, None, 'field_instance_id',
+                                       'FIELD_CONFIGURATION_INVALID')
+    if instance is None:
+        return None
+    if getattr(instance, 'host_location_id', None) != getattr(game, 'host_location_id', None):
+        return ResolvedFieldAssignment(None, instance, 'field_instance_id',
+                                       'FIELD_LOCATION_MISMATCH')
+
+    availability = getattr(instance, 'hosting_availability', None)
+    relational_field_id = getattr(availability, 'field_id', None)
+    if relational_field_id:
+        field = db.get(Field, relational_field_id)
+        if field is None:
+            return ResolvedFieldAssignment(None, instance, 'availability_field_id',
+                                           'FIELD_CONFIGURATION_INVALID')
+        issue = ('FIELD_LOCATION_MISMATCH'
+                 if field.host_location_id != getattr(game, 'host_location_id', None)
+                 else 'FIELD_CONFIGURATION_INVALID'
+                 if not field.is_active or field.deleted_at is not None else None)
+        if repair and issue is None:
+            game.field_id = field.id
+        return ResolvedFieldAssignment(field, instance, 'availability_field_id', issue,
+                                       repaired=bool(repair and issue is None))
+
+    requested = normalize_field_identifier(getattr(instance, 'field_name', None))
+    candidates = db.query(Field).filter(
+        Field.host_location_id == getattr(game, 'host_location_id', None),
+        Field.deleted_at.is_(None),
+    ).all()
+    matches = [candidate for candidate in candidates
+               if normalize_field_identifier(candidate.name) == requested]
+    if len(matches) > 1:
+        return ResolvedFieldAssignment(None, instance, 'legacy_name',
+                                       'FIELD_ASSIGNMENT_AMBIGUOUS')
+    if not matches:
+        return ResolvedFieldAssignment(None, instance, 'legacy_name',
+                                       'FIELD_CONFIGURATION_INVALID')
+    field = matches[0]
+    issue = None if field.is_active else 'FIELD_CONFIGURATION_INVALID'
+    if repair and issue is None:
+        game.field_id = field.id
+    return ResolvedFieldAssignment(field, instance, 'legacy_name', issue,
+                                   repaired=bool(repair and issue is None))
+
+
+@dataclass(frozen=True)
 class HistoricalFieldDisplay:
     """A display value plus the stable historical source that supplied it."""
 
