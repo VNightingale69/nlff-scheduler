@@ -28532,6 +28532,8 @@ def _empty_standings_row(team: Team, division: Division, organization: Organizat
 
 def _standings_game_summary(row, *, public: bool, can_manage: bool, community_org_id: uuid.UUID | None = None) -> dict:
     g, _slot, _fi, _host, home, away, div, _org, _status = row
+    home_organization = getattr(home, 'organization', None)
+    away_organization = getattr(away, 'organization', None)
     score = getattr(g, 'score', None)
     official = _is_official_score(score)
     result_status = _standings_result_status(g, score, public=public)
@@ -28552,8 +28554,16 @@ def _standings_game_summary(row, *, public: bool, can_manage: bool, community_or
         'division_group': div.division_group,
         'home_team_id': str(home.id),
         'home_team': home.name,
+        'home_organization_id': str(home.organization_id),
+        'home_organization_name': getattr(home_organization, 'name', None) or '',
+        'home_organization_logo_url': _community_logo_browser_url(home_organization),
+        'home_organization_logo_alt_text': _community_logo_alt_text(home_organization),
         'away_team_id': str(away.id),
         'away_team': away.name,
+        'away_organization_id': str(away.organization_id),
+        'away_organization_name': getattr(away_organization, 'name', None) or '',
+        'away_organization_logo_url': _community_logo_browser_url(away_organization),
+        'away_organization_logo_alt_text': _community_logo_alt_text(away_organization),
         'home_score': ('F' if bool(getattr(score, 'home_forfeit', False)) else getattr(score, 'home_score', None)) if visible_score and score else None,
         'away_score': ('F' if bool(getattr(score, 'away_forfeit', False)) else getattr(score, 'away_score', None)) if visible_score and score else None,
         'winner': winner,
