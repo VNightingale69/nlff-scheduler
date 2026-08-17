@@ -115,6 +115,35 @@ class StandingsTest(unittest.TestCase):
         self.assertEqual(rows['B Team']['community_logo_url'], '/uploads/lake-county.png')
         self.assertIsNone(rows['C Team']['community_logo_url'])
 
+    def test_public_score_results_include_each_teams_organization_logo_metadata(self):
+        self.org_a.logo_filename = 'westosha.png'
+        self.org_a.logo_url = '/bad/legacy/path.png'
+        self.org_b.logo_url = 'uploads/lake-county.png'
+        self.db.commit()
+        self._game(self.teams[0], self.teams[1], score=(21, 14))
+
+        response = self._standings(public=True)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()['game_results'][0]
+        self.assertEqual(result['home_organization_id'], str(self.org_a.id))
+        self.assertEqual(result['home_organization_name'], 'Westosha')
+        self.assertEqual(result['home_organization_logo_url'], f'/api/public/organizations/{self.org_a.id}/logo/westosha.png')
+        self.assertEqual(result['home_organization_logo_alt_text'], 'Westosha logo')
+        self.assertEqual(result['away_organization_id'], str(self.org_b.id))
+        self.assertEqual(result['away_organization_name'], 'Lake County')
+        self.assertEqual(result['away_organization_logo_url'], '/uploads/lake-county.png')
+        self.assertEqual(result['away_organization_logo_alt_text'], 'Lake County logo')
+
+    def test_public_score_result_exposes_missing_logo_without_hiding_team(self):
+        self._game(self.teams[0], self.teams[2], score=(7, 6))
+
+        result = self._standings(public=True).json()['game_results'][0]
+
+        self.assertEqual(result['away_team'], 'C Team')
+        self.assertEqual(result['away_organization_name'], 'Other')
+        self.assertIsNone(result['away_organization_logo_url'])
+
     def test_division_standings_include_zero_score_teams_and_count_published_results_only(self):
         self._game(self.teams[0], self.teams[1], score=(21, 14))
         self._game(self.teams[1], self.teams[2], score=(7, 20), status='SUBMITTED', published=False)
