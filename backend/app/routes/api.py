@@ -40,7 +40,7 @@ from app.schemas import (
 from app.security import access_token_expires_at, auth_invalid_token_exception, create_access_token, create_refresh_token, hash_password, validate_password_strength, verify_password, decode_token
 from app.services.game_statuses import REQUIRED_GAME_STATUSES, ensure_required_game_statuses
 from app.services.generated_field_names import get_field_display_name, retire_generated_field
-from app.services.field_resolution import resolve_game_field_display, snapshot_game_field_display
+from app.services.field_resolution import resolve_game_field_assignment, resolve_game_field_display, snapshot_game_field_display
 from app.services.organization_cleanup import cleanup_organization_dependencies, collect_organization_delete_inventory
 from app.services.scheduling_validation import validate_game
 from app.services.tosc_field_areas import ensure_tosc_physical_areas
@@ -2031,7 +2031,8 @@ def _build_final_schedule_validation_result(
 
     for g, slot, fi, host, home, away, div, _org, _status in rows:
         game_id = str(g.id)
-        canonical_field = getattr(g, 'field', None)
+        assignment = resolve_game_field_assignment(db, g, field_instance=fi, repair=True)
+        canonical_field = assignment.physical_field if assignment else None
         configured_field_type = (getattr(slot, 'field_type', None) or
                                  getattr(fi, 'field_type', None) or
                                  getattr(canonical_field, 'layout_type', None))
@@ -2047,8 +2048,7 @@ def _build_final_schedule_validation_result(
         # replace the canonical field type only after the facility configuration
         # service confirms that the entire kickoff wave fits.
         field_type = required_field_type if supported_reconfiguration else configured_field_type
-        has_saved_field = bool(getattr(g, 'field_id', None) or getattr(g, 'field_instance_id', None))
-        if not has_saved_field or getattr(g, 'missing_field_assignment', False) or getattr(g, 'field_assignment_status', None) == 'MISSING_FIELD':
+        if assignment is None:
             saved_missing_field_failures.append({
                 **_final_validation_game_detail(g, slot, fi, host, home, away, div, failure_code='SCHEDULED_GAME_MISSING_FIELD', failure_category='game', specific_reason='Game is missing a field assignment because the assigned field was deleted.'),
                 'missing_field_assignment': True,
@@ -2057,6 +2057,15 @@ def _build_final_schedule_validation_result(
                 'previous_field_id': str(getattr(g, 'previous_field_id', None)) if getattr(g, 'previous_field_id', None) else None,
                 'previous_field_name': getattr(g, 'previous_field_name', None),
             })
+        elif assignment.issue_code is None and (
+            getattr(g, 'missing_field_assignment', False)
+            or getattr(g, 'field_assignment_status', None) == 'MISSING_FIELD'
+        ):
+            # Repair stale deletion markers when a stable saved relationship
+            # still resolves.  They are metadata, never an assignment source.
+            g.missing_field_assignment = False
+            g.field_assignment_status = None
+            g.field_deleted_from_game = False
         if supported_reconfiguration:
             field_label = getattr(canonical_field, 'name', None) or getattr(fi, 'field_name', None) or 'Assigned field'
             validation_warnings.append({
@@ -16524,7 +16533,8 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
     turf_capacity_groups: dict[tuple, list[tuple]] = {}
     layout_evaluations: list[dict[str, object]] = []
     for game, _slot, field_instance, host, home, away, division, _org, _status in rows:
-        canonical_field = getattr(game, 'field', None)
+        assignment = resolve_game_field_assignment(db, game, field_instance=field_instance, repair=True)
+        canonical_field = assignment.physical_field if assignment else None
         def error(code: str, message: str):
             issue_required_type = _required_field_type_for_division(division)
             issue_configuration = getattr(getattr(game, 'timeslot_configuration', None), 'configuration', None)
@@ -16559,16 +16569,24 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
             error('INVALID_DIVISION', 'Both teams must belong to the game division.')
         if not game.game_date: error('INVALID_DATE', 'A game date is required.')
         if not game.kickoff_time: error('INVALID_KICKOFF', 'A kickoff time is required.')
-        # Game.field_id is the canonical saved relationship. Imported and
-        # manually assigned logical fields do not require a generated instance.
-        if not game.field_id or not canonical_field:
-            error('MISSING_FIELD', 'A canonical field assignment is required.')
-        elif (
-            not bool(getattr(canonical_field, 'is_active', True))
-            or getattr(canonical_field, 'deleted_at', None) is not None
-            or getattr(canonical_field, 'host_location_id', game.host_location_id) != game.host_location_id
-        ):
-            error('INVALID_FIELD_FOR_ACTIVE_LAYOUT', 'The assigned field is retired, inactive, or belongs to a different host location.')
+        if assignment is None:
+            error('MISSING_FIELD', 'No field has been assigned to this scheduled game.')
+        elif assignment.issue_code:
+            messages = {
+                'FIELD_LOCATION_MISMATCH': 'The assigned field belongs to a different host location.',
+                'FIELD_ASSIGNMENT_AMBIGUOUS': 'The legacy field label matches more than one saved field.',
+                'FIELD_CONFIGURATION_INVALID': 'The saved field or field configuration does not exist or is inactive.',
+            }
+            error(assignment.issue_code, messages[assignment.issue_code])
+        logger.debug(
+            'schedule_field_validation scheduled_game_id=%s host_location_id=%s saved_field_id=%s '
+            'saved_layout_id=%s saved_configuration_id=%s resolved_field_id=%s resolved_layout_id=%s '
+            'required_field_size=%s validation_result=%s',
+            game.id, game.host_location_id, getattr(game, 'field_id', None), getattr(game, 'field_instance_id', None),
+            getattr(game, 'timeslot_configuration_id', None), assignment.physical_field_id if assignment else None,
+            assignment.field_instance_id if assignment else None, _required_field_type_for_division(division),
+            assignment.issue_code if assignment and assignment.issue_code else 'VALID' if assignment else 'MISSING_FIELD',
+        )
         matchup = (game.week_id, game.home_team_id, game.away_team_id, game.game_date, game.kickoff_time)
         reverse = (game.week_id, game.away_team_id, game.home_team_id, game.game_date, game.kickoff_time)
         if matchup in matchups or reverse in matchups: error('DUPLICATE_GAME', 'This matchup is duplicated.')

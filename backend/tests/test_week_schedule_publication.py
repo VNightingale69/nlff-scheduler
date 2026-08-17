@@ -73,19 +73,19 @@ def test_one_truly_null_canonical_field_is_a_descriptive_blocking_error():
     assert result['status'] == 'Blocked'
 
 
-def test_stale_field_from_an_inactive_layout_is_actionable_and_blocks_publish():
+def test_stale_field_from_an_inactive_layout_has_distinct_configuration_error():
     week_id = uuid.uuid4()
     row = _game(week_id)
     row[0].field.is_active = False
     row[0].field.deleted_at = None
     with patch('app.routes.api.get_scheduled_games_for_season', return_value=[row]):
         result = _week_publish_readiness(SimpleNamespace(), SimpleNamespace(id=uuid.uuid4()), [SimpleNamespace(id=week_id)])
-    issue = next(item for item in result['blocking_errors'] if item['issue_code'] == 'INVALID_FIELD_FOR_ACTIVE_LAYOUT')
+    issue = next(item for item in result['blocking_errors'] if item['issue_code'] == 'FIELD_CONFIGURATION_INVALID')
     assert issue['scheduled_game_display_name'] == 'Home Team vs Away Team'
     assert issue['field'] == 'Hiller Park SW'
     assert issue['required_field_type'] == 'SMALL'
-    assert issue['reason'] == 'The assigned field is retired, inactive, or belongs to a different host location.'
-    assert issue['recommended_action'] == 'Reassign to an active Small field in Manual Schedule Builder.'
+    assert issue['reason'] == 'The saved field or field configuration does not exist or is inactive.'
+    assert issue['recommended_action'] == 'Correct the game in Manual Schedule Builder.'
     assert result['status'] == 'Blocked'
 
 
