@@ -28630,32 +28630,38 @@ def _build_standings_payload(db: Session, *, season_id: uuid.UUID | None = None,
     if published:
         want = published.strip().lower() in {'true', '1', 'published'}
         rows = [row for row in rows if _is_official_score(getattr(row[0], 'score', None)) == want]
-    result_rows = [_standings_game_summary(row, public=public, can_manage=can_manage, community_org_id=community_org_id) for row in rows]
+    # The scheduler roster is the authoritative current-season population.  In
+    # particular, games are historical records and must never resurrect a team
+    # whose organization/division participation was removed.
+    roster_query = season_roster_query(db, season_id)
+    if division_id:
+        roster_query = roster_query.filter(Team.division_id == division_id)
+    valid_teams = roster_query.order_by(Team.name, Team.id).all()
+    valid_team_ids = {team.id for team in valid_teams}
+    for source_row in rows:
+        game, _slot, _fi, _host, home, away, div, _org, _status = source_row
+        for referenced_team in (home, away):
+            if referenced_team.id not in valid_team_ids:
+                logger.warning(
+                    'standings_data_integrity_warning game_id=%s season_id=%s division_id=%s '
+                    'division_name=%s team_id=%s team_name=%s reason=not_active_season_participant',
+                    game.id, season_id, div.id, div.name, referenced_team.id, referenced_team.name,
+                )
+    valid_rows = [row for row in rows if row[4].id in valid_team_ids and row[5].id in valid_team_ids]
+    result_rows = [_standings_game_summary(row, public=public, can_manage=can_manage, community_org_id=community_org_id) for row in valid_rows]
     if played:
         want_played = played.strip().lower() in {'true', '1', 'played'}
         result_rows = [row for row in result_rows if (row['result_status'] == 'Played') == want_played]
     now = _score_now()
-    division_ids = {row[6].id for row in rows}
-    if division_id:
-        division_ids.add(division_id)
-    if not rows and not division_id:
-        division_query = db.query(Division).filter(Division.is_active.is_(True))
-        if community_org_id:
-            division_query = division_query.join(Team, Team.division_id == Division.id).filter(Team.organization_id == community_org_id, Team.is_active.is_(True))
-        division_ids = {item.id for item in division_query.all()}
-    teams_query = db.query(Team, Organization, Division).join(Organization, Team.organization_id == Organization.id).join(Division, Team.division_id == Division.id).filter(Team.is_active.is_(True), Division.is_active.is_(True))
-    if division_ids:
-        teams_query = teams_query.filter(Team.division_id.in_(division_ids))
-    if community_org_id and not division_ids:
-        teams_query = teams_query.filter(Team.organization_id == community_org_id)
-    teams = teams_query.order_by(Division.sort_order, Division.name, Organization.name, Team.name).all()
+    teams = [(team, team.organization, team.division) for team in valid_teams]
+    teams.sort(key=lambda item: (item[2].sort_order, item[2].name, item[1].name, item[0].name))
     standings: dict[uuid.UUID, dict] = {}
     divisions: dict[uuid.UUID, dict] = {}
     for team, org, div in teams:
         divisions.setdefault(div.id, {'id': str(div.id), 'name': div.name, 'division_group': div.division_group, 'sort_order': div.sort_order})
         standings[team.id] = _empty_standings_row(team, div, org, now)
     summary_by_division = {div_id: {'scheduled': 0, 'official_played': 0, 'missing': 0, 'pending_approval': 0, 'flagged_conflict': 0, 'future': 0, 'unpublished': 0, 'not_played': 0} for div_id in divisions}
-    for source_row in rows:
+    for source_row in valid_rows:
         g, _slot, _fi, _host, home, away, div, _org, _status = source_row
         divisions.setdefault(div.id, {'id': str(div.id), 'name': div.name, 'division_group': div.division_group, 'sort_order': div.sort_order})
         summary = summary_by_division.setdefault(div.id, {'scheduled': 0, 'official_played': 0, 'missing': 0, 'pending_approval': 0, 'flagged_conflict': 0, 'future': 0, 'unpublished': 0, 'not_played': 0})
@@ -28708,6 +28714,8 @@ def _build_standings_payload(db: Session, *, season_id: uuid.UUID | None = None,
             home_row['ties'] += 1; away_row['ties'] += 1
     standings_by_division: dict[uuid.UUID, list[dict]] = {}
     for row in standings.values():
+        if uuid.UUID(row['team_id']) not in valid_team_ids:
+            continue
         row['games_remaining'] = max(int(row['games_scheduled']) - int(row['games_played']), 0)
         row['games_not_played'] = row['games_remaining']
         row['point_differential'] = int(row['points_for']) - int(row['points_against'])
@@ -29113,7 +29121,7 @@ def _standings_seed_rows(db: Session, season_id: uuid.UUID, division_id: uuid.UU
     block = next((item for item in standings_payload.get('divisions', []) if item.get('division', {}).get('id') == str(division_id)), None)
     standings_rows = list((block or {}).get('standings') or [])
     ranked_ids = {uuid.UUID(row['team_id']): row for row in standings_rows if row.get('team_id')}
-    teams = db.query(Team).join(Division).filter(Team.division_id == division_id, Team.is_active.is_(True), Division.is_active.is_(True)).order_by(Team.name).all()
+    teams = season_roster_query(db, season_id).filter(Team.division_id == division_id).order_by(Team.name).all()
     rows = []
     for team in teams:
         rank_row = ranked_ids.get(team.id)
