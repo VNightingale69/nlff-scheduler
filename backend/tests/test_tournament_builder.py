@@ -10,7 +10,7 @@ from sqlalchemy.pool import StaticPool
 from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_SCHEDULING_ADMIN
 from app.database import Base, get_db
 from app.main import app
-from app.models import Division, Game, GameScore, GameStatus, Organization, Role, Season, Team, Tournament, TournamentGame, User, Week
+from app.models import Division, Game, GameScore, GameStatus, Organization, OrganizationDivisionParticipation, Role, Season, Team, Tournament, TournamentGame, User, Week
 from app.security import create_access_token, hash_password
 
 
@@ -31,8 +31,9 @@ class TournamentBuilderTest(unittest.TestCase):
         self.scheduler = User(id=uuid.uuid4(), email='scheduler@example.com', full_name='Scheduler', password_hash=hash_password('Password123!'), role_id=self.scheduler_role.id, is_active=True)
         self.orgs = [Organization(id=uuid.uuid4(), name=f'Org {i}', is_active=True) for i in range(1, 9)]
         self.teams = [Team(id=uuid.uuid4(), organization_id=org.id, division_id=self.division.id, name=f'Team {i}', is_active=True) for i, org in enumerate(self.orgs, start=1)]
+        self.participations = [OrganizationDivisionParticipation(id=uuid.uuid4(), organization_id=org.id, division_id=self.division.id, is_participating=True, team_count=1, is_active=True) for org in self.orgs]
         self.community_user = User(id=uuid.uuid4(), email='org1@example.com', full_name='Org 1 Admin', password_hash=hash_password('Password123!'), role_id=self.community_role.id, organization_id=self.orgs[0].id, is_active=True)
-        self.db.add_all([self.scheduler_role, self.community_role, self.division, self.season, self.week, self.status, self.scheduler, self.community_user, *self.orgs, *self.teams])
+        self.db.add_all([self.scheduler_role, self.community_role, self.division, self.season, self.week, self.status, self.scheduler, self.community_user, *self.orgs, *self.teams, *self.participations])
         self.db.commit()
 
     def tearDown(self):
@@ -70,6 +71,18 @@ class TournamentBuilderTest(unittest.TestCase):
         seeds = {team['team_name']: team['seed'] for team in division['teams']}
         self.assertEqual(seeds['Team 1'], 1)
         self.assertTrue(all(team['included'] for team in division['teams']))
+
+    def test_tournament_seeding_excludes_team_without_current_participation(self):
+        legacy_org = Organization(id=uuid.uuid4(), name='Legacy Org', is_active=True)
+        legacy_team = Team(id=uuid.uuid4(), organization_id=legacy_org.id, division_id=self.division.id, name='Legacy Team', is_active=True)
+        self.db.add_all([legacy_org, legacy_team])
+        self.db.commit()
+
+        response = self._create()
+
+        self.assertEqual(response.status_code, 200, response.text)
+        seeded_ids = {team['team_id'] for team in response.json()['tournament']['divisions'][0]['teams']}
+        self.assertNotIn(str(legacy_team.id), seeded_ids)
 
     def test_manual_seed_override_and_four_team_bracket(self):
         response = self._create(seed_overrides=[{'team_id': str(self.teams[3].id), 'seed': 1}], excluded=[str(team.id) for team in self.teams[4:]])

@@ -1,6 +1,6 @@
 import unittest
 import uuid
-from datetime import date, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -10,7 +10,7 @@ from sqlalchemy.pool import StaticPool
 from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_SCHEDULING_ADMIN
 from app.database import Base, get_db
 from app.main import app
-from app.models import Division, Game, GameScore, GameStatus, Organization, Role, Season, Team, User, Week
+from app.models import Division, Game, GameScore, GameStatus, Organization, OrganizationDivisionParticipation, Role, Season, Team, User, Week
 from app.security import create_access_token, hash_password
 
 
@@ -38,9 +38,13 @@ class StandingsTest(unittest.TestCase):
             Team(id=uuid.uuid4(), organization_id=self.org_c.id, division_id=self.division.id, name='C Team', is_active=True),
             Team(id=uuid.uuid4(), organization_id=self.org_c.id, division_id=self.division.id, name='D No Scores', is_active=True),
         ]
+        self.participations = [OrganizationDivisionParticipation(
+            id=uuid.uuid4(), organization_id=org.id, division_id=self.division.id,
+            is_participating=True, team_count=sum(team.organization_id == org.id for team in self.teams), is_active=True,
+        ) for org in (self.org_a, self.org_b, self.org_c)]
         self.scheduling_user = User(id=uuid.uuid4(), email='scheduler@example.com', full_name='Scheduler', password_hash=hash_password('Password123!'), role_id=self.scheduling_role.id, is_active=True)
         self.community_user = User(id=uuid.uuid4(), email='a@example.com', full_name='A Admin', password_hash=hash_password('Password123!'), role_id=self.community_role.id, organization_id=self.org_a.id, is_active=True)
-        self.db.add_all([self.scheduling_role, self.community_role, self.org_a, self.org_b, self.org_c, self.division, self.season, self.week, self.status, *self.teams, self.scheduling_user, self.community_user])
+        self.db.add_all([self.scheduling_role, self.community_role, self.org_a, self.org_b, self.org_c, self.division, self.season, self.week, self.status, *self.teams, *self.participations, self.scheduling_user, self.community_user])
         self.db.commit()
 
     def tearDown(self):
@@ -160,6 +164,26 @@ class StandingsTest(unittest.TestCase):
         self.assertEqual(division['summary']['official_played'], 1)
         self.assertEqual(division['summary']['pending_approval'], 1)
         self.assertEqual(division['summary']['missing'], 1)
+
+    def test_invalid_teams_are_excluded_and_orphaned_game_is_logged(self):
+        deleted = Team(id=uuid.uuid4(), organization_id=self.org_a.id, division_id=self.division.id, name='Deleted', is_active=True, deleted_at=datetime.now(timezone.utc))
+        inactive = Team(id=uuid.uuid4(), organization_id=self.org_a.id, division_id=self.division.id, name='Inactive', is_active=False)
+        historical_org = Organization(id=uuid.uuid4(), name='Johnsburg', is_active=True)
+        historical = Team(id=uuid.uuid4(), organization_id=historical_org.id, division_id=self.division.id, name="J'Burg Coed 6-7 Blue", is_active=True)
+        self.db.add_all([deleted, inactive, historical_org, historical])
+        self.db.commit()
+        game = self._game(self.teams[0], historical, score=(30, 0))
+
+        with self.assertLogs('app.routes.api', level='WARNING') as logs:
+            payload = self._standings().json()
+
+        division = payload['divisions'][0]
+        names = {row['team_name'] for row in division['standings']}
+        self.assertEqual(names, {'A Team', 'B Team', 'C Team', 'D No Scores'})
+        self.assertEqual(len(division['standings']), 4)
+        self.assertEqual(next(row for row in division['standings'] if row['team_name'] == 'A Team')['wins'], 0)
+        self.assertNotIn(str(game.id), {row['game_id'] for row in payload['game_results']})
+        self.assertTrue(any(str(game.id) in message and str(historical.id) in message for message in logs.output))
 
     def test_ties_forfeits_points_and_ranking_tiebreakers(self):
         self._game(self.teams[0], self.teams[1], score=(14, 14), kickoff=time(9, 0))
