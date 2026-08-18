@@ -1,7 +1,8 @@
 import uuid
+from datetime import date
 
-from app.models import Field, Game
-from app.services.field_resolution import resolve_game_field_display
+from app.models import Field, FieldInstance, Game
+from app.services.field_resolution import resolve_game_field_display, resolve_public_game_field_display
 
 
 def _game(**values):
@@ -44,3 +45,26 @@ def test_historical_field_snapshot_survives_field_deletion():
 
 def test_genuinely_unassigned_game_remains_unassigned():
     assert resolve_game_field_display(_game()).name is None
+
+
+def test_public_display_prefers_active_canonical_field_over_retired_instance():
+    field = Field(id=uuid.uuid4(), host_location_id=uuid.uuid4(), name='Medium Field 1',
+                  layout_type='MEDIUM', is_active=True)
+    retired = FieldInstance(
+        id=uuid.uuid4(), host_location_id=field.host_location_id,
+        hosting_availability_id=uuid.uuid4(), instance_date=date(2026, 8, 16),
+        field_name='__retired_generated__f9ac615f__retired_generated__f9ac615f__Medium Field 1',
+        field_type='MEDIUM', is_active=False, is_generated=True,
+    )
+    game = _game(field_id=field.id, field_instance_id=retired.id)
+    game.field = field
+    game.field_instance = retired
+
+    resolved = resolve_public_game_field_display(game, field_instance=retired)
+    assert resolved.name == 'Medium Field 1'
+    assert resolved.source == 'active_field'
+
+
+def test_public_display_rejects_unparseable_internal_name():
+    game = _game(field_display_name_snapshot='__generated__database-key')
+    assert resolve_public_game_field_display(game).name is None

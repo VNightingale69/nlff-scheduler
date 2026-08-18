@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from app.routes.api import _field_export_display_label
 from app.services.generated_field_names import (
     get_field_display_name,
+    get_public_field_display_name,
     get_original_generated_field_name,
     is_retired_generated_field,
     retire_generated_field,
@@ -61,6 +62,17 @@ class GeneratedFieldNamesTest(unittest.TestCase):
         self.assertFalse(retire_generated_field(field))
         self.assertEqual(field.field_name, stored)
         self.assertFalse(field.is_active)
+
+    def test_public_display_never_returns_internal_markers(self):
+        self.assertEqual(
+            get_public_field_display_name(
+                '__retired_generated__f9ac615f__retired_generated__f9ac615f__Medium Field 1'
+            ),
+            'Medium Field 1',
+        )
+        for malformed in ('__generated__f9ac615f', '_retired_Field 1',
+                          '__retired_generated__broken'):
+            self.assertIsNone(get_public_field_display_name(malformed))
 
 
 if __name__ == '__main__':
