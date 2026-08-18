@@ -4687,8 +4687,15 @@ def _rulebook_stored_file_available(rulebook: Rulebook) -> bool:
     return _rulebook_file_path(rulebook) is not None
 
 
-def _active_rulebook(db: Session) -> Rulebook | None:
-    return db.query(Rulebook).filter(Rulebook.is_active.is_(True)).order_by(Rulebook.uploaded_at.desc(), Rulebook.created_at.desc()).first()
+RULEBOOK_DOCUMENT = 'RULEBOOK'
+RULE_INFOGRAPHIC_DOCUMENT = 'RULE_INFOGRAPHIC'
+
+
+def _active_rulebook(db: Session, document_type: str = RULEBOOK_DOCUMENT) -> Rulebook | None:
+    return db.query(Rulebook).filter(
+        Rulebook.document_type == document_type,
+        Rulebook.is_active.is_(True),
+    ).order_by(Rulebook.uploaded_at.desc(), Rulebook.created_at.desc()).first()
 
 
 def _serialize_rulebook(rulebook: Rulebook) -> dict:
@@ -4698,6 +4705,7 @@ def _serialize_rulebook(rulebook: Rulebook) -> dict:
     file_available = _rulebook_stored_file_available(rulebook)
     return {
         'id': rulebook.id,
+        'document_type': rulebook.document_type,
         'created_at': rulebook.created_at,
         'updated_at': rulebook.updated_at,
         'original_filename': rulebook.original_filename,
@@ -4718,10 +4726,11 @@ def _serialize_rulebook(rulebook: Rulebook) -> dict:
     }
 
 
-def _ensure_active_rulebook(db: Session) -> Rulebook:
-    rulebook = _active_rulebook(db)
+def _ensure_active_rulebook(db: Session, document_type: str = RULEBOOK_DOCUMENT) -> Rulebook:
+    rulebook = _active_rulebook(db, document_type)
     if not rulebook:
-        raise HTTPException(status_code=404, detail='No rulebook has been uploaded yet.')
+        name = 'Rule Infographic' if document_type == RULE_INFOGRAPHIC_DOCUMENT else 'rulebook'
+        raise HTTPException(status_code=404, detail=f'No {name} has been uploaded yet.')
     return rulebook
 
 
@@ -7881,6 +7890,15 @@ def _log_login_attempt(email: str, *, success: bool, user: User | None = None, f
 
 @router.post('/admin/rulebook/upload', response_model=RulebookRead, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
 def upload_rulebook(file: UploadFile = File(...), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return _upload_rulebook_document(file, current_user, db, RULEBOOK_DOCUMENT)
+
+
+@router.post('/admin/rule-infographic/upload', response_model=RulebookRead, dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN))])
+def upload_rule_infographic(file: UploadFile = File(...), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return _upload_rulebook_document(file, current_user, db, RULE_INFOGRAPHIC_DOCUMENT)
+
+
+def _upload_rulebook_document(file: UploadFile, current_user: User, db: Session, document_type: str):
     original_filename = _validate_rulebook_upload(file)
     stored_filename = f'{uuid.uuid4()}.pdf'
     destination: Path | None = None
@@ -7897,7 +7915,7 @@ def upload_rulebook(file: UploadFile = File(...), current_user: User = Depends(g
                     if destination:
                         destination.unlink(missing_ok=True)
                     limit_mb = RULEBOOK_MAX_SIZE_BYTES // (1024 * 1024)
-                    raise HTTPException(status_code=413, detail=f'File is too large. Maximum size is {limit_mb} MB.')
+                    raise HTTPException(status_code=413, detail=f'The selected file exceeds the {limit_mb} MB maximum file size.')
                 output.write(chunk)
 
         if total_bytes == 0:
@@ -7918,10 +7936,14 @@ def upload_rulebook(file: UploadFile = File(...), current_user: User = Depends(g
         if not saved_file_exists:
             raise HTTPException(status_code=500, detail='Rulebook upload could not be saved to persistent storage.')
 
-        db.query(Rulebook).filter(Rulebook.is_active.is_(True)).update({Rulebook.is_active: False}, synchronize_session=False)
+        db.query(Rulebook).filter(
+            Rulebook.document_type == document_type,
+            Rulebook.is_active.is_(True),
+        ).update({Rulebook.is_active: False}, synchronize_session=False)
         rulebook_id = uuid.uuid4()
         rulebook = Rulebook(
             id=rulebook_id,
+            document_type=document_type,
             original_filename=original_filename,
             stored_filename=stored_filename,
             content_type=RULEBOOK_ALLOWED_CONTENT_TYPE,
@@ -7962,12 +7984,25 @@ def get_rulebook(db: Session = Depends(get_db)):
     return _serialize_rulebook(_ensure_active_rulebook(db))
 
 
+@router.get('/rule-infographic', response_model=RulebookRead, dependencies=[Depends(get_current_user)])
+def get_rule_infographic(db: Session = Depends(get_db)):
+    return _serialize_rulebook(_ensure_active_rulebook(db, RULE_INFOGRAPHIC_DOCUMENT))
+
+
 @router.get('/public/rulebook', response_model=RulebookRead)
 def get_public_rulebook(db: Session = Depends(get_db)):
     rulebook = _ensure_active_rulebook(db)
     if not _rulebook_stored_file_available(rulebook):
         raise HTTPException(status_code=404, detail=_missing_rulebook_detail(admin=False))
     return _serialize_rulebook(rulebook)
+
+
+@router.get('/public/rule-infographic', response_model=RulebookRead)
+def get_public_rule_infographic(db: Session = Depends(get_db)):
+    infographic = _ensure_active_rulebook(db, RULE_INFOGRAPHIC_DOCUMENT)
+    if not _rulebook_stored_file_available(infographic):
+        raise HTTPException(status_code=404, detail='Rule Infographic is temporarily unavailable.')
+    return _serialize_rulebook(infographic)
 
 
 def _rulebook_file_path(rulebook: Rulebook) -> Path | None:

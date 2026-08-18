@@ -99,6 +99,7 @@ class TokenResponse(BaseModel):
 
 
 class RulebookRead(BaseSchema):
+    document_type: str = 'RULEBOOK'
     original_filename: str
     stored_filename: str
     content_type: str
