@@ -2,6 +2,7 @@
 
 import CommunityLogo, { logoSource } from '@/components/CommunityLogo';
 import { formatDisplayDate, formatDisplayTime } from '@/lib/displayFormat';
+import { publicFieldName } from '@/lib/publicFieldName';
 
 export type TournamentBracketGame = {
   id: string;
@@ -341,7 +342,7 @@ function gameMetadata(game: TournamentBracketGame): GameMetadataRow[] {
     { label: 'Date', value: formatDisplayDate(game.date || '') || '—' },
     { label: 'Time', value: formatDisplayTime(game.time || '') || '—' },
     { label: 'Host', value: game.host_location_name || '—' },
-    { label: 'Field', value: game.field_name || '—' },
+    { label: 'Field', value: publicFieldName(game.field_name) || '—' },
     { label: 'Winner', value: game.winner_team_name || '—' },
   ];
 }

@@ -41,7 +41,7 @@ from app.schemas import (
 from app.security import access_token_expires_at, auth_invalid_token_exception, create_access_token, create_refresh_token, hash_password, validate_password_strength, verify_password, decode_token
 from app.services.game_statuses import REQUIRED_GAME_STATUSES, ensure_required_game_statuses
 from app.services.generated_field_names import get_field_display_name, retire_generated_field
-from app.services.field_resolution import resolve_game_field_assignment, resolve_game_field_display, snapshot_game_field_display
+from app.services.field_resolution import resolve_game_field_assignment, resolve_game_field_display, resolve_public_game_field_display, snapshot_game_field_display
 from app.services.organization_cleanup import cleanup_organization_dependencies, collect_organization_delete_inventory
 from app.services.scheduling_validation import validate_game
 from app.services.tosc_field_areas import ensure_tosc_physical_areas
@@ -28608,7 +28608,9 @@ def _standings_game_summary(row, *, public: bool, can_manage: bool, community_or
         'division_group': div.division_group,
         'field_type': _required_field_type_for_division(div),
         'host_location': getattr(host, 'name', None) or getattr(g, 'host_location_name_snapshot', None),
-        'field': getattr(field_instance, 'field_name', None) or getattr(g, 'field_display_name_snapshot', None),
+        'field': resolve_public_game_field_display(
+            g, generated_slot=slot, field_instance=field_instance
+        ).name,
         'home_team_id': str(home.id),
         'home_team': home.name,
         'home_organization_id': str(home.organization_id),
@@ -29723,7 +29725,7 @@ def _public_game_read_from_schedule_row(row, db: Session | None = None, current_
         host_location_id=host.id if host else None,
         host_location_name=host.name if host else '',
         field_id=g.field_id,
-        field_name=resolve_game_field_display(g, db, generated_slot=slot, field_instance=fi).name or 'Field Not Assigned',
+        field_name=resolve_public_game_field_display(g, db, generated_slot=slot, field_instance=fi).name or 'Field Not Assigned',
         physical_area_id=getattr(physical_area, 'id', None),
         physical_area_name=getattr(physical_area, 'name', None),
         # Generated/turf schedules assign the physical component through the

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from sqlalchemy.orm import Session
 
 from app.models import Field, FieldInstance, Game, GameSlot, HostLocation
-from app.services.generated_field_names import get_field_display_name
+from app.services.generated_field_names import get_field_display_name, get_public_field_display_name
 
 
 _CANONICAL_COMPONENT_SEPARATOR = re.compile(r'\s+(?:-|\u2013|\u2014)\s+')
@@ -274,6 +274,33 @@ def resolve_game_field_display(
         return HistoricalFieldDisplay(snapshot, 'snapshot', field_id=field_id or getattr(game, 'previous_field_id', None),
                                       physical_area_name=getattr(game, 'physical_area_name_snapshot', None))
     return HistoricalFieldDisplay(None, 'unassigned')
+
+
+def resolve_public_game_field_display(
+    game: Game,
+    db: Session | None = None,
+    *,
+    generated_slot: GameSlot | None = None,
+    field_instance: FieldInstance | None = None,
+) -> HistoricalFieldDisplay:
+    """Resolve a public label from canonical active data before legacy data."""
+    field_id = getattr(game, 'field_id', None)
+    field = getattr(game, 'field', None)
+    if field is None and db is not None and field_id:
+        field = db.get(Field, field_id)
+    if (field is not None and bool(getattr(field, 'is_active', True))
+            and getattr(field, 'deleted_at', None) is None):
+        name = get_public_field_display_name(getattr(field, 'name', None))
+        if name:
+            area = getattr(field, 'physical_field_area', None)
+            return HistoricalFieldDisplay(name, 'active_field', field_id=getattr(field, 'id', field_id),
+                                          physical_area_name=getattr(area, 'name', None))
+
+    resolved = resolve_game_field_display(game, db, generated_slot=generated_slot,
+                                          field_instance=field_instance)
+    safe_name = get_public_field_display_name(resolved.name)
+    return HistoricalFieldDisplay(safe_name, resolved.source, resolved.field_id,
+                                  resolved.field_instance_id, resolved.physical_area_name)
 
 
 def snapshot_game_field_display(game: Game, resolved: HistoricalFieldDisplay, host_name: str | None = None) -> None:

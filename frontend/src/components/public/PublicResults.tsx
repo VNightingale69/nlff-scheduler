@@ -8,6 +8,7 @@ import StandingsTable from '@/components/StandingsTable';
 import TeamWithLogo from '@/components/TeamWithLogo';
 import TouchdownGuide from './TouchdownGuide';
 import { filterPublicScores, formatGameDateOption } from '@/lib/publicScoreFilters';
+import { publicFieldName } from '@/lib/publicFieldName';
 
 type Standing = { rank: number; team_id?: string; team_name: string; community_id?: string; organization_name?: string; community_name?: string; community_logo_url?: string | null; community_logo_alt_text?: string | null; wins: number; losses: number; ties: number };
 type Division = { division: { id: string; name: string; division_group?: string }; standings: Standing[] };
@@ -97,7 +98,7 @@ export default function PublicResults({ view }: { view: 'standings' | 'scores' }
             <dl className='grid grid-cols-2 content-center gap-x-4 gap-y-3 border-t border-slate-100 pt-4 text-sm sm:block sm:space-y-3 sm:border-l sm:border-t-0 sm:pl-5 sm:pt-0'>
               <div><dt className='text-xs font-bold uppercase tracking-wide text-slate-500'>Date &amp; kickoff</dt><dd className='mt-0.5 font-medium'>{formatDisplayDate(game.date)}{game.time ? ` · ${formatDisplayTime(game.time)}` : ''}</dd></div>
               <div><dt className='text-xs font-bold uppercase tracking-wide text-slate-500'>Host location</dt><dd className='mt-0.5 font-medium'>{game.host_location || 'Location not listed'}</dd></div>
-              <div><dt className='text-xs font-bold uppercase tracking-wide text-slate-500'>Field</dt><dd className='mt-0.5 font-medium'>{game.field || 'Field not listed'}</dd></div>
+              <div><dt className='text-xs font-bold uppercase tracking-wide text-slate-500'>Field</dt><dd className='mt-0.5 font-medium'>{publicFieldName(game.field) || 'Field not listed'}</dd></div>
             </dl>
           </div>
         </article>; })}

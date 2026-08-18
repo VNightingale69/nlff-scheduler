@@ -17,7 +17,7 @@ assert.doesNotMatch(source, /<dd className='truncate'>\{game\.host_location_name
 assert.match(source, /\{ label: 'Date', value: formatDisplayDate\(game\.date \|\| ''\) \|\| '—' \}/);
 assert.match(source, /\{ label: 'Time', value: formatDisplayTime\(game\.time \|\| ''\) \|\| '—' \}/);
 assert.match(source, /\{ label: 'Host', value: game\.host_location_name \|\| '—' \}/);
-assert.match(source, /\{ label: 'Field', value: game\.field_name \|\| '—' \}/);
+assert.match(source, /\{ label: 'Field', value: publicFieldName\(game\.field_name\) \|\| '—' \}/);
 assert.match(source, /\{ label: 'Winner', value: game\.winner_team_name \|\| '—' \}/);
 
 // Card height expands based on wrapped metadata, including long host/field/winner values.
