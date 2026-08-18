@@ -1,12 +1,15 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { apiFetch } from '@/lib/api';
 import { useAuthSession } from '@/components/AuthGate';
 import { ScoreTimestamp } from '@/components/ScoreTimestamp';
 import { formatDateTime, formatDisplayDate, formatDisplayTime } from '@/lib/displayFormat';
+import { getDivisionLabel } from '@/lib/divisionLabel';
 
 type ScoreGame = any;
+type ReferenceOption = { id: string; name: string; organization_id?: string; division_group?: string };
+type ReferenceKey = 'divisions' | 'communities' | 'hostLocations';
 const statuses = ['MISSING','SUBMITTED','FLAGGED','CONFLICT','APPROVED','PUBLISHED','UNPUBLISHED','CORRECTION_PENDING'];
 const scoreTableHeaders = ['Date','Time','Division','Host Location','Field','Home Team','Home Score','Away Team','Away Score','Submitted By','Submitted','Score Status','Published Status','Updated','Actions'];
 const teamColumnClass = 'min-w-[200px] p-2 text-left';
@@ -17,6 +20,9 @@ export default function ScoreManagementPage() {
   const [filters, setFilters] = useState({ date: '', division_id: '', organization_id: '', host_location_id: '', status: '', published: '', game_type: '', missing: false, flagged: false, conflicts: false });
   const [drafts, setDrafts] = useState<Record<string, { home_score: string; away_score: string; notes: string }>>({});
   const [message, setMessage] = useState('');
+  const [references, setReferences] = useState<Record<ReferenceKey, ReferenceOption[]>>({ divisions: [], communities: [], hostLocations: [] });
+  const [referenceLoading, setReferenceLoading] = useState<Record<ReferenceKey, boolean>>({ divisions: true, communities: true, hostLocations: true });
+  const [referenceErrors, setReferenceErrors] = useState<Partial<Record<ReferenceKey, string>>>({});
   const { accessToken } = useAuthSession();
   const token = accessToken || undefined;
 
@@ -34,6 +40,30 @@ export default function ScoreManagementPage() {
     setItems(data.items || []);
   };
   useEffect(() => { load().catch((error) => setMessage(error.message)); }, []);
+
+  const loadReferences = async (keys: ReferenceKey[] = ['divisions', 'communities', 'hostLocations']) => {
+    const paths: Record<ReferenceKey, string> = { divisions: '/divisions?page_size=500', communities: '/organizations?page_size=500', hostLocations: '/host-locations?page_size=500&is_active=true' };
+    setReferenceLoading((current) => ({ ...current, ...Object.fromEntries(keys.map((key) => [key, true])) }));
+    setReferenceErrors((current) => { const next = { ...current }; keys.forEach((key) => delete next[key]); return next; });
+    const results = await Promise.allSettled(keys.map((key) => apiFetch(paths[key], {}, token)));
+    results.forEach((result, index) => {
+      const key = keys[index];
+      if (result.status === 'fulfilled') setReferences((current) => ({ ...current, [key]: result.value.items || [] }));
+      else setReferenceErrors((current) => ({ ...current, [key]: result.reason?.message || `Unable to load ${key}.` }));
+    });
+    setReferenceLoading((current) => ({ ...current, ...Object.fromEntries(keys.map((key) => [key, false])) }));
+  };
+  useEffect(() => { loadReferences(); }, []);
+
+  const communities = useMemo(() => [...references.communities].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true })), [references.communities]);
+  const hostLocations = useMemo(() => references.hostLocations
+    .filter((host) => !filters.organization_id || host.organization_id === filters.organization_id)
+    .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true })), [filters.organization_id, references.hostLocations]);
+  const changeCommunity = (organization_id: string) => setFilters((current) => ({
+    ...current,
+    organization_id,
+    host_location_id: !organization_id || references.hostLocations.some((host) => host.id === current.host_location_id && host.organization_id === organization_id) ? current.host_location_id : '',
+  }));
 
   const draftFor = (g: ScoreGame) => drafts[g.game_id] || { home_score: g.home_score ?? '', away_score: g.away_score ?? '', notes: g.league_admin_notes || '' };
   const setDraft = (g: ScoreGame, patch: Partial<{ home_score: string; away_score: string; notes: string }>) => setDrafts((current) => ({ ...current, [g.game_id]: { ...draftFor(g), ...patch } }));
@@ -54,14 +84,21 @@ export default function ScoreManagementPage() {
     {message && <div className='rounded border bg-green-50 p-3 text-sm'>{message}</div>}
     <div className='grid gap-2 rounded border bg-white p-3 md:grid-cols-4'>
       <input className='rounded border p-2' type='date' value={filters.date} onChange={(e) => setFilters({ ...filters, date: e.target.value })} />
-      <input className='rounded border p-2' placeholder='Division ID' value={filters.division_id} onChange={(e) => setFilters({ ...filters, division_id: e.target.value })} />
-      <input className='rounded border p-2' placeholder='Community ID' value={filters.organization_id} onChange={(e) => setFilters({ ...filters, organization_id: e.target.value })} />
-      <input className='rounded border p-2' placeholder='Host Location ID' value={filters.host_location_id} onChange={(e) => setFilters({ ...filters, host_location_id: e.target.value })} />
+      <select aria-label='Division' className='rounded border p-2' disabled={referenceLoading.divisions || Boolean(referenceErrors.divisions)} value={filters.division_id} onChange={(e) => setFilters({ ...filters, division_id: e.target.value })}>
+        {referenceLoading.divisions ? <option>Loading divisions...</option> : referenceErrors.divisions ? <option>Divisions unavailable</option> : <><option value=''>All Divisions</option>{references.divisions.map((division) => <option key={division.id} value={division.id}>{getDivisionLabel(division)}</option>)}</>}
+      </select>
+      <select aria-label='Community' className='rounded border p-2' disabled={referenceLoading.communities || Boolean(referenceErrors.communities)} value={filters.organization_id} onChange={(e) => changeCommunity(e.target.value)}>
+        {referenceLoading.communities ? <option>Loading communities...</option> : referenceErrors.communities ? <option>Communities unavailable</option> : <><option value=''>All Communities</option>{communities.map((community) => <option key={community.id} value={community.id}>{community.name}</option>)}</>}
+      </select>
+      <select aria-label='Host Location' className='rounded border p-2' disabled={referenceLoading.hostLocations || Boolean(referenceErrors.hostLocations)} value={filters.host_location_id} onChange={(e) => setFilters({ ...filters, host_location_id: e.target.value })}>
+        {referenceLoading.hostLocations ? <option>Loading host locations...</option> : referenceErrors.hostLocations ? <option>Host locations unavailable</option> : <><option value=''>All Host Locations</option>{hostLocations.map((host) => <option key={host.id} value={host.id}>{host.name}</option>)}</>}
+      </select>
       <select className='rounded border p-2' value={filters.status} onChange={(e) => setFilters({ ...filters, status: e.target.value })}><option value=''>All score statuses</option>{statuses.map((s) => <option key={s}>{s}</option>)}</select>
       <select className='rounded border p-2' value={filters.published} onChange={(e) => setFilters({ ...filters, published: e.target.value })}><option value=''>All published states</option><option value='published'>Published</option><option value='unpublished'>Unpublished</option></select>
       <select className='rounded border p-2' value={filters.game_type} onChange={(e) => setFilters({ ...filters, game_type: e.target.value })}><option value=''>Game Type: All</option><option value='REGULAR_SEASON'>Regular Season</option><option value='TOURNAMENT'>Tournament</option></select>
       {(['missing','flagged','conflicts'] as const).map((key) => <label key={key} className='flex items-center gap-2 text-sm'><input type='checkbox' checked={filters[key]} onChange={(e) => setFilters({ ...filters, [key]: e.target.checked })} /> {key === 'missing' ? 'Missing Scores' : key === 'flagged' ? 'Flagged Scores' : 'Conflicts'}</label>)}
       <button className='rounded bg-slate-800 px-3 py-2 text-white' onClick={load}>Apply Filters</button>
+      {Object.keys(referenceErrors).length > 0 && <div className='text-sm text-red-700 md:col-span-4'>Some filter options could not be loaded. <button className='underline' type='button' onClick={() => loadReferences(Object.keys(referenceErrors) as ReferenceKey[])}>Retry</button></div>}
     </div>
     <div className='overflow-x-auto rounded border bg-white'><table className='min-w-full text-sm'><thead className='bg-slate-100 text-left'><tr>{scoreTableHeaders.map((h) => <th key={h} className={h.endsWith('Team') ? teamColumnClass : h.endsWith('Score') ? scoreColumnClass : 'p-2'}>{h}</th>)}</tr></thead><tbody>{items.map((g) => { const d = draftFor(g); return <tr key={g.game_id} className='border-t align-top'><td className='p-2'>{formatDisplayDate(g.game_date)}</td><td className='p-2'>{formatDisplayTime(g.kickoff_time)}</td><td className='p-2'>{g.division_group} {g.division_name}</td><td className='p-2'>{g.host_location_name}</td><td className='p-2'>{g.field_name}</td><td className={teamColumnClass}>{g.home_team_name}</td><td className={scoreColumnClass}><input className='mx-auto block w-[70px] rounded border p-1 text-center' type='text' inputMode='numeric' value={d.home_score} onChange={(e) => setDraft(g, { home_score: e.target.value })} /></td><td className={teamColumnClass}>{g.away_team_name}</td><td className={scoreColumnClass}><input className='mx-auto block w-[70px] rounded border p-1 text-center' type='text' inputMode='numeric' value={d.away_score} onChange={(e) => setDraft(g, { away_score: e.target.value })} /></td><td className='p-2'>{g.submitted_by?.full_name || ''}</td><td className='p-2'><ScoreTimestamp value={g.submitted_at} /></td><td className='p-2'>{g.score_status}</td><td className='p-2'>{g.is_published ? 'Published' : 'Unpublished'}</td><td className='p-2'><ScoreTimestamp value={g.last_updated_at || g.approved_at || g.submitted_at} /></td><td className='flex flex-wrap gap-1 p-2'><button className='rounded border px-2 py-1' onClick={() => save(g)}>Save Correction</button><button className='rounded border px-2 py-1' onClick={() => approve(g)}>Approve</button><button className='rounded border px-2 py-1' onClick={() => publish(g)}>Publish</button><button className='rounded border px-2 py-1' onClick={() => approvePublish(g)}>Approve & Publish</button><button className='rounded border px-2 py-1' onClick={() => unpublish(g)}>Unpublish</button><button className='rounded border px-2 py-1' onClick={() => resolve(g)}>Resolve Conflict</button><button className='rounded border px-2 py-1' onClick={() => flag(g)}>Flag</button><button className='rounded border px-2 py-1' onClick={() => clear(g)}>Clear Score</button><button className='rounded border px-2 py-1' onClick={() => history(g)}>View History</button></td></tr>; })}</tbody></table></div>
   </div>;
