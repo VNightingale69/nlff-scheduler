@@ -18,11 +18,15 @@ for (const obsolete of ['Girls K/1st', 'Girls 2nd/3rd', 'Girls 4th/5th', 'Girls 
 
 assert.match(guide, /No extra-point attempts/);
 assert.match(guide, /Optional 1-point or 2-point conversion/);
-assert.match(guide, /data-testid='sticky-touchdown-guide'/);
-assert.match(guide, /min-\[900px\]:sticky/);
-assert.match(guide, /min-\[900px\]:top-20/);
+assert.match(guide, /data-testid='desktop-touchdown-guide'/);
+assert.doesNotMatch(guide, /min-\[900px\]:sticky/);
 assert.match(guide, /<details className=.*min-\[900px\]:hidden/);
 assert.match(results, /min-\[900px\]:grid-cols-\[minmax\(0,3fr\)_minmax\(250px,1fr\)\]/);
 assert.match(results, /order-2.*min-\[900px\]:order-1/);
+assert.match(results, /data-testid='scores-guide-sidebar'/);
+assert.match(results, /min-\[900px\]:sticky/);
+assert.match(results, /min-\[900px\]:top-20/);
+assert.match(results, /min-\[900px\]:self-start/);
+assert.doesNotMatch(results, /(?:^|\s)sticky(?:\s|')/);
 
 console.log('public scores touchdown guide tests passed');

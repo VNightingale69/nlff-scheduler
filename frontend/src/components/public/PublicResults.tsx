@@ -57,7 +57,7 @@ export default function PublicResults({ view }: { view: 'standings' | 'scores' }
         </article>; })}
         {officialGames.length === 0 && <p className='rounded-xl border border-slate-200 bg-white p-6 text-center text-slate-600 shadow-sm'>No published scores are available.</p>}
       </div>
-      <div className='order-1 min-[900px]:order-2'><TouchdownGuide /></div>
+      <div data-testid='scores-guide-sidebar' className='order-1 min-[900px]:sticky min-[900px]:top-20 min-[900px]:order-2 min-[900px]:self-start'><TouchdownGuide /></div>
     </div>}
   </>;
 }
