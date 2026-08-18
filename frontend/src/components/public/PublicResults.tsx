@@ -80,7 +80,9 @@ export default function PublicResults({ view }: { view: 'standings' | 'scores' }
       <StandingsTable rows={block.standings} divisionId={block.division.id} />
     </section>)}{visibleDivisions.length === 0 && <p className='rounded-lg border bg-white p-5'>No published standings are available.</p>}</div>
     : <div data-testid='scores-guide-layout' className='grid items-start gap-5 min-[900px]:grid-cols-[minmax(0,3fr)_minmax(250px,1fr)] min-[900px]:gap-6'>
-      <div className='order-2 space-y-3 min-[900px]:order-1' aria-live='polite'>
+      <div className='min-w-0 space-y-3'>
+        <TouchdownGuide variant='mobile' />
+        <div className='space-y-3' aria-live='polite'>
         <p className='text-sm text-slate-600'>Showing {officialGames.length} {officialGames.length === 1 ? 'game' : 'games'}</p>
         {officialGames.map(game => { const scoring = getDivisionScoringInfo(game.division_group, game.division_name, game.field_type); return <article key={game.game_id} className='overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm'>
           <div className='flex flex-wrap items-start justify-between gap-3 border-b border-slate-100 bg-slate-50 px-4 py-3 sm:px-5'>
@@ -100,8 +102,9 @@ export default function PublicResults({ view }: { view: 'standings' | 'scores' }
           </div>
         </article>; })}
         {officialGames.length === 0 && <div className='rounded-xl border border-slate-200 bg-white p-6 text-center text-slate-600 shadow-sm'><p>{filtersActive ? 'No published scores match these filters.' : 'No published scores are available.'}</p>{filtersActive && <button type='button' className='mt-3 text-sm font-semibold text-slate-700 underline hover:text-slate-950' onClick={clearFilters}>Clear Filters</button>}</div>}
+        </div>
       </div>
-      <div data-testid='scores-guide-sidebar' className='order-1 min-[900px]:sticky min-[900px]:top-20 min-[900px]:order-2 min-[900px]:self-start'><TouchdownGuide /></div>
+      <div data-testid='scores-guide-sidebar' className='hidden min-[900px]:sticky min-[900px]:top-20 min-[900px]:block min-[900px]:self-start'><TouchdownGuide variant='desktop' /></div>
     </div>}
   </>;
 }
