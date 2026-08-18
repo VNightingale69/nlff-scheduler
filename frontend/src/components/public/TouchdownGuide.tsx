@@ -22,7 +22,7 @@ function GuideContent() {
 
 export default function TouchdownGuide() {
   return <aside aria-label='Touchdown Guide'>
-    <div data-testid='sticky-touchdown-guide' className='hidden rounded-xl border border-slate-200 bg-white shadow-sm min-[900px]:sticky min-[900px]:top-20 min-[900px]:block'>
+    <div data-testid='desktop-touchdown-guide' className='hidden rounded-xl border border-slate-200 bg-white shadow-sm min-[900px]:block'>
       <h2 className='rounded-t-xl border-b border-slate-200 bg-slate-900 px-5 py-4 text-sm font-extrabold uppercase tracking-widest text-white'><span aria-hidden='true'>🏈 </span>Touchdown Guide</h2>
       <div className='p-5'><GuideContent /></div>
     </div>
