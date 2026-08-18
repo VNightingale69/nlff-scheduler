@@ -25,6 +25,7 @@ from app.organizations import active_organization_filter, normalize_organization
 from app.models import Division, Field, FieldConfigurationMember, FieldConfigurationOption, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostPlanSelection, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Rulebook, LoginAuditLog, ScheduleChangeLog, ScheduleImport, SchedulePublicationEvent, ScoreHistory, ScoreSubmission, Season, Team, TimeslotFieldConfiguration, Tournament, TournamentDivision, TournamentGame, TournamentTeam, TurfWave, User, Week
 from app.services.facility_layout_validation import active_layout_capacities, active_supported_layouts_query, field_combination_diagnostics, get_active_supported_layouts, layout_label, select_supported_layout, validate_field_combination, validate_timeslot_demands
 from app.services.division_field_types import required_field_type_for_division
+from app.services.division_reference import division_reference_query
 from app.services.schedule_import import (build_preview,
                                           _layout_integrity_error,
                                           configuration_supports_required_slots,
@@ -11682,9 +11683,9 @@ def create_division(payload: DivisionCreate, db: Session = Depends(get_db)):
     d = Division(**payload.model_dump()); db.add(d); db.commit(); db.refresh(d); return d
 
 @router.get('/divisions', response_model=PagedResponse[DivisionRead], dependencies=[Depends(get_current_user)])
-def list_divisions(search: str | None = None, page: int = 1, page_size: int = 20, db: Session = Depends(get_db)):
+def list_divisions(season_id: uuid.UUID | None = None, search: str | None = None, page: int = 1, page_size: int = 20, db: Session = Depends(get_db)):
     ensure_league_defined_divisions(db)
-    q = db.query(Division)
+    q = division_reference_query(db, season_id)
     if search: q = q.filter(func.lower(Division.name).like(f"%{search.lower()}%"))
     return paginate(q.order_by(Division.division_group, Division.sort_order, Division.name), page, page_size)
 
