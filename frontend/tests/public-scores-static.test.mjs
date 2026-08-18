@@ -19,5 +19,11 @@ assert.match(teamWithLogo, /<CommunityLogo/);
 assert.match(teamWithLogo, /gap-2/);
 assert.match(teamWithLogo, /organizationName \|\| teamName/);
 assert.match(teamWithLogo, /<span className='min-w-0 break-words'>\{teamName\}<\/span>/);
+assert.match(results, /All Communities/);
+assert.match(results, /All Dates/);
+assert.match(results, /All Divisions/);
+assert.match(results, /No published scores match these filters\./);
+assert.match(results, /onClick=\{clearFilters\}/);
+assert.match(results, /window\.history\.replaceState/);
 
 console.log('public scores logo tests passed');
