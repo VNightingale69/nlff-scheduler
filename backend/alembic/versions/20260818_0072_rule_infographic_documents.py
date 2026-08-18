@@ -1,13 +1,13 @@
 """support independently active rulebook documents
 
-Revision ID: 20260818_0071
-Revises: 20260816_0070
+Revision ID: 20260818_0072
+Revises: 20260818_0071
 """
 from alembic import op
 import sqlalchemy as sa
 
-revision = '20260818_0071'
-down_revision = '20260816_0070'
+revision = '20260818_0072'
+down_revision = '20260818_0071'
 branch_labels = None
 depends_on = None
 
