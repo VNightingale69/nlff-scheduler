@@ -10,10 +10,11 @@ for (const side of ['home', 'away']) {
   assert.match(results, new RegExp(`organizationName=\\{game\\.${side}_organization_name\\}`));
 }
 
-assert.match(results, /Home Team.*Home Score.*Away Team.*Away Score/);
-assert.match(results, /md:hidden/);
+assert.match(results, /Home.*Away/s);
 assert.match(results, /grid-cols-\[minmax\(0,1fr\)_auto\]/);
-assert.match(results, /logoSize=\{32\}/);
+assert.match(results, /logoSize=\{36\}/);
+assert.match(results, /host_location/);
+assert.match(results, /fieldTypeLabel/);
 assert.match(teamWithLogo, /<CommunityLogo/);
 assert.match(teamWithLogo, /gap-2/);
 assert.match(teamWithLogo, /organizationName \|\| teamName/);

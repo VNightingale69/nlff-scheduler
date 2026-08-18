@@ -2,13 +2,15 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { API_URL } from '@/lib/api';
-import { formatDisplayDate } from '@/lib/displayFormat';
+import { formatDisplayDate, formatDisplayTime } from '@/lib/displayFormat';
+import { fieldTypeLabel, getDivisionScoringInfo } from '@/lib/divisionScoring';
 import StandingsTable from '@/components/StandingsTable';
 import TeamWithLogo from '@/components/TeamWithLogo';
+import TouchdownGuide from './TouchdownGuide';
 
 type Standing = { rank: number; team_id?: string; team_name: string; organization_name?: string; community_name?: string; community_logo_url?: string | null; community_logo_alt_text?: string | null; wins: number; losses: number; ties: number };
 type Division = { division: { id: string; name: string; division_group?: string }; standings: Standing[] };
-type Game = { game_id: string; date: string; division_id: string; division_name: string; division_group?: string; home_team: string; home_organization_id?: string; home_organization_name?: string; home_organization_logo_url?: string | null; home_organization_logo_alt_text?: string | null; away_team: string; away_organization_id?: string; away_organization_name?: string; away_organization_logo_url?: string | null; away_organization_logo_alt_text?: string | null; home_score: number | string | null; away_score: number | string | null; is_official: boolean };
+type Game = { game_id: string; date: string; time?: string | null; division_id: string; division_name: string; division_group?: string; field_type?: string | null; host_location?: string | null; field?: string | null; home_team: string; home_organization_id?: string; home_organization_name?: string; home_organization_logo_url?: string | null; home_organization_logo_alt_text?: string | null; away_team: string; away_organization_id?: string; away_organization_name?: string; away_organization_logo_url?: string | null; away_organization_logo_alt_text?: string | null; home_score: number | string | null; away_score: number | string | null; is_official: boolean };
 type Payload = { divisions: Division[]; game_results: Game[]; official_score_note?: string };
 
 export default function PublicResults({ view }: { view: 'standings' | 'scores' }) {
@@ -34,15 +36,28 @@ export default function PublicResults({ view }: { view: 'standings' | 'scores' }
       <div className='flex items-center justify-between gap-3 bg-slate-100 px-4 py-3 sm:px-5'><h2 className='text-lg font-bold'>{block.division.division_group} {block.division.name}</h2><span className='text-sm font-medium text-slate-500'>{block.standings.length} {block.standings.length === 1 ? 'Team' : 'Teams'}</span></div>
       <StandingsTable rows={block.standings} divisionId={block.division.id} />
     </section>)}{visibleDivisions.length === 0 && <p className='rounded-lg border bg-white p-5'>No published standings are available.</p>}</div>
-    : <div className='rounded-xl border bg-white shadow-sm'>
-      <table className='hidden w-full text-sm md:table'><thead className='bg-slate-100'><tr className='text-left'><th className='p-3'>Date</th><th className='p-3'>Division</th><th className='p-3'>Home Team</th><th className='p-3 text-center'>Home Score</th><th className='p-3'>Away Team</th><th className='p-3 text-center'>Away Score</th></tr></thead><tbody>{officialGames.map(game => <tr key={game.game_id} className='border-t'><td className='whitespace-nowrap p-3'>{formatDisplayDate(game.date)}</td><td className='p-3'>{game.division_group} {game.division_name}</td><td className='p-3 font-medium'><TeamWithLogo teamName={game.home_team} organizationName={game.home_organization_name} logoUrl={game.home_organization_logo_url} logoAltText={game.home_organization_logo_alt_text} /></td><td className='p-3 text-center text-lg font-bold'>{game.home_score}</td><td className='p-3 font-medium'><TeamWithLogo teamName={game.away_team} organizationName={game.away_organization_name} logoUrl={game.away_organization_logo_url} logoAltText={game.away_organization_logo_alt_text} /></td><td className='p-3 text-center text-lg font-bold'>{game.away_score}</td></tr>)}{officialGames.length === 0 && <tr><td colSpan={6} className='p-6 text-center text-slate-600'>No published scores are available.</td></tr>}</tbody></table>
-      <div className='divide-y md:hidden'>{officialGames.map(game => <article key={game.game_id} className='p-4'>
-        <div className='mb-3 flex items-start justify-between gap-3 text-sm text-slate-600'><span className='font-semibold text-slate-800'>{game.division_group} {game.division_name}</span><span className='whitespace-nowrap'>{formatDisplayDate(game.date)}</span></div>
-        <div className='space-y-3'>
-          <div className='grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3'><TeamWithLogo teamName={game.home_team} organizationName={game.home_organization_name} logoUrl={game.home_organization_logo_url} logoAltText={game.home_organization_logo_alt_text} logoSize={32} className='font-medium' /><span className='text-xl font-bold'>{game.home_score}</span></div>
-          <div className='grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3'><TeamWithLogo teamName={game.away_team} organizationName={game.away_organization_name} logoUrl={game.away_organization_logo_url} logoAltText={game.away_organization_logo_alt_text} logoSize={32} className='font-medium' /><span className='text-xl font-bold'>{game.away_score}</span></div>
-        </div>
-      </article>)}{officialGames.length === 0 && <p className='p-6 text-center text-slate-600'>No published scores are available.</p>}</div>
+    : <div data-testid='scores-guide-layout' className='grid items-start gap-5 min-[900px]:grid-cols-[minmax(0,3fr)_minmax(250px,1fr)] min-[900px]:gap-6'>
+      <div className='order-2 space-y-3 min-[900px]:order-1' aria-live='polite'>
+        {officialGames.map(game => { const scoring = getDivisionScoringInfo(game.division_group, game.division_name, game.field_type); return <article key={game.game_id} className='overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm'>
+          <div className='flex flex-wrap items-start justify-between gap-3 border-b border-slate-100 bg-slate-50 px-4 py-3 sm:px-5'>
+            <div className='flex flex-wrap items-center gap-2'>{scoring && <span className='rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[11px] font-extrabold uppercase tracking-wide text-emerald-900'>{fieldTypeLabel(scoring.fieldType)}</span>}<h2 className='font-bold text-slate-900'>{game.division_group} {game.division_name}</h2></div>
+            <span className='rounded-full bg-slate-900 px-2.5 py-1 text-[11px] font-bold uppercase tracking-wide text-white'>Final</span>
+          </div>
+          <div className='grid gap-5 p-4 sm:grid-cols-[minmax(0,1fr)_minmax(220px,0.7fr)] sm:p-5'>
+            <div className='space-y-4'>
+              <div className='grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3'><TeamWithLogo teamName={game.home_team} organizationName={game.home_organization_name} logoUrl={game.home_organization_logo_url} logoAltText={game.home_organization_logo_alt_text} logoSize={36} className='font-semibold' /><div className='text-right'><span className='block text-2xl font-extrabold'>{game.home_score}</span><span className='text-[10px] font-bold uppercase tracking-wide text-slate-500'>Home</span></div></div>
+              <div className='grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3'><TeamWithLogo teamName={game.away_team} organizationName={game.away_organization_name} logoUrl={game.away_organization_logo_url} logoAltText={game.away_organization_logo_alt_text} logoSize={36} className='font-semibold' /><div className='text-right'><span className='block text-2xl font-extrabold'>{game.away_score}</span><span className='text-[10px] font-bold uppercase tracking-wide text-slate-500'>Away</span></div></div>
+            </div>
+            <dl className='grid grid-cols-2 content-center gap-x-4 gap-y-3 border-t border-slate-100 pt-4 text-sm sm:block sm:space-y-3 sm:border-l sm:border-t-0 sm:pl-5 sm:pt-0'>
+              <div><dt className='text-xs font-bold uppercase tracking-wide text-slate-500'>Date &amp; kickoff</dt><dd className='mt-0.5 font-medium'>{formatDisplayDate(game.date)}{game.time ? ` · ${formatDisplayTime(game.time)}` : ''}</dd></div>
+              <div><dt className='text-xs font-bold uppercase tracking-wide text-slate-500'>Host location</dt><dd className='mt-0.5 font-medium'>{game.host_location || 'Location not listed'}</dd></div>
+              <div><dt className='text-xs font-bold uppercase tracking-wide text-slate-500'>Field</dt><dd className='mt-0.5 font-medium'>{game.field || 'Field not listed'}</dd></div>
+            </dl>
+          </div>
+        </article>; })}
+        {officialGames.length === 0 && <p className='rounded-xl border border-slate-200 bg-white p-6 text-center text-slate-600 shadow-sm'>No published scores are available.</p>}
+      </div>
+      <div className='order-1 min-[900px]:order-2'><TouchdownGuide /></div>
     </div>}
   </>;
 }

@@ -28585,7 +28585,7 @@ def _empty_standings_row(team: Team, division: Division, organization: Organizat
 
 
 def _standings_game_summary(row, *, public: bool, can_manage: bool, community_org_id: uuid.UUID | None = None) -> dict:
-    g, _slot, _fi, _host, home, away, div, _org, _status = row
+    g, slot, field_instance, host, home, away, div, _org, _status = row
     home_organization = getattr(home, 'organization', None)
     away_organization = getattr(away, 'organization', None)
     score = getattr(g, 'score', None)
@@ -28606,6 +28606,9 @@ def _standings_game_summary(row, *, public: bool, can_manage: bool, community_or
         'division_id': str(div.id),
         'division_name': div.name,
         'division_group': div.division_group,
+        'field_type': _required_field_type_for_division(div),
+        'host_location': getattr(host, 'name', None) or getattr(g, 'host_location_name_snapshot', None),
+        'field': getattr(field_instance, 'field_name', None) or getattr(g, 'field_display_name_snapshot', None),
         'home_team_id': str(home.id),
         'home_team': home.name,
         'home_organization_id': str(home.organization_id),
