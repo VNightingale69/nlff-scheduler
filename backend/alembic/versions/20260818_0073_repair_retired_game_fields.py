@@ -30,7 +30,7 @@ _UPGRADE_SQL = rf"""
       FROM games g
       JOIN seasons s ON s.id = g.season_id AND s.is_active IS TRUE
       JOIN field_instances fi ON fi.id = g.field_instance_id
-      WHERE (fi.is_active IS FALSE OR fi.field_name LIKE '__retired_generated__%')
+      WHERE (fi.is_active IS FALSE OR starts_with(fi.field_name, '__retired_generated__'))
     ), unique_replacements AS (
       SELECT retired.game_id, min(active.id::text)::uuid AS active_id
       FROM retired_assignments retired
@@ -39,7 +39,7 @@ _UPGRADE_SQL = rf"""
        AND active.instance_date = retired.instance_date
        AND active.field_type = retired.field_type
        AND active.is_active IS TRUE
-       AND active.field_name NOT LIKE '__retired_generated__%'
+       AND NOT starts_with(active.field_name, '__retired_generated__')
        AND active.field_name = retired.human_name
       GROUP BY retired.game_id
       HAVING count(*) = 1
