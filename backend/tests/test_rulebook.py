@@ -366,3 +366,52 @@ class TestRulebookFeature:
         serialized = str(payload)
         assert upload['stored_filename'] not in serialized
         assert 'secret body' not in serialized
+
+    def _upload_infographic(self, filename='infographic.pdf', content=b'%PDF-1.4\ninfographic', user_id=None):
+        return self.client.post(
+            '/api/admin/rule-infographic/upload',
+            headers=_auth_header(user_id or self.league_admin.id),
+            files={'file': (filename, content, 'application/pdf')},
+        )
+
+    def test_infographic_upload_metadata_view_download_and_public_access(self, tmp_path):
+        self._set_upload_dir(tmp_path)
+        content = b'%PDF-1.4\nquick reference'
+        response = self._upload_infographic('Community Flag Rules Infographic.pdf', content)
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload['document_type'] == 'RULE_INFOGRAPHIC'
+        assert payload['original_filename'] == 'Community Flag Rules Infographic.pdf'
+        assert payload['file_size_bytes'] == len(content)
+        assert payload['uploaded_by_name'] == 'League Admin'
+        assert self.client.get('/api/public/rule-infographic').json()['id'] == payload['id']
+        assert self.client.get(payload['view_url']).content == content
+        download = self.client.get(payload['download_url'])
+        assert download.content == content
+        assert 'Community%20Flag%20Rules%20Infographic.pdf' in download.headers['content-disposition']
+
+    def test_replacing_infographic_does_not_modify_rulebook(self, tmp_path):
+        self._set_upload_dir(tmp_path)
+        rulebook = self._upload_pdf('official.pdf', b'%PDF-1.4\nofficial').json()
+        first = self._upload_infographic('quick-one.pdf').json()
+        second = self._upload_infographic('quick-two.pdf', b'%PDF-1.4\nsecond').json()
+        assert self.client.get('/api/public/rulebook').json()['id'] == rulebook['id']
+        assert self.client.get(rulebook['download_url']).content == b'%PDF-1.4\nofficial'
+        assert self.client.get('/api/public/rule-infographic').json()['id'] == second['id']
+        assert self.db.query(Rulebook).filter(Rulebook.id == uuid.UUID(first['id'])).one().is_active is False
+        assert self.db.query(Rulebook).filter(Rulebook.id == uuid.UUID(rulebook['id'])).one().is_active is True
+
+    def test_infographic_validation_permissions_and_empty_public_state(self, tmp_path):
+        self._set_upload_dir(tmp_path)
+        assert self.client.get('/api/public/rule-infographic').status_code == 404
+        invalid = self.client.post('/api/admin/rule-infographic/upload', headers=_auth_header(self.league_admin.id), files={'file': ('graphic.txt', b'no', 'text/plain')})
+        assert invalid.status_code == 400
+        assert invalid.json()['detail'] == 'Only PDF files are allowed.'
+        assert self._upload_infographic(user_id=self.community_admin.id).status_code == 403
+
+    def test_infographic_over_25_mb_is_rejected(self, tmp_path):
+        self._set_upload_dir(tmp_path)
+        response = self._upload_infographic(content=b'%PDF-' + b'x' * (25 * 1024 * 1024))
+        assert response.status_code == 413
+        assert response.json()['detail'] == 'The selected file exceeds the 25 MB maximum file size.'
+        assert self.client.get('/api/public/rule-infographic').status_code == 404

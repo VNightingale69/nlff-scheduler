@@ -95,6 +95,8 @@ class Rulebook(Base, TimestampMixin):
     __tablename__ = 'rulebooks'
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    # Kept on the existing table so deployed rulebook rows and stable URLs survive.
+    document_type: Mapped[str] = mapped_column(String(40), nullable=False, default='RULEBOOK', server_default='RULEBOOK')
     original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
     stored_filename: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
     content_type: Mapped[str] = mapped_column(String(100), nullable=False)
@@ -107,7 +109,7 @@ class Rulebook(Base, TimestampMixin):
     file_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
     uploaded_by = relationship('User')
-    __table_args__ = (Index('ix_rulebooks_active', 'is_active'),)
+    __table_args__ = (Index('ix_rulebooks_type_active', 'document_type', 'is_active'),)
 
 
 class Division(Base, TimestampMixin):
