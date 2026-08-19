@@ -17281,7 +17281,7 @@ def manual_schedule_builder_options(db: Session = Depends(get_db)):
         'fields': [{'id': f.id, 'field_id': f.id, 'host_location_id': f.host_location_id, 'name': f.name, 'display_name': field_display_name(f), 'field_type': f.layout_type, 'physical_area_id': f.physical_field_area_id, 'physical_area_name': f.physical_field_area.name if f.physical_field_area else None, 'is_active': f.is_active} for f in fields],
         'field_instances': [{'id': fi.id, 'field_instance_id': fi.id, 'field_id': getattr(fi.hosting_availability, 'field_id', None), 'host_location_id': fi.host_location_id, 'field_instance_name': _field_export_display_label(None, fi, db), 'field_name': _field_export_display_label(None, fi, db), 'field_type': fi.field_type, 'field_size': fi.field_type, 'instance_date': fi.instance_date, 'game_date': fi.instance_date, 'available_date': fi.instance_date, 'is_active': fi.is_active} for fi in field_instances],
         'seasons': [{'id': s.id, 'name': s.name, 'start_date': s.start_date, 'end_date': s.end_date, 'is_active': s.is_active} for s in seasons],
-        'weeks': [{'id': w.id, 'season_id': w.season_id, 'week_number': w.week_number, 'label': w.label or f'Week {w.week_number}', 'start_date': w.start_date, 'end_date': w.end_date, 'primary_game_date': w.primary_game_date or w.start_date, 'status': w.status} for w in weeks],
+        'weeks': [{'id': w.id, 'season_id': w.season_id, 'week_number': w.week_number, 'label': w.label or f'Week {w.week_number}', 'start_date': w.start_date, 'end_date': w.end_date, 'primary_game_date': w.primary_game_date or w.start_date, 'status': w.status, 'publication_status': w.publication_status} for w in weeks],
         'organizations': [{'id': o.id, 'name': o.name} for o in organizations],
     }
 
@@ -31237,14 +31237,55 @@ def patch_game(game_id: uuid.UUID, payload: GameCreate, db: Session = Depends(ge
 
 
 @router.delete('/games/{game_id}', dependencies=[Depends(require_schedule_admin)])
-def delete_game(game_id: uuid.UUID, db: Session = Depends(get_db)):
+def delete_game(
+    game_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Delete one working-schedule game without weakening publication/results protections."""
     obj = db.query(Game).filter(Game.id == game_id).first()
     if not obj:
-        raise HTTPException(404, 'Game not found')
-    slot = db.query(GameSlot).filter(GameSlot.assigned_game_id == game_id).first()
-    if slot:
-        slot.status = 'OPEN'
-        slot.assigned_game_id = None
-    db.delete(obj)
-    db.commit()
-    return {'ok': True}
+        raise HTTPException(404, 'Scheduled game not found.')
+
+    season = db.get(Season, obj.season_id) if obj.season_id else None
+    if season and obj.week_id in _published_week_ids(db, season):
+        raise HTTPException(409, 'Published games cannot be deleted from the Manual Schedule Builder.')
+
+    score = db.query(GameScore).filter(GameScore.game_id == game_id).first()
+    has_recorded_result = bool(
+        score and (
+            score.home_score is not None or score.away_score is not None
+            or score.home_forfeit or score.away_forfeit or score.submitted_at
+            or score.is_published or str(score.score_status or 'MISSING').upper() != 'MISSING'
+        )
+    ) or db.query(ScoreSubmission.id).filter(ScoreSubmission.game_id == game_id).first() is not None \
+      or db.query(ScoreHistory.id).filter(ScoreHistory.game_id == game_id).first() is not None
+    if has_recorded_result:
+        raise HTTPException(409, 'This game has a recorded score/result and cannot be deleted.')
+
+    audit = {
+        'season_id': obj.season_id, 'game_date': obj.game_date, 'kickoff_time': obj.kickoff_time,
+        'division_id': getattr(obj.home_team, 'division_id', None),
+        'home_team': getattr(obj.home_team, 'name', None), 'away_team': getattr(obj.away_team, 'name', None),
+        'host_location': getattr(obj.host_location, 'name', None),
+        'field': resolve_game_field_display(obj, db).name,
+    }
+    try:
+        reopened_slots = db.query(GameSlot).filter(GameSlot.assigned_game_id == game_id).update(
+            {GameSlot.status: 'OPEN', GameSlot.assigned_game_id: None}, synchronize_session=False,
+        )
+        db.delete(obj)
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception('manual_schedule_game_delete_failed game_id=%s actor_user_id=%s', game_id, current_user.id)
+        raise
+    logger.info(
+        'manual_schedule_game_deleted game_id=%s season_id=%s date=%s kickoff=%s division_id=%s '
+        'home_team=%s away_team=%s host_location=%s field=%s reopened_slots=%s '
+        'actor_user_id=%s actor_email=%s deleted_at=%s',
+        game_id, audit['season_id'], audit['game_date'], audit['kickoff_time'], audit['division_id'],
+        audit['home_team'], audit['away_team'], audit['host_location'], audit['field'], reopened_slots,
+        current_user.id, current_user.email, datetime.now(timezone.utc).isoformat(),
+    )
+    return {'success': True, 'deleted_game_id': str(game_id), 'released_slot_count': reopened_slots}

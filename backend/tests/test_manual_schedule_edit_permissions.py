@@ -291,6 +291,58 @@ class ManualScheduleEditPermissionsTest(unittest.TestCase):
         self.assertEqual(clear.status_code, 200, clear.text)
         self.assertGreaterEqual(clear.json()['deleted_count'], 1)
 
+    def _make_schedule_unpublished(self):
+        self.season.schedule_status = 'draft'
+        self.week.publication_status = 'UNPUBLISHED'
+        self.db.commit()
+
+    def test_scheduling_admin_deletes_one_unpublished_game_and_releases_slot(self):
+        self._make_schedule_unpublished()
+        other = self._add_other_community_game()
+        response = self.client.delete(f'/api/games/{self.game.id}', headers=self._token(self.scheduling_user.id))
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()['deleted_game_id'], str(self.game.id))
+        self.db.expire_all()
+        self.assertIsNone(self.db.get(Game, self.game.id))
+        self.assertIsNotNone(self.db.get(Game, other.id))
+        released = self.db.get(GameSlot, self.slot.id)
+        self.assertEqual(released.status, 'OPEN')
+        self.assertIsNone(released.assigned_game_id)
+
+    def test_league_admin_can_delete_unpublished_game(self):
+        self._make_schedule_unpublished()
+        response = self.client.delete(f'/api/games/{self.game.id}', headers=self._token(self.league_user.id))
+        self.assertEqual(response.status_code, 200, response.text)
+
+    def test_community_and_unauthenticated_users_cannot_delete_game(self):
+        self._make_schedule_unpublished()
+        community = self.client.delete(f'/api/games/{self.game.id}', headers=self._token(self.community_user.id))
+        self.assertEqual(community.status_code, 403, community.text)
+        anonymous = self.client.delete(f'/api/games/{self.game.id}')
+        self.assertIn(anonymous.status_code, {401, 403}, anonymous.text)
+        self.assertIsNotNone(self.db.get(Game, self.game.id))
+
+    def test_published_game_cannot_be_deleted(self):
+        self.week.publication_status = 'PUBLISHED'
+        self.db.commit()
+        response = self.client.delete(f'/api/games/{self.game.id}', headers=self._token(self.scheduling_user.id))
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertIn('Published games cannot be deleted', response.text)
+        self.assertIsNotNone(self.db.get(Game, self.game.id))
+
+    def test_game_with_recorded_result_cannot_be_deleted(self):
+        self._make_schedule_unpublished()
+        self.db.add(GameScore(game_id=self.game.id, home_score=14, away_score=7, score_status='SUBMITTED'))
+        self.db.commit()
+        response = self.client.delete(f'/api/games/{self.game.id}', headers=self._token(self.scheduling_user.id))
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertIn('recorded score/result', response.text)
+        self.assertIsNotNone(self.db.get(Game, self.game.id))
+
+    def test_delete_invalid_game_id_returns_404(self):
+        response = self.client.delete(f'/api/games/{uuid.uuid4()}', headers=self._token(self.scheduling_user.id))
+        self.assertEqual(response.status_code, 404, response.text)
+
     def test_community_and_public_users_cannot_access_schedule_admin_routes(self):
         protected_requests = [
             lambda headers: self.client.get('/api/schedule-management/games', headers=headers),
