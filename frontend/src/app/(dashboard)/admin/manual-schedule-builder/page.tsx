@@ -362,16 +362,20 @@ export default function ManualScheduleBuilderPage() {
     const candidateMinutes = Number(String(candidate.kickoff_time).slice(0, 2)) * 60 + Number(String(candidate.kickoff_time).slice(3, 5));
     return sharedTeam && Math.abs(selectedMinutes - candidateMinutes) === 60;
   });
-  const performUnschedule = async (game: any, deleteBoth: boolean) => {
+  const performDelete = async (game: any) => {
     setError('');
+    setSuccess('');
     try {
-      await apiFetch(`/schedule-management/games/${game.id}/unschedule?delete_both=${deleteBoth}`, { method: 'PATCH' }, token);
+      await apiFetch(`/games/${game.id}`, { method: 'DELETE' }, token);
       setDeleteGame(null);
+      setPendingGameEdits((current) => { const next = { ...current }; delete next[game.id]; return next; });
       await load();
       await loadRecommendations();
-      setManualScheduleBannerFromValidation(deleteBoth ? 'Both doubleheader games were unscheduled.' : 'Game unscheduled; doubleheaders were recalculated.', await loadFinalScheduleValidation());
+      await loadGeneratedSlots();
+      setManualScheduleBannerFromValidation('Game deleted.', await loadFinalScheduleValidation());
     } catch (e: unknown) { setError(extractError(e)); }
   };
+  const isPublishedGame = (game: any) => String((options.weeks || []).find((week: any) => String(week.id) === String(game.week_id))?.publication_status || '').toUpperCase() === 'PUBLISHED';
   const hasScheduledGamesFilters = Object.values(scheduledGamesFilters).some(Boolean);
 
   useEffect(() => {
@@ -920,13 +924,11 @@ export default function ManualScheduleBuilderPage() {
                       {isDirtyRow && canBulkInlineEditScheduledGames ? <button className='rounded border px-2 py-1 text-xs' onClick={() => setPendingGameEdits((current) => { const next = { ...current }; delete next[g.id]; return next; })}>Reset Row</button> : null}
                     </> : <>
                       <button className='rounded border px-2 py-1 text-xs' onClick={() => { if (!confirmDiscardBulkEdits()) return; setPendingGameEdits({}); setMoveGame(g); }}>Move</button>
-                      <button className='rounded border border-red-300 px-2 py-1 text-xs text-red-700' onClick={() => {
-                        if (!confirmDiscardBulkEdits()) return;
-                        setPendingGameEdits({});
+                      <button className='rounded border border-red-300 px-2 py-1 text-xs text-red-700 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400' disabled={isPublishedGame(g)} title={isPublishedGame(g) ? 'Published games cannot be deleted from the Manual Schedule Builder.' : 'Delete this unpublished scheduled game'} onClick={() => {
                         setAutoFillSkipped([]);
                         setAutoFillPreview([]);
                         setDeleteGame(g);
-                      }}>Delete / Unschedule</button>
+                      }}>Delete Game</button>
                     </>}
                   </div></td> : null}
                 </tr>;
@@ -964,13 +966,20 @@ export default function ManualScheduleBuilderPage() {
         </div>
       </div> : null}
       {deleteGame ? <div className='fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4'>
-        <div className='w-full max-w-lg rounded-lg bg-white p-5 shadow-xl' role='dialog' aria-modal='true' aria-labelledby='doubleheader-override-title'>
-          <h3 id='doubleheader-override-title' className='text-lg font-semibold text-amber-800'>{doubleheaderPartner(deleteGame) ? 'Doubleheader Override' : 'Delete / Unschedule Game'}</h3>
-          <p className='mt-2 text-sm text-slate-700'>{doubleheaderPartner(deleteGame) ? 'This game is currently part of a doubleheader. Removing it may break the doubleheader relationship.' : 'Remove this scheduled game?'}</p>
+        <div className='w-full max-w-lg rounded-lg bg-white p-5 shadow-xl' role='dialog' aria-modal='true' aria-labelledby='delete-game-title'>
+          <h3 id='delete-game-title' className='text-lg font-semibold text-red-800'>Delete Scheduled Game?</h3>
+          <div className='mt-3 space-y-1 rounded border bg-slate-50 p-3 text-sm text-slate-800'>
+            <p className='font-semibold'>{formatDisplayDateTime(deleteGame.game_date, deleteGame.kickoff_time)}</p>
+            <p>{deleteGame.division_name || 'Unknown Division'}</p>
+            <p>{deleteGame.home_team_name || 'Unknown Team'} vs {deleteGame.away_team_name || 'Unknown Team'}</p>
+            <p>{deleteGame.host_location_name || 'No host location'}</p>
+            <p>Field: {explicitFieldSlotLabel(deleteGame) || 'Not assigned'}</p>
+          </div>
+          {doubleheaderPartner(deleteGame) ? <p className='mt-3 rounded border border-amber-300 bg-amber-50 p-2 text-sm text-amber-900'><strong>Doubleheader warning:</strong> The other doubleheader game will not be deleted.</p> : null}
+          <p className='mt-3 text-sm text-slate-700'>This game has not been published. Deleting it will remove it from the working schedule.</p>
           <div className='mt-4 flex flex-wrap justify-end gap-2'>
             <button className='rounded border px-3 py-2' onClick={() => setDeleteGame(null)}>Cancel</button>
-            <button className='rounded border border-red-300 px-3 py-2 text-red-700' onClick={() => performUnschedule(deleteGame, false)}>Delete This Game Only</button>
-            {doubleheaderPartner(deleteGame) ? <button className='rounded bg-red-700 px-3 py-2 text-white' onClick={() => performUnschedule(deleteGame, true)}>Delete Both Doubleheader Games</button> : null}
+            <button className='rounded bg-red-700 px-3 py-2 text-white' onClick={() => performDelete(deleteGame)}>Delete Game</button>
           </div>
         </div>
       </div> : null}
