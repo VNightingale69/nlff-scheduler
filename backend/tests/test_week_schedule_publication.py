@@ -2,7 +2,8 @@ import uuid
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from app.routes.api import _season_publication_rollup, _week_publish_readiness
+from app.routes.api import (_season_publication_rollup, _week_publish_readiness,
+                            _week_public_schedule_hash, compare_week_to_published_snapshot)
 
 
 def _game(week_id, *, game_id=None, home_id=None, away_id=None, field_id=None):
@@ -92,6 +93,41 @@ def test_stale_field_from_an_inactive_layout_has_distinct_configuration_error():
 def test_season_rollup_reports_partial_and_complete_publication():
     assert _season_publication_rollup([SimpleNamespace(publication_status='PUBLISHED'), SimpleNamespace(publication_status='UNPUBLISHED')]) == 'partially_published'
     assert _season_publication_rollup([SimpleNamespace(publication_status='PUBLISHED'), SimpleNamespace(publication_status='PUBLISHED')]) == 'published'
+
+
+def test_public_fingerprint_ignores_game_identity_and_implementation_metadata():
+    first = {'scheduled_game_id': 'a', 'game_date': '2026-08-16', 'start_time': '09:00:00',
+             'host_location_id': 'host', 'field_id': 'field', 'home_team_id': 'home',
+             'away_team_id': 'away', 'division_id': 'division', 'canonical_field_label': 'Old',
+             'timeslot_configuration_id': 'config-a'}
+    second = {**first, 'scheduled_game_id': 'b', 'canonical_field_label': 'New',
+              'timeslot_configuration_id': 'config-b'}
+    with patch('app.routes.api._week_schedule_payload', side_effect=[[first], [second]]):
+        old_hash = _week_public_schedule_hash(SimpleNamespace(), uuid.uuid4(), uuid.uuid4())
+        new_hash = _week_public_schedule_hash(SimpleNamespace(), uuid.uuid4(), uuid.uuid4())
+    assert old_hash == new_hash
+
+
+def test_migrated_week_uses_matching_season_snapshot_instead_of_null_false_positive():
+    revision = 'a' * 64
+    season = SimpleNamespace(id=uuid.uuid4(), last_published_schedule_hash=revision, last_published_game_count=2)
+    week = SimpleNamespace(id=uuid.uuid4(), publication_status='PUBLISHED', last_published_schedule_hash=None,
+                           last_published_game_count=None, publication_hash_version=1)
+    with patch('app.routes.api._week_schedule_hash', return_value=('week', 1)), \
+         patch('app.routes.api._compute_schedule_hash', return_value=(revision, 2)):
+        comparison = compare_week_to_published_snapshot(SimpleNamespace(), season, week)
+    assert comparison['has_pending_changes'] is False
+    assert comparison['publication_error'] is None
+
+
+def test_missing_publication_snapshot_is_error_not_pending_changes():
+    season = SimpleNamespace(id=uuid.uuid4(), last_published_schedule_hash=None, last_published_game_count=None)
+    week = SimpleNamespace(id=uuid.uuid4(), publication_status='PUBLISHED', last_published_schedule_hash=None,
+                           last_published_game_count=None, publication_hash_version=1)
+    with patch('app.routes.api._week_schedule_hash', return_value=('current', 1)):
+        comparison = compare_week_to_published_snapshot(SimpleNamespace(), season, week)
+    assert comparison['has_pending_changes'] is False
+    assert comparison['publication_error']
 
 
 def test_hiller_saved_large_override_is_descriptive_nonblocking_warning():

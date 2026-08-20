@@ -208,7 +208,13 @@ export default function ScheduleManagementPage() {
           </div> : null}
         </div>
         <fieldset className='mt-3 rounded border bg-white p-3'><legend className='px-1 font-semibold'>Publication scope</legend>
-          <div className='flex flex-wrap gap-4'>{(publishDiagnostics.weeks || []).map((week: any) => <label key={week.id} className='flex items-center gap-2'><input type='checkbox' checked={publicationWeekIds.includes(week.id)} onChange={(event) => setPublicationWeekIds((current) => event.target.checked ? [...current, week.id] : current.filter((id) => id !== week.id))} /><span>Week {week.week_number} - {formatDisplayDate(week.date)}</span><span className={`rounded px-2 py-0.5 text-xs ${week.publication_status === 'PUBLISHED' ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-100'}`}>{week.needs_republish ? 'Published - Changes Pending' : week.publication_status === 'PUBLISHED' ? 'Published' : 'Draft'}</span></label>)}</div>
+          <div className='flex flex-wrap gap-4'>{(publishDiagnostics.weeks || []).map((week: any) => {
+            const status = week.publication_error ? 'error' : week.needs_republish ? 'pending' : week.publication_status === 'PUBLISHED' ? 'published' : 'draft';
+            const label = status === 'error' ? 'Publication Error' : status === 'pending' ? 'Published - Changes Pending' : status === 'published' ? 'Published' : 'Draft';
+            const tooltip = status === 'pending' ? 'This week has been published, but the working schedule contains changes that have not yet been republished.' : status === 'published' ? 'The working schedule matches the currently published schedule.' : status === 'error' ? week.publication_error : 'This week has not been published.';
+            const tone = status === 'error' ? 'bg-red-100 text-red-800' : status === 'pending' ? 'bg-amber-100 text-amber-800' : status === 'published' ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-100 text-slate-700';
+            return <label key={week.id} className='flex items-center gap-2'><input type='checkbox' checked={publicationWeekIds.includes(week.id)} onChange={(event) => setPublicationWeekIds((current) => event.target.checked ? [...current, week.id] : current.filter((id) => id !== week.id))} /><span>Week {week.week_number} - {formatDisplayDate(week.date)}</span><span title={tooltip} className={`rounded px-2 py-0.5 text-xs ${tone}`}>{label}</span></label>;
+          })}</div>
           <button className='mt-2 text-xs text-blue-700 underline' onClick={() => setPublicationWeekIds([])}>Select Entire Season</button>
         </fieldset>
         <h2 className='mt-3 font-bold uppercase'>Publish Readiness{publicationWeekIds.length === 1 ? ` - Week ${(publishDiagnostics.weeks || []).find((w: any) => w.id === publicationWeekIds[0])?.week_number}` : ''}</h2>
