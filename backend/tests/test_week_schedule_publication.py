@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.routes.api import (_season_publication_rollup, _week_publish_readiness,
+                            _normalize_public_schedule_payload, _public_schedule_differences,
                             _week_public_schedule_hash, compare_week_to_published_snapshot,
                             get_week_publication_state)
 
@@ -109,12 +110,62 @@ def test_public_fingerprint_ignores_game_identity_and_implementation_metadata():
     assert old_hash == new_hash
 
 
+def _public_game(**changes):
+    game = {'scheduled_game_id': 'current-row', 'game_date': '2026-08-30', 'start_time': '09:00:00',
+            'host_location_id': 'host', 'field_id': 'field', 'home_team_id': 'home',
+            'away_team_id': 'away', 'division_id': 'division', 'field_name': 'Hiller - Small - NE',
+            'division_name': 'Coed K-1', 'home_team_name': 'Johnsburg K-1 Black',
+            'updated_at': '2026-08-20T12:00:00Z', 'notes': None}
+    game.update(changes)
+    return game
+
+
+def test_canonical_comparison_ignores_ids_display_names_order_metadata_and_empty_notes():
+    first = _public_game()
+    second = _public_game(scheduled_game_id='other-current-row', start_time='10:30:00', home_team_id='home-2')
+    published = [
+        _public_game(scheduled_game_id='published-row-2', start_time='10:30', home_team_id='home-2',
+                     field_name='Hiller / Small / NE', division_name='K-1', updated_at='yesterday', notes=''),
+        _public_game(scheduled_game_id='published-row-1', start_time='9:00 AM',
+                     field_name='Hiller – Small – NE', home_team_name='Jbrg K-1 Black', updated_at='last-week', notes=''),
+    ]
+    differences = _public_schedule_differences(
+        _normalize_public_schedule_payload([first, second]),
+        _normalize_public_schedule_payload(published),
+    )
+    assert differences == {'added_games': [], 'removed_games': [], 'modified_games': []}
+
+
+def test_canonical_comparison_detects_field_and_matchup_changes():
+    original = _normalize_public_schedule_payload([_public_game()])
+    field_change = _normalize_public_schedule_payload([_public_game(field_id='different-field')])
+    matchup_change = _normalize_public_schedule_payload([_public_game(away_team_id='different-away')])
+    assert len(_public_schedule_differences(field_change, original)['modified_games']) == 1
+    matchup_diff = _public_schedule_differences(matchup_change, original)
+    assert len(matchup_diff['added_games']) == len(matchup_diff['removed_games']) == 1
+
+
+def test_canonical_comparison_detects_added_removed_and_restored_games():
+    original = _normalize_public_schedule_payload([_public_game()])
+    added = _normalize_public_schedule_payload([_public_game(), _public_game(start_time='10:00')])
+    assert len(_public_schedule_differences(added, original)['added_games']) == 1
+    assert len(_public_schedule_differences([], original)['removed_games']) == 1
+    assert not any(_public_schedule_differences(original, original).values())
+
+
+def test_duplicate_publication_rows_are_reported_not_silently_deduplicated():
+    game = _normalize_public_schedule_payload([_public_game()])[0]
+    differences = _public_schedule_differences([game], [game, game])
+    assert differences['removed_games'] == [game]
+
+
 def test_migrated_week_uses_matching_season_snapshot_instead_of_null_false_positive():
     revision = 'a' * 64
     season = SimpleNamespace(id=uuid.uuid4(), last_published_schedule_hash=revision, last_published_game_count=2)
     week = SimpleNamespace(id=uuid.uuid4(), publication_status='PUBLISHED', last_published_schedule_hash=None,
                            last_published_game_count=None, publication_hash_version=1)
-    with patch('app.routes.api._week_schedule_hash', return_value=('week', 1)), \
+    with patch('app.routes.api._week_public_schedule_payload', return_value=[]), \
+         patch('app.routes.api._week_schedule_hash', return_value=('week', 1)), \
          patch('app.routes.api._compute_schedule_hash', return_value=(revision, 2)):
         comparison = compare_week_to_published_snapshot(SimpleNamespace(), season, week)
     assert comparison['has_pending_changes'] is False
@@ -125,10 +176,30 @@ def test_missing_publication_snapshot_is_error_not_pending_changes():
     season = SimpleNamespace(id=uuid.uuid4(), last_published_schedule_hash=None, last_published_game_count=None)
     week = SimpleNamespace(id=uuid.uuid4(), publication_status='PUBLISHED', last_published_schedule_hash=None,
                            last_published_game_count=None, publication_hash_version=1)
-    with patch('app.routes.api._week_schedule_hash', return_value=('current', 1)):
+    with patch('app.routes.api._week_public_schedule_payload', return_value=[]), \
+         patch('app.routes.api._week_schedule_hash', return_value=('current', 1)):
         comparison = compare_week_to_published_snapshot(SimpleNamespace(), season, week)
     assert comparison['has_pending_changes'] is False
     assert comparison['publication_error']
+
+
+def test_week_3_legacy_row_id_mismatch_is_not_a_material_pending_change():
+    """Reproduce the production-equivalent Week 3 false positive.
+
+    The v1 digest included scheduled_game_id, so an import/rebuild could change
+    the digest while leaving every public field identical.
+    """
+    season = SimpleNamespace(id=uuid.uuid4(), last_published_schedule_hash=None, last_published_game_count=None)
+    week = SimpleNamespace(id=uuid.uuid4(), week_number=3, primary_game_date=__import__('datetime').date(2026, 8, 30),
+                           publication_status='PUBLISHED', published_at=None,
+                           last_published_schedule_hash='legacy-before-rebuild', last_published_game_count=1,
+                           last_published_schedule_payload=None, publication_hash_version=1)
+    with patch('app.routes.api._week_public_schedule_payload', return_value=_normalize_public_schedule_payload([_public_game()])), \
+         patch('app.routes.api._week_schedule_hash', return_value=('legacy-after-rebuild', 1)):
+        state = get_week_publication_state(SimpleNamespace(), season, week)
+    assert state['publication_status'] == 'PUBLISHED'
+    assert state['has_pending_changes'] is False
+    assert state['added_games'] == state['removed_games'] == state['modified_games'] == []
 
 
 def test_canonical_publication_state_has_exactly_three_schedule_states():
@@ -138,12 +209,12 @@ def test_canonical_publication_state_has_exactly_three_schedule_states():
     assert get_week_publication_state(SimpleNamespace(), season, draft)['publication_status'] == 'DRAFT'
 
     published = SimpleNamespace(**{**draft.__dict__, 'publication_status': 'PUBLISHED',
-                                  'last_published_schedule_hash': 'same'})
-    with patch('app.routes.api._week_public_schedule_hash', return_value=('same', 1)):
+                                  'last_published_schedule_hash': __import__('hashlib').sha256(b'[]').hexdigest()})
+    with patch('app.routes.api._week_public_schedule_payload', return_value=[]):
         current = get_week_publication_state(SimpleNamespace(), season, published)
     assert (current['is_published'], current['has_pending_changes'], current['publication_status']) == (True, False, 'PUBLISHED')
 
-    with patch('app.routes.api._week_public_schedule_hash', return_value=('changed', 1)):
+    with patch('app.routes.api._week_public_schedule_payload', return_value=_normalize_public_schedule_payload([_public_game()])):
         pending = get_week_publication_state(SimpleNamespace(), season, published)
     assert (pending['is_published'], pending['has_pending_changes'], pending['publication_status']) == (True, True, 'PUBLISHED_CHANGES_PENDING')
 
