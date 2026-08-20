@@ -8,6 +8,8 @@ persisted legacy counts only when they identify the host's complete active
 inventory unambiguously. It never changes game assignments or matches layouts
 by display name.
 """
+import logging
+
 from alembic import op
 import sqlalchemy as sa
 
@@ -16,6 +18,52 @@ revision = '20260820_0076'
 down_revision = '20260820_0075'
 branch_labels = None
 depends_on = None
+
+logger = logging.getLogger('alembic.runtime.migration')
+
+
+_REPAIR_RETIRED_MEMBERSHIPS_SQL = """WITH eligible_members AS (
+  SELECT m.id AS member_id, m.field_configuration_id, old.name AS old_name
+  FROM field_configuration_members m
+  JOIN host_location_configurations c ON c.id=m.field_configuration_id
+  JOIN fields old ON old.id=m.field_id
+  WHERE old.is_active=FALSE OR old.deleted_at IS NOT NULL
+), candidates AS (
+  SELECT e.member_id, e.field_configuration_id, n.id AS new_field_id
+  FROM eligible_members e
+  JOIN host_location_configurations c ON c.id=e.field_configuration_id
+  JOIN fields n ON n.host_location_id=c.host_location_id
+   AND lower(regexp_replace(trim(n.name), '\\s+', ' ', 'g'))=
+       lower(regexp_replace(trim(e.old_name), '\\s+', ' ', 'g'))
+   AND n.is_active=TRUE AND n.deleted_at IS NULL
+), candidate_counts AS (
+  SELECT e.member_id, count(c.new_field_id) AS candidate_count
+  FROM eligible_members e
+  LEFT JOIN candidates c ON c.member_id=e.member_id
+  GROUP BY e.member_id
+), unambiguous AS (
+  SELECT c.member_id, c.field_configuration_id, c.new_field_id
+  FROM candidates c
+  JOIN candidate_counts counts ON counts.member_id=c.member_id
+  WHERE counts.candidate_count=1
+), repairable AS (
+  SELECT u.*
+  FROM unambiguous u
+  WHERE NOT EXISTS (SELECT 1 FROM field_configuration_members x
+    WHERE x.field_configuration_id=u.field_configuration_id
+      AND x.field_id=u.new_field_id AND x.id<>u.member_id)
+), repaired AS (
+  UPDATE field_configuration_members m SET field_id=r.new_field_id,
+    updated_at=now() FROM repairable r
+  WHERE m.id=r.member_id AND m.field_id IS DISTINCT FROM r.new_field_id
+  RETURNING m.id
+)
+SELECT
+  (SELECT count(*) FROM candidates) AS candidates_inspected,
+  (SELECT count(*) FROM repaired) AS unambiguous_repairs,
+  (SELECT count(*) FROM candidate_counts WHERE candidate_count>1) AS ambiguous_skipped,
+  (SELECT count(*) FROM candidate_counts WHERE candidate_count=0) AS no_match_skipped,
+  ((SELECT count(*) FROM unambiguous)-(SELECT count(*) FROM repairable)) AS existing_target_skipped"""
 
 
 def upgrade() -> None:
@@ -29,22 +77,19 @@ def upgrade() -> None:
     # Replace a retired member only where its normalized label has exactly one
     # active successor at the same host. Names are migration evidence only;
     # runtime matching remains entirely ID-based.
-    bind.execute(sa.text("""WITH replacements AS (
-      SELECT m.id member_id, min(n.id) new_field_id
-      FROM field_configuration_members m
-      JOIN host_location_configurations c ON c.id=m.field_configuration_id
-      JOIN fields old ON old.id=m.field_id
-      JOIN fields n ON n.host_location_id=c.host_location_id
-       AND lower(regexp_replace(trim(n.name), '\\s+', ' ', 'g'))=
-           lower(regexp_replace(trim(old.name), '\\s+', ' ', 'g'))
-       AND n.is_active=TRUE AND n.deleted_at IS NULL
-      WHERE (old.is_active=FALSE OR old.deleted_at IS NOT NULL)
-      GROUP BY m.id HAVING count(n.id)=1
-    ) UPDATE field_configuration_members m SET field_id=r.new_field_id,
-      updated_at=now() FROM replacements r WHERE m.id=r.member_id
-      AND NOT EXISTS (SELECT 1 FROM field_configuration_members x
-        WHERE x.field_configuration_id=m.field_configuration_id
-          AND x.field_id=r.new_field_id AND x.id<>m.id)"""))
+    repair_counts = bind.execute(
+        sa.text(_REPAIR_RETIRED_MEMBERSHIPS_SQL)
+    ).mappings().one()
+    logger.info(
+        'Canonical membership repair: Candidates inspected: %s; '
+        'Unambiguous repairs: %s; Ambiguous mappings skipped: %s; '
+        'No-match mappings skipped: %s; Existing target memberships skipped: %s',
+        repair_counts['candidates_inspected'],
+        repair_counts['unambiguous_repairs'],
+        repair_counts['ambiguous_skipped'],
+        repair_counts['no_match_skipped'],
+        repair_counts['existing_target_skipped'],
+    )
 
     # Empty legacy layouts are safe to reconstruct only if every required size
     # count equals the complete active inventory for that host. Extra fields of
