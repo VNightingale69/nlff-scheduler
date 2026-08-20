@@ -19,6 +19,7 @@ assert.match(page, /PREPUBLISHED SCHEDULE — SUBJECT TO CHANGE/);
 assert.match(page, /some\(\(week\) => !week\.is_published\)/, 'Only truly draft weeks trigger the draft notice');
 assert.match(page, /week\.is_published && week\.has_pending_changes/, 'Warning consumes the canonical backend state');
 assert.match(page, /The current administrative schedule contains changes that have not yet been published\./);
+assert.match(page, /publicationStatus=\{week\.publication_status/, 'Hosting View renders status independently for every week');
 assert.doesNotMatch(page, /Official public version differs/);
 for (const forbidden of ['Publish Week', 'Unpublish', 'Manual Override', 'Regenerate']) assert.doesNotMatch(page, new RegExp(forbidden));
 

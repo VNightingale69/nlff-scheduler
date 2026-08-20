@@ -369,7 +369,7 @@ export default function ScheduleManagementPage() {
         {conflicts.length === 0 ? <p>No schedule conflicts found.</p> : <ul className='list-disc pl-6'>{conflicts.map((conflict: any, index: number) => <li key={index}>{conflict.message}</li>)}</ul>}
       </div>}
 
-      {view === 'hosting' ? <HostingView games={hostingGames} mode='unpublished' /> : <div className='space-y-3'>
+      {view === 'hosting' ? <HostingView games={hostingGames} publicationStatus='DRAFT' /> : <div className='space-y-3'>
         {grouped.map(([groupName, groupGames]) => (
           <div key={groupName} className='rounded border p-3'>
             <h3 className='mb-2 text-lg font-semibold'>{groupName}</h3>
