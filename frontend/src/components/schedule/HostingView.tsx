@@ -41,12 +41,17 @@ function GameCard({ game }: { game: HostingViewGame }) {
   </article>;
 }
 
-/** Read-only host report. Its caller supplies either saved draft games or public snapshot games. */
-export default function HostingView({ games, mode = 'published' }: { games: HostingViewGame[]; mode?: 'published' | 'unpublished' }) {
+type PublicationStatus = 'DRAFT' | 'PUBLISHED' | 'PUBLISHED_CHANGES_PENDING';
+
+/** Read-only host report. Its caller supplies the canonical publication state for these games. */
+export default function HostingView({ games, publicationStatus = 'PUBLISHED' }: { games: HostingViewGame[]; publicationStatus?: PublicationStatus }) {
   const warn = process.env.NODE_ENV === 'production' ? () => {} : console.warn;
   const dates = Array.from(new Set(games.map((game) => game.date))).sort();
-  return <div className={`hosting-view ${mode === 'unpublished' ? 'unpublished-hosting-view' : ''} space-y-8`}>
-    {mode === 'unpublished' && <div className='unpublished-banner rounded border-2 border-amber-400 bg-amber-50 p-3 text-amber-950'><strong className='block uppercase tracking-wide'>Pre-published schedule</strong><span className='text-sm'>Unpublished schedule preview — not visible to the public. Read only and subject to change.</span></div>}
+  const isDraft = publicationStatus === 'DRAFT';
+  const hasPendingChanges = publicationStatus === 'PUBLISHED_CHANGES_PENDING';
+  return <div className={`hosting-view ${isDraft ? 'unpublished-hosting-view' : ''} space-y-8`}>
+    {isDraft && <div className='unpublished-banner rounded border-2 border-amber-400 bg-amber-50 p-3 text-amber-950'><strong className='block uppercase tracking-wide'>Pre-published schedule</strong><span className='text-sm'>Unpublished schedule preview — not visible to the public. Read only and subject to change.</span></div>}
+    {hasPendingChanges && <div className='pending-changes-banner rounded border-2 border-amber-400 bg-amber-50 p-3 text-amber-950'><strong className='block uppercase tracking-wide'>Schedule changes pending</strong><span className='text-sm'>This week has been published, but the administrative schedule contains changes that have not yet been republished.</span></div>}
     {dates.map((date) => {
       const dateGames = games.filter((game) => game.date === date);
       const hosts = Array.from(new Set(dateGames.map((game) => game.hostLocation || 'Host Location Unassigned'))).sort();

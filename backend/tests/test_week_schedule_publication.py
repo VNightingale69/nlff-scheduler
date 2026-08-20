@@ -219,6 +219,23 @@ def test_canonical_publication_state_has_exactly_three_schedule_states():
     assert (pending['is_published'], pending['has_pending_changes'], pending['publication_status']) == (True, True, 'PUBLISHED_CHANGES_PENDING')
 
 
+def test_partially_published_season_keeps_week_publication_states_independent():
+    season = SimpleNamespace(id=uuid.uuid4(), last_published_schedule_hash=None, last_published_game_count=None)
+    draft = SimpleNamespace(id=uuid.uuid4(), publication_status='UNPUBLISHED', last_published_schedule_hash=None,
+                            last_published_game_count=None, publication_hash_version=2)
+    published = SimpleNamespace(id=uuid.uuid4(), publication_status='PUBLISHED',
+                                last_published_schedule_hash=__import__('hashlib').sha256(b'[]').hexdigest(),
+                                last_published_game_count=0, publication_hash_version=2)
+
+    with patch('app.routes.api._week_public_schedule_payload', return_value=[]):
+        states = [get_week_publication_state(SimpleNamespace(), season, week) for week in (published, draft)]
+
+    assert [(state['is_published'], state['publication_status']) for state in states] == [
+        (True, 'PUBLISHED'),
+        (False, 'DRAFT'),
+    ]
+
+
 def test_hiller_saved_large_override_is_descriptive_nonblocking_warning():
     week_id = uuid.uuid4()
     row = _game(week_id)
