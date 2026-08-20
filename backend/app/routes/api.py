@@ -16719,7 +16719,7 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
     field_times: dict[tuple, uuid.UUID] = {}
     matchups: set[tuple] = set()
     layout_groups: dict[tuple, list[tuple]] = {}
-    turf_capacity_groups: dict[tuple, list[tuple]] = {}
+    host_timeslot_groups: dict[tuple, list[tuple]] = {}
     layout_evaluations: list[dict[str, object]] = []
     for game, _slot, field_instance, host, home, away, division, _org, _status in rows:
         assignment = resolve_game_field_assignment(db, game, field_instance=field_instance, repair=True)
@@ -16817,23 +16817,16 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
                 'recommended_action': 'The obsolete generated/timeslot layout relationship may be detached; the current canonical field remains authoritative.',
                 'summary': 'Ignored a stale generated/timeslot layout reference because the game has a current canonical field.',
             })
-        if host and (host.surface_type or 'GRASS_FIELD') == 'TURF_STADIUM' and required_type:
-            turf_capacity_groups.setdefault((game.host_location_id, game.game_date, game.kickoff_time), []).append(
+        if host and game.host_location_id and game.game_date and game.kickoff_time:
+            host_timeslot_groups.setdefault((game.host_location_id, game.game_date, game.kickoff_time), []).append(
                 (game, required_type, host, home, away, _slot, field_instance)
             )
         if canonical_type and required_type and canonical_type != required_type:
             layout_groups.setdefault((game.host_location_id, game.game_date, game.kickoff_time), []).append((game, required_type, canonical_type, host))
-    for (host_id, game_date, kickoff), wave in turf_capacity_groups.items():
-        override, configuration, valid = select_supported_layout(
-            db, host_id, game_date, kickoff, [item[1] for item in wave],
-        )
-        # Root cause of the production false positives: this check formerly
-        # treated the generated slot's selected/default layout as capacity and
-        # could therefore compare saved games with a retired planning artifact.
-        # Demand below comes only from saved games; capacity comes only from
-        # current host configurations (or an explicit active timeslot lock).
+    for (host_id, game_date, kickoff), wave in host_timeslot_groups.items():
+        # This is the sole host/timeslot physical-capacity decision. Both the
+        # diagnostic and any blocker below are projections of this result.
         demand = {size: sum(item[1] == size for item in wave) for size in FIELD_SIZE_ORDER}
-        evaluated_layouts = active_layout_capacities(db, host_id)
         assigned_fields = [
             getattr(getattr(item[0], 'field', None), 'name', None)
             for item in wave if getattr(item[0], 'field_id', None)
@@ -16843,13 +16836,8 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
             'field_name': getattr(getattr(item[0], 'field', None), 'name', None),
             'required_field_size': item[1],
         } for item in wave])
-        # Saved canonical fields outrank aggregate template labels.  Thus a
-        # persisted Medium+Small combination can be valid even though no
-        # quantity-only template happens to carry that exact label.
         valid = capacity_assessment['valid']
-        configuration_basis = 'Explicit time-specific configuration' if override else (
-            'All active host configurations' if evaluated_layouts else 'Unable to determine'
-        )
+        evaluated_layouts = capacity_assessment['available_layouts']
         retired_slots_excluded = sum(
             '__retired_generated__' in str(getattr(item[5], 'field_name', '') or '')
             or '__retired_generated__' in str(getattr(item[6], 'field_name', '') or '')
@@ -16863,7 +16851,7 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
             'required': demand,
             'available_layouts': evaluated_layouts,
             'matched_layout': capacity_assessment['compatible_configuration'] or (
-                configuration.configuration_name if valid and configuration else None),
+                capacity_assessment['supported_layouts'][0] if valid and capacity_assessment['supported_layouts'] else None),
             'configuration_basis': capacity_assessment['configuration_basis'],
             'assigned_fields': sorted(filter(None, assigned_fields)),
             'result': 'Valid' if valid else ('Blocking conflict' if evaluated_layouts else 'Warning — does not block publication'),
@@ -16880,17 +16868,14 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
             'physical_field_ids': [str(item[0].field_id) for item in wave if item[0].field_id],
             'active_configuration_ids': [layout['id'] for layout in evaluated_layouts],
             'retired_slots_excluded': retired_slots_excluded,
-            'configuration_selected': configuration.configuration_name if configuration else None,
+            'configuration_selected': capacity_assessment['compatible_configuration'],
             'validation_source': 'saved_scheduled_games+current_physical_fields+active_host_configurations',
             'blocking_result': bool(not valid and evaluated_layouts),
             'reason': capacity_assessment['reason'],
         }
         logger.debug('schedule_capacity_validation %s', json.dumps(log_detail, sort_keys=True))
         if valid:
-            continue
-        if capacity_assessment['issue_code'] == 'FIELD_LAYOUT_CONFLICT':
-            # The physical-wave pass below emits the single detailed conflict;
-            # do not also mislabel it as an aggregate capacity shortage.
+            assert not capacity_assessment['blocking_issues']
             continue
         game, _required_type, host, home, away, _slot, _field_instance = wave[0]
         demand_text = ', '.join(f'{count} {size.title()}' for size, count in demand.items() if count) or 'none'
@@ -16908,12 +16893,13 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
             'simultaneous_demand': demand,
             'available_layouts': evaluated_layouts,
             'matched_layout': None,
-            'selected_layout': layout_label(configuration), 'configuration_basis': configuration_basis,
+            'selected_layout': capacity_assessment['compatible_configuration'],
+            'configuration_basis': capacity_assessment['configuration_basis'],
             'assigned_fields': sorted(filter(None, assigned_fields)),
             'recommended_action': 'Reduce overlapping games or select an allowed field layout for this kickoff.',
-            'summary': (f'Required: {demand_text}. Available layouts: {layout_text}. No active layout can satisfy this timeslot.'
-                        if evaluated_layouts else
-                        'Unable to conclusively determine the host field configuration for this kickoff. The scheduled games will remain publishable.'),
+            'summary': (capacity_assessment['reason'] if capacity_assessment['issue_code'] == 'FIELD_LAYOUT_CONFLICT'
+                        else f'Required: {demand_text}. Available layouts: {layout_text}. No active layout can satisfy this timeslot.'
+                        if evaluated_layouts else 'Unable to conclusively determine the host field configuration for this kickoff. The scheduled games will remain publishable.'),
         }
         if evaluated_layouts:
             errors.append(issue)
@@ -16951,42 +16937,6 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
                              'field_layout': layout_label(configuration),
                              'recommended_action': 'Verify field reconfiguration before kickoff.',
                              'summary': f'{getattr(host, "name", "Host location")} normally uses two Medium fields. This {game.kickoff_time.strftime("%I:%M %p").lstrip("0")} {detail["division"]} game uses the supported {layout_label(configuration)} configuration. Verify field reconfiguration before kickoff.'})
-    physical_waves = {}
-    for game, _slot, _instance, host, _home, _away, _division, _org, _status in rows:
-        if game.host_location_id and game.game_date and game.kickoff_time and game.field_id:
-            physical_waves.setdefault((game.host_location_id, game.game_date, game.kickoff_time), {'host': host, 'fields': set(), 'game': game})['fields'].add(game.field_id)
-    for (_host_id, game_date, kickoff), wave in physical_waves.items():
-        names = [name for (name,) in db.query(Field.name).filter(Field.id.in_(wave['fields'])).all()]
-        assessment = evaluate_host_timeslot_capacity(db, _host_id, game_date, kickoff, [
-            {'field_id': field_id, 'field_name': name, 'required_field_size': None}
-            for field_id, name in db.query(Field.id, Field.name).filter(Field.id.in_(wave['fields'])).all()
-        ])
-        valid = assessment['valid']
-        layout_evaluations.append({
-            'host_location_id': str(_host_id),
-            'host_location_name': getattr(wave['host'], 'name', None),
-            'date': game_date.isoformat(),
-            'time': kickoff.isoformat(),
-            'required_field_ids': sorted(str(field_id) for field_id in wave['fields']),
-            'assigned_fields': sorted(names),
-            'active_configurations': assessment['active_configurations'],
-            'matched_layout': assessment['compatible_configuration'],
-            'configuration_basis': assessment['configuration_basis'],
-            'result': 'Valid' if valid else 'Blocking conflict',
-        })
-        if valid:
-            continue
-        errors.append({
-            'issue_code': 'FIELD_LAYOUT_CONFLICT', 'scheduled_game_id': str(wave['game'].id),
-            'date': game_date.isoformat(), 'time': kickoff.isoformat(),
-            'location': getattr(wave['host'], 'name', None), 'scheduled_fields': sorted(names),
-            'supported_layouts': assessment['supported_layouts'],
-            'active_configurations': assessment['active_configurations'],
-            'compatible_configuration': assessment['compatible_configuration'],
-            'conflicting_fields': assessment['conflicting_fields'],
-            'summary': assessment['reason'],
-            'recommended_action': 'Move a game or choose fields that are contained together in one active supported layout.',
-        })
     return {'games': len(rows), 'blocking_errors': errors, 'warnings': warnings,
             'layout_evaluations': layout_evaluations,
             'status': 'Blocked' if errors else 'Ready to Publish'}

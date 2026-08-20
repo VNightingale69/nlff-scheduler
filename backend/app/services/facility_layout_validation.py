@@ -300,9 +300,16 @@ def evaluate_host_timeslot_capacity(db, host_location_id, game_date, kickoff_tim
     # resource-membership question, not a comparison of size-count labels.
     if games and len(field_ids) == len(games):
         valid, supported, _used = validate_field_combination(db, host_location_id, field_ids)
-        return {
+        issue_code = None if valid else 'FIELD_LAYOUT_CONFLICT'
+        blocking_issues = [] if valid else [{
+            'issue_code': issue_code,
+            'reason': 'The assigned physical fields are not members of any one active host configuration.',
+            'conflicting_fields': assigned_fields,
+        }]
+        result = {
             'valid': valid,
-            'issue_code': None if valid else 'FIELD_LAYOUT_CONFLICT',
+            'issue_code': issue_code,
+            'blocking_issues': blocking_issues,
             'assigned_field_ids': [str(value) for value in field_ids],
             'assigned_fields': assigned_fields,
             'required_field_sizes': required_counts,
@@ -315,16 +322,25 @@ def evaluate_host_timeslot_capacity(db, host_location_id, game_date, kickoff_tim
             'configuration_basis': 'Persisted physical field memberships (field IDs)',
             'supported_layouts': supported,
         }
+        assert not result['valid'] or not result['blocking_issues']
+        return result
 
     result = validate_timeslot_demands(
         {(game_date, host_location_id, kickoff_time): required_counts},
         {(game_date, host_location_id, kickoff_time): [row['capacity'] for row in capacities]},
     )
     valid = result['valid']
-    return {
+    issue_code = None if valid else ('HOST_TIMESLOT_CAPACITY_SHORTAGE' if capacities else
+                                     'HOST_TIMESLOT_CONFIGURATION_UNCONFIRMED')
+    blocking_issues = [] if valid or not capacities else [{
+        'issue_code': issue_code,
+        'reason': 'Canonical physical field assignments are missing and no active layout has sufficient capacity.',
+        'conflicting_fields': [],
+    }]
+    result = {
         'valid': valid,
-        'issue_code': None if valid else ('HOST_TIMESLOT_CAPACITY_SHORTAGE' if capacities else
-                                          'HOST_TIMESLOT_CONFIGURATION_UNCONFIRMED'),
+        'issue_code': issue_code,
+        'blocking_issues': blocking_issues,
         'assigned_field_ids': [str(value) for value in field_ids],
         'assigned_fields': assigned_fields,
         'required_field_sizes': required_counts,
@@ -337,3 +353,5 @@ def evaluate_host_timeslot_capacity(db, host_location_id, game_date, kickoff_tim
         'configuration_basis': 'Active configuration capacity fallback (missing physical field IDs)',
         'supported_layouts': [row['code'] for row in capacities],
     }
+    assert not result['valid'] or not result['blocking_issues']
+    return result
