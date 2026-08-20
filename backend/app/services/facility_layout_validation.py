@@ -3,7 +3,8 @@ from collections import Counter
 
 from sqlalchemy.orm import selectinload
 
-from app.models import Field, FieldConfigurationMember, HostLocation, HostLocationConfiguration, TimeslotFieldConfiguration
+from app.models import (Field, FieldConfigurationMember, FieldPhysicalConflict,
+                        HostLocation, HostLocationConfiguration, TimeslotFieldConfiguration)
 from app.turf_configurations import APPROVED_TURF_CONFIGURATIONS, turf_configuration_counts
 
 
@@ -195,14 +196,15 @@ def layout_label(configuration):
 
 
 def validate_field_combination(db, host_id, field_ids):
-    """Return whether exact physical fields are a subset of one active layout.
+    """Return whether canonical physical fields can operate simultaneously.
 
-    A missing layout is treated as the legacy all-active-fields layout so older
-    facilities remain schedulable while administrators migrate their setup.
+    A containing named configuration is a fast path. Otherwise only explicit
+    physical-conflict relationships make independently usable fields
+    incompatible; absence of an enumerated configuration is not a conflict.
     """
     used = {field_id for field_id in field_ids if field_id}
-    # Physical coexistence is defined only by persisted join-table membership,
-    # including at facilities that also use synthetic turf capacity layouts.
+    # Membership provides the configuration fast path, including at facilities
+    # that also use synthetic turf capacity layouts.
     configurations = active_supported_layouts_query(db, host_id).order_by(
         HostLocationConfiguration.sort_order,
         HostLocationConfiguration.configuration_name,
@@ -235,8 +237,55 @@ def validate_field_combination(db, host_id, field_ids):
             )
         }
         return used.issubset(active), [], active
+    if not layouts:
+        return False, [configuration.configuration_name for configuration in configurations], used
     matching = [configuration for configuration, members in layouts if used.issubset(members)]
-    return bool(matching), [configuration.configuration_name for configuration in configurations], used
+    names = [configuration.configuration_name for configuration in configurations]
+    if matching:
+        return True, names, used
+    active = {
+        row.id for row in db.query(Field.id).filter(
+            Field.host_location_id == host_id, Field.is_active.is_(True), Field.deleted_at.is_(None),
+        )
+    }
+    if not used.issubset(active):
+        return False, names, used
+    conflicts = db.query(FieldPhysicalConflict.id).filter(
+        FieldPhysicalConflict.host_location_id == host_id,
+        FieldPhysicalConflict.field_a_id.in_(used),
+        FieldPhysicalConflict.field_b_id.in_(used),
+    ).first()
+    return conflicts is None, names, used
+
+
+def fields_can_operate_simultaneously(db, host_id, field_ids):
+    """Return host ownership/activity and explicit pairwise overlap diagnostics."""
+    used = {value for value in field_ids if value}
+    fields = db.query(Field).filter(Field.id.in_(used)).all() if used else []
+    by_id = {field.id: field for field in fields}
+    invalid_ids = sorted(str(value) for value in used if (
+        value not in by_id or by_id[value].host_location_id != host_id
+        or not by_id[value].is_active or by_id[value].deleted_at is not None
+    ))
+    pairs = []
+    if not invalid_ids:
+        relationships = db.query(FieldPhysicalConflict).filter(
+            FieldPhysicalConflict.host_location_id == host_id,
+            FieldPhysicalConflict.field_a_id.in_(used),
+            FieldPhysicalConflict.field_b_id.in_(used),
+        ).all()
+        for relationship in relationships:
+            first, second = by_id[relationship.field_a_id], by_id[relationship.field_b_id]
+            pairs.append({'field_a_id': str(first.id), 'field_a': first.name,
+                          'field_b_id': str(second.id), 'field_b': second.name,
+                          'reason': relationship.reason or 'Fields occupy overlapping physical field space.'})
+    invalid_reason = ('Assigned field IDs do not belong to this host or are inactive: '
+                      + ', '.join(invalid_ids)) if invalid_ids else None
+    return {'valid': not invalid_ids and not pairs,
+            'assigned_fields': [by_id[value].name for value in used if value in by_id],
+            'invalid_field_ids': invalid_ids, 'conflicting_pairs': pairs,
+            'reason': (invalid_reason if invalid_ids else
+                       'Physical field conflicts found.' if pairs else 'No physical field conflicts.')}
 
 
 def field_combination_diagnostics(db, host_id, field_ids):
@@ -303,11 +352,13 @@ def evaluate_host_timeslot_capacity(db, host_location_id, game_date, kickoff_tim
     # resource-membership question, not a comparison of size-count labels.
     if games and len(field_ids) == len(games):
         valid, supported, _used = validate_field_combination(db, host_location_id, field_ids)
+        physical = fields_can_operate_simultaneously(db, host_location_id, field_ids)
         issue_code = None if valid else 'FIELD_LAYOUT_CONFLICT'
-        unreferenced = membership.get('unreferenced_assigned_field_ids', [])
-        conflict_reason = ('Assigned field IDs not referenced by any active configuration: '
-                           + ', '.join(unreferenced)) if unreferenced else (
-                           'The assigned physical fields are not members of any one active host configuration.')
+        conflict_reason = physical['reason']
+        if physical['conflicting_pairs']:
+            conflict_reason = '; '.join(
+                f"{pair['field_a']} and {pair['field_b']} cannot operate simultaneously: {pair['reason']}"
+                for pair in physical['conflicting_pairs'])
         blocking_issues = [] if valid else [{
             'issue_code': issue_code,
             'reason': conflict_reason,
@@ -323,9 +374,12 @@ def evaluate_host_timeslot_capacity(db, host_location_id, game_date, kickoff_tim
             'compatible_configuration': membership['compatible_configuration'],
             'active_configurations': membership['configurations'],
             'available_layouts': capacities,
-            'conflicting_fields': [] if valid else assigned_fields,
-            'reason': ('Assigned physical fields coexist in the persisted configuration.' if valid else conflict_reason),
-            'configuration_basis': 'Persisted physical field memberships (field IDs)',
+            'conflicting_fields': sorted({name for pair in physical['conflicting_pairs'] for name in (pair['field_a'], pair['field_b'])}),
+            'conflicting_pairs': physical['conflicting_pairs'],
+            'reason': (('Assigned physical fields coexist in the persisted configuration.'
+                        if membership['compatible_configuration'] else 'No physical field conflicts.') if valid else conflict_reason),
+            'configuration_basis': ('Named configuration membership (field IDs)' if membership['compatible_configuration']
+                                    else 'Physical field compatibility (field IDs)'),
             'supported_layouts': supported,
         }
         assert not result['valid'] or not result['blocking_issues']

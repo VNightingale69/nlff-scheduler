@@ -7,7 +7,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
-from app.models import Field, FieldConfigurationMember, HostLocation, HostLocationConfiguration, Organization, Role, User
+from app.models import (Field, FieldConfigurationMember, FieldPhysicalConflict,
+                        HostLocation, HostLocationConfiguration, Organization, Role, User)
 from app.routes.api import _validate_configuration_activation, list_host_location_configurations
 from app.services.facility_layout_validation import evaluate_host_timeslot_capacity, field_combination_diagnostics, validate_field_combination
 from app.services.host_configuration_integrity import audit_host_configurations, repair_host_configuration_memberships
@@ -164,6 +165,11 @@ class SupportedFieldLayoutActivationTest(unittest.TestCase):
         self.assertEqual([], large_result['blocking_issues'])
 
     def test_authoritative_evaluator_reports_actual_overlapping_fields(self):
+        self.db.add(FieldPhysicalConflict(
+            host_location_id=self.host.id, field_a_id=self.large.id,
+            field_b_id=self.fields[1].id, reason='Shared turf footprint.',
+        ))
+        self.db.commit()
         result = evaluate_host_timeslot_capacity(self.db, self.host.id, date(2026, 9, 13), time(13), [
             {'field_id': self.large.id, 'field_name': self.large.name, 'required_field_size': 'LARGE'},
             {'field_id': self.fields[1].id, 'field_name': self.fields[1].name, 'required_field_size': 'SMALL'},
@@ -173,6 +179,34 @@ class SupportedFieldLayoutActivationTest(unittest.TestCase):
         self.assertEqual('FIELD_LAYOUT_CONFLICT', result['issue_code'])
         self.assertEqual({'Large 1', 'Small 2'}, set(result['conflicting_fields']))
         self.assertEqual(['FIELD_LAYOUT_CONFLICT'], [issue['issue_code'] for issue in result['blocking_issues']])
+        self.assertIn('Shared turf footprint', result['reason'])
+
+    def test_fields_from_different_configurations_without_overlap_are_valid(self):
+        result = evaluate_host_timeslot_capacity(self.db, self.host.id, date(2026, 9, 13), time(12), [
+            {'field_id': self.medium.id, 'field_name': self.medium.name, 'required_field_size': 'MEDIUM'},
+            {'field_id': self.fields[2].id, 'field_name': self.fields[2].name, 'required_field_size': 'SMALL'},
+        ])
+
+        self.assertTrue(result['valid'])
+        self.assertIsNone(result['compatible_configuration'])
+        self.assertEqual('Physical field compatibility (field IDs)', result['configuration_basis'])
+        self.assertEqual('No physical field conflicts.', result['reason'])
+
+    def test_canonical_field_from_another_host_is_invalid(self):
+        other = HostLocation(id=uuid.uuid4(), organization_id=self.org.id, name='Other Stadium')
+        same_named = Field(id=uuid.uuid4(), host_location_id=other.id, name=self.medium.name,
+                           layout_type='MEDIUM', is_active=True)
+        self.db.add_all([other, same_named])
+        self.db.commit()
+
+        result = evaluate_host_timeslot_capacity(self.db, self.host.id, date(2026, 9, 13), time(12), [
+            {'field_id': self.medium.id, 'field_name': self.medium.name, 'required_field_size': 'MEDIUM'},
+            {'field_id': same_named.id, 'field_name': same_named.name, 'required_field_size': 'MEDIUM'},
+        ])
+
+        self.assertFalse(result['valid'])
+        self.assertEqual('FIELD_LAYOUT_CONFLICT', result['issue_code'])
+        self.assertIn(str(same_named.id), result['reason'])
 
     def test_authoritative_evaluator_fallback_reports_capacity_shortage(self):
         result = evaluate_host_timeslot_capacity(self.db, self.host.id, date(2026, 9, 13), time(14), [
