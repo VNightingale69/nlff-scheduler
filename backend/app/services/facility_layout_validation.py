@@ -273,7 +273,10 @@ def field_combination_diagnostics(db, host_id, field_ids):
             'status': 'VALID' if compatible else ('ACTIVE BUT INVALID' if not member_ids else 'INCOMPATIBLE'),
             'reason': 'Configuration contains no assigned physical fields.' if not member_ids else None,
         })
-    return {'configurations': evaluations, 'compatible_configuration': matching_name}
+    referenced = {value for evaluation in evaluations for value in evaluation['field_ids']}
+    unreferenced = [str(value) for value in used if str(value) not in referenced]
+    return {'configurations': evaluations, 'compatible_configuration': matching_name,
+            'unreferenced_assigned_field_ids': sorted(unreferenced)}
 
 
 def evaluate_host_timeslot_capacity(db, host_location_id, game_date, kickoff_time, scheduled_games):
@@ -301,9 +304,13 @@ def evaluate_host_timeslot_capacity(db, host_location_id, game_date, kickoff_tim
     if games and len(field_ids) == len(games):
         valid, supported, _used = validate_field_combination(db, host_location_id, field_ids)
         issue_code = None if valid else 'FIELD_LAYOUT_CONFLICT'
+        unreferenced = membership.get('unreferenced_assigned_field_ids', [])
+        conflict_reason = ('Assigned field IDs not referenced by any active configuration: '
+                           + ', '.join(unreferenced)) if unreferenced else (
+                           'The assigned physical fields are not members of any one active host configuration.')
         blocking_issues = [] if valid else [{
             'issue_code': issue_code,
-            'reason': 'The assigned physical fields are not members of any one active host configuration.',
+            'reason': conflict_reason,
             'conflicting_fields': assigned_fields,
         }]
         result = {
@@ -317,8 +324,7 @@ def evaluate_host_timeslot_capacity(db, host_location_id, game_date, kickoff_tim
             'active_configurations': membership['configurations'],
             'available_layouts': capacities,
             'conflicting_fields': [] if valid else assigned_fields,
-            'reason': ('Assigned physical fields coexist in the persisted configuration.' if valid else
-                       'The assigned physical fields are not members of any one active host configuration.'),
+            'reason': ('Assigned physical fields coexist in the persisted configuration.' if valid else conflict_reason),
             'configuration_basis': 'Persisted physical field memberships (field IDs)',
             'supported_layouts': supported,
         }
