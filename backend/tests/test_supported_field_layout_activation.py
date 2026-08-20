@@ -244,6 +244,7 @@ class SupportedFieldLayoutActivationTest(unittest.TestCase):
         self.assertIn(empty.id, audit['zero_member_configuration_ids'])
         self.assertEqual(1, len(audit['cross_host_member_ids']))
         self.assertEqual(1, len(audit['uncovered_scheduled_field_ids']))
+        self.assertIn(self.medium.id, audit['uncovered_active_field_ids'])
 
     def test_repair_moves_obsolete_membership_to_unique_canonical_id(self):
         old = Field(id=uuid.uuid4(), host_location_id=self.host.id, name='Legacy Pitch',
@@ -278,6 +279,37 @@ class SupportedFieldLayoutActivationTest(unittest.TestCase):
         second = repair_host_configuration_memberships(self.db, self.host.id)
         self.assertEqual([], ambiguous.members)
         self.assertEqual(0, second['memberships_repaired'])
+
+    def test_partial_layout_adds_only_unambiguous_missing_canonical_field(self):
+        layout = HostLocationConfiguration(
+            host_location_id=self.host.id, configuration_name='Large and small',
+            large_field_count=1, small_field_count=1, is_active=True,
+        )
+        layout.members = [FieldConfigurationMember(field=self.fields[0])]
+        self.db.add(layout)
+        self.db.commit()
+
+        report = repair_host_configuration_memberships(self.db, self.host.id)
+
+        self.assertEqual(1, report['memberships_repaired'])
+        self.assertEqual({self.fields[0].id, self.large.id}, {member.field_id for member in layout.members})
+        valid, _layouts, _used = validate_field_combination(self.db, self.host.id, [self.large.id])
+        self.assertTrue(valid)
+
+    def test_partial_layout_does_not_guess_between_same_size_fields(self):
+        medium_two = Field(host_location_id=self.host.id, name='Medium 2', layout_type='MEDIUM', is_active=True)
+        layout = HostLocationConfiguration(
+            host_location_id=self.host.id, configuration_name='One medium and one small',
+            medium_field_count=1, small_field_count=1, is_active=True,
+        )
+        layout.members = [FieldConfigurationMember(field=self.fields[0])]
+        self.db.add_all([medium_two, layout])
+        self.db.commit()
+
+        report = repair_host_configuration_memberships(self.db, self.host.id)
+
+        self.assertEqual(0, report['memberships_repaired'])
+        self.assertEqual({self.fields[0].id}, {member.field_id for member in layout.members})
 
 
 if __name__ == '__main__':
