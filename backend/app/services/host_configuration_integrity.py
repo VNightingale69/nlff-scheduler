@@ -61,6 +61,9 @@ def audit_host_configurations(db, host_location_id, scheduled_field_ids=()):
         'cross_host_member_ids': cross_host_members,
         'obsolete_member_ids': obsolete_members,
         'duplicate_fields': [[field.id for field in group] for group in duplicates],
+        'uncovered_active_field_ids': sorted(
+            {field.id for field in active_fields} - covered, key=str,
+        ),
         'uncovered_scheduled_field_ids': sorted(scheduled - covered, key=str),
         'configurations': details,
     }
@@ -99,16 +102,26 @@ def repair_host_configuration_memberships(db, host_location_id):
                 member.field = candidates[0]
                 repaired += 1
 
-        if not configuration.members:
-            expected = Counter({size: int(getattr(configuration, f'{size.lower()}_field_count', 0) or 0)
-                                for size in SIZES})
-            required_sizes = [size for size in SIZES if expected[size]]
-            # Exact cardinality makes the persisted legacy definition a unique
-            # mapping. A host with extra same-size fields requires admin input.
-            if required_sizes and all(len(active_by_size[size]) == expected[size] for size in required_sizes):
-                selected = [field for size in required_sizes for field in active_by_size[size]]
-                configuration.members[:] = [FieldConfigurationMember(field=field) for field in selected]
-                repaired += len(selected)
+        expected = Counter({size: int(getattr(configuration, f'{size.lower()}_field_count', 0) or 0)
+                            for size in SIZES})
+        current_ids = {member.field_id for member in configuration.members
+                       if member.field and member.field.is_active and member.field.deleted_at is None
+                       and member.field.host_location_id == host_location_id}
+        current = Counter(str(member.field.layout_type or '').strip().upper()
+                          for member in configuration.members
+                          if member.field_id in current_ids)
+        selected = []
+        for size in SIZES:
+            missing = expected[size] - current[size]
+            candidates = [field for field in active_by_size[size] if field.id not in current_ids]
+            # Persisted counts are authoritative, but identify physical fields
+            # only when every missing position has exactly one possible set.
+            if missing > 0 and len(candidates) == missing:
+                selected.extend(candidates)
+        for field in selected:
+            configuration.members.append(FieldConfigurationMember(field=field))
+            current_ids.add(field.id)
+        repaired += len(selected)
         after = [member.field_id or (member.field.id if member.field else None) for member in configuration.members]
         if before != after:
             changes.append({'configuration_id': configuration.id,
