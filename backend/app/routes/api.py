@@ -23,7 +23,7 @@ from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_AD
 from app.database import get_db
 from app.organizations import active_organization_filter, normalize_organization_name
 from app.models import Division, Field, FieldConfigurationMember, FieldConfigurationOption, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostPlanSelection, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Rulebook, LoginAuditLog, ScheduleChangeLog, ScheduleImport, SchedulePublicationEvent, ScoreHistory, ScoreSubmission, Season, Team, TimeslotFieldConfiguration, Tournament, TournamentDivision, TournamentGame, TournamentTeam, TurfWave, User, Week
-from app.services.facility_layout_validation import active_layout_capacities, active_supported_layouts_query, field_combination_diagnostics, get_active_supported_layouts, layout_label, select_supported_layout, validate_field_combination, validate_timeslot_demands
+from app.services.facility_layout_validation import active_layout_capacities, active_supported_layouts_query, evaluate_host_timeslot_capacity, field_combination_diagnostics, get_active_supported_layouts, layout_label, select_supported_layout, validate_field_combination, validate_timeslot_demands
 from app.services.division_field_types import required_field_type_for_division
 from app.services.division_reference import division_reference_query
 from app.services.schedule_import import (build_preview,
@@ -16838,6 +16838,15 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
             getattr(getattr(item[0], 'field', None), 'name', None)
             for item in wave if getattr(item[0], 'field_id', None)
         ]
+        capacity_assessment = evaluate_host_timeslot_capacity(db, host_id, game_date, kickoff, [{
+            'field_id': item[0].field_id,
+            'field_name': getattr(getattr(item[0], 'field', None), 'name', None),
+            'required_field_size': item[1],
+        } for item in wave])
+        # Saved canonical fields outrank aggregate template labels.  Thus a
+        # persisted Medium+Small combination can be valid even though no
+        # quantity-only template happens to carry that exact label.
+        valid = capacity_assessment['valid']
         configuration_basis = 'Explicit time-specific configuration' if override else (
             'All active host configurations' if evaluated_layouts else 'Unable to determine'
         )
@@ -16853,8 +16862,9 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
             'time': kickoff.isoformat() if kickoff else None,
             'required': demand,
             'available_layouts': evaluated_layouts,
-            'matched_layout': configuration.configuration_name if valid and configuration else None,
-            'configuration_basis': configuration_basis,
+            'matched_layout': capacity_assessment['compatible_configuration'] or (
+                configuration.configuration_name if valid and configuration else None),
+            'configuration_basis': capacity_assessment['configuration_basis'],
             'assigned_fields': sorted(filter(None, assigned_fields)),
             'result': 'Valid' if valid else ('Blocking conflict' if evaluated_layouts else 'Warning — does not block publication'),
         })
@@ -16873,10 +16883,14 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
             'configuration_selected': configuration.configuration_name if configuration else None,
             'validation_source': 'saved_scheduled_games+current_physical_fields+active_host_configurations',
             'blocking_result': bool(not valid and evaluated_layouts),
-            'reason': 'matched configuration' if valid else ('no legal current configuration' if evaluated_layouts else 'configuration unconfirmed'),
+            'reason': capacity_assessment['reason'],
         }
         logger.debug('schedule_capacity_validation %s', json.dumps(log_detail, sort_keys=True))
         if valid:
+            continue
+        if capacity_assessment['issue_code'] == 'FIELD_LAYOUT_CONFLICT':
+            # The physical-wave pass below emits the single detailed conflict;
+            # do not also mislabel it as an aggregate capacity shortage.
             continue
         game, _required_type, host, home, away, _slot, _field_instance = wave[0]
         demand_text = ', '.join(f'{count} {size.title()}' for size, count in demand.items() if count) or 'none'
@@ -16885,7 +16899,7 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
             for layout in evaluated_layouts
         ) or 'none'
         issue = {
-            'issue_code': 'HOST_TIMESLOT_CAPACITY_SHORTAGE' if evaluated_layouts else 'HOST_TIMESLOT_CONFIGURATION_UNCONFIRMED',
+            'issue_code': capacity_assessment['issue_code'],
             'scheduled_game_id': str(game.id),
             'scheduled_game_display_name': _format_scheduled_game_display_name(getattr(home, 'name', None), getattr(away, 'name', None)),
             'date': game_date.isoformat() if game_date else None,
@@ -16942,9 +16956,12 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
         if game.host_location_id and game.game_date and game.kickoff_time and game.field_id:
             physical_waves.setdefault((game.host_location_id, game.game_date, game.kickoff_time), {'host': host, 'fields': set(), 'game': game})['fields'].add(game.field_id)
     for (_host_id, game_date, kickoff), wave in physical_waves.items():
-        valid, supported_layouts, _used = validate_field_combination(db, _host_id, wave['fields'])
         names = [name for (name,) in db.query(Field.name).filter(Field.id.in_(wave['fields'])).all()]
-        membership = field_combination_diagnostics(db, _host_id, wave['fields'])
+        assessment = evaluate_host_timeslot_capacity(db, _host_id, game_date, kickoff, [
+            {'field_id': field_id, 'field_name': name, 'required_field_size': None}
+            for field_id, name in db.query(Field.id, Field.name).filter(Field.id.in_(wave['fields'])).all()
+        ])
+        valid = assessment['valid']
         layout_evaluations.append({
             'host_location_id': str(_host_id),
             'host_location_name': getattr(wave['host'], 'name', None),
@@ -16952,9 +16969,9 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
             'time': kickoff.isoformat(),
             'required_field_ids': sorted(str(field_id) for field_id in wave['fields']),
             'assigned_fields': sorted(names),
-            'active_configurations': membership['configurations'],
-            'matched_layout': membership['compatible_configuration'],
-            'configuration_basis': 'Persisted physical field memberships (field IDs)',
+            'active_configurations': assessment['active_configurations'],
+            'matched_layout': assessment['compatible_configuration'],
+            'configuration_basis': assessment['configuration_basis'],
             'result': 'Valid' if valid else 'Blocking conflict',
         })
         if valid:
@@ -16963,10 +16980,11 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
             'issue_code': 'FIELD_LAYOUT_CONFLICT', 'scheduled_game_id': str(wave['game'].id),
             'date': game_date.isoformat(), 'time': kickoff.isoformat(),
             'location': getattr(wave['host'], 'name', None), 'scheduled_fields': sorted(names),
-            'supported_layouts': supported_layouts,
-            'active_configurations': membership['configurations'],
-            'compatible_configuration': membership['compatible_configuration'],
-            'summary': 'No supported field configuration allows these fields to operate simultaneously.',
+            'supported_layouts': assessment['supported_layouts'],
+            'active_configurations': assessment['active_configurations'],
+            'compatible_configuration': assessment['compatible_configuration'],
+            'conflicting_fields': assessment['conflicting_fields'],
+            'summary': assessment['reason'],
             'recommended_action': 'Move a game or choose fields that are contained together in one active supported layout.',
         })
     return {'games': len(rows), 'blocking_errors': errors, 'warnings': warnings,

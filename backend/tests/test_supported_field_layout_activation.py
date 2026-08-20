@@ -1,6 +1,6 @@
 import unittest
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timezone
 
 from fastapi import HTTPException
 from sqlalchemy import create_engine
@@ -9,7 +9,7 @@ from sqlalchemy.orm import sessionmaker
 from app.database import Base
 from app.models import Field, FieldConfigurationMember, HostLocation, HostLocationConfiguration, Organization, Role, User
 from app.routes.api import _validate_configuration_activation, list_host_location_configurations
-from app.services.facility_layout_validation import field_combination_diagnostics, validate_field_combination
+from app.services.facility_layout_validation import evaluate_host_timeslot_capacity, field_combination_diagnostics, validate_field_combination
 
 
 class SupportedFieldLayoutActivationTest(unittest.TestCase):
@@ -112,6 +112,35 @@ class SupportedFieldLayoutActivationTest(unittest.TestCase):
         self.assertTrue(valid)
         self.assertIn('1 Large + 1 Medium', layouts)
         self.assertGreater(len(layouts), 1)
+
+    def test_authoritative_evaluator_uses_physical_membership_not_size_totals(self):
+        result = evaluate_host_timeslot_capacity(self.db, self.host.id, date(2026, 9, 13), time(12), [
+            {'field_id': self.medium.id, 'field_name': self.medium.name, 'required_field_size': 'MEDIUM'},
+            {'field_id': self.fields[0].id, 'field_name': self.fields[0].name, 'required_field_size': 'SMALL'},
+        ])
+
+        self.assertTrue(result['valid'])
+        self.assertEqual('2 Small + 1 Medium', result['compatible_configuration'])
+        self.assertEqual({'SMALL': 1, 'MEDIUM': 1, 'LARGE': 0}, result['required_field_sizes'])
+
+    def test_authoritative_evaluator_reports_actual_overlapping_fields(self):
+        result = evaluate_host_timeslot_capacity(self.db, self.host.id, date(2026, 9, 13), time(13), [
+            {'field_id': self.large.id, 'field_name': self.large.name, 'required_field_size': 'LARGE'},
+            {'field_id': self.fields[1].id, 'field_name': self.fields[1].name, 'required_field_size': 'SMALL'},
+        ])
+
+        self.assertFalse(result['valid'])
+        self.assertEqual('FIELD_LAYOUT_CONFLICT', result['issue_code'])
+        self.assertEqual({'Large 1', 'Small 2'}, set(result['conflicting_fields']))
+
+    def test_authoritative_evaluator_fallback_reports_capacity_shortage(self):
+        result = evaluate_host_timeslot_capacity(self.db, self.host.id, date(2026, 9, 13), time(14), [
+            {'field_id': None, 'field_name': None, 'required_field_size': 'LARGE'},
+            {'field_id': None, 'field_name': None, 'required_field_size': 'LARGE'},
+        ])
+
+        self.assertFalse(result['valid'])
+        self.assertEqual('HOST_TIMESLOT_CAPACITY_SHORTAGE', result['issue_code'])
 
     def test_inactive_configuration_is_excluded(self):
         valid, layouts, _used = validate_field_combination(

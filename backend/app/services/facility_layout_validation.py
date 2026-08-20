@@ -274,3 +274,66 @@ def field_combination_diagnostics(db, host_id, field_ids):
             'reason': 'Configuration contains no assigned physical fields.' if not member_ids else None,
         })
     return {'configurations': evaluations, 'compatible_configuration': matching_name}
+
+
+def evaluate_host_timeslot_capacity(db, host_location_id, game_date, kickoff_time, scheduled_games):
+    """Evaluate one saved-game wave against physical field membership.
+
+    ``scheduled_games`` is a sequence of mappings containing ``field_id`` and
+    ``required_field_size`` (and, optionally, display labels).  Stable saved
+    field IDs are authoritative.  Configuration quantity columns are only a
+    fallback for legacy assignments which have no canonical physical field.
+    This keeps generated slots and their historical configuration selection
+    out of publication decisions.
+    """
+    games = list(scheduled_games)
+    field_ids = [game.get('field_id') for game in games if game.get('field_id')]
+    assigned_fields = [game.get('field_name') for game in games if game.get('field_name')]
+    required = Counter(filter(None, (_size(game.get('required_field_size')) for game in games)))
+    required_counts = {size: int(required.get(size, 0)) for size in SIZES}
+    capacities = active_layout_capacities(db, host_location_id)
+    membership = field_combination_diagnostics(db, host_location_id, field_ids) if field_ids else {
+        'configurations': [], 'compatible_configuration': None,
+    }
+
+    # If every saved game resolves to a physical field, compatibility is a
+    # resource-membership question, not a comparison of size-count labels.
+    if games and len(field_ids) == len(games):
+        valid, supported, _used = validate_field_combination(db, host_location_id, field_ids)
+        return {
+            'valid': valid,
+            'issue_code': None if valid else 'FIELD_LAYOUT_CONFLICT',
+            'assigned_field_ids': [str(value) for value in field_ids],
+            'assigned_fields': assigned_fields,
+            'required_field_sizes': required_counts,
+            'compatible_configuration': membership['compatible_configuration'],
+            'active_configurations': membership['configurations'],
+            'available_layouts': capacities,
+            'conflicting_fields': [] if valid else assigned_fields,
+            'reason': ('Assigned physical fields coexist in the persisted configuration.' if valid else
+                       'The assigned physical fields are not members of any one active host configuration.'),
+            'configuration_basis': 'Persisted physical field memberships (field IDs)',
+            'supported_layouts': supported,
+        }
+
+    result = validate_timeslot_demands(
+        {(game_date, host_location_id, kickoff_time): required_counts},
+        {(game_date, host_location_id, kickoff_time): [row['capacity'] for row in capacities]},
+    )
+    valid = result['valid']
+    return {
+        'valid': valid,
+        'issue_code': None if valid else ('HOST_TIMESLOT_CAPACITY_SHORTAGE' if capacities else
+                                          'HOST_TIMESLOT_CONFIGURATION_UNCONFIRMED'),
+        'assigned_field_ids': [str(value) for value in field_ids],
+        'assigned_fields': assigned_fields,
+        'required_field_sizes': required_counts,
+        'compatible_configuration': None,
+        'active_configurations': membership['configurations'],
+        'available_layouts': capacities,
+        'conflicting_fields': [],
+        'reason': ('Legacy assignments fit an active host configuration.' if valid else
+                   'Canonical physical field assignments are missing and no active layout has sufficient capacity.'),
+        'configuration_basis': 'Active configuration capacity fallback (missing physical field IDs)',
+        'supported_layouts': [row['code'] for row in capacities],
+    }
