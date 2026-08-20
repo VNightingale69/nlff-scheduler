@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Index, Integer, String, Text, Time, UniqueConstraint, func
+from sqlalchemy import JSON, Boolean, Date, DateTime, ForeignKey, Index, Integer, String, Text, Time, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -315,6 +315,7 @@ class Week(Base, TimestampMixin):
     unpublished_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_published_schedule_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     last_published_game_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_published_schedule_payload: Mapped[list | None] = mapped_column(JSON, nullable=True)
     publication_hash_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     season = relationship('Season')
     published_by = relationship('User', foreign_keys=[published_by_user_id])

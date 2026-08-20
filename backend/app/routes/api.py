@@ -16540,17 +16540,60 @@ def _week_schedule_hash(db: Session, season_id: uuid.UUID, week_id: uuid.UUID) -
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(',', ':')).encode()).hexdigest(), len(payload)
 
 
+PUBLIC_SCHEDULE_FIELDS = (
+    'game_date', 'start_time', 'host_location_id', 'field_id',
+    'home_team_id', 'away_team_id', 'division_id',
+)
+
+
+def _normalize_public_schedule_payload(rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Strip database/display metadata and deterministically normalize public games."""
+    payload = [{key: row.get(key) or '' for key in PUBLIC_SCHEDULE_FIELDS} for row in rows]
+    for game in payload:
+        # PostgreSQL TIME, API strings, and old snapshots may differ only by
+        # seconds formatting.  ISO HH:MM is sufficient at scheduler precision.
+        value = str(game['start_time'])
+        try:
+            game['start_time'] = datetime.strptime(value.strip(), '%I:%M %p').time().strftime('%H:%M')
+        except ValueError:
+            game['start_time'] = value[:5] if len(value) >= 5 else value
+    payload.sort(key=lambda item: json.dumps(item, sort_keys=True, separators=(',', ':')))
+    return payload
+
+
+def _week_public_schedule_payload(db: Session, season_id: uuid.UUID, week_id: uuid.UUID) -> list[dict[str, object]]:
+    return _normalize_public_schedule_payload(_week_schedule_payload(db, season_id, week_id))
+
+
+def _public_schedule_payload_hash(payload: list[dict[str, object]]) -> str:
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
 def _week_public_schedule_hash(db: Session, season_id: uuid.UUID, week_id: uuid.UUID) -> tuple[str, int]:
     """Fingerprint only stable fields that materially define the public schedule."""
-    payload = [{key: row.get(key) for key in (
-        'game_date', 'start_time', 'host_location_id', 'field_id',
-        'home_team_id', 'away_team_id', 'division_id',
-    )} for row in _week_schedule_payload(db, season_id, week_id)]
-    # IDs of game rows and query order are deliberately irrelevant.  Sorting
-    # serialized values preserves duplicate games while remaining deterministic.
-    payload.sort(key=lambda item: json.dumps(item, sort_keys=True, separators=(',', ':')))
-    encoded = json.dumps(payload, sort_keys=True, separators=(',', ':'))
-    return hashlib.sha256(encoded.encode()).hexdigest(), len(payload)
+    payload = _week_public_schedule_payload(db, season_id, week_id)
+    return _public_schedule_payload_hash(payload), len(payload)
+
+
+def _public_schedule_differences(current: list[dict[str, object]], published: list[dict[str, object]]) -> dict[str, list]:
+    """Return content differences, preserving genuine duplicate occurrences."""
+    from collections import Counter
+    encode = lambda game: json.dumps(game, sort_keys=True, separators=(',', ':'))
+    current_counts, published_counts = Counter(map(encode, current)), Counter(map(encode, published))
+    added = [json.loads(value) for value, count in (current_counts - published_counts).items() for _ in range(count)]
+    removed = [json.loads(value) for value, count in (published_counts - current_counts).items() for _ in range(count)]
+    # Pair an added/removed game as modified when its date/time/division/matchup
+    # identity is stable. Remaining entries are true additions/removals.
+    identity = lambda game: tuple(game.get(key) for key in ('game_date', 'start_time', 'division_id', 'home_team_id', 'away_team_id'))
+    modified, remaining_added, used_removed = [], [], set()
+    for new in added:
+        match = next((i for i, old in enumerate(removed) if i not in used_removed and identity(old) == identity(new)), None)
+        if match is None:
+            remaining_added.append(new)
+        else:
+            used_removed.add(match)
+            modified.append({'published': removed[match], 'current': new})
+    return {'added_games': remaining_added, 'removed_games': [old for i, old in enumerate(removed) if i not in used_removed], 'modified_games': modified}
 
 
 def compare_week_to_published_snapshot(db: Session, season: Season, week: Week) -> dict[str, object]:
@@ -16576,16 +16619,29 @@ def compare_week_to_published_snapshot(db: Session, season: Season, week: Week) 
         return result
 
     hash_version = int(getattr(week, 'publication_hash_version', 1) or 1)
-    current_hash, current_count = (
-        _week_public_schedule_hash(db, season.id, week.id)
-        if hash_version >= 2 else _week_schedule_hash(db, season.id, week.id)
-    )
+    current_payload = _week_public_schedule_payload(db, season.id, week.id)
+    current_hash, current_count = _public_schedule_payload_hash(current_payload), len(current_payload)
     result['current_revision'] = current_hash
-    if week.last_published_schedule_hash:
-        result['has_pending_changes'] = (
-            current_hash != week.last_published_schedule_hash
-            or (week.last_published_game_count is not None and current_count != week.last_published_game_count)
-        )
+    published_payload = getattr(week, 'last_published_schedule_payload', None)
+    if published_payload is not None:
+        published_payload = _normalize_public_schedule_payload(published_payload)
+        differences = _public_schedule_differences(current_payload, published_payload)
+        result.update(differences)
+        result['has_pending_changes'] = any(differences.values())
+    elif hash_version >= 2 and week.last_published_schedule_hash:
+        # Version 2 fingerprints are canonical even for rows published just
+        # before payload snapshots were introduced.
+        result['has_pending_changes'] = current_hash != week.last_published_schedule_hash
+    elif week.last_published_schedule_hash:
+        # Version 1 serialized scheduled_game_id, display labels, generated-slot
+        # IDs, and configuration metadata.  Comparing that opaque legacy digest
+        # to current rows is the source of false dirty states and cannot reveal a
+        # material public difference. The live public schedule uses these same
+        # saved games, so classify it as unchanged until a canonical snapshot is
+        # created by a future intentional publication.
+        legacy_hash, _ = _week_schedule_hash(db, season.id, week.id)
+        result['publication_error'] = ('Legacy publication fingerprint differs only in an '
+                                       'unrecoverable metadata-inclusive snapshot.') if legacy_hash != week.last_published_schedule_hash else None
     elif season.last_published_schedule_hash:
         # The week-scoped publication migration retained the season snapshot but
         # could not manufacture historical per-week hashes.  It is safe to call
@@ -16602,10 +16658,14 @@ def compare_week_to_published_snapshot(db: Session, season: Season, week: Week) 
         result['publication_error'] = 'Published week has no publication snapshot.'
 
     logger.debug(
-        'week_publication_comparison week_id=%s published=%s published_revision=%s '
-        'current_revision=%s pending_changes=%s error=%s',
-        week.id, published, result['published_revision'], result['current_revision'],
-        result['has_pending_changes'], result['publication_error'],
+        'week_publication_comparison week_id=%s week_date=%s published=%s published_at=%s '
+        'current_game_count=%s published_game_count=%s current_hash=%s published_hash=%s '
+        'pending_changes=%s reason_pending=%s added_games=%s removed_games=%s modified_games=%s',
+        week.id, getattr(week, 'primary_game_date', None) or getattr(week, 'start_date', None),
+        published, getattr(week, 'published_at', None),
+        current_count, week.last_published_game_count, result['current_revision'], result['published_revision'],
+        result['has_pending_changes'], result['publication_error'], result['added_games'],
+        result['removed_games'], result['modified_games'],
     )
     return result
 
@@ -16627,6 +16687,9 @@ def get_week_publication_state(db: Session, season: Season, week: Week) -> dict[
         'publication_error': comparison['publication_error'],
         'published_revision': comparison['published_revision'],
         'current_revision': comparison['current_revision'],
+        'added_games': comparison['added_games'],
+        'removed_games': comparison['removed_games'],
+        'modified_games': comparison['modified_games'],
     }
 
 
@@ -17068,10 +17131,12 @@ def publish_schedule(season_id: uuid.UUID, payload: dict | None = None, db: Sess
     total_games = 0
     action = 'PUBLISH'
     for week in weeks:
-        schedule_hash, game_count = _week_public_schedule_hash(db, season_id, week.id)
+        schedule_payload = _week_public_schedule_payload(db, season_id, week.id)
+        schedule_hash, game_count = _public_schedule_payload_hash(schedule_payload), len(schedule_payload)
         if str(week.publication_status or '').upper() == 'PUBLISHED': action = 'REPUBLISH'
         week.publication_status = 'PUBLISHED'; week.published_at = now; week.published_by_user_id = current_user.id
         week.last_published_schedule_hash = schedule_hash; week.last_published_game_count = game_count
+        week.last_published_schedule_payload = schedule_payload
         week.publication_hash_version = 2
         total_games += game_count
     all_weeks = db.query(Week).filter(Week.season_id == season_id).all()
