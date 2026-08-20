@@ -3,7 +3,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.routes.api import (_season_publication_rollup, _week_publish_readiness,
-                            _week_public_schedule_hash, compare_week_to_published_snapshot)
+                            _week_public_schedule_hash, compare_week_to_published_snapshot,
+                            get_week_publication_state)
 
 
 def _game(week_id, *, game_id=None, home_id=None, away_id=None, field_id=None):
@@ -128,6 +129,23 @@ def test_missing_publication_snapshot_is_error_not_pending_changes():
         comparison = compare_week_to_published_snapshot(SimpleNamespace(), season, week)
     assert comparison['has_pending_changes'] is False
     assert comparison['publication_error']
+
+
+def test_canonical_publication_state_has_exactly_three_schedule_states():
+    season = SimpleNamespace(id=uuid.uuid4(), last_published_schedule_hash=None, last_published_game_count=None)
+    draft = SimpleNamespace(id=uuid.uuid4(), publication_status='UNPUBLISHED', last_published_schedule_hash=None,
+                            last_published_game_count=None, publication_hash_version=2)
+    assert get_week_publication_state(SimpleNamespace(), season, draft)['publication_status'] == 'DRAFT'
+
+    published = SimpleNamespace(**{**draft.__dict__, 'publication_status': 'PUBLISHED',
+                                  'last_published_schedule_hash': 'same'})
+    with patch('app.routes.api._week_public_schedule_hash', return_value=('same', 1)):
+        current = get_week_publication_state(SimpleNamespace(), season, published)
+    assert (current['is_published'], current['has_pending_changes'], current['publication_status']) == (True, False, 'PUBLISHED')
+
+    with patch('app.routes.api._week_public_schedule_hash', return_value=('changed', 1)):
+        pending = get_week_publication_state(SimpleNamespace(), season, published)
+    assert (pending['is_published'], pending['has_pending_changes'], pending['publication_status']) == (True, True, 'PUBLISHED_CHANGES_PENDING')
 
 
 def test_hiller_saved_large_override_is_descriptive_nonblocking_warning():

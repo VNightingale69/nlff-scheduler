@@ -7,7 +7,7 @@ import { formatDisplayDate, formatDisplayTime } from '@/lib/displayFormat';
 import HostingView, { HostingViewGame } from '@/components/schedule/HostingView';
 
 type Game = { game_id: string; date: string; kickoff: string; division: string; home_team: string; away_team: string; host_organization?: string; host_location?: string; field: string; field_type?: string; physical_area?: string; physical_area_id?: string; physical_field_id?: string; publication_status: string; home_team_logo_url?: string; home_team_logo_alt_text?: string; away_team_logo_url?: string; away_team_logo_alt_text?: string };
-type Week = { week_id: string; week_number: number; label: string; date: string; publication_status: string; games: Game[] };
+type Week = { week_id: string; week_number: number; label: string; date: string; is_published: boolean; has_pending_changes: boolean; publication_status: string; games: Game[] };
 type Option = { id: string; name?: string; label?: string };
 type Payload = { season: { name: string } | null; weeks: Week[]; my_organization?: { name: string } | null; options?: Record<string, Option[]> };
 type View = 'date' | 'host' | 'team' | 'division' | 'hosting';
@@ -34,7 +34,7 @@ export default function ScheduleReviewPage() {
   };
   useEffect(() => { load('league', {}); }, []);
   const games = useMemo(() => payload.weeks.flatMap((week) => week.games.map((game) => ({ ...game, week }))), [payload]);
-  const hasDrafts = payload.weeks.some((week) => week.publication_status !== 'PUBLISHED');
+  const hasDrafts = payload.weeks.some((week) => !week.is_published);
   const option = (key: string, label: string) => <select aria-label={label} className='h-10 rounded border bg-white px-3' value={filters[key] || ''} onChange={(event) => setFilters({ ...filters, [key]: event.target.value })}><option value=''>All {label}</option>{(payload.options?.[key.replace('_id', '') + 's'] || []).map((item) => <option key={item.id} value={item.id}>{item.label || item.name}</option>)}</select>;
   const download = async () => {
     const query = new URLSearchParams({ scope });
@@ -47,7 +47,7 @@ export default function ScheduleReviewPage() {
 
   return <div className='mx-auto w-full max-w-[1800px] space-y-5 print:max-w-none'>
     <header className='flex flex-wrap items-center justify-between gap-3'><div className='flex items-center gap-3'><h1 className='text-2xl font-bold'>Schedule Review</h1><span className='rounded-full bg-slate-200 px-3 py-1 text-xs font-semibold uppercase tracking-wide'>Read Only</span></div><strong>Season: {payload.season?.name || 'Active season'}</strong></header>
-    <div className='rounded border border-sky-200 bg-sky-50 p-4 text-sm text-sky-950'><strong>This schedule includes weeks that have not yet been published.</strong><br />Draft games, times, fields, and matchups may change before official publication.</div>
+    {hasDrafts && <div className='rounded border border-sky-200 bg-sky-50 p-4 text-sm text-sky-950'><strong>This schedule includes weeks that have not yet been published.</strong><br />Draft games, times, fields, and matchups may change before official publication.</div>}
     {hasDrafts && <div className='hidden text-center text-lg font-bold print:block'>PREPUBLISHED SCHEDULE — SUBJECT TO CHANGE</div>}
     <section className='space-y-3 rounded border bg-white p-4 print:hidden'>
       <div className='grid gap-3 sm:grid-cols-2 lg:grid-cols-7'>
@@ -60,7 +60,7 @@ export default function ScheduleReviewPage() {
     {loading && <p className='rounded border bg-white p-4'>Loading saved schedule…</p>}{error && <p className='rounded border border-red-200 bg-red-50 p-4 text-red-800'>{error}</p>}
     {!loading && !error && payload.weeks.map((week) => <section key={week.week_id} className='space-y-3 rounded border bg-white p-4 break-inside-avoid'>
       <div className='flex flex-wrap items-center gap-3'><h2 className='text-lg font-bold'>{week.label} — {formatDisplayDate(week.date)}</h2><span className={`rounded-full px-3 py-1 text-xs font-bold ${statusTone(week.publication_status)}`}>{statusLabel(week.publication_status)}</span></div>
-      {week.publication_status === 'PUBLISHED_CHANGES_PENDING' && <p className='text-sm text-amber-800'>Official public version differs from the current administrative schedule.</p>}
+      {week.is_published && week.has_pending_changes && <p className='text-sm text-amber-800'>The current administrative schedule contains changes that have not yet been published.</p>}
       {!week.games.length ? <p className='text-sm text-slate-500'>No games match the selected filters.</p> : view === 'hosting' ? <HostingView mode='unpublished' games={week.games.map((game): HostingViewGame => ({ id: game.game_id, date: game.date, time: game.kickoff, hostLocation: game.host_location || 'Host Location Unassigned', physicalFieldId: game.physical_field_id, physicalAreaId: game.physical_area_id, physicalArea: game.physical_area || game.field, fieldLane: game.field, fieldType: game.field_type, division: game.division, homeTeam: game.home_team, awayTeam: game.away_team, homeLogoUrl: game.home_team_logo_url, homeLogoAlt: game.home_team_logo_alt_text, awayLogoUrl: game.away_team_logo_url, awayLogoAlt: game.away_team_logo_alt_text }))} /> : <GameTable games={[...week.games].sort((a, b) => groupValue(a, view).localeCompare(groupValue(b, view)) || a.kickoff.localeCompare(b.kickoff))} groupBy={view} />}
     </section>)}
   </div>;
