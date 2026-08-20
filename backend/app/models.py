@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Boolean, Date, DateTime, ForeignKey, Index, Integer, String, Text, Time, UniqueConstraint, func
+from sqlalchemy import JSON, Boolean, CheckConstraint, Date, DateTime, ForeignKey, Index, Integer, String, Text, Time, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -194,6 +194,20 @@ class FieldConfigurationMember(Base, TimestampMixin):
     configuration = relationship('HostLocationConfiguration', back_populates='members')
     field = relationship('Field')
     __table_args__ = (UniqueConstraint('field_configuration_id', 'field_id', name='uq_field_configuration_member'),)
+
+
+class FieldPhysicalConflict(Base, TimestampMixin):
+    """An explicit, host-scoped overlap between two canonical physical fields."""
+    __tablename__ = 'field_physical_conflicts'
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    host_location_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('host_locations.id', ondelete='CASCADE'), nullable=False)
+    field_a_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('fields.id', ondelete='CASCADE'), nullable=False)
+    field_b_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('fields.id', ondelete='CASCADE'), nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text)
+    __table_args__ = (
+        UniqueConstraint('host_location_id', 'field_a_id', 'field_b_id', name='uq_field_physical_conflict_pair'),
+        CheckConstraint('field_a_id <> field_b_id', name='ck_field_physical_conflict_distinct'),
+    )
 
 
 class Field(Base, TimestampMixin):
