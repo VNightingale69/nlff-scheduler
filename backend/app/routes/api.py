@@ -24,6 +24,7 @@ from app.database import get_db
 from app.organizations import active_organization_filter, normalize_organization_name
 from app.models import Division, Field, FieldConfigurationMember, FieldConfigurationOption, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostPlanSelection, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Rulebook, LoginAuditLog, ScheduleChangeLog, ScheduleImport, SchedulePublicationEvent, ScoreHistory, ScoreSubmission, Season, Team, TimeslotFieldConfiguration, Tournament, TournamentDivision, TournamentGame, TournamentTeam, TurfWave, User, Week
 from app.services.facility_layout_validation import active_layout_capacities, active_supported_layouts_query, evaluate_host_timeslot_capacity, field_combination_diagnostics, get_active_supported_layouts, layout_label, select_supported_layout, validate_field_combination, validate_timeslot_demands
+from app.services.host_configuration_integrity import repair_host_configuration_memberships
 from app.services.division_field_types import required_field_type_for_division
 from app.services.division_reference import division_reference_query
 from app.services.schedule_import import (build_preview,
@@ -5985,6 +5986,12 @@ def _ensure_approved_turf_configurations(db: Session, host: HostLocation) -> boo
         _apply_turf_configuration_metadata(config, config_name)
         after = (config.configuration_name, config.surface_type, config.space_used_yards, config.remaining_yards, config.large_field_count, config.medium_field_count, config.small_field_count)
         changed = changed or before != after
+    # Older deployments created the approved rows before membership persistence
+    # existed. Repair only layouts whose stored counts map uniquely to the
+    # host's canonical active inventory; ambiguous sites remain visibly empty.
+    db.flush()
+    repair = repair_host_configuration_memberships(db, host.id)
+    changed = changed or bool(repair['memberships_repaired'])
     return changed
 
 def _attach_configuration_instances(config: HostLocationConfiguration) -> HostLocationConfiguration:

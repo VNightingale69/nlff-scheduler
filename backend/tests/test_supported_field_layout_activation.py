@@ -10,6 +10,7 @@ from app.database import Base
 from app.models import Field, FieldConfigurationMember, HostLocation, HostLocationConfiguration, Organization, Role, User
 from app.routes.api import _validate_configuration_activation, list_host_location_configurations
 from app.services.facility_layout_validation import evaluate_host_timeslot_capacity, field_combination_diagnostics, validate_field_combination
+from app.services.host_configuration_integrity import audit_host_configurations, repair_host_configuration_memberships
 
 
 class SupportedFieldLayoutActivationTest(unittest.TestCase):
@@ -227,6 +228,56 @@ class SupportedFieldLayoutActivationTest(unittest.TestCase):
         self.assertTrue(valid)
         self.assertEqual([], layouts)
         self.assertIn(self.fields[0].id, active)
+
+    def test_integrity_audit_reports_empty_deleted_cross_host_and_uncovered_fields(self):
+        other = HostLocation(id=uuid.uuid4(), organization_id=self.org.id, name='Other Park')
+        other_field = Field(id=uuid.uuid4(), host_location_id=other.id, name='Small 1', layout_type='SMALL')
+        empty = HostLocationConfiguration(host_location_id=self.host.id, configuration_name='Empty', is_active=True)
+        broken = HostLocationConfiguration(host_location_id=self.host.id, configuration_name='Broken', is_active=True)
+        broken.members = [FieldConfigurationMember(field=other_field)]
+        self.large.deleted_at = datetime.now(timezone.utc)
+        self.db.add_all([other, other_field, empty, broken])
+        self.db.commit()
+
+        audit = audit_host_configurations(self.db, self.host.id, [uuid.uuid4()])
+
+        self.assertIn(empty.id, audit['zero_member_configuration_ids'])
+        self.assertEqual(1, len(audit['cross_host_member_ids']))
+        self.assertEqual(1, len(audit['uncovered_scheduled_field_ids']))
+
+    def test_repair_moves_obsolete_membership_to_unique_canonical_id(self):
+        old = Field(id=uuid.uuid4(), host_location_id=self.host.id, name='Legacy Pitch',
+                    layout_type='SMALL', is_active=False, deleted_at=datetime.now(timezone.utc))
+        canonical = Field(id=uuid.uuid4(), host_location_id=self.host.id, name=' legacy   pitch ',
+                          layout_type='SMALL', is_active=True)
+        layout = HostLocationConfiguration(host_location_id=self.host.id, configuration_name='Legacy layout',
+                                           is_active=True)
+        layout.members = [FieldConfigurationMember(field=old)]
+        self.db.add_all([old, canonical, layout]); self.db.commit()
+
+        report = repair_host_configuration_memberships(self.db, self.host.id)
+        self.db.commit()
+
+        self.assertEqual(1, report['memberships_repaired'])
+        self.assertEqual([canonical.id], [member.field_id for member in layout.members])
+
+    def test_empty_legacy_counts_repair_only_when_inventory_is_unambiguous(self):
+        for configuration in [self.canonical, *self.alternatives]:
+            configuration.is_active = False
+        layout = HostLocationConfiguration(host_location_id=self.host.id, configuration_name='Three canonical small',
+                                           small_field_count=4, is_active=True)
+        self.db.add(layout); self.db.commit()
+
+        report = repair_host_configuration_memberships(self.db, self.host.id)
+        self.assertEqual(4, report['memberships_repaired'])
+        self.assertEqual({field.id for field in self.fields}, {member.field_id for member in layout.members})
+
+        ambiguous = HostLocationConfiguration(host_location_id=self.host.id, configuration_name='Ambiguous',
+                                              small_field_count=3, is_active=True)
+        self.db.add(ambiguous); self.db.commit()
+        second = repair_host_configuration_memberships(self.db, self.host.id)
+        self.assertEqual([], ambiguous.members)
+        self.assertEqual(0, second['memberships_repaired'])
 
 
 if __name__ == '__main__':
