@@ -122,6 +122,45 @@ class SupportedFieldLayoutActivationTest(unittest.TestCase):
         self.assertTrue(result['valid'])
         self.assertEqual('2 Small + 1 Medium', result['compatible_configuration'])
         self.assertEqual({'SMALL': 1, 'MEDIUM': 1, 'LARGE': 0}, result['required_field_sizes'])
+        self.assertEqual([], result['blocking_issues'])
+
+    def test_three_small_fields_and_subset_share_authoritative_valid_result(self):
+        for kickoff, fields in (
+            (time(9), self.fields[:3]),
+            (time(10), self.fields[:3]),
+            (time(11), self.fields[:2]),
+        ):
+            result = evaluate_host_timeslot_capacity(self.db, self.host.id, date(2026, 9, 13), kickoff, [
+                {'field_id': field.id, 'field_name': field.name, 'required_field_size': 'SMALL'}
+                for field in fields
+            ])
+
+            self.assertTrue(result['valid'])
+            self.assertEqual('4 Small', result['compatible_configuration'])
+            self.assertEqual([], result['blocking_issues'])
+            self.assertIsNone(result['issue_code'])
+
+    def test_two_medium_fields_and_single_large_use_supported_physical_layouts(self):
+        medium_two = Field(
+            id=uuid.uuid4(), host_location_id=self.host.id, name='Medium 2', layout_type='MEDIUM', is_active=True,
+        )
+        two_medium = self._layout('2 Medium', [self.medium, medium_two])
+        self.db.add_all([medium_two, two_medium])
+        self.db.commit()
+
+        medium_result = evaluate_host_timeslot_capacity(self.db, self.host.id, date(2026, 9, 13), time(14), [
+            {'field_id': field.id, 'field_name': field.name, 'required_field_size': 'MEDIUM'}
+            for field in (self.medium, medium_two)
+        ])
+        large_result = evaluate_host_timeslot_capacity(self.db, self.host.id, date(2026, 9, 13), time(15), [
+            {'field_id': self.large.id, 'field_name': self.large.name, 'required_field_size': 'LARGE'},
+        ])
+
+        self.assertTrue(medium_result['valid'])
+        self.assertEqual('2 Medium', medium_result['compatible_configuration'])
+        self.assertEqual([], medium_result['blocking_issues'])
+        self.assertTrue(large_result['valid'])
+        self.assertEqual([], large_result['blocking_issues'])
 
     def test_authoritative_evaluator_reports_actual_overlapping_fields(self):
         result = evaluate_host_timeslot_capacity(self.db, self.host.id, date(2026, 9, 13), time(13), [
@@ -132,6 +171,7 @@ class SupportedFieldLayoutActivationTest(unittest.TestCase):
         self.assertFalse(result['valid'])
         self.assertEqual('FIELD_LAYOUT_CONFLICT', result['issue_code'])
         self.assertEqual({'Large 1', 'Small 2'}, set(result['conflicting_fields']))
+        self.assertEqual(['FIELD_LAYOUT_CONFLICT'], [issue['issue_code'] for issue in result['blocking_issues']])
 
     def test_authoritative_evaluator_fallback_reports_capacity_shortage(self):
         result = evaluate_host_timeslot_capacity(self.db, self.host.id, date(2026, 9, 13), time(14), [
