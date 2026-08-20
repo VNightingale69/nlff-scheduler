@@ -16610,6 +16610,26 @@ def compare_week_to_published_snapshot(db: Session, season: Season, week: Week) 
     return result
 
 
+def get_week_publication_state(db: Session, season: Season, week: Week) -> dict[str, object]:
+    """Return the canonical publication state consumed by every admin view."""
+    comparison = compare_week_to_published_snapshot(db, season, week)
+    is_published = bool(comparison['published'])
+    has_pending_changes = is_published and bool(comparison['has_pending_changes'])
+    status = (
+        'PUBLISHED_CHANGES_PENDING' if has_pending_changes
+        else 'PUBLISHED' if is_published
+        else 'DRAFT'
+    )
+    return {
+        'is_published': is_published,
+        'has_pending_changes': has_pending_changes,
+        'publication_status': status,
+        'publication_error': comparison['publication_error'],
+        'published_revision': comparison['published_revision'],
+        'current_revision': comparison['current_revision'],
+    }
+
+
 def _publication_weeks(db: Session, season_id: uuid.UUID, week_ids: list[object] | None) -> list[Week]:
     configured = db.query(Week).filter(Week.season_id == season_id).order_by(Week.week_number).all()
     if week_ids is None:
@@ -26191,17 +26211,6 @@ def list_public_games(season_id: uuid.UUID | None = None, host_location_id: uuid
 SCHEDULE_REVIEW_ROLES = (ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN, ROLE_COMMUNITY_ADMIN)
 
 
-def _schedule_review_publication_status(db: Session, season: Season, week: Week) -> str:
-    if str(week.publication_status or '').upper() != 'PUBLISHED':
-        return 'DRAFT'
-    comparison = compare_week_to_published_snapshot(db, season, week)
-    if comparison['publication_error']:
-        return 'PUBLICATION_ERROR'
-    if comparison['has_pending_changes']:
-        return 'PUBLISHED_CHANGES_PENDING'
-    return 'PUBLISHED'
-
-
 def _schedule_review_rows(db: Session, season: Season, current_user: User, *, scope: str, organization_id: uuid.UUID | None = None, date_value: date | None = None, division_id: uuid.UUID | None = None, host_location_id: uuid.UUID | None = None, field_id: uuid.UUID | None = None, team_id: uuid.UUID | None = None, week_id: uuid.UUID | None = None):
     if scope not in {'my_organization', 'league'}:
         raise HTTPException(400, "scope must be 'my_organization' or 'league'")
@@ -26249,15 +26258,15 @@ def schedule_review(season_id: uuid.UUID | None = None, scope: str = 'league', o
     rows = _schedule_review_rows(db, season, current_user, scope=scope, organization_id=organization_id, date_value=date, division_id=division_id, host_location_id=host_location_id, field_id=field_id, team_id=team_id, week_id=week_id)
     all_rows = get_saved_scheduled_game_rows_for_export(db, season.id, {'season_id': season.id})
     weeks = db.query(Week).filter(Week.season_id == season.id).order_by(Week.week_number).all()
-    statuses = {week.id: _schedule_review_publication_status(db, season, week) for week in weeks}
+    publication_states = {week.id: get_week_publication_state(db, season, week) for week in weeks}
     games_by_week = {week.id: [] for week in weeks}
     for row in rows:
         if row[0].week_id in games_by_week:
-            games_by_week[row[0].week_id].append(_schedule_review_game(row, statuses[row[0].week_id]))
+            games_by_week[row[0].week_id].append(_schedule_review_game(row, publication_states[row[0].week_id]['publication_status']))
     return {
         'season': {'name': season.name}, 'scope': scope,
         'my_organization': {'name': current_user.organization.name} if is_community_admin(current_user) and current_user.organization else None,
-        'weeks': [{'week_id': str(week.id), 'week_number': week.week_number, 'label': week.label or f'Week {week.week_number}', 'date': (week.primary_game_date or week.start_date).isoformat(), 'publication_status': statuses[week.id], 'games': games_by_week[week.id]} for week in weeks if not week_id or week.id == week_id],
+        'weeks': [{'week_id': str(week.id), 'week_number': week.week_number, 'label': week.label or f'Week {week.week_number}', 'date': (week.primary_game_date or week.start_date).isoformat(), **publication_states[week.id], 'games': games_by_week[week.id]} for week in weeks if not week_id or week.id == week_id],
         'options': {
             'weeks': [{'id': str(week.id), 'label': week.label or f'Week {week.week_number}'} for week in weeks],
             'organizations': [{'id': str(x.id), 'name': x.name} for x in sorted({t.organization.id: t.organization for r in all_rows for t in (r[4], r[5]) if t.organization}.values(), key=lambda x: x.name)],
@@ -26276,12 +26285,12 @@ def export_schedule_review_csv(season_id: uuid.UUID | None = None, scope: str = 
         raise HTTPException(404, 'No saved schedule is currently available.')
     rows = _schedule_review_rows(db, season, current_user, scope=scope, organization_id=organization_id)
     weeks = {week.id: week for week in db.query(Week).filter(Week.season_id == season.id).all()}
-    statuses = {week.id: _schedule_review_publication_status(db, season, week) for week in weeks.values()}
+    publication_states = {week.id: get_week_publication_state(db, season, week) for week in weeks.values()}
     out = io.StringIO(); writer = csv.writer(out)
-    if any(status != 'PUBLISHED' for status in statuses.values()): writer.writerow(['PREPUBLISHED SCHEDULE — SUBJECT TO CHANGE'])
+    if any(not state['is_published'] for state in publication_states.values()): writer.writerow(['PREPUBLISHED SCHEDULE — SUBJECT TO CHANGE'])
     writer.writerow(['Week', 'Date', 'Time', 'Division', 'Home Team', 'Away Team', 'Host Organization', 'Host Location', 'Field', 'Field Type', 'Publication Status'])
     for row in rows:
-        game = _schedule_review_game(row, statuses[row[0].week_id])
+        game = _schedule_review_game(row, publication_states[row[0].week_id]['publication_status'])
         writer.writerow([weeks[row[0].week_id].week_number, game['date'], game['kickoff'], game['division'], game['home_team'], game['away_team'], game['host_organization'], game['host_location'], game['field'], game['field_type'], game['publication_status']])
     return StreamingResponse(iter([out.getvalue()]), media_type='text/csv', headers={'Content-Disposition': 'attachment; filename="schedule-review.csv"'})
 
@@ -30135,11 +30144,10 @@ def schedule_publish_diagnostics(season_id: uuid.UUID | None = None, week_ids: l
         'weeks': [dict(
             id=str(week.id), week_number=week.week_number, label=week.label,
             date=str(week.primary_game_date or week.start_date),
-            publication_status=week.publication_status,
-            needs_republish=bool(comparison['has_pending_changes']),
-            publication_error=comparison['publication_error'],
+            **state,
+            needs_republish=state['has_pending_changes'],
         ) for week in db.query(Week).filter(Week.season_id == season.id).order_by(Week.week_number).all()
-          for comparison in [compare_week_to_published_snapshot(db, season, week)]],
+          for state in [get_week_publication_state(db, season, week)]],
     }
 
 
