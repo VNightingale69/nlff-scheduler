@@ -16540,6 +16540,76 @@ def _week_schedule_hash(db: Session, season_id: uuid.UUID, week_id: uuid.UUID) -
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(',', ':')).encode()).hexdigest(), len(payload)
 
 
+def _week_public_schedule_hash(db: Session, season_id: uuid.UUID, week_id: uuid.UUID) -> tuple[str, int]:
+    """Fingerprint only stable fields that materially define the public schedule."""
+    payload = [{key: row.get(key) for key in (
+        'game_date', 'start_time', 'host_location_id', 'field_id',
+        'home_team_id', 'away_team_id', 'division_id',
+    )} for row in _week_schedule_payload(db, season_id, week_id)]
+    # IDs of game rows and query order are deliberately irrelevant.  Sorting
+    # serialized values preserves duplicate games while remaining deterministic.
+    payload.sort(key=lambda item: json.dumps(item, sort_keys=True, separators=(',', ':')))
+    encoded = json.dumps(payload, sort_keys=True, separators=(',', ':'))
+    return hashlib.sha256(encoded.encode()).hexdigest(), len(payload)
+
+
+def compare_week_to_published_snapshot(db: Session, season: Season, week: Week) -> dict[str, object]:
+    """Compare a working week with its publication fingerprint.
+
+    Publication predates week-scoped fingerprints.  Such migrated weeks must not
+    be labelled dirty merely because their fingerprint is NULL.  When possible,
+    the season fingerprint is the authoritative compatibility snapshot; without
+    either snapshot the state is unknown (not "changes pending").
+    """
+    published = str(week.publication_status or '').upper() == 'PUBLISHED'
+    result: dict[str, object] = {
+        'published': published,
+        'has_pending_changes': False,
+        'publication_error': None,
+        'published_revision': week.last_published_schedule_hash,
+        'current_revision': None,
+        'added_games': [],
+        'removed_games': [],
+        'modified_games': [],
+    }
+    if not published:
+        return result
+
+    hash_version = int(getattr(week, 'publication_hash_version', 1) or 1)
+    current_hash, current_count = (
+        _week_public_schedule_hash(db, season.id, week.id)
+        if hash_version >= 2 else _week_schedule_hash(db, season.id, week.id)
+    )
+    result['current_revision'] = current_hash
+    if week.last_published_schedule_hash:
+        result['has_pending_changes'] = (
+            current_hash != week.last_published_schedule_hash
+            or (week.last_published_game_count is not None and current_count != week.last_published_game_count)
+        )
+    elif season.last_published_schedule_hash:
+        # The week-scoped publication migration retained the season snapshot but
+        # could not manufacture historical per-week hashes.  It is safe to call
+        # every published week unchanged only while that complete snapshot still
+        # matches the working season.
+        season_hash, season_count = _compute_schedule_hash(db, season.id)
+        result['published_revision'] = season.last_published_schedule_hash
+        result['current_revision'] = season_hash
+        result['has_pending_changes'] = (
+            season_hash != season.last_published_schedule_hash
+            or (season.last_published_game_count is not None and season_count != season.last_published_game_count)
+        )
+    else:
+        result['publication_error'] = 'Published week has no publication snapshot.'
+
+    logger.debug(
+        'week_publication_comparison week_id=%s published=%s published_revision=%s '
+        'current_revision=%s pending_changes=%s error=%s',
+        week.id, published, result['published_revision'], result['current_revision'],
+        result['has_pending_changes'], result['publication_error'],
+    )
+    return result
+
+
 def _publication_weeks(db: Session, season_id: uuid.UUID, week_ids: list[object] | None) -> list[Week]:
     configured = db.query(Week).filter(Week.season_id == season_id).order_by(Week.week_number).all()
     if week_ids is None:
@@ -16978,10 +17048,11 @@ def publish_schedule(season_id: uuid.UUID, payload: dict | None = None, db: Sess
     total_games = 0
     action = 'PUBLISH'
     for week in weeks:
-        schedule_hash, game_count = _week_schedule_hash(db, season_id, week.id)
+        schedule_hash, game_count = _week_public_schedule_hash(db, season_id, week.id)
         if str(week.publication_status or '').upper() == 'PUBLISHED': action = 'REPUBLISH'
         week.publication_status = 'PUBLISHED'; week.published_at = now; week.published_by_user_id = current_user.id
         week.last_published_schedule_hash = schedule_hash; week.last_published_game_count = game_count
+        week.publication_hash_version = 2
         total_games += game_count
     all_weeks = db.query(Week).filter(Week.season_id == season_id).all()
     season.schedule_status = _season_publication_rollup(all_weeks)
@@ -26123,8 +26194,10 @@ SCHEDULE_REVIEW_ROLES = (ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN, ROLE_COMMUNIT
 def _schedule_review_publication_status(db: Session, season: Season, week: Week) -> str:
     if str(week.publication_status or '').upper() != 'PUBLISHED':
         return 'DRAFT'
-    current_hash, current_count = _week_schedule_hash(db, season.id, week.id)
-    if week.last_published_schedule_hash and (current_hash != week.last_published_schedule_hash or current_count != week.last_published_game_count):
+    comparison = compare_week_to_published_snapshot(db, season, week)
+    if comparison['publication_error']:
+        return 'PUBLICATION_ERROR'
+    if comparison['has_pending_changes']:
         return 'PUBLISHED_CHANGES_PENDING'
     return 'PUBLISHED'
 
@@ -30059,11 +30132,14 @@ def schedule_publish_diagnostics(season_id: uuid.UUID | None = None, week_ids: l
         'scope_week_ids': [str(week.id) for week in weeks],
         'scope_game_count': readiness['games'],
         'scope_status': readiness['status'],
-        'weeks': [{'id': str(week.id), 'week_number': week.week_number, 'label': week.label,
-                   'date': str(week.primary_game_date or week.start_date),
-                   'publication_status': week.publication_status,
-                   'needs_republish': str(week.publication_status).upper() == 'PUBLISHED' and _week_schedule_hash(db, season.id, week.id)[0] != week.last_published_schedule_hash}
-                  for week in db.query(Week).filter(Week.season_id == season.id).order_by(Week.week_number).all()],
+        'weeks': [dict(
+            id=str(week.id), week_number=week.week_number, label=week.label,
+            date=str(week.primary_game_date or week.start_date),
+            publication_status=week.publication_status,
+            needs_republish=bool(comparison['has_pending_changes']),
+            publication_error=comparison['publication_error'],
+        ) for week in db.query(Week).filter(Week.season_id == season.id).order_by(Week.week_number).all()
+          for comparison in [compare_week_to_published_snapshot(db, season, week)]],
     }
 
 

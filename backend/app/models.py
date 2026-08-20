@@ -315,6 +315,7 @@ class Week(Base, TimestampMixin):
     unpublished_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_published_schedule_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     last_published_game_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    publication_hash_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     season = relationship('Season')
     published_by = relationship('User', foreign_keys=[published_by_user_id])
     __table_args__ = (UniqueConstraint('season_id', 'week_number', name='uq_week_season_number'),)
