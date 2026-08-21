@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { apiFetch } from '@/lib/api';
+import { API_URL, apiFetch } from '@/lib/api';
 import { getToken } from '@/lib/auth';
 import { turfConfigurationLabel, turfConfigurationsForHost } from '@/lib/turfConfigurations';
 import Toast from '@/components/Toast';
@@ -26,6 +26,9 @@ type HostLocation = {
   effective_is_active?: boolean;
   status_label?: string;
   status_warning?: string | null;
+  location_image_url?: string | null;
+  location_image_filename?: string | null;
+  can_manage_location_image?: boolean;
 };
 
 type Organization = {
@@ -71,6 +74,12 @@ export default function HostLocationsAdminPage() {
   const [siteTypeByHostId, setSiteTypeByHostId] = useState<Record<string, string>>({});
   const [configsByHostId, setConfigsByHostId] = useState<Record<string, any[]>>({});
   const [zipCodeError, setZipCodeError] = useState('');
+  const [imageFile, setImageFile] = useState<File | null>(null);
+  const [imagePreview, setImagePreview] = useState<string>('');
+
+  const browserImageUrl = (value?: string | null) => value ? (value.startsWith('/api/') ? `${API_URL.replace(/\/api$/, '')}${value}` : value) : '';
+
+  useEffect(() => () => { if (imagePreview.startsWith('blob:')) URL.revokeObjectURL(imagePreview); }, [imagePreview]);
 
   const orgNameById = useMemo(() => Object.fromEntries(organizations.map((x) => [x.id, x.name])), [organizations]);
   const displayItems = useMemo(
@@ -198,16 +207,24 @@ export default function HostLocationsAdminPage() {
         ...(form.is_active !== undefined ? { is_active: Boolean(form.is_active) } : {}),
       };
 
+      let saved: HostLocation;
       if (editingId) {
-        await apiFetch(`/host-locations/${editingId}`, { method: 'PUT', body: JSON.stringify(payload) }, getToken());
+        saved = await apiFetch(`/host-locations/${editingId}`, { method: 'PUT', body: JSON.stringify(payload) }, getToken());
       } else {
-        await apiFetch('/host-locations', { method: 'POST', body: JSON.stringify(payload) }, getToken());
+        saved = await apiFetch('/host-locations', { method: 'POST', body: JSON.stringify(payload) }, getToken());
+      }
+      if (imageFile) {
+        const imagePayload = new FormData();
+        imagePayload.append('file', imageFile);
+        saved = await apiFetch(`/admin/host-locations/${saved.id}/image`, { method: 'POST', body: imagePayload }, getToken());
       }
 
       setMessage(editingId ? 'Updated successfully' : 'Created successfully');
       setType('ok');
       setForm({ is_active: true, state: 'WI', surface_type: 'GRASS_FIELD' });
       setEditingId(null);
+      setImageFile(null);
+      setImagePreview('');
       setZipCodeError('');
       load();
     } catch (e: any) {
@@ -221,7 +238,25 @@ export default function HostLocationsAdminPage() {
   const edit = (item: HostLocation) => {
     setForm({ ...item, address_line1: item.address_line1 || item.address || '', state: item.state || 'WI', surface_type: item.surface_type || 'GRASS_FIELD' });
     setEditingId(item.id);
+    setImageFile(null);
+    setImagePreview(browserImageUrl(item.location_image_url));
     setZipCodeError('');
+  };
+
+  const removeImage = async () => {
+    if (!editingId) return;
+    try {
+      const updated: HostLocation = await apiFetch(`/admin/host-locations/${editingId}/image`, { method: 'DELETE' }, getToken());
+      setForm({ ...form, ...updated });
+      setImageFile(null);
+      setImagePreview('');
+      setMessage('Location image removed');
+      setType('ok');
+      load();
+    } catch (e: any) {
+      setMessage(e?.message || 'Image removal failed');
+      setType('err');
+    }
   };
 
   const openDeleteModal = async (item: HostLocation) => {
@@ -319,6 +354,29 @@ export default function HostLocationsAdminPage() {
         <FormField label='Surface Type' type='select' value={form.surface_type ?? 'GRASS_FIELD'} options={SURFACE_TYPES} onChange={(value) => setForm({ ...form, surface_type: String(value) })} />
         <FormField label='Internal Notes' type='textarea' value={form.notes ?? ''} onChange={(value) => setForm({ ...form, notes: String(value) })} />
         <FormField label='Public Location Notes' type='textarea' value={form.public_location_notes ?? ''} onChange={(value) => setForm({ ...form, public_location_notes: String(value) })} />
+        {(!editingId || form.can_manage_location_image) && <div className='space-y-2 md:col-span-2'>
+          <label className='block text-sm font-medium' htmlFor='location-image'>Location / Field Layout Image</label>
+          <p className='text-sm text-slate-600'>Optional image showing the hosting site, field layout, parking, field configuration, entrances, or field locations. This image will be visible on the public Locations page.</p>
+          <input id='location-image' type='file' accept='.jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp' onChange={(event) => {
+            const selected = event.target.files?.[0] || null;
+            if (selected && selected.size > 10 * 1024 * 1024) {
+              setMessage('Image must be smaller than 10 MB.');
+              setType('err');
+              event.target.value = '';
+              return;
+            }
+            setImageFile(selected);
+            setImagePreview(selected ? URL.createObjectURL(selected) : browserImageUrl(form.location_image_url));
+          }} />
+          {imagePreview && <img src={imagePreview} alt={`Field layout for ${form.name || 'host location'}`} className='max-h-80 w-full max-w-2xl rounded-lg border object-contain' />}
+          {form.location_image_filename && !imageFile && <p className='text-sm text-slate-600'>Current image: {form.location_image_filename}</p>}
+          {editingId && form.location_image_url && <button type='button' className='rounded border border-rose-300 px-3 py-2 text-sm text-rose-700' onClick={removeImage}>Remove Image</button>}
+        </div>}
+        {editingId && !form.can_manage_location_image && form.location_image_url && <div className='space-y-2 md:col-span-2'>
+          <p className='text-sm font-medium'>Location / Field Layout Image</p>
+          <img src={browserImageUrl(form.location_image_url)} alt={`Field layout for ${form.name}`} className='max-h-80 w-full max-w-2xl rounded-lg border object-contain' />
+          <p className='text-sm text-slate-500'>Only administrators for this community may change this image.</p>
+        </div>}
         <div className='flex flex-col gap-1'>
           <FormField
             label='Zip Code'
@@ -338,7 +396,7 @@ export default function HostLocationsAdminPage() {
             {saving ? 'Saving…' : editingId ? 'Update' : 'Create'}
           </button>
           {editingId && (
-            <button className='rounded border px-4 py-2 disabled:cursor-not-allowed disabled:opacity-50' onClick={() => { setForm({ is_active: true, state: 'WI', surface_type: 'GRASS_FIELD' }); setEditingId(null); setZipCodeError(''); }} disabled={saving}>
+            <button className='rounded border px-4 py-2 disabled:cursor-not-allowed disabled:opacity-50' onClick={() => { setForm({ is_active: true, state: 'WI', surface_type: 'GRASS_FIELD' }); setEditingId(null); setImageFile(null); setImagePreview(''); setZipCodeError(''); }} disabled={saving}>
               Cancel
             </button>
           )}
@@ -359,6 +417,7 @@ export default function HostLocationsAdminPage() {
                 <th className='px-3 py-2'>Surface Type</th>
                 <th className='px-3 py-2'>Supported Configurations</th>
                 <th className='px-3 py-2'>Effective Status</th>
+                <th className='px-3 py-2'>Image</th>
                 <th className='px-3 py-2'>Actions</th>
               </tr>
             </thead>
@@ -373,6 +432,7 @@ export default function HostLocationsAdminPage() {
                   <td className='px-3 py-2'>{SURFACE_TYPES.find((surface) => surface.value === item.surface_type)?.label || item.surface_type || 'Other'}</td>
                   <td className='px-3 py-2'><div className='flex flex-col gap-1'>{item.surface_type === 'TURF_STADIUM' ? <>{(configsByHostId[item.id] || []).length ? (configsByHostId[item.id] || []).map((config: any) => <span key={config.id}>{configLabel(config.configuration_name)} ({(config.field_instances || []).join(', ')}){config.is_active ? '' : ' (Inactive)'}</span>) : <span className='text-slate-500'>No turf configuration selected</span>}<div className='mt-1 flex flex-wrap gap-1'>{turfConfigurationsForHost(item.name, orgNameById[item.organization_id]).map(({ code, displayName }) => ({ value: code, label: displayName })).filter((option) => !(configsByHostId[item.id] || []).some((config: any) => config.configuration_name === option.value)).map((option) => <button key={option.value} type='button' className='rounded border px-2 py-0.5 text-xs text-emerald-700' onClick={async () => { await apiFetch('/host-location-configurations', { method: 'POST', body: JSON.stringify({ host_location_id: item.id, configuration_name: option.value, is_active: true }) }, getToken()); load(); }}>+ {option.label}</button>)}</div></> : <span className='text-slate-600'>Manual grass fields: Small / Medium / Large</span>}</div></td>
                   <td className='px-3 py-2'><div className='flex flex-col gap-1'><span>{item.status_label || ((item.effective_is_active ?? item.is_active) ? 'Active' : 'Inactive/Unavailable')}</span>{item.status_warning ? <span className='inline-flex w-fit rounded bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800'>{item.status_warning}</span> : null}</div></td>
+                  <td className='px-3 py-2'>{item.location_image_url ? <img src={browserImageUrl(item.location_image_url)} alt={`Field layout for ${item.name}`} className='h-12 w-16 rounded border object-contain' /> : '—'}</td>
                   <td className='space-x-2 px-3 py-2'>
                     <button className='text-blue-700' onClick={() => edit(item)}>Edit</button>
                     <button className='text-rose-700' onClick={() => openDeleteModal(item)}>Delete</button>

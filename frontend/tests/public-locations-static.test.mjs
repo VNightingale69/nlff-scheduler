@@ -7,6 +7,13 @@ const schedule = read('app/schedule/page.tsx');
 const admin = read('app/(dashboard)/admin/host-locations/page.tsx');
 
 assert.match(page, /public\/hosting-locations/);
+assert.match(page, /Field Layout/);
+assert.match(page, /Tap or click the image to enlarge/);
+assert.match(page, /event\.key === 'Escape'/);
+assert.match(page, /alt={`Field layout for \${location\.name}`}/);
+assert.match(admin, /Location \/ Field Layout Image/);
+assert.match(admin, /can_manage_location_image/);
+assert.match(admin, /admin\/host-locations\/\${editingId}\/image/);
 assert.match(page, /Address not yet available/);
 assert.match(page, /complete && <a/);
 assert.match(page, /encodeURIComponent\(addressQuery\(location\)\)/);

@@ -10,6 +10,7 @@ import tempfile
 from pathlib import Path
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
+from PIL import Image, ImageOps, UnidentifiedImageError
 import logging
 from time import perf_counter
 from datetime import date, datetime, time, timedelta, timezone
@@ -18,7 +19,7 @@ from sqlalchemy import String, and_, delete, func, inspect as sa_inspect, or_, s
 from sqlalchemy.exc import IntegrityError, ProgrammingError, SQLAlchemyError
 from sqlalchemy.orm import Session, aliased
 
-from app.config import ADMIN_SEED_EMAIL, COMMUNITY_LOGO_MAX_SIZE_BYTES, COMMUNITY_LOGO_UPLOAD_DIR, ENABLE_SCHEDULE_QUALITY_REPORT, ENABLE_TURF_OPTIMIZATION, RULEBOOK_MAX_SIZE_BYTES, RULEBOOK_UPLOAD_DIR, UPLOAD_STORAGE_DIR
+from app.config import ADMIN_SEED_EMAIL, COMMUNITY_LOGO_MAX_SIZE_BYTES, COMMUNITY_LOGO_UPLOAD_DIR, ENABLE_SCHEDULE_QUALITY_REPORT, ENABLE_TURF_OPTIMIZATION, HOST_LOCATION_IMAGE_MAX_SIZE_BYTES, HOST_LOCATION_IMAGE_UPLOAD_DIR, RULEBOOK_MAX_SIZE_BYTES, RULEBOOK_UPLOAD_DIR, UPLOAD_STORAGE_DIR
 from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN, can_manage_fields, can_manage_schedule, enforce_organization_scope, get_current_user, get_optional_current_user, is_community_admin, is_league_admin, is_scheduling_admin, normalize_role_name, require_field_deleter, require_field_manager, require_roles, require_schedule_admin, require_schedule_publisher, role_by_name
 from app.database import get_db
 from app.organizations import active_organization_filter, normalize_organization_name
@@ -57,6 +58,8 @@ HOST_PLAN_SELECTION_PERMISSION_MESSAGE = 'Only admin@example.com can modify host
 RULEBOOK_ALLOWED_CONTENT_TYPE = 'application/pdf'
 COMMUNITY_LOGO_ALLOWED_CONTENT_TYPE = 'image/png'
 COMMUNITY_LOGO_MIN_DIMENSION_PIXELS = 500
+HOST_LOCATION_IMAGE_FORMATS = {'JPEG': ('image/jpeg', '.jpg'), 'PNG': ('image/png', '.png'), 'WEBP': ('image/webp', '.webp')}
+HOST_LOCATION_IMAGE_MAX_DIMENSION = 2400
 UPLOAD_STORAGE_WARNING = (
     'Upload storage warning: local filesystem storage in production requires persistent Railway volume'
 )
@@ -4548,6 +4551,86 @@ def _resolved_community_logo_storage_dir() -> Path:
     if not upload_dir.is_absolute():
         upload_dir = Path.cwd() / upload_dir
     return upload_dir
+
+
+def _resolved_host_location_image_storage_dir() -> Path:
+    upload_dir = Path((HOST_LOCATION_IMAGE_UPLOAD_DIR or '').strip() or (_resolved_upload_storage_dir() / 'host-locations'))
+    if not upload_dir.is_absolute():
+        upload_dir = Path.cwd() / upload_dir
+    return upload_dir
+
+
+def _host_location_image_storage_dir(location_id: uuid.UUID) -> Path:
+    root = _resolved_host_location_image_storage_dir()
+    status = _ensure_directory_status(root, create=True, label='Host location image storage')
+    if not status['writable']:
+        raise HTTPException(500, 'Host location image storage is unavailable. Please verify persistent storage configuration.')
+    directory = root / str(location_id)
+    directory.mkdir(parents=True, exist_ok=True)
+    if not _check_directory_writable(directory):
+        raise HTTPException(500, 'Host location image storage is unavailable. Please verify persistent storage configuration.')
+    return directory
+
+
+def _can_manage_host_location_image(location: HostLocation, user: User) -> bool:
+    role = normalize_role_name(user.role.name)
+    if role in {ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN}:
+        return True
+    return role == ROLE_COMMUNITY_ADMIN and user.organization_id == location.organization_id
+
+
+def _require_host_location_image_manager(location: HostLocation, user: User) -> None:
+    if not _can_manage_host_location_image(location, user):
+        raise HTTPException(status_code=403, detail='You may only manage images for host locations in your organization.')
+
+
+def _host_location_image_public_url(location_id: uuid.UUID, stored_filename: str) -> str:
+    return f'/api/public/hosting-locations/{location_id}/image/{Path(stored_filename).name}'
+
+
+def _host_location_image_path(location: HostLocation) -> Path | None:
+    if not location.location_image_storage_key:
+        return None
+    key = Path(location.location_image_storage_key)
+    if key.is_absolute() or '..' in key.parts or len(key.parts) != 3 or key.parts[0] != 'host-locations' or key.parts[1] != str(location.id):
+        return None
+    return _resolved_host_location_image_storage_dir() / str(location.id) / key.parts[2]
+
+
+def _clear_host_location_image(location: HostLocation) -> None:
+    location.location_image_url = None
+    location.location_image_filename = None
+    location.location_image_storage_key = None
+    location.location_image_updated_at = None
+
+
+def _process_host_location_image(file: UploadFile, content: bytes) -> tuple[bytes, str, str]:
+    if len(content) > HOST_LOCATION_IMAGE_MAX_SIZE_BYTES:
+        raise HTTPException(status_code=413, detail='Image must be smaller than 10 MB.')
+    try:
+        with Image.open(io.BytesIO(content)) as source:
+            source.verify()
+        with Image.open(io.BytesIO(content)) as source:
+            image_format = source.format
+            if image_format not in HOST_LOCATION_IMAGE_FORMATS:
+                raise HTTPException(400, 'Unsupported image format. Please upload a JPG, PNG, or WebP image.')
+            expected_mime, extension = HOST_LOCATION_IMAGE_FORMATS[image_format]
+            original_extension = Path(file.filename or '').suffix.lower()
+            allowed_extensions = {'.jpg', '.jpeg'} if image_format == 'JPEG' else {extension}
+            if file.content_type != expected_mime or original_extension not in allowed_extensions:
+                raise HTTPException(400, 'Unsupported image format. Please upload a JPG, PNG, or WebP image.')
+            image = ImageOps.exif_transpose(source)
+            image.thumbnail((HOST_LOCATION_IMAGE_MAX_DIMENSION, HOST_LOCATION_IMAGE_MAX_DIMENSION), Image.Resampling.LANCZOS)
+            if image_format == 'JPEG' and image.mode not in ('RGB', 'L'):
+                image = image.convert('RGB')
+            output = io.BytesIO()
+            save_options = {'quality': 92} if image_format in {'JPEG', 'WEBP'} else {'optimize': True}
+            image.save(output, format=image_format, **save_options)
+            return output.getvalue(), expected_mime, extension
+    except HTTPException:
+        raise
+    except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError) as exc:
+        raise HTTPException(400, 'Unsupported image format. Please upload a JPG, PNG, or WebP image.') from exc
 
 
 def _ensure_directory_status(directory: Path, create: bool = True, label: str = 'Upload storage') -> dict:
@@ -11801,7 +11884,81 @@ def create_host_location(payload: HostLocationCreate, current_user: User = Depen
         raise HTTPException(400, f'Invalid surface type: {surface_type}')
     x = HostLocation(**{**payload.model_dump(), 'surface_type': surface_type}); db.add(x); db.flush()
     _ensure_approved_turf_configurations(db, x)
-    db.commit(); db.refresh(x); return x
+    db.commit(); db.refresh(x)
+    x.can_manage_location_image = _can_manage_host_location_image(x, current_user)
+    return x
+
+
+@router.post('/admin/host-locations/{location_id}/image', response_model=HostLocationRead)
+async def upload_host_location_image(location_id: uuid.UUID, file: UploadFile = File(...), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    location = db.get(HostLocation, location_id)
+    if not location:
+        raise HTTPException(404, 'Host location not found')
+    _require_host_location_image_manager(location, current_user)
+    original_filename = Path(file.filename or 'location-image').name[:255]
+    content = await file.read(HOST_LOCATION_IMAGE_MAX_SIZE_BYTES + 1)
+    processed, _, extension = _process_host_location_image(file, content)
+    stored_filename = f'{uuid.uuid4()}{extension}'
+    destination = _host_location_image_storage_dir(location.id) / stored_filename
+    temporary = destination.with_suffix(destination.suffix + '.tmp')
+    old_path = _host_location_image_path(location)
+    try:
+        temporary.write_bytes(processed)
+        os.replace(temporary, destination)
+        if not destination.is_file() or destination.stat().st_size != len(processed):
+            raise OSError('saved image could not be verified')
+        action = 'replaced' if location.location_image_storage_key else 'uploaded'
+        location.location_image_filename = original_filename
+        location.location_image_storage_key = f'host-locations/{location.id}/{stored_filename}'
+        location.location_image_url = _host_location_image_public_url(location.id, stored_filename)
+        location.location_image_updated_at = datetime.now(timezone.utc)
+        db.commit()
+        db.refresh(location)
+    except Exception as exc:
+        db.rollback()
+        temporary.unlink(missing_ok=True)
+        destination.unlink(missing_ok=True)
+        if isinstance(exc, HTTPException):
+            raise
+        logger.exception('Host location image upload failed location_id=%s', location.id)
+        raise HTTPException(500, 'Location image could not be saved to persistent storage.') from exc
+    if old_path and old_path != destination:
+        old_path.unlink(missing_ok=True)
+    location.can_manage_location_image = True
+    logger.info('host_location_image_%s user_id=%s organization_id=%s host_location_id=%s', action, current_user.id, location.organization_id, location.id)
+    return location
+
+
+@router.delete('/admin/host-locations/{location_id}/image', response_model=HostLocationRead)
+def remove_host_location_image(location_id: uuid.UUID, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    location = db.get(HostLocation, location_id)
+    if not location:
+        raise HTTPException(404, 'Host location not found')
+    _require_host_location_image_manager(location, current_user)
+    old_path = _host_location_image_path(location)
+    _clear_host_location_image(location)
+    db.commit()
+    db.refresh(location)
+    if old_path:
+        old_path.unlink(missing_ok=True)
+    location.can_manage_location_image = True
+    logger.info('host_location_image_removed user_id=%s organization_id=%s host_location_id=%s', current_user.id, location.organization_id, location.id)
+    return location
+
+
+@router.get('/public/hosting-locations/{location_id}/image/{stored_filename}')
+def view_host_location_image(location_id: uuid.UUID, stored_filename: str, db: Session = Depends(get_db)):
+    location = db.query(HostLocation).join(Organization).filter(
+        HostLocation.id == location_id, HostLocation.is_active.is_(True),
+        Organization.is_active.is_(True), Organization.deleted_at.is_(None),
+    ).first()
+    if not location or Path(stored_filename).name != stored_filename or not location.location_image_storage_key:
+        raise HTTPException(404, 'Location image not found')
+    path = _host_location_image_path(location)
+    if not path or path.name != stored_filename or not path.is_file():
+        raise HTTPException(404, 'Location image not found')
+    media_type = {'.jpg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp'}.get(path.suffix.lower())
+    return FileResponse(path, media_type=media_type, headers={'Cache-Control': 'public, max-age=31536000, immutable'})
 
 
 @router.get('/public/hosting-locations', response_model=list[PublicHostingLocationRead])
@@ -11826,6 +11983,7 @@ def list_public_hosting_locations(db: Session = Depends(get_db)):
             state=location.state,
             postal_code=location.zip_code,
             public_notes=location.public_location_notes,
+            location_image_url=location.location_image_url,
         )
         for location in locations
     ]
@@ -11841,6 +11999,7 @@ def list_host_locations(search: str | None = None, organization_id: uuid.UUID | 
     page_data = paginate(q.order_by(HostLocation.name), page, page_size)
     ensured_any = False
     for item in page_data.items:
+        item.can_manage_location_image = _can_manage_host_location_image(item, current_user)
         ensured_any = ensure_tosc_physical_areas(db, item) or ensured_any
         ensured_any = _ensure_approved_turf_configurations(db, item) or ensured_any
     if ensured_any:
@@ -11882,7 +12041,9 @@ def upd_host_location(item_id: uuid.UUID, payload: HostLocationCreate, current_u
         raise HTTPException(400, f'Invalid surface type: {surface_type}')
     for k, v in {**payload.model_dump(), 'surface_type': surface_type}.items(): setattr(x, k, v)
     _ensure_approved_turf_configurations(db, x)
-    db.commit(); db.refresh(x); return x
+    db.commit(); db.refresh(x)
+    x.can_manage_location_image = _can_manage_host_location_image(x, current_user)
+    return x
 
 
 @router.post('/host-location-configurations', response_model=HostLocationConfigurationRead, dependencies=[Depends(get_current_user)])
@@ -12061,6 +12222,7 @@ def del_host_location(item_id: uuid.UUID, force: bool = Query(False), current_us
     x = db.query(HostLocation).filter(HostLocation.id == item_id).first()
     if not x: raise HTTPException(404, 'Host location not found')
     enforce_organization_scope(x.organization_id, current_user)
+    image_path = _host_location_image_path(x)
     dependencies = _host_location_dependency_summary(db, item_id)
     blocking_labels = {'Scheduled Games', 'Generated Slots Assigned to Games'}
     has_blocking_dependencies = any(count > 0 for label, count in dependencies if label in blocking_labels)
@@ -12088,6 +12250,8 @@ def del_host_location(item_id: uuid.UUID, force: bool = Query(False), current_us
     deleted_physical_field_areas = db.query(PhysicalFieldArea).filter(PhysicalFieldArea.id.in_(area_ids)).delete(synchronize_session=False) if area_ids else 0
     deleted_fields = db.query(Field).filter(Field.id.in_(field_ids)).delete(synchronize_session=False) if field_ids else 0
     db.delete(x); db.commit()
+    if image_path:
+        image_path.unlink(missing_ok=True)
 
     return {
         'ok': True,

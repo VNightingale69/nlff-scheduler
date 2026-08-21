@@ -14,6 +14,7 @@ type HostingLocation = {
   state?: string | null;
   postal_code?: string | null;
   public_notes?: string | null;
+  location_image_url?: string | null;
 };
 
 const clean = (value?: string | null) => value?.trim() || '';
@@ -28,6 +29,15 @@ export default function HostingLocationsPage() {
   const [locations, setLocations] = useState<HostingLocation[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [enlargedLocation, setEnlargedLocation] = useState<HostingLocation | null>(null);
+  const imageUrl = (value?: string | null) => value ? (value.startsWith('/api/') ? `${API_URL.replace(/\/api$/, '')}${value}` : value) : '';
+
+  useEffect(() => {
+    if (!enlargedLocation) return;
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === 'Escape') setEnlargedLocation(null); };
+    document.addEventListener('keydown', closeOnEscape);
+    return () => document.removeEventListener('keydown', closeOnEscape);
+  }, [enlargedLocation]);
 
   useEffect(() => {
     fetch(`${API_URL}/public/hosting-locations`)
@@ -69,6 +79,13 @@ export default function HostingLocationsPage() {
                   {clean(location.address_line_2) && <span className='block break-words'>{clean(location.address_line_2)}</span>}
                   <span className='block break-words'>{cityLine}</span>
                 </address> : <p className='mt-4 font-medium text-slate-500'>Address not yet available</p>}
+                {location.location_image_url && <section className='mt-5' aria-label={`Field layout for ${location.name}`}>
+                  <h4 className='mb-2 font-bold text-slate-900'>Field Layout</h4>
+                  <button type='button' className='block w-full cursor-zoom-in rounded-xl focus:outline-none focus-visible:ring-4 focus-visible:ring-emerald-300' onClick={() => setEnlargedLocation(location)} aria-label={`Enlarge field layout for ${location.name}`}>
+                    <img src={imageUrl(location.location_image_url)} alt={`Field layout for ${location.name}`} className='h-auto max-h-[34rem] w-full rounded-xl border border-slate-200 object-contain' />
+                  </button>
+                  <p className='mt-2 text-xs text-slate-500'>Tap or click the image to enlarge.</p>
+                </section>}
                 {clean(location.public_notes) && <p className='mt-4 whitespace-pre-line text-sm leading-6 text-slate-600'>{clean(location.public_notes)}</p>}
                 {complete && <a className='mt-5 inline-flex min-h-11 w-full items-center justify-center rounded-lg bg-emerald-700 px-4 py-3 text-center font-bold text-white hover:bg-emerald-800 focus:outline-none focus-visible:ring-4 focus-visible:ring-emerald-300' href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(addressQuery(location))}`} target='_blank' rel='noopener noreferrer' aria-label={`Get directions to ${location.name}`}>Get Directions<span className='sr-only'> (opens in a new tab)</span></a>}
               </article>;
@@ -76,6 +93,10 @@ export default function HostingLocationsPage() {
           </div>
         </section>)}
       </div>
+      {enlargedLocation && <div role='dialog' aria-modal='true' aria-label={`Field layout for ${enlargedLocation.name}`} className='fixed inset-0 z-50 flex items-center justify-center bg-black/85 p-3 sm:p-8' onClick={() => setEnlargedLocation(null)}>
+        <button type='button' autoFocus aria-label='Close enlarged image' className='absolute right-3 top-3 min-h-11 rounded-lg bg-white px-4 py-2 font-bold text-slate-900 shadow sm:right-6 sm:top-6' onClick={() => setEnlargedLocation(null)}>Close ×</button>
+        <img src={imageUrl(enlargedLocation.location_image_url)} alt={`Field layout for ${enlargedLocation.name}`} className='max-h-[calc(100vh-2rem)] max-w-full rounded-xl object-contain' onClick={(event) => event.stopPropagation()} />
+      </div>}
     </main>
   </PublicLayout>;
 }

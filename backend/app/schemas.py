@@ -194,6 +194,10 @@ class HostLocationCreate(BaseModel):
     is_active: bool = True
 
 class HostLocationRead(BaseSchema, HostLocationCreate):
+    location_image_url: str | None = None
+    location_image_filename: str | None = None
+    location_image_updated_at: datetime | None = None
+    can_manage_location_image: bool = False
     has_active_field_setup: bool = False
     effective_is_active: bool = False
     status_label: str = 'Inactive/Unavailable'
@@ -210,6 +214,7 @@ class PublicHostingLocationRead(BaseModel):
     state: str | None = None
     postal_code: str | None = None
     public_notes: str | None = None
+    location_image_url: str | None = None
 
 
 class HostLocationConfigurationCreate(BaseModel):
