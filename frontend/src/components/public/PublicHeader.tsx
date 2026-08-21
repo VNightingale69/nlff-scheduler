@@ -9,6 +9,7 @@ const links = [
   ['/schedule', 'Schedule'],
   ['/standings', 'Standings'],
   ['/scores', 'Scores'],
+  ['/locations', 'Locations'],
   ['/rulebook', 'Rulebook'],
 ] as const;
 

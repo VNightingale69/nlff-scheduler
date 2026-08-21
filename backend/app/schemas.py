@@ -190,6 +190,7 @@ class HostLocationCreate(BaseModel):
     state: str | None = None
     zip_code: str | None = None
     notes: str | None = None
+    public_location_notes: str | None = None
     is_active: bool = True
 
 class HostLocationRead(BaseSchema, HostLocationCreate):
@@ -197,6 +198,18 @@ class HostLocationRead(BaseSchema, HostLocationCreate):
     effective_is_active: bool = False
     status_label: str = 'Inactive/Unavailable'
     status_warning: str | None = None
+
+
+class PublicHostingLocationRead(BaseModel):
+    id: uuid.UUID
+    name: str
+    community: str
+    address_line_1: str | None = None
+    address_line_2: str | None = None
+    city: str | None = None
+    state: str | None = None
+    postal_code: str | None = None
+    public_notes: str | None = None
 
 
 class HostLocationConfigurationCreate(BaseModel):

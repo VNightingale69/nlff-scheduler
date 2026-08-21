@@ -20,6 +20,7 @@ type HostLocation = {
   zip_code?: string;
   surface_type?: string;
   notes?: string;
+  public_location_notes?: string;
   is_active?: boolean;
   has_active_field_setup?: boolean;
   effective_is_active?: boolean;
@@ -193,6 +194,7 @@ export default function HostLocationsAdminPage() {
         zip_code: form.zip_code?.trim(),
         surface_type: form.surface_type || 'GRASS_FIELD',
         notes: form.notes?.trim() || null,
+        public_location_notes: form.public_location_notes?.trim() || null,
         ...(form.is_active !== undefined ? { is_active: Boolean(form.is_active) } : {}),
       };
 
@@ -315,7 +317,8 @@ export default function HostLocationsAdminPage() {
         <FormField label='City' type='text' value={form.city ?? ''} onChange={(value) => setForm({ ...form, city: String(value) })} />
         <FormField label='State' type='text' value={form.state ?? 'WI'} onChange={(value) => setForm({ ...form, state: String(value) })} />
         <FormField label='Surface Type' type='select' value={form.surface_type ?? 'GRASS_FIELD'} options={SURFACE_TYPES} onChange={(value) => setForm({ ...form, surface_type: String(value) })} />
-        <FormField label='Notes' type='textarea' value={form.notes ?? ''} onChange={(value) => setForm({ ...form, notes: String(value) })} />
+        <FormField label='Internal Notes' type='textarea' value={form.notes ?? ''} onChange={(value) => setForm({ ...form, notes: String(value) })} />
+        <FormField label='Public Location Notes' type='textarea' value={form.public_location_notes ?? ''} onChange={(value) => setForm({ ...form, public_location_notes: String(value) })} />
         <div className='flex flex-col gap-1'>
           <FormField
             label='Zip Code'
