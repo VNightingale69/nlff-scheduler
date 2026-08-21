@@ -17,6 +17,7 @@ type Game = {
   game_date: string;
   kickoff_time: string;
   host_location_name: string;
+  host_location_id?: string | null;
   field_name: string;
   field_id?: string | null;
   physical_area_id?: string | null;
@@ -42,7 +43,7 @@ type Game = {
 
 type ScheduleView = 'list' | 'hosting';
 type HostingField = { key: string; name: string; type: string };
-type HostingLocation = { name: string; fields: HostingField[] };
+type HostingLocation = { id?: string | null; name: string; fields: HostingField[] };
 
 const normalizeFieldType = (value?: string | null) => {
   const normalized = (value || '').toUpperCase();
@@ -87,7 +88,7 @@ function HostingSchedule({ games }: { games: Game[] }) {
       dateGames.forEach((game) => {
         const locationName = game.host_location_name || 'Host Location Unassigned';
         let location = locations.find((item) => item.name === locationName);
-        if (!location) { location = { name: locationName, fields: [] }; locations.push(location); }
+        if (!location) { location = { id: game.host_location_id, name: locationName, fields: [] }; locations.push(location); }
         const field = gameField(game);
         if (!location.fields.some((item) => item.key === field.key)) location.fields.push(field);
       });
@@ -105,7 +106,7 @@ function HostingSchedule({ games }: { games: Game[] }) {
               <tr>
                 <th rowSpan={2} scope='col' className='sticky left-0 top-0 z-30 w-[130px] min-w-[130px] border-b border-r bg-slate-200 px-3 py-3 text-left'>Time</th>
                 {locations.map((location, locationIndex) => <th key={location.name} scope='colgroup' colSpan={location.fields.length} className={`location-group-header ${locationAccent(locationIndex)} sticky top-0 z-20 px-3 py-2.5 text-center`}>
-                  <span className='block text-base font-extrabold tracking-wide text-slate-900'>{location.name}</span>
+                  {location.id ? <Link className='block text-base font-extrabold tracking-wide text-slate-900 underline decoration-emerald-500 underline-offset-2' href={`/locations#location-${location.id}`}>{location.name}</Link> : <span className='block text-base font-extrabold tracking-wide text-slate-900'>{location.name}</span>}
                   <span className='mt-0.5 block text-xs font-semibold text-slate-700'>{location.fields.length} {location.fields.length === 1 ? 'Field' : 'Fields'}</span>
                 </th>)}
               </tr>
@@ -299,7 +300,7 @@ function PublicScheduleContent() {
                 <tr key={g.id} className='border-t'>
                   <td className='whitespace-nowrap px-3 py-3'>{formatDisplayDate(g.game_date)}</td>
                   <td className='whitespace-nowrap px-3 py-3'>{formatDisplayTime(g.kickoff_time)}</td>
-                  <td className='whitespace-nowrap px-3 py-3'>{g.host_location_name}</td>
+                  <td className='whitespace-nowrap px-3 py-3'>{g.host_location_id ? <Link className='font-semibold text-emerald-800 underline decoration-emerald-300 underline-offset-2 hover:text-emerald-950' href={`/locations#location-${g.host_location_id}`}>{g.host_location_name}</Link> : g.host_location_name}</td>
                   <td className='whitespace-nowrap px-3 py-3'>{g.field_name}</td>
                   <td className='whitespace-nowrap px-3 py-3'>{g.division_name}</td>
                   <td className='team-cell px-3 py-3'><span className='team-content flex items-center justify-center gap-2 text-center'><CommunityLogo src={g.home_team_logo_url} name={g.home_team_community_name || g.home_team_name} altText={g.home_team_logo_alt_text} size={24} />{g.home_team_name}</span></td>

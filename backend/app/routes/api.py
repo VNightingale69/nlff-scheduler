@@ -35,7 +35,7 @@ from app.schemas import (
     DivisionCreate, DivisionRead, FieldConfigurationOptionCreate, FieldConfigurationOptionRead, FieldCreate, FieldRead, GameCreate, GameRead, GameSaveResponse, ManualGameBulkEditRequest, ManualGameBulkEditResponse, ManualGameEditRequest, ManualGameEditResponse, ScheduleChangeLogRead, ScheduleEditWarning,
     OrganizationDivisionParticipationBulkUpsertRequest, OrganizationDivisionParticipationRead,
     GeneratedSlotRead, GeneratedSlotsClearResponse, HostAvailabilityMatrixSaveRequest, HostAvailabilityMatrixSaveResponse, HostLocationCreate, HostLocationRead, HostLocationConfigurationCreate, HostLocationConfigurationRead, HostingAvailabilityCreate, HostingAvailabilityRead, HostingAvailabilityBulkUpsertRequest, HostingAvailabilityBulkUpsertResponse, HostingGenerationRunResult, HostingGenerationLocationResult, PhysicalFieldAreaCreate, PhysicalFieldAreaRead, SavedAvailabilityResponse,
-    LoginAuditLogRead, LoginRequest, OrganizationCreate, OrganizationRead, PagedResponse, PublicGameRead, RefreshRequest, RulebookRead, ScoreApprovePayload, ScorePayload,
+    LoginAuditLogRead, LoginRequest, OrganizationCreate, OrganizationRead, PagedResponse, PublicGameRead, PublicHostingLocationRead, RefreshRequest, RulebookRead, ScoreApprovePayload, ScorePayload,
     TeamCreate, TeamRead, TeamUpdate, TokenResponse, UserCreate, UserPasswordReset, UserRead, UserUpdate,
     HOST_PLAN_SELECTION_STATUSES, ScheduleReadinessDivisionRow, ScheduleReadinessHostDateRow, ScheduleReadinessHostSiteRow, ScheduleReadinessResponse, ScheduleReadinessTotals, ScheduleReadinessTurfWaveRow, ScheduleReadinessTurfWaveSlotRow
 )
@@ -11802,6 +11802,33 @@ def create_host_location(payload: HostLocationCreate, current_user: User = Depen
     x = HostLocation(**{**payload.model_dump(), 'surface_type': surface_type}); db.add(x); db.flush()
     _ensure_approved_turf_configurations(db, x)
     db.commit(); db.refresh(x); return x
+
+
+@router.get('/public/hosting-locations', response_model=list[PublicHostingLocationRead])
+def list_public_hosting_locations(db: Session = Depends(get_db)):
+    """Return one public-safe row per active canonical physical hosting site."""
+    locations = db.query(HostLocation).join(
+        Organization, Organization.id == HostLocation.organization_id
+    ).filter(
+        HostLocation.is_active.is_(True),
+        Organization.is_active.is_(True),
+        Organization.deleted_at.is_(None),
+        func.upper(func.trim(HostLocation.name)) != 'TBD',
+    ).order_by(func.lower(Organization.name), func.lower(HostLocation.name)).all()
+    return [
+        PublicHostingLocationRead(
+            id=location.id,
+            name=location.name,
+            community=location.organization.name,
+            address_line_1=location.address_line1 or location.address,
+            address_line_2=location.address_line2,
+            city=location.city,
+            state=location.state,
+            postal_code=location.zip_code,
+            public_notes=location.public_location_notes,
+        )
+        for location in locations
+    ]
 
 @router.get('/host-locations', response_model=PagedResponse[HostLocationRead], dependencies=[Depends(get_current_user)])
 def list_host_locations(search: str | None = None, organization_id: uuid.UUID | None = None, is_active: bool | None = None, page: int = 1, page_size: int = 20, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):

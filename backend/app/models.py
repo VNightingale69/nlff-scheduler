@@ -163,6 +163,7 @@ class HostLocation(Base, TimestampMixin):
     state: Mapped[str | None] = mapped_column(String(80))
     zip_code: Mapped[str | None] = mapped_column(String(20))
     notes: Mapped[str | None] = mapped_column(Text)
+    public_location_notes: Mapped[str | None] = mapped_column(Text)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     organization = relationship('Organization')
     __table_args__ = (UniqueConstraint('organization_id', 'name', name='uq_host_location_org_name'),)
