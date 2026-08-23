@@ -226,6 +226,34 @@ class ScoreTrackingTest(unittest.TestCase):
         response = self._submit(self.other_user, self.game.id)
         self.assertEqual(response.status_code, 403, response.text)
 
+    def test_community_score_filters_use_active_season_week_and_status(self):
+        second_week = Week(id=uuid.uuid4(), season_id=self.season.id, week_number=2, label='Week 2', start_date=date(2026, 5, 8), end_date=date(2026, 5, 14), primary_game_date=date(2026, 5, 9), status='active')
+        self.other_game.week_id = second_week.id
+        self.other_game.game_date = second_week.primary_game_date
+        self.db.add_all([second_week, GameScore(game_id=self.other_game.id, home_score=14, away_score=7, score_status='PUBLISHED', is_published=True)])
+        self.db.commit()
+
+        all_games = self.client.get('/api/scores/my-community', headers=self._token(self.home_user.id))
+        self.assertEqual({item['game_id'] for item in all_games.json()['items']}, {str(self.game.id), str(self.other_game.id)})
+        self.assertEqual([week['id'] for week in all_games.json()['weeks']], [str(self.week.id), str(second_week.id)])
+
+        week_only = self.client.get(f'/api/scores/my-community?week_id={second_week.id}', headers=self._token(self.home_user.id))
+        self.assertEqual([item['game_id'] for item in week_only.json()['items']], [str(self.other_game.id)])
+        week_and_status = self.client.get(f'/api/scores/my-community?week_id={second_week.id}&status=PUBLISHED', headers=self._token(self.home_user.id))
+        self.assertEqual([item['game_id'] for item in week_and_status.json()['items']], [str(self.other_game.id)])
+        no_games = self.client.get(f'/api/scores/my-community?week_id={self.week.id}&status=PUBLISHED', headers=self._token(self.home_user.id))
+        self.assertEqual(no_games.status_code, 200, no_games.text)
+        self.assertEqual(no_games.json()['items'], [])
+
+        other_season = Season(id=uuid.uuid4(), name='Fall 2025', start_date=date(2025, 8, 1), end_date=date(2025, 11, 1), is_active=False)
+        other_week = Week(id=uuid.uuid4(), season_id=other_season.id, week_number=1, start_date=date(2025, 8, 1), end_date=date(2025, 8, 7), primary_game_date=date(2025, 8, 2), status='active')
+        self.db.add_all([other_season, other_week])
+        self.db.commit()
+        foreign_week = self.client.get(f'/api/scores/my-community?week_id={other_week.id}', headers=self._token(self.home_user.id))
+        self.assertEqual(foreign_week.status_code, 200, foreign_week.text)
+        self.assertEqual(foreign_week.json()['items'], [])
+        self.assertNotIn(str(other_week.id), {week['id'] for week in foreign_week.json()['weeks']})
+
     def test_community_admin_cannot_administer_scores(self):
         self._submit(self.home_user)
         for path in ['approve', 'publish', 'unpublish', 'clear', 'resolve-conflict']:
