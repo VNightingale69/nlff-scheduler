@@ -29169,7 +29169,20 @@ def community_scores(season_id: uuid.UUID | None = None, week_id: uuid.UUID | No
         raise HTTPException(404, 'Active score-entry season not found.')
     rows = _score_rows(db, {'season_id': season.id, 'week_id': week_id, 'division_id': division_id, 'team_id': team_id, 'host_location_id': host_location_id})
     rows = _apply_score_filters(rows, status, published, missing, flagged, conflicts)
-    return {'items': [_score_game_dict(row, include_history=True, db=db) for row in rows], 'total': len(rows)}
+    weeks = db.query(Week).filter(Week.season_id == season.id).order_by(
+        Week.primary_game_date.asc().nullslast(), Week.start_date.asc(), Week.week_number.asc()
+    ).all()
+    return {
+        'items': [_score_game_dict(row, include_history=True, db=db) for row in rows],
+        'total': len(rows),
+        'season_id': str(season.id),
+        'weeks': [{
+            'id': str(week.id),
+            'week_number': week.week_number,
+            'label': _week_label(week),
+            'primary_game_date': _date_only_iso(week.primary_game_date or week.start_date),
+        } for week in weeks],
+    }
 
 
 @router.patch('/scores/{game_id}/submit', dependencies=[Depends(require_roles(ROLE_COMMUNITY_ADMIN))])
