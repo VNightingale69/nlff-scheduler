@@ -7,10 +7,11 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
-from app.models import Field, HostLocation, HostLocationConfiguration, Organization, Role, TimeslotFieldConfiguration, User
+from app.models import Field, FieldConfigurationMember, HostLocation, HostLocationConfiguration, Organization, Role, TimeslotFieldConfiguration, User
 from app.routes.api import create_host_location_configuration
 from app.schemas import HostLocationConfigurationCreate
-from app.services.facility_layout_validation import active_layout_capacities, get_active_supported_layouts, select_supported_layout
+from app.services.facility_layout_validation import active_layout_capacities, get_active_supported_layouts, resolve_facility_configuration, select_supported_layout
+from app.services.schedule_import import _layout_integrity_error
 
 
 @pytest.fixture()
@@ -113,6 +114,42 @@ def test_layout_records_persist_selected_canonical_fields(facility):
     assert {member.field.name for member in persisted[large_small.configuration_name].members} == {
         'Large Field 1', 'Small Field 1',
     }
+
+
+@pytest.mark.parametrize(('code', 'names', 'expected_types'), [
+    ('ONE_LARGE_ONE_SMALL', ('Large Field 1', 'Small Field 1'), {'LARGE', 'SMALL'}),
+    ('THREE_SMALL', ('Small Field 1', 'Small Field 2', 'Small Field 3'), {'SMALL'}),
+    ('TWO_MEDIUM', ('Medium 1', 'Medium 2'), {'MEDIUM'}),
+])
+def test_westosha_layouts_resolve_canonical_logical_fields(
+        facility, code, names, expected_types):
+    db, host, user, fields = facility
+    configuration = _add(db, host, user, {name: fields[name] for name in names}, code)
+
+    resolved = resolve_facility_configuration(configuration, host)
+
+    assert [item.name for item in resolved.logical_fields] == list(names)
+    assert {item.field_type for item in resolved.logical_fields} == expected_types
+    assert _layout_integrity_error(configuration, host) is None
+
+
+def test_stale_westosha_membership_is_rejected_as_logical_not_physical_capacity(facility):
+    db, host, user, fields = facility
+    configuration = _add(db, host, user, {
+        'Large Field 1': fields['Large Field 1'],
+        'Small Field 1': fields['Small Field 1'],
+    }, 'ONE_LARGE_ONE_SMALL')
+    db.add(FieldConfigurationMember(
+        field_configuration_id=configuration.id,
+        field_id=fields['Small Field 2'].id,
+    ))
+    db.commit()
+
+    resolved = resolve_facility_configuration(configuration, host)
+
+    assert len(resolved.logical_fields) == 3
+    assert _layout_integrity_error(configuration, host) == (
+        'Configuration is incomplete: it requires 2 logical fields but has 3 assigned.')
 
 
 def test_validation_and_host_scoped_code_uniqueness(facility):

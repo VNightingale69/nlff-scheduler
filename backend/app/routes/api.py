@@ -24,7 +24,7 @@ from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_AD
 from app.database import get_db
 from app.organizations import active_organization_filter, normalize_organization_name
 from app.models import Division, Field, FieldConfigurationMember, FieldConfigurationOption, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostPlanSelection, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Rulebook, LoginAuditLog, ScheduleChangeLog, ScheduleImport, SchedulePublicationEvent, ScoreHistory, ScoreSubmission, Season, Team, TimeslotFieldConfiguration, Tournament, TournamentDivision, TournamentGame, TournamentTeam, TurfWave, User, Week
-from app.services.facility_layout_validation import active_layout_capacities, active_supported_layouts_query, evaluate_host_timeslot_capacity, field_combination_diagnostics, get_active_supported_layouts, layout_label, select_supported_layout, validate_field_combination, validate_timeslot_demands
+from app.services.facility_layout_validation import active_layout_capacities, active_supported_layouts_query, evaluate_host_timeslot_capacity, field_combination_diagnostics, get_active_supported_layouts, layout_label, resolve_facility_configuration, select_supported_layout, validate_field_combination, validate_timeslot_demands
 from app.services.host_configuration_integrity import repair_host_configuration_memberships
 from app.services.division_field_types import required_field_type_for_division
 from app.services.division_reference import division_reference_query
@@ -269,8 +269,14 @@ def confirm_schedule_import(
                 integrity_error = _layout_integrity_error(supported, db.get(HostLocation, site_id))
                 if integrity_error:
                     raise ValueError(integrity_error)
+                # Consume the same canonical resolution used by preview. The
+                # second resolution is only an optimistic-lock check against
+                # edits made after the preview, not a separate capacity model.
+                resolved_configuration = resolve_facility_configuration(
+                    supported, db.get(HostLocation, site_id))
                 planned_field_ids = set(row.get('layout_field_ids') or [])
-                current_field_ids = {str(member.field_id) for member in supported.members}
+                current_field_ids = {
+                    str(item.field_id) for item in resolved_configuration.logical_fields}
                 if planned_field_ids and current_field_ids != planned_field_ids:
                     raise ValueError(
                         f'Configuration "{row.get("configuration") or row.get("configuration_name")}" '
