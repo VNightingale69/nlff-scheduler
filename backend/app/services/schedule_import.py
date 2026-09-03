@@ -17,7 +17,9 @@ from app.facility_layouts import (JOHNSBURG_APPROVED_LAYOUT_CODES_BY_LOCATION,
                                   johnsburg_location_name)
 from app.services.field_resolution import resolve_legacy_import_field
 from app.services.facility_layout_validation import (get_active_supported_layouts,
-                                                      layout_label)
+                                                      layout_label,
+                                                      log_configuration_integrity_failure,
+                                                      resolve_facility_configuration)
 
 REQUIRED = ('week', 'date', 'kickoff', 'site', 'field', 'fieldtype', 'division', 'hometeam', 'awayteam')
 logger = logging.getLogger(__name__)
@@ -85,10 +87,8 @@ def _layout_integrity_error(configuration, site, physical_area=None):
     """
     if not configuration or not configuration.is_active:
         return 'Configuration could not be resolved or is inactive.'
-    members = list(configuration.members or [])
-    member_ids = [member.field_id for member in members]
-    if len(member_ids) != len(set(member_ids)):
-        return 'Configuration contains a duplicate physical field assignment.'
+    resolved = resolve_facility_configuration(configuration, site)
+    members_by_id = {item.field_id: item for item in resolved.logical_fields}
     expected_by_type = {
         size: int(getattr(configuration, f'{size.lower()}_field_count', 0) or 0)
         for size in ('SMALL', 'MEDIUM', 'LARGE')
@@ -100,26 +100,30 @@ def _layout_integrity_error(configuration, site, physical_area=None):
         for count, size in re.findall(r'(\d+)\s+(SMALL|MEDIUM|LARGE)', label):
             expected_by_type[size] += int(count)
     expected = sum(expected_by_type.values())
-    if len(members) != expected:
-        return (f'Configuration is incomplete: it requires {expected} physical fields '
-                f'but has {len(members)} assigned.')
+    def invalid(reason):
+        log_configuration_integrity_failure(resolved, expected, reason)
+        return reason
+    if len(resolved.logical_fields) != expected:
+        reason = (f'Configuration is incomplete: it requires {expected} logical fields '
+                  f'but has {len(resolved.logical_fields)} assigned.')
+        return invalid(reason)
+    members = [member for member in configuration.members if member.field_id in members_by_id]
     for member in members:
         field = member.field
         if not field:
-            return ('Configuration contains a reference to a physical field that no longer '
-                    'exists. Edit the configuration and reassign its fields before importing.')
+            return invalid('Configuration contains a reference to a physical field that no longer '
+                           'exists. Edit the configuration and reassign its fields before importing.')
         if (field.deleted_at is not None or not field.is_active
                 or field.host_location_id != site.id
                 or (physical_area is not None
                     and field.physical_field_area_id != physical_area.id)):
-            return (f'Configuration references field "{field.name}", but that field is inactive, '
-                    'deleted, or no longer assigned to this physical area.')
+            return invalid(f'Configuration references field "{field.name}", but that field is inactive, '
+                           'deleted, or no longer assigned to this physical area.')
         field_type = _normalized_field_type(field.layout_type)
         configured_count = expected_by_type.get(field_type, 0)
-        actual_count = sum(1 for item in members if item.field and
-                           _normalized_field_type(item.field.layout_type) == field_type)
+        actual_count = sum(1 for item in resolved.logical_fields if item.field_type == field_type)
         if not field_type or actual_count > configured_count:
-            return f'Configuration references field "{field.name}" with an incompatible field type.'
+            return invalid(f'Configuration references field "{field.name}" with an incompatible field type.')
     return None
 
 
@@ -607,7 +611,7 @@ def build_preview(db, season_id, raw_rows):
                         selected_code = existing_code
             selected = grouped[0][2][selected_code]
             layout = getattr(selected, 'name', None) or selected.configuration_name.replace('_', ' ').title()
-            if not is_area_group and (site.surface_type or '').upper() != 'TURF_STADIUM':
+            if not is_area_group:
                 integrity_error = _layout_integrity_error(selected, site)
                 if integrity_error:
                     message = f'Configuration "{layout}" for {site.name} is invalid. {integrity_error}'
@@ -615,7 +619,8 @@ def build_preview(db, season_id, raw_rows):
                         row['status'] = 'ERROR'; row['message'] = message
                         invalid_staged_ids.add(id(staged_row))
                     continue
-            resolved_member_ids = ([str(member.field_id) for member in selected.members]
+            resolved_member_ids = ([str(item.field_id) for item in
+                                    resolve_facility_configuration(selected, site).logical_fields]
                                    if not is_area_group else [])
             for row, staged_row, _candidates in grouped:
                 # This is the canonical scheduling-block identity used by

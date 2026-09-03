@@ -1,5 +1,7 @@
 """Resolve and validate supported facility layouts for scheduled kickoff waves."""
 from collections import Counter
+from dataclasses import dataclass, field as dataclass_field
+import logging
 
 from sqlalchemy.orm import selectinload
 
@@ -9,6 +11,83 @@ from app.turf_configurations import APPROVED_TURF_CONFIGURATIONS, turf_configura
 
 
 SIZES = ('SMALL', 'MEDIUM', 'LARGE')
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ResolvedConfigurationField:
+    """One canonical playable position in a persisted facility layout."""
+    configuration_field_id: object
+    field_id: object
+    name: str
+    field_type: str | None
+    physical_area_id: object | None
+
+
+@dataclass(frozen=True)
+class ResolvedFacilityConfiguration:
+    """Shared preview/persistence representation of a facility layout.
+
+    Generated slots, hosting rows, and physical-area joins are deliberately
+    diagnostics rather than playable positions.  Capacity is based only on
+    canonical configuration-member identities.
+    """
+    facility_id: object
+    facility_name: str
+    configuration_id: object
+    configuration_code: str
+    logical_fields: tuple[ResolvedConfigurationField, ...]
+    physical_area_ids: tuple[object, ...] = dataclass_field(default_factory=tuple)
+    legacy_field_ids: tuple[object, ...] = dataclass_field(default_factory=tuple)
+    generated_slot_ids: tuple[object, ...] = dataclass_field(default_factory=tuple)
+
+
+def resolve_facility_configuration(configuration, site):
+    """Resolve canonical logical fields once, independent of derived rows."""
+    seen = set()
+    logical_fields = []
+    for member in list(getattr(configuration, 'members', ()) or ()):
+        # The member/slot identity is canonical. Repeated ORM rows must never
+        # turn one playable field into extra capacity.
+        identity = member.field_id
+        if identity in seen:
+            continue
+        seen.add(identity)
+        playable = member.field
+        logical_fields.append(ResolvedConfigurationField(
+            configuration_field_id=member.id,
+            field_id=member.field_id,
+            name=getattr(playable, 'name', ''),
+            field_type=_size(getattr(playable, 'layout_type', None)),
+            physical_area_id=getattr(playable, 'physical_field_area_id', None),
+        ))
+    return ResolvedFacilityConfiguration(
+        facility_id=site.id,
+        facility_name=site.name,
+        configuration_id=configuration.id,
+        configuration_code=configuration.configuration_name,
+        logical_fields=tuple(logical_fields),
+        physical_area_ids=tuple(dict.fromkeys(
+            item.physical_area_id for item in logical_fields if item.physical_area_id)),
+        legacy_field_ids=tuple(item.field_id for item in logical_fields),
+    )
+
+
+def log_configuration_integrity_failure(resolved, expected_count, reason):
+    logger.error(
+        'facility_configuration_integrity_failure facility_id=%s facility_name=%s '
+        'configuration_id=%s configuration_code=%s expected_logical_field_count=%s '
+        'resolved_logical_field_count=%s configuration_field_ids=%s field_ids=%s '
+        'field_names=%s physical_area_ids=%s legacy_field_ids=%s generated_slot_ids=%s reason=%s',
+        resolved.facility_id, resolved.facility_name, resolved.configuration_id,
+        resolved.configuration_code, expected_count, len(resolved.logical_fields),
+        [str(item.configuration_field_id) for item in resolved.logical_fields],
+        [str(item.field_id) for item in resolved.logical_fields],
+        [item.name for item in resolved.logical_fields],
+        [str(value) for value in resolved.physical_area_ids],
+        [str(value) for value in resolved.legacy_field_ids],
+        [str(value) for value in resolved.generated_slot_ids], reason,
+    )
 
 
 def _size(value):
