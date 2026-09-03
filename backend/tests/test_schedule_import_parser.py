@@ -380,6 +380,64 @@ def test_legacy_import_commit_persists_existing_field_id():
     assert not game.missing_field_assignment
 
 
+def test_hybrid_site_without_area_keeps_canonical_legacy_field_assignment():
+    """Westosha-style hybrid hosts must not reclassify flat fields as slots."""
+    db, season, teams, site, fields = _legacy_field_context()
+    area = PhysicalFieldArea(
+        host_location_id=site.id, name='Stadium Playing Surface',
+        field_space_type='TURF_STADIUM', is_active=True,
+    )
+    db.add(area); db.flush()
+    db.add(FieldConfigurationOption(
+        physical_field_area_id=area.id, name='Three Small',
+        small_field_count=3, is_active=True,
+    ))
+    db.query(FieldConfigurationMember).delete()
+    db.query(HostLocationConfiguration).delete()
+    db.commit()
+
+    preview, staged = build_preview(db, season.id, [
+        _legacy_row(teams, '', 'Small - 1', 'Small')])
+
+    assert preview['blocking_errors'] == 0
+    assert preview['rows'][0]['physical_area'] is None
+    assert staged[0]['field_architecture'] == 'legacy_field'
+    assert staged[0]['resolved_field_id'] == str(fields['Small - 1'].id)
+    assert staged[0].get('configuration_id') is None
+
+    user_id = uuid.uuid4()
+    record = ScheduleImport(
+        season_id=season.id, imported_by_user_id=user_id,
+        source_filename='westosha-2026-09-27.xlsx',
+        weeks_replaced=json.dumps(preview['weeks']), status='PREVIEW',
+        staged_rows=json.dumps(staged), preview_summary=json.dumps(preview),
+    )
+    db.add(record); db.commit()
+    confirm_schedule_import(record.id, {'confirmation': 'Replace Existing Schedule Games'},
+                            db, SimpleNamespace(id=user_id))
+
+    game = db.query(Game).filter_by(season_id=season.id).one()
+    assert game.field_id == fields['Small - 1'].id
+    assert game.field_instance_id is None
+
+
+def test_hybrid_site_unknown_flat_field_is_blocking_during_preview():
+    db, season, teams, site, _fields = _legacy_field_context()
+    db.add(PhysicalFieldArea(
+        host_location_id=site.id, name='Stadium Playing Surface',
+        field_space_type='TURF_STADIUM', is_active=True,
+    ))
+    db.commit()
+
+    preview, staged = build_preview(db, season.id, [
+        _legacy_row(teams, '', 'Small Field 99', 'Small')])
+
+    assert staged == []
+    assert preview['blocking_errors'] == 1
+    assert preview['rows'][0]['status'] == 'ERROR'
+    assert 'could not be found' in preview['rows'][0]['message']
+
+
 def test_legacy_layout_multiple_games_share_one_timeslot_config():
     db, season, teams, site, _fields = _legacy_field_context()
     preview, staged = build_preview(db, season.id, [
