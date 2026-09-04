@@ -719,15 +719,17 @@ def build_preview(db, season_id, raw_rows):
                 matching_result['message'] = (
                     f'Ready to import. Existing configuration "{current_label}" will be reused.')
             continue
-        missing_ids = required_ids - available_ids
-        missing_fields = [db.get(Field, field_id) for field_id in missing_ids]
-        missing_label = ', '.join(f'"{field.name}"' for field in missing_fields if field)
-        message = (f'Existing configuration "{layout_label(existing.configuration)}" does not '
-                   f'provide required field {missing_label or "assignment"}.')
-        for staged_row in grouped_rows:
-            matching_result = next(item for item in results if item['row'] == staged_row['row'])
-            matching_result['status'] = 'ERROR'; matching_result['message'] = message
-            invalid_staged_ids.add(id(staged_row))
+        # The saved assignment belongs to this exact wave, but it may have
+        # been produced by an older preview (or the schedule being replaced).
+        # Do not let it override the layout selected from the complete set of
+        # fields in the current import. Confirmation will update this one
+        # date/site/kickoff record rather than carrying its layout elsewhere.
+        logger.info(
+            'schedule_import_timeslot_reconfiguration host_location_id=%s date=%s '
+            'kickoff=%s previous_layout_id=%s selected_layout_id=%s required_field_ids=%s',
+            site_id, configuration_date, kickoff_value, existing.configuration_id,
+            grouped_rows[0].get('configuration_id'), sorted(required_ids),
+        )
     staged = [row for row in staged if id(row) not in invalid_staged_ids]
 
     affected = sorted({x['week_number'] for x in staged})
