@@ -313,7 +313,12 @@ def confirm_schedule_import(
                 }
                 required_ids.discard(None)
                 if not configuration_supports_required_slots(available_ids, required_ids):
-                    raise ValueError(f'{row.get("site")} already has an incompatible configuration for {row.get("date")} at {row.get("kickoff")}')
+                    # This import has already resolved all games in the exact
+                    # date/site/kickoff wave to one supported layout. Replace
+                    # a stale assignment for that wave; never borrow a layout
+                    # from an adjacent kickoff merely because the date/site
+                    # match.
+                    existing_override.configuration_id = uuid.UUID(configuration_value)
             if not existing_override:
                 existing_override = TimeslotFieldConfiguration(
                     host_location_id=site_id, configuration_date=game_date,

@@ -463,7 +463,7 @@ def test_legacy_layout_multiple_games_share_one_timeslot_config():
         host_location_id=site.id).count() == 1
 
 
-def test_different_existing_config_blocks_during_preview():
+def test_different_existing_config_is_replaced_for_exact_timeslot():
     db, season, teams, site, _fields = _legacy_field_context()
     existing_layout = db.query(HostLocationConfiguration).filter_by(
         host_location_id=site.id, configuration_name='1 Large').one()
@@ -477,10 +477,58 @@ def test_different_existing_config_blocks_during_preview():
         _legacy_row(teams, 'Medium - 2', 'Medium 2', 'Medium', index=2),
     ])
 
-    assert staged == []
-    assert preview['blocking_errors'] == 2
-    assert all('does not provide required field' in row['message']
-               for row in preview['rows'])
+    assert preview['blocking_errors'] == 0
+    assert len(staged) == 2
+    assert {row['configuration'] for row in preview['rows']} == {'2 Medium'}
+    user_id = uuid.uuid4()
+    record = ScheduleImport(
+        season_id=season.id, imported_by_user_id=user_id,
+        source_filename='reconfigured-wave.xlsx',
+        weeks_replaced=json.dumps(preview['weeks']), status='PREVIEW',
+        staged_rows=json.dumps(staged), preview_summary=json.dumps(preview),
+    )
+    db.add(record); db.commit()
+
+    confirm_schedule_import(record.id, {'confirmation': 'Replace Existing Schedule Games'},
+                            db, SimpleNamespace(id=user_id))
+
+    saved = db.query(TimeslotFieldConfiguration).filter_by(
+        host_location_id=site.id, configuration_date=_date('2026-08-16'),
+        kickoff_time=_time('9:00 AM')).one()
+    assert saved.configuration.configuration_name == '2 Medium'
+
+
+@pytest.mark.parametrize('layouts', [
+    ('3 Small', '1 Small + 1 Large', '1 Small + 1 Large'),
+    ('1 Small + 1 Large', '3 Small', '1 Small + 1 Large'),
+])
+def test_legacy_site_configuration_is_scoped_to_each_kickoff(layouts):
+    db, season, teams, site, _fields = _legacy_field_context()
+    fields_by_layout = {
+        '3 Small': (('Small - 1', 'Small'), ('Small - 2', 'Small'),
+                    ('Small - 3', 'Small')),
+        '1 Small + 1 Large': (('Small - 1', 'Small'), ('Large - 1', 'Large')),
+    }
+    rows = []
+    team_index = 0
+    for kickoff, layout in zip(('9:00 AM', '10:00 AM', '11:00 AM'), layouts):
+        for field_name, field_type in fields_by_layout[layout]:
+            row = _legacy_row(teams, '', field_name, field_type, index=team_index)
+            row['kickoff'] = kickoff
+            rows.append(row)
+            team_index += 2
+
+    preview, staged = build_preview(db, season.id, rows)
+
+    assert preview['blocking_errors'] == 0
+    assert preview['importable_games'] == len(rows)
+    for kickoff, expected_layout in zip(('09:00', '10:00', '11:00'), layouts):
+        preview_wave = [row for row in preview['rows'] if row['kickoff'] == kickoff]
+        staged_wave = [row for row in staged if row['kickoff'] == kickoff]
+        assert {row['configuration'] for row in preview_wave} == {expected_layout}
+        assert len({row['configuration_group_key'] for row in staged_wave}) == 1
+        assert all(f'|{kickoff}|' in row['configuration_group_key'] for row in staged_wave)
+    assert len({row['configuration_group_key'] for row in staged}) == 3
 
 
 @pytest.mark.parametrize(('existing_name', 'imported_fields'), [
