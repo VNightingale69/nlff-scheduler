@@ -34,6 +34,17 @@ APPROVED_TURF_CONFIGURATIONS: tuple[dict[str, object], ...] = (
         'remainingYards': 14,
     },
     {
+        'code': 'TWO_LARGE',
+        'displayName': 'Two Large Fields',
+        'availableFields': (FIELD_SIZE_LARGE, FIELD_SIZE_LARGE),
+        'supportedFieldSizes': (FIELD_SIZE_LARGE,),
+        'supportedDivisions': ('Coed 6-7', 'Coed 8', 'Girls 6-8'),
+        'maxFieldsPerWave': 2,
+        'schedulingNote': 'Alternative layout for two simultaneous Large games.',
+        'spaceUsedYards': 106,
+        'remainingYards': 14,
+    },
+    {
         'code': 'ONE_LARGE_ONE_SMALL',
         'displayName': 'One Large Field + One Small Field',
         'availableFields': (FIELD_SIZE_SMALL, FIELD_SIZE_LARGE),

@@ -24,6 +24,7 @@ TURF_APPROVED_LAYOUTS_BY_SMALL_MEDIUM_LARGE = {
     (3, 0, 0): 'THREE_SMALL',
     (0, 2, 0): 'TWO_MEDIUM',
     (1, 0, 1): 'ONE_LARGE_ONE_SMALL',
+    (0, 0, 2): 'TWO_LARGE',
 }
 
 

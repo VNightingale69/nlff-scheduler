@@ -3,6 +3,7 @@ import csv
 import io
 import logging
 import re
+import uuid
 from datetime import date, datetime, time, timedelta
 
 from openpyxl import load_workbook
@@ -16,10 +17,13 @@ from app.facility_layouts import (JOHNSBURG_APPROVED_LAYOUT_CODES_BY_LOCATION,
                                   johnsburg_field_templates,
                                   johnsburg_location_name)
 from app.services.field_resolution import resolve_legacy_import_field
-from app.services.facility_layout_validation import (get_active_supported_layouts,
+from app.services.facility_layout_validation import (choose_supported_configuration,
+                                                      get_active_supported_layouts,
+                                                      configuration_supports_field_types,
                                                       layout_label,
                                                       log_configuration_integrity_failure,
-                                                      resolve_facility_configuration)
+                                                      resolve_facility_configuration,
+                                                      supported_configurations_for_fields)
 
 REQUIRED = ('week', 'date', 'kickoff', 'site', 'field', 'fieldtype', 'division', 'hometeam', 'awayteam')
 logger = logging.getLogger(__name__)
@@ -261,11 +265,14 @@ def _configuration_candidates(db, site, field_name, field_type):
         if configuration and configuration.members:
             templates = [(member.field.name, member.field.layout_type) for member in configuration.members
                          if member.field and member.field.is_active and member.field.deleted_at is None]
-        if templates and any(
-            _normalized_name(name) == requested_name
-            and _key(template_type).startswith(_key(field_type))
-            for name, template_type in templates
-        ):
+        # Numbered members are canonical layout positions, not an allow-list.
+        # Any active physical field of a supported type may occupy that slot.
+        if (configuration and configuration_supports_field_types(
+                configuration, [field_type])) or (templates and any(
+                _normalized_name(name) == requested_name
+                and _key(template_type).startswith(_key(field_type))
+                for name, template_type in templates
+        )):
             candidates[layout_code] = configured_by_code.get(layout_code)
     return candidates
 
@@ -525,6 +532,10 @@ def build_preview(db, season_id, raw_rows):
         common_ids = set(grouped[0][2])
         for _row, _staged_row, candidates in grouped[1:]:
             common_ids.intersection_update(candidates)
+        if not is_area_group:
+            wave_types = [row['imported_field_type'] for row, *_ in grouped]
+            common_ids = {code for code in common_ids if configuration_supports_field_types(
+                grouped[0][2][code], wave_types)}
         if not common_ids:
             site_name = grouped[0][0]['site']
             area_label = grouped[0][0].get('physical_area')
@@ -567,7 +578,12 @@ def build_preview(db, season_id, raw_rows):
                              _normalized_name(getattr(grouped[0][2][code], 'name', None)
                                               or grouped[0][2][code].configuration_name) == _normalized_name(explicit)}
             elif not is_area_group:
-                exact_ids = {sorted(common_ids)[0]}
+                chosen = choose_supported_configuration(
+                    [grouped[0][2][code] for code in common_ids],
+                    [row['imported_field_type'] for row, *_ in grouped],
+                )
+                exact_ids = {str(chosen.configuration_name).strip().upper()
+                             .replace('-', '_').replace(' ', '_')} if chosen else set()
             if len(exact_ids) != 1:
                 slots = ' + '.join(row['field'] for row, *_ in grouped)
                 message = (f'The imported slots {slots} do not match any supported layout for '
@@ -704,12 +720,16 @@ def build_preview(db, season_id, raw_rows):
                 matching_result['status'] = 'ERROR'; matching_result['message'] = message
                 invalid_staged_ids.add(id(staged_row))
             continue
-        available_ids = {str(member.field_id) for member in existing.configuration.members
-                         if member.field and member.field.is_active and member.field.deleted_at is None}
         required_ids = {row.get('resolved_field_id') or row.get('field_id') for row in grouped_rows}
         required_ids.discard(None)
-        if configuration_supports_required_slots(available_ids, required_ids):
+        matching, resolution_error = supported_configurations_for_fields(
+            db, existing.host_location_id, [uuid.UUID(value) for value in required_ids])
+        if not resolution_error and any(
+                item.id == existing.configuration_id for item in matching):
             current_label = layout_label(existing.configuration)
+            available_ids = {str(item.field_id) for item in
+                             resolve_facility_configuration(existing.configuration,
+                                                            db.get(HostLocation, site_id)).logical_fields}
             for staged_row in grouped_rows:
                 staged_row['configuration_id'] = str(existing.configuration_id)
                 staged_row['configuration_name'] = existing.configuration.configuration_name
