@@ -236,6 +236,28 @@ def test_retired_timeslot_selection_does_not_override_current_layouts(facility):
     }
 
 
+def test_inactive_two_large_is_not_resurrected_for_partial_large_wave(facility):
+    db, host, user, fields = facility
+    large_small = _add(db, host, user, {
+        'Large Field 1': fields['Large Field 1'],
+        'Small Field 1': fields['Small Field 1'],
+    }, 'ONE_LARGE_ONE_SMALL')
+    retired = HostLocationConfiguration(
+        host_location_id=host.id, configuration_name='TWO_LARGE',
+        large_field_count=2, is_active=False,
+    )
+    db.add(retired); db.commit()
+
+    active = get_active_supported_layouts(db, host.id)
+    _override, selected, valid = select_supported_layout(
+        db, host.id, date(2026, 9, 27), time(14), ['LARGE'])
+
+    assert retired not in active
+    assert all(layout.is_active for layout in active)
+    assert valid
+    assert selected.id == large_small.id
+
+
 def test_active_timeslot_configuration_is_an_explicit_capacity_lock(facility):
     db, host, user, fields = facility
     three_small = _add(db, host, user, {name: fields[name] for name in
