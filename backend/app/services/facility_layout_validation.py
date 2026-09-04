@@ -190,9 +190,10 @@ def get_active_supported_layouts(db, host_location_id):
     """
     host = db.query(HostLocation).filter(HostLocation.id == host_location_id).first()
     if host and (host.surface_type or '').upper() == 'TURF_STADIUM':
-        # Approved layouts describe capability. They must not disappear because
-        # a legacy row is inactive or only the most recently generated layout
-        # happened to be persisted.
+        # Approved layouts describe capability when a site has not persisted a
+        # decision for that layout yet.  A persisted inactive row is an
+        # explicit retirement, however, and must never be resurrected merely
+        # because its code is in the approved catalog.
         existing = {
             str(row.configuration_name or '').strip().upper(): row
             for row in db.query(HostLocationConfiguration).filter(
@@ -202,7 +203,10 @@ def get_active_supported_layouts(db, host_location_id):
         layouts = []
         for sort_order, metadata in enumerate(APPROVED_TURF_CONFIGURATIONS):
             code = str(metadata['code'])
-            configuration = existing.get(code) or HostLocationConfiguration(
+            persisted = existing.get(code)
+            if persisted is not None and not persisted.is_active:
+                continue
+            configuration = persisted or HostLocationConfiguration(
                 host_location_id=host_location_id,
                 configuration_name=code,
                 is_active=True,

@@ -451,6 +451,44 @@ def test_september_27_westosha_preview_accepts_reported_field_waves():
     assert db.query(Game).filter_by(season_id=season.id).count() == 4
 
 
+def test_september_27_westosha_sequential_large_games_use_active_partial_layout():
+    db, season, teams, site, fields = _legacy_field_context()
+    site.name = 'Westosha High School Stadium'
+    site.surface_type = 'TURF_STADIUM'
+    fields['Large - 1'].name = 'Large Field 1'
+    large_small = db.query(HostLocationConfiguration).filter_by(
+        host_location_id=site.id, configuration_name='1 Small + 1 Large').one()
+    large_small.configuration_name = 'ONE_LARGE_ONE_SMALL'
+    two_large = HostLocationConfiguration(
+        host_location_id=site.id, configuration_name='TWO_LARGE',
+        large_field_count=2, is_active=False)
+    db.add(two_large)
+    week = db.query(Week).filter_by(season_id=season.id).one()
+    week.start_date = week.end_date = week.primary_game_date = _date('2026-09-27')
+    db.commit()
+    rows = []
+    for index, kickoff in enumerate(('2:00 PM', '3:00 PM')):
+        row = _hiller_row(kickoff, 'Large Field 1', 'Large',
+                          teams[index * 2], teams[index * 2 + 1])
+        row.update({'site': site.name, 'date': '2026-09-27'})
+        rows.append(row)
+
+    preview, staged, result = _confirm_rows(
+        db, season, rows, filename='westosha-2026-09-27.xlsx')
+
+    assert preview['blocking_errors'] == 0
+    assert [row['status'] for row in preview['rows']] == ['VALID', 'VALID']
+    assert {row['configuration'] for row in preview['rows']} == {
+        'One Large One Small'}
+    assert len({row['configuration_group_key'] for row in staged}) == 2
+    assert result['games_imported'] == 2
+    games = db.query(Game).filter_by(season_id=season.id).order_by(Game.kickoff_time).all()
+    assert [game.kickoff_time for game in games] == [_time('2:00 PM'), _time('3:00 PM')]
+    assert len({game.field_id for game in games}) == 1
+    assert all(game.timeslot_configuration.configuration_id == large_small.id
+               for game in games)
+
+
 def test_legacy_import_commit_persists_existing_field_id():
     db, season, teams, site, fields = _legacy_field_context()
     preview, staged = build_preview(db, season.id, [
