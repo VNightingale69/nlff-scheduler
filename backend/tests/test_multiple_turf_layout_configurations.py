@@ -10,7 +10,7 @@ from app.database import Base
 from app.models import Field, FieldConfigurationMember, HostLocation, HostLocationConfiguration, Organization, Role, TimeslotFieldConfiguration, User
 from app.routes.api import create_host_location_configuration
 from app.schemas import HostLocationConfigurationCreate
-from app.services.facility_layout_validation import active_layout_capacities, get_active_supported_layouts, resolve_facility_configuration, select_supported_layout
+from app.services.facility_layout_validation import active_layout_capacities, evaluate_host_timeslot_capacity, get_active_supported_layouts, resolve_facility_configuration, select_supported_layout, supported_configurations_for_fields
 from app.services.schedule_import import _layout_integrity_error
 
 
@@ -27,7 +27,8 @@ def facility():
     fields = {
         name: Field(id=uuid.uuid4(), host_location_id=host.id, name=name, layout_type=size)
         for name, size in (
-            ('Large Field 1', 'LARGE'), ('Medium 1', 'MEDIUM'), ('Medium 2', 'MEDIUM'),
+            ('Large Field 1', 'LARGE'), ('Large Field 2', 'LARGE'),
+            ('Medium 1', 'MEDIUM'), ('Medium 2', 'MEDIUM'),
             ('Small Field 1', 'SMALL'), ('Small Field 2', 'SMALL'), ('Small Field 3', 'SMALL'),
         )
     }
@@ -50,17 +51,18 @@ def test_three_alternative_layouts_remain_active_and_match_whole_waves(facility)
     _add(db, host, user, {name: fields[name] for name in ('Large Field 1', 'Small Field 1')}, 'ONE_LARGE_ONE_SMALL')
 
     layouts = get_active_supported_layouts(db, host.id)
-    assert len(layouts) == 3
+    assert len(layouts) == 4
     assert {layout.configuration_name for layout in layouts} == {
-        'THREE_SMALL', 'TWO_MEDIUM', 'ONE_LARGE_ONE_SMALL',
+        'THREE_SMALL', 'TWO_MEDIUM', 'ONE_LARGE_ONE_SMALL', 'TWO_LARGE',
     }
     assert select_supported_layout(db, host.id, None, None, ['SMALL'] * 3)[1].configuration_name == 'THREE_SMALL'
     assert select_supported_layout(db, host.id, None, None, ['MEDIUM'] * 2)[1].configuration_name == 'TWO_MEDIUM'
     assert select_supported_layout(db, host.id, None, None, ['MEDIUM'])[1].configuration_name == 'TWO_MEDIUM'
     assert select_supported_layout(db, host.id, None, None, ['LARGE', 'SMALL'])[1].configuration_name == 'ONE_LARGE_ONE_SMALL'
+    assert select_supported_layout(db, host.id, None, None, ['LARGE'] * 2)[1].configuration_name == 'TWO_LARGE'
     assert not select_supported_layout(db, host.id, None, None, ['LARGE', 'MEDIUM'])[2]
     assert {row['code'] for row in active_layout_capacities(db, host.id)} == {
-        'THREE_SMALL', 'TWO_MEDIUM', 'ONE_LARGE_ONE_SMALL',
+        'THREE_SMALL', 'TWO_MEDIUM', 'ONE_LARGE_ONE_SMALL', 'TWO_LARGE',
     }
 
 
@@ -69,7 +71,7 @@ def test_new_layout_is_visible_immediately_without_slot_regeneration_or_cache_cl
     _add(db, host, user, {'Large Field 1': fields['Large Field 1'],
                          'Small Field 1': fields['Small Field 1']}, 'ONE_LARGE_ONE_SMALL')
     assert {layout.configuration_name for layout in get_active_supported_layouts(db, host.id)} == {
-        'THREE_SMALL', 'TWO_MEDIUM', 'ONE_LARGE_ONE_SMALL',
+        'THREE_SMALL', 'TWO_MEDIUM', 'ONE_LARGE_ONE_SMALL', 'TWO_LARGE',
     }
 
     two_medium = _add(db, host, user, {'Medium 1': fields['Medium 1'], 'Medium 2': fields['Medium 2']},
@@ -77,7 +79,7 @@ def test_new_layout_is_visible_immediately_without_slot_regeneration_or_cache_cl
 
     layouts = get_active_supported_layouts(db, host.id)
     assert {layout.configuration_name for layout in layouts} == {
-        'THREE_SMALL', 'TWO_MEDIUM', 'ONE_LARGE_ONE_SMALL',
+        'THREE_SMALL', 'TWO_MEDIUM', 'ONE_LARGE_ONE_SMALL', 'TWO_LARGE',
     }
     assert select_supported_layout(db, host.id, date(2026, 8, 23), time(13), ['MEDIUM'])[1].id == two_medium.id
 
@@ -150,6 +152,40 @@ def test_stale_westosha_membership_is_rejected_as_logical_not_physical_capacity(
     assert len(resolved.logical_fields) == 3
     assert _layout_integrity_error(configuration, host) == (
         'Configuration is incomplete: it requires 2 logical fields but has 3 assigned.')
+
+
+def test_westosha_resolves_numbered_fields_by_type_capacity_and_rejects_duplicates(facility):
+    db, host, user, fields = facility
+    large_small = _add(db, host, user, {
+        'Large Field 1': fields['Large Field 1'],
+        'Small Field 1': fields['Small Field 1'],
+    }, 'ONE_LARGE_ONE_SMALL')
+    three_small = _add(db, host, user, {name: fields[name] for name in
+                                       ('Small Field 1', 'Small Field 2', 'Small Field 3')}, 'THREE_SMALL')
+
+    for small_name in ('Small Field 1', 'Small Field 2', 'Small Field 3'):
+        matching, error = supported_configurations_for_fields(
+            db, host.id, [fields['Large Field 1'].id, fields[small_name].id])
+        assert error is None
+        assert large_small.id in {item.id for item in matching}
+    matching, error = supported_configurations_for_fields(
+        db, host.id, [fields['Small Field 1'].id, fields['Small Field 3'].id])
+    assert error is None
+    assert three_small.id in {item.id for item in matching}
+    for small_name in ('Small Field 2', 'Small Field 3'):
+        assert select_supported_layout(
+            db, host.id, None, None, [fields[small_name].layout_type]
+        )[1].configuration_name == 'THREE_SMALL'
+
+    matching, _error = supported_configurations_for_fields(db, host.id, [
+        fields['Large Field 1'].id, fields['Small Field 1'].id, fields['Small Field 2'].id])
+    assert matching == []
+    duplicate = evaluate_host_timeslot_capacity(db, host.id, date(2026, 9, 27), time(13), [
+        {'field_id': fields['Small Field 2'].id, 'field_name': 'Small Field 2', 'required_field_size': 'SMALL'},
+        {'field_id': fields['Small Field 2'].id, 'field_name': 'Small Field 2', 'required_field_size': 'SMALL'},
+    ])
+    assert not duplicate['valid']
+    assert 'more than once' in duplicate['reason']
 
 
 def test_validation_and_host_scoped_code_uniqueness(facility):

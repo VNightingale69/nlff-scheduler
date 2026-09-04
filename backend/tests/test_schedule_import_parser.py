@@ -357,6 +357,100 @@ def test_legacy_site_rejects_invalid_field_combination():
                for row in preview['rows'])
 
 
+@pytest.mark.parametrize('small_number', [1, 2, 3])
+def test_westosha_large_field_accepts_any_numbered_small_field(small_number):
+    db, season, teams, site, fields = _legacy_field_context()
+    site.name = 'Westosha High School Stadium'
+    fields['Large - 1'].name = 'Large Field 1'
+    for number in range(1, 4):
+        fields[f'Small - {number}'].name = f'Small Field {number}'
+    db.commit()
+    rows = [
+        _hiller_row('1:00 PM', 'Large Field 1', 'Large', teams[0], teams[1]),
+        _hiller_row('1:00 PM', f'Small Field {small_number}', 'Small', teams[2], teams[3]),
+    ]
+    for row in rows:
+        row['site'] = site.name
+
+    preview, staged = build_preview(db, season.id, rows)
+
+    assert len(staged) == 2
+    assert preview['blocking_errors'] == 0
+    assert {row['status'] for row in preview['rows']} == {'VALID'}
+    assert {row['configuration'] for row in preview['rows']} == {'1 Small + 1 Large'}
+
+
+@pytest.mark.parametrize('small_numbers', [(1, 3), (2,), (3,)])
+def test_westosha_partial_small_waves_use_three_small_configuration(small_numbers):
+    db, season, teams, site, fields = _legacy_field_context()
+    site.name = 'Westosha High School Stadium'
+    for number in range(1, 4):
+        fields[f'Small - {number}'].name = f'Small Field {number}'
+    db.commit()
+    rows = []
+    for index, small_number in enumerate(small_numbers):
+        row = _hiller_row('1:00 PM', f'Small Field {small_number}', 'Small',
+                          teams[index * 2], teams[index * 2 + 1])
+        row['site'] = site.name
+        rows.append(row)
+
+    preview, staged = build_preview(db, season.id, rows)
+
+    assert len(staged) == len(rows)
+    assert preview['blocking_errors'] == 0
+    assert {row['configuration'] for row in preview['rows']} == {'3 Small'}
+
+
+def test_westosha_large_plus_two_small_fields_is_rejected():
+    db, season, teams, site, fields = _legacy_field_context()
+    site.name = 'Westosha High School Stadium'
+    fields['Large - 1'].name = 'Large Field 1'
+    for number in range(1, 4):
+        fields[f'Small - {number}'].name = f'Small Field {number}'
+    db.commit()
+    rows = []
+    for index, (name, field_type) in enumerate((
+            ('Large Field 1', 'Large'), ('Small Field 1', 'Small'),
+            ('Small Field 2', 'Small'))):
+        row = _hiller_row('1:00 PM', name, field_type,
+                          teams[index * 2], teams[index * 2 + 1])
+        row['site'] = site.name
+        rows.append(row)
+
+    preview, staged = build_preview(db, season.id, rows)
+
+    assert staged == []
+    assert preview['blocking_errors'] == 3
+    assert all(row['status'] == 'ERROR' for row in preview['rows'])
+
+
+def test_september_27_westosha_preview_accepts_reported_field_waves():
+    db, season, teams, site, fields = _legacy_field_context()
+    site.name = 'Westosha High School Stadium'
+    fields['Large - 1'].name = 'Large Field 1'
+    for number in range(1, 4):
+        fields[f'Small - {number}'].name = f'Small Field {number}'
+    week = db.query(Week).filter_by(season_id=season.id).one()
+    week.start_date = week.end_date = week.primary_game_date = _date('2026-09-27')
+    db.commit()
+    rows = []
+    for index, (kickoff, small_number) in enumerate((('1:00 PM', 2), ('2:00 PM', 3))):
+        large = _hiller_row(kickoff, 'Large Field 1', 'Large', teams[index * 4], teams[index * 4 + 1])
+        small = _hiller_row(kickoff, f'Small Field {small_number}', 'Small', teams[index * 4 + 2], teams[index * 4 + 3])
+        for row in (large, small):
+            row.update({'site': site.name, 'date': '2026-09-27'})
+        rows.extend((large, small))
+
+    preview, staged, _result = _confirm_rows(
+        db, season, rows, filename='westosha-2026-09-27.xlsx')
+
+    assert len(staged) == 4
+    assert preview['blocking_errors'] == 0
+    assert all(row['status'] == 'VALID' for row in preview['rows'])
+    assert all(row['configuration'] == '1 Small + 1 Large' for row in preview['rows'])
+    assert db.query(Game).filter_by(season_id=season.id).count() == 4
+
+
 def test_legacy_import_commit_persists_existing_field_id():
     db, season, teams, site, fields = _legacy_field_context()
     preview, staged = build_preview(db, season.id, [

@@ -33,9 +33,8 @@ def test_turf_stadium_configurations_are_limited_to_approved_wave_codes():
                 assert isinstance(value, ast.Constant)
                 codes.add(value.value)
 
-    assert codes == {'THREE_SMALL', 'TWO_MEDIUM', 'ONE_LARGE_ONE_SMALL'}
+    assert codes == {'THREE_SMALL', 'TWO_MEDIUM', 'ONE_LARGE_ONE_SMALL', 'TWO_LARGE'}
     assert 'ONE_MEDIUM_ONE_SMALL' not in codes
-    assert 'TWO_LARGE' not in codes
     assert 'ONE_LARGE_ONE_MEDIUM' not in codes
     assert 'ONE_MEDIUM_TWO_SMALL' not in codes
 
@@ -47,8 +46,8 @@ def test_manual_turf_validation_slot_counts_match_approved_wave_codes_only():
     code_values = {value.value for value in layouts.values if isinstance(value, ast.Constant)}
     count_keys = {tuple(item.value for item in key.elts) for key in layouts.keys if isinstance(key, ast.Tuple)}
 
-    assert code_values == {'THREE_SMALL', 'TWO_MEDIUM', 'ONE_LARGE_ONE_SMALL'}
-    assert count_keys == {(3, 0, 0), (0, 2, 0), (1, 0, 1)}
+    assert code_values == {'THREE_SMALL', 'TWO_MEDIUM', 'ONE_LARGE_ONE_SMALL', 'TWO_LARGE'}
+    assert count_keys == {(3, 0, 0), (0, 2, 0), (1, 0, 1), (0, 0, 2)}
 
 
 def test_manual_validation_uses_standard_explicit_turf_slot_sets():
@@ -67,7 +66,7 @@ def test_manual_validation_uses_standard_explicit_turf_slot_sets():
         'THREE_SMALL': {'Small Field 1', 'Small Field 2', 'Small Field 3'},
         'TWO_MEDIUM': {'Medium Field 1', 'Medium Field 2'},
         'ONE_LARGE_ONE_SMALL': {'Small Field', 'Large Field'},
+        'TWO_LARGE': {'Large Field 1', 'Large Field 2'},
     }
-    assert all('Large Field 2' not in labels for labels in parsed.values())
     assert all(not ({'Medium Field 1', 'Large Field 1'} <= labels) for labels in parsed.values())
     assert all(not ({'Small Field 1', 'Small Field 2', 'Large Field 1'} <= labels) for labels in parsed.values())

@@ -2,6 +2,7 @@
 from collections import Counter
 from dataclasses import dataclass, field as dataclass_field
 import logging
+import re
 
 from sqlalchemy.orm import selectinload
 
@@ -96,7 +97,72 @@ def _size(value):
 
 
 def _capacity(configuration):
-    return {size: int(getattr(configuration, f'{size.lower()}_field_count', 0) or 0) for size in SIZES}
+    capacity = {size: int(getattr(configuration, f'{size.lower()}_field_count', 0) or 0) for size in SIZES}
+    if any(capacity.values()):
+        return capacity
+    # Capacity columns were added after the first custom configurations. Keep
+    # those rows usable by normalizing their human/code labels once here.
+    label = str(getattr(configuration, 'configuration_name', '') or '').strip().upper()
+    words = {'ONE': 1, 'TWO': 2, 'THREE': 3, 'FOUR': 4}
+    tokens = re.findall(r'[A-Z]+|\d+', label)
+    for index, token in enumerate(tokens[:-1]):
+        size = tokens[index + 1]
+        if size in SIZES and (token.isdigit() or token in words):
+            capacity[size] += int(token) if token.isdigit() else words[token]
+    return capacity
+
+
+def configuration_supports_field_types(configuration, field_types):
+    """Return whether one layout can accommodate the complete typed wave.
+
+    Configuration members describe the canonical positions used to build a
+    layout; they are not an allow-list of numbered physical fields.  Runtime
+    assignments therefore match the layout's normalized type capacities.
+    """
+    demand = Counter(filter(None, (_size(value) for value in field_types)))
+    capacity = _capacity(configuration)
+    return bool(demand) and all(demand[size] <= capacity[size] for size in SIZES)
+
+
+def choose_supported_configuration(configurations, field_types, previous_code=None):
+    """Choose a deterministic containing layout for one complete wave."""
+    demand = Counter(filter(None, (_size(value) for value in field_types)))
+    supported = [item for item in configurations
+                 if configuration_supports_field_types(item, field_types)]
+    if not supported:
+        return None
+    demand_exact = {size: int(demand.get(size, 0)) for size in SIZES}
+    demand_total = sum(demand_exact.values())
+    return min(supported, key=lambda item: (
+        0 if _capacity(item) == demand_exact else 1,
+        sum(_capacity(item)[size] for size in SIZES if not demand_exact[size]),
+        sum(_capacity(item).values()) - demand_total,
+        0 if item.configuration_name == previous_code else 1,
+        item.configuration_name,
+    ))
+
+
+def supported_configurations_for_fields(db, host_id, field_ids):
+    """Resolve active physical fields to layouts by type and capacity.
+
+    The original sequence is retained long enough to reject duplicate use of
+    one physical field.  Only after that identity check do normalized field
+    types determine which facility configurations can support the wave.
+    """
+    assigned = [value for value in field_ids if value]
+    if len(assigned) != len(set(assigned)):
+        return [], 'A physical field is assigned more than once at this date and kickoff.'
+    fields = db.query(Field).filter(Field.id.in_(assigned)).all() if assigned else []
+    by_id = {item.id: item for item in fields}
+    if any(value not in by_id for value in assigned) or any(
+        item.host_location_id != host_id or not item.is_active or item.deleted_at is not None
+        for item in fields
+    ):
+        return [], 'Assigned fields do not belong to this host or are inactive.'
+    field_types = [by_id[value].layout_type for value in assigned]
+    configurations = get_active_supported_layouts(db, host_id)
+    return [item for item in configurations
+            if configuration_supports_field_types(item, field_types)], None
 
 
 def active_supported_layouts_query(db, host_location_id):
@@ -237,14 +303,7 @@ def select_supported_layout(db, host_id, game_date, kickoff, required_sizes, *, 
         if previous and previous.configuration:
             previous_code = previous.configuration.configuration_name
 
-    demand_total = sum(demand.values())
-    demand_exact = {size: int(demand.get(size, 0)) for size in SIZES}
-    selected = min(supported, key=lambda item: (
-        0 if _capacity(item) == demand_exact else 1,
-        sum(_capacity(item).values()) - demand_total,
-        0 if item.configuration_name == previous_code else 1,
-        item.configuration_name,
-    ))
+    selected = choose_supported_configuration(supported, required_sizes, previous_code)
     override = None
     if persist and selected.id is not None:
         if existing:
@@ -277,11 +336,16 @@ def layout_label(configuration):
 def validate_field_combination(db, host_id, field_ids):
     """Return whether canonical physical fields can operate simultaneously.
 
-    A containing named configuration is a fast path. Otherwise only explicit
-    physical-conflict relationships make independently usable fields
-    incompatible; absence of an enumerated configuration is not a conflict.
+    Configured hosts resolve layouts by normalized type capacity, while the
+    original field IDs still enforce host ownership, duplicate assignments,
+    and explicit physical-conflict relationships. Hosts with no configuration
+    records retain the legacy active-field fallback.
     """
-    used = {field_id for field_id in field_ids if field_id}
+    assigned = [field_id for field_id in field_ids if field_id]
+    used = set(assigned)
+    matching, resolution_error = supported_configurations_for_fields(db, host_id, assigned)
+    if resolution_error:
+        return False, [item.configuration_name for item in get_active_supported_layouts(db, host_id)], used
     # Membership provides the configuration fast path, including at facilities
     # that also use synthetic turf capacity layouts.
     configurations = active_supported_layouts_query(db, host_id).order_by(
@@ -315,13 +379,11 @@ def validate_field_combination(db, host_id, field_ids):
                 Field.deleted_at.is_(None),
             )
         }
-        return used.issubset(active), [], active
-    if not layouts:
+        if not matching:
+            return used.issubset(active), [], active
+    if configurations and not layouts:
         return False, [configuration.configuration_name for configuration in configurations], used
-    matching = [configuration for configuration, members in layouts if used.issubset(members)]
     names = [configuration.configuration_name for configuration in configurations]
-    if matching:
-        return True, names, used
     active = {
         row.id for row in db.query(Field.id).filter(
             Field.host_location_id == host_id, Field.is_active.is_(True), Field.deleted_at.is_(None),
@@ -334,7 +396,7 @@ def validate_field_combination(db, host_id, field_ids):
         FieldPhysicalConflict.field_a_id.in_(used),
         FieldPhysicalConflict.field_b_id.in_(used),
     ).first()
-    return conflicts is None, names, used
+    return bool(matching) and conflicts is None, names, used
 
 
 def fields_can_operate_simultaneously(db, host_id, field_ids):
@@ -369,7 +431,10 @@ def fields_can_operate_simultaneously(db, host_id, field_ids):
 
 def field_combination_diagnostics(db, host_id, field_ids):
     """Describe the persisted, host-ID-scoped membership decision."""
-    used = {field_id for field_id in field_ids if field_id}
+    assigned = [field_id for field_id in field_ids if field_id]
+    used = set(assigned)
+    matching, resolution_error = supported_configurations_for_fields(db, host_id, assigned)
+    matching_codes = {item.configuration_name for item in matching}
     evaluations = []
     matching_name = None
     configurations = active_supported_layouts_query(db, host_id).order_by(
@@ -390,7 +455,7 @@ def field_combination_diagnostics(db, host_id, field_ids):
             .all()
         )
         member_ids = {field.id for field in fields}
-        compatible = bool(member_ids) and used.issubset(member_ids)
+        compatible = configuration.configuration_name in matching_codes
         if compatible and matching_name is None:
             matching_name = configuration.configuration_name
         evaluations.append({
@@ -399,7 +464,8 @@ def field_combination_diagnostics(db, host_id, field_ids):
             'field_ids': [str(field.id) for field in fields],
             'fields': [field.name for field in fields],
             'status': 'VALID' if compatible else ('ACTIVE BUT INVALID' if not member_ids else 'INCOMPATIBLE'),
-            'reason': 'Configuration contains no assigned physical fields.' if not member_ids else None,
+            'reason': (resolution_error if resolution_error else
+                       'Configuration contains no assigned physical fields.' if not member_ids else None),
         })
     referenced = {value for evaluation in evaluations for value in evaluation['field_ids']}
     unreferenced = [str(value) for value in used if str(value) not in referenced]
@@ -432,6 +498,10 @@ def evaluate_host_timeslot_capacity(db, host_location_id, game_date, kickoff_tim
     if games and len(field_ids) == len(games):
         valid, supported, _used = validate_field_combination(db, host_location_id, field_ids)
         physical = fields_can_operate_simultaneously(db, host_location_id, field_ids)
+        if len(field_ids) != len(set(field_ids)):
+            physical = {**physical, 'valid': False,
+                        'reason': 'A physical field is assigned more than once at this date and kickoff.'}
+            valid = False
         issue_code = None if valid else 'FIELD_LAYOUT_CONFLICT'
         conflict_reason = physical['reason']
         if physical['conflicting_pairs']:

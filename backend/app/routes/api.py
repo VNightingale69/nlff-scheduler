@@ -24,7 +24,7 @@ from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_AD
 from app.database import get_db
 from app.organizations import active_organization_filter, normalize_organization_name
 from app.models import Division, Field, FieldConfigurationMember, FieldConfigurationOption, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostPlanSelection, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Rulebook, LoginAuditLog, ScheduleChangeLog, ScheduleImport, SchedulePublicationEvent, ScoreHistory, ScoreSubmission, Season, Team, TimeslotFieldConfiguration, Tournament, TournamentDivision, TournamentGame, TournamentTeam, TurfWave, User, Week
-from app.services.facility_layout_validation import active_layout_capacities, active_supported_layouts_query, evaluate_host_timeslot_capacity, field_combination_diagnostics, get_active_supported_layouts, layout_label, resolve_facility_configuration, select_supported_layout, validate_field_combination, validate_timeslot_demands
+from app.services.facility_layout_validation import active_layout_capacities, active_supported_layouts_query, evaluate_host_timeslot_capacity, field_combination_diagnostics, get_active_supported_layouts, layout_label, resolve_facility_configuration, select_supported_layout, supported_configurations_for_fields, validate_field_combination, validate_timeslot_demands
 from app.services.host_configuration_integrity import repair_host_configuration_memberships
 from app.services.division_field_types import required_field_type_for_division
 from app.services.division_reference import division_reference_query
@@ -274,6 +274,18 @@ def confirm_schedule_import(
                 # edits made after the preview, not a separate capacity model.
                 resolved_configuration = resolve_facility_configuration(
                     supported, db.get(HostLocation, site_id))
+                assigned_ids = [uuid.UUID(item.get('resolved_field_id') or item.get('field_id'))
+                                for item in group['rows']
+                                if item.get('resolved_field_id') or item.get('field_id')]
+                matching_configurations, resolution_error = supported_configurations_for_fields(
+                    db, site_id, assigned_ids)
+                if (resolution_error or not any(
+                        item.id == supported.id for item in matching_configurations)):
+                    raise ValueError(
+                        resolution_error or
+                        f'Configuration "{row.get("configuration") or row.get("configuration_name")}" '
+                        'does not support the imported field types and capacity.'
+                    )
                 planned_field_ids = set(row.get('layout_field_ids') or [])
                 current_field_ids = {
                     str(item.field_id) for item in resolved_configuration.logical_fields}
@@ -303,16 +315,16 @@ def confirm_schedule_import(
                 host_location_id=site_id, configuration_date=game_date,
                 kickoff_time=kickoff).first()
             if existing_override and str(existing_override.configuration_id) != configuration_value:
-                available_ids = {str(member.field_id)
-                                 for member in existing_override.configuration.members
-                                 if member.field and member.field.is_active
-                                 and member.field.deleted_at is None}
                 required_ids = {
                     item.get('resolved_field_id') or item.get('field_id')
                     for item in group['rows']
                 }
                 required_ids.discard(None)
-                if not configuration_supports_required_slots(available_ids, required_ids):
+                matching_existing, existing_error = supported_configurations_for_fields(
+                    db, site_id, [uuid.UUID(value) for value in required_ids])
+                if existing_error or not any(
+                        item.id == existing_override.configuration_id
+                        for item in matching_existing):
                     # This import has already resolved all games in the exact
                     # date/site/kickoff wave to one supported layout. Replace
                     # a stale assignment for that wave; never borrow a layout
@@ -5247,12 +5259,14 @@ STANDARD_TURF_FIELD_SLOT_LABELS = (
     'Medium Field 1',
     'Medium Field 2',
     'Large Field 1',
+    'Large Field 2',
 )
 STANDARD_TURF_FIELD_SLOT_SET = frozenset(STANDARD_TURF_FIELD_SLOT_LABELS)
 APPROVED_TURF_FIELD_SLOT_SETS = {
     'THREE_SMALL': frozenset({'Small Field 1', 'Small Field 2', 'Small Field 3'}),
     'TWO_MEDIUM': frozenset({'Medium Field 1', 'Medium Field 2'}),
     'ONE_LARGE_ONE_SMALL': frozenset({'Large Field', 'Small Field'}),
+    'TWO_LARGE': frozenset({'Large Field 1', 'Large Field 2'}),
 }
 
 TIM_OSMOND_LOCATION_NAME = 'TIM OSMOND SPORTS COMPLEX'
@@ -5278,17 +5292,9 @@ def _is_approved_turf_slot_counts(counts: dict[str, int]) -> bool:
     normalized_counts = {size: max(int(counts.get(size, 0) or 0), 0) for size in FIELD_SIZE_ORDER}
     if not any(normalized_counts.values()):
         return False
-    # One turf surface cannot fit two large fields, and this league model only
-    # exposes Large Field 1 as an explicit slot.  Treat any second large field
-    # as a hard physical-capacity violation even if legacy data/configuration
-    # names still exist in older databases.
-    if normalized_counts[FIELD_SIZE_LARGE] > 1:
-        return False
     for metadata in TURF_STADIUM_CONFIGURATIONS.values():
         layout_counts = metadata.get('counts') or {}
         if int(metadata.get('space_used_yards') or 0) > TURF_FOOTPRINT_YARDS:
-            continue
-        if int(layout_counts.get(FIELD_SIZE_LARGE, 0) or 0) > 1:
             continue
         if all(normalized_counts[size] <= int(layout_counts.get(size, 0) or 0) for size in FIELD_SIZE_ORDER):
             return True
