@@ -2,7 +2,8 @@ import uuid
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from app.routes.api import (_season_publication_rollup, _week_publish_readiness,
+from app.routes.api import (_is_publishable_schedule_week, _publication_week_payload,
+                            _season_publication_rollup, _week_publish_readiness,
                             _normalize_public_schedule_payload, _public_schedule_differences,
                             _week_public_schedule_hash, compare_week_to_published_snapshot,
                             get_week_publication_state)
@@ -95,6 +96,62 @@ def test_stale_field_from_an_inactive_layout_has_distinct_configuration_error():
 def test_season_rollup_reports_partial_and_complete_publication():
     assert _season_publication_rollup([SimpleNamespace(publication_status='PUBLISHED'), SimpleNamespace(publication_status='UNPUBLISHED')]) == 'partially_published'
     assert _season_publication_rollup([SimpleNamespace(publication_status='PUBLISHED'), SimpleNamespace(publication_status='PUBLISHED')]) == 'published'
+
+
+def _configured_week(number, game_date, date_type='REGULAR_SEASON', status='active', label=None):
+    return SimpleNamespace(id=uuid.uuid4(), week_number=number, primary_game_date=game_date,
+                           date_type=date_type, status=status, label=label)
+
+
+def test_standard_sequential_publication_weeks_keep_configured_numbers_and_dates():
+    date = __import__('datetime').date
+    weeks = [_configured_week(index, date(2026, 8, day)) for index, day in enumerate((9, 16, 23), 1)]
+    assert [(week.week_number, week.primary_game_date) for week in weeks if _is_publishable_schedule_week(week)] == [
+        (1, date(2026, 8, 9)), (2, date(2026, 8, 16)), (3, date(2026, 8, 23)),
+    ]
+
+
+def test_publication_scope_uses_configured_playable_dates_across_blackouts():
+    date = __import__('datetime').date
+    weeks = [
+        _configured_week(1, date(2026, 8, 9)),
+        _configured_week(2, date(2026, 8, 16)),
+        _configured_week(3, date(2026, 8, 23)),
+        _configured_week(4, date(2026, 8, 30)),
+        _configured_week(99, date(2026, 9, 6), 'BLACKOUT'),
+        _configured_week(5, date(2026, 9, 13)),
+    ]
+    publishable = [week for week in weeks if _is_publishable_schedule_week(week)]
+    assert [(week.week_number, week.primary_game_date.isoformat()) for week in publishable] == [
+        (1, '2026-08-09'), (2, '2026-08-16'), (3, '2026-08-23'),
+        (4, '2026-08-30'), (5, '2026-09-13'),
+    ]
+
+
+def test_multiple_blackouts_do_not_become_publication_weeks():
+    date = __import__('datetime').date
+    weeks = [_configured_week(7, date(2026, 9, 27)),
+             _configured_week(8, date(2026, 10, 4), 'BLACKOUT'),
+             _configured_week(8, date(2026, 10, 11), 'BLACKOUT'),
+             _configured_week(8, date(2026, 10, 18))]
+    assert [week.primary_game_date for week in weeks if _is_publishable_schedule_week(week)] == [date(2026, 9, 27), date(2026, 10, 18)]
+
+
+def test_postseason_payload_preserves_configured_date_only_value_and_identity():
+    week = _configured_week(9, __import__('datetime').date(2026, 10, 10), 'PLAYOFF', label='Tournament Day 1')
+    state = {'is_published': False, 'has_pending_changes': False, 'publication_status': 'DRAFT'}
+    with patch('app.routes.api.get_week_publication_state', return_value=state):
+        payload = _publication_week_payload(SimpleNamespace(), SimpleNamespace(), week)
+    assert payload['season_week_id'] == str(week.id)
+    assert payload['game_date'] == '2026-10-10'
+    assert payload['week_type'] == 'postseason'
+    assert payload['is_playable'] is True
+
+
+def test_cancelled_or_date_less_week_is_not_publishable():
+    date = __import__('datetime').date
+    assert not _is_publishable_schedule_week(_configured_week(1, date(2026, 8, 9), status='cancelled'))
+    assert not _is_publishable_schedule_week(_configured_week(1, None))
 
 
 def test_public_fingerprint_ignores_game_identity_and_implementation_metadata():

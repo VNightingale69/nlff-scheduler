@@ -100,7 +100,7 @@ export default function ScheduleManagementPage() {
     setError('');
     setPublicationMessage('');
     try {
-      const selected = publicationWeekIds.length ? publicationWeekIds : (publishDiagnostics.weeks || []).map((week: any) => week.id);
+      const selected = publicationWeekIds.length ? publicationWeekIds : (publishDiagnostics.weeks || []).map((week: any) => week.season_week_id);
       const label = selected.length === 1 ? `Week ${(publishDiagnostics.weeks || []).find((week: any) => week.id === selected[0])?.week_number}` : `${selected.length} selected weeks`;
       if (!window.confirm(`${action === 'publish' ? 'Publish' : 'Unpublish'} ${label}?\n\n${publishDiagnostics.scope_game_count || 0} games. Blocking errors: ${publishDiagnostics.publish_blocking_issue_count || 0}. Warnings: ${publishDiagnostics.publish_warning_count || 0}.\n\nOther weeks will remain unchanged.`)) return;
       const result = await apiFetch(`/seasons/${seasonId}/${action}-schedule`, { method: 'POST', body: JSON.stringify({ week_ids: selected }) }, token);
@@ -181,6 +181,7 @@ export default function ScheduleManagementPage() {
   }));
 
   const selectView = (next: 'schedule' | 'hosting') => { setView(next); const url = new URL(window.location.href); next === 'hosting' ? url.searchParams.set('view', 'hosting') : url.searchParams.delete('view'); window.history.replaceState({}, '', url); };
+  const allPublicationWeeksSelected = !!publishDiagnostics?.weeks?.length && publicationWeekIds.length === publishDiagnostics.weeks.length;
 
   return (
     <div className='space-y-4'>
@@ -203,7 +204,7 @@ export default function ScheduleManagementPage() {
             <div className='mt-1'>Schedule Publication Status: <span className='font-semibold'>{String(publishDiagnostics.schedule_status || 'unpublished').replace('_', ' ')}</span></div>
           </div>
           {canControlSchedulePublication ? <div className='flex flex-wrap gap-2'>
-            <button className='rounded bg-emerald-700 px-3 py-2 text-white disabled:cursor-not-allowed disabled:bg-slate-300' disabled={publicationLoading || !!publishDiagnostics.publish_blocking_issue_count} onClick={() => updateSchedulePublication('publish')}>{publicationWeekIds.length === 1 ? `${(publishDiagnostics.weeks || []).find((w: any) => w.id === publicationWeekIds[0])?.needs_republish ? 'Republish' : 'Publish'} Week ${(publishDiagnostics.weeks || []).find((w: any) => w.id === publicationWeekIds[0])?.week_number}` : publicationWeekIds.length ? 'Publish Selected Weeks' : 'Publish Entire Season'}</button>
+            <button className='rounded bg-emerald-700 px-3 py-2 text-white disabled:cursor-not-allowed disabled:bg-slate-300' disabled={publicationLoading || !!publishDiagnostics.publish_blocking_issue_count} onClick={() => updateSchedulePublication('publish')}>{publicationWeekIds.length === 1 ? `${(publishDiagnostics.weeks || []).find((w: any) => w.season_week_id === publicationWeekIds[0])?.needs_republish ? 'Republish' : 'Publish'} Week ${(publishDiagnostics.weeks || []).find((w: any) => w.season_week_id === publicationWeekIds[0])?.week_number}` : !publicationWeekIds.length || allPublicationWeeksSelected ? 'Publish Entire Season' : 'Publish Selected Weeks'}</button>
             <button className='rounded bg-amber-700 px-3 py-2 text-white disabled:cursor-not-allowed disabled:bg-slate-300' disabled={publicationLoading || !publicationWeekIds.length} onClick={() => updateSchedulePublication('unpublish')}>Unpublish Selected Weeks</button>
           </div> : null}
         </div>
@@ -213,9 +214,10 @@ export default function ScheduleManagementPage() {
             const label = status === 'pending' ? 'Published - Changes Pending' : status === 'published' ? 'Published' : 'Draft';
             const tooltip = status === 'pending' ? 'This week has been published, but the working schedule contains changes that have not yet been republished.' : status === 'published' ? 'The working schedule matches the currently published schedule.' : 'This week has not been published.';
             const tone = status === 'pending' ? 'bg-amber-100 text-amber-800' : status === 'published' ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-100 text-slate-700';
-            return <label key={week.id} className='flex items-center gap-2'><input type='checkbox' checked={publicationWeekIds.includes(week.id)} onChange={(event) => setPublicationWeekIds((current) => event.target.checked ? [...current, week.id] : current.filter((id) => id !== week.id))} /><span>Week {week.week_number} - {formatDisplayDate(week.date)}</span><span title={tooltip} className={`rounded px-2 py-0.5 text-xs ${tone}`}>{label}</span></label>;
+            const scopeLabel = week.week_type === 'postseason' ? (week.label || 'Postseason') : `Week ${week.week_number}`;
+            return <label key={week.season_week_id} className='flex items-center gap-2'><input type='checkbox' checked={publicationWeekIds.includes(week.season_week_id)} onChange={(event) => setPublicationWeekIds((current) => event.target.checked ? [...current, week.season_week_id] : current.filter((id) => id !== week.season_week_id))} /><span>{scopeLabel} - {formatDisplayDate(week.game_date)}</span><span title={tooltip} className={`rounded px-2 py-0.5 text-xs ${tone}`}>{label}</span></label>;
           })}</div>
-          <button className='mt-2 text-xs text-blue-700 underline' onClick={() => setPublicationWeekIds([])}>Select Entire Season</button>
+          <button className='mt-2 text-xs text-blue-700 underline' onClick={() => setPublicationWeekIds((publishDiagnostics.weeks || []).map((week: any) => week.season_week_id))}>Select Entire Season</button>
         </fieldset>
         <h2 className='mt-3 font-bold uppercase'>Publish Readiness{publicationWeekIds.length === 1 ? ` - Week ${(publishDiagnostics.weeks || []).find((w: any) => w.id === publicationWeekIds[0])?.week_number}` : ''}</h2>
         <div className='mt-2 grid grid-cols-2 gap-2 md:grid-cols-3'>
