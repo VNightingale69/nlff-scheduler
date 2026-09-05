@@ -192,6 +192,85 @@ class SupportedFieldLayoutActivationTest(unittest.TestCase):
         self.assertEqual('Physical field compatibility (field IDs)', result['configuration_basis'])
         self.assertEqual('No physical field conflicts.', result['reason'])
 
+    def test_independent_fields_need_no_named_combination(self):
+        medium_two = Field(
+            id=uuid.uuid4(), host_location_id=self.host.id, name='Medium 2',
+            layout_type='MEDIUM', is_active=True,
+        )
+        self.db.add(medium_two)
+        self.db.commit()
+
+        result = evaluate_host_timeslot_capacity(
+            self.db, self.host.id, date(2026, 9, 20), time(9), [
+                {'field_id': field.id, 'field_name': field.name,
+                 'required_field_size': field.layout_type}
+                for field in (*self.fields[:3], self.medium, medium_two)
+            ],
+        )
+
+        self.assertTrue(result['valid'])
+        self.assertIsNone(result['compatible_configuration'])
+        self.assertEqual('Physical field compatibility (field IDs)', result['configuration_basis'])
+        self.assertEqual([], result['blocking_issues'])
+
+    def test_named_configuration_match_and_diagnostic_share_validity(self):
+        result = evaluate_host_timeslot_capacity(
+            self.db, self.host.id, date(2026, 9, 20), time(9), [
+                {'field_id': self.large.id, 'field_name': self.large.name,
+                 'required_field_size': 'LARGE'},
+                {'field_id': self.fields[0].id, 'field_name': self.fields[0].name,
+                 'required_field_size': 'SMALL'},
+            ],
+        )
+
+        self.assertTrue(result['valid'])
+        self.assertEqual('1 Large + 1 Small', result['compatible_configuration'])
+        self.assertEqual('Named configuration membership (field IDs)', result['configuration_basis'])
+        self.assertIsNone(result['issue_code'])
+        self.assertEqual([], result['blocking_issues'])
+
+    def test_validation_uses_host_id_not_display_name(self):
+        before = evaluate_host_timeslot_capacity(
+            self.db, self.host.id, date(2026, 9, 20), time(9), [
+                {'field_id': self.large.id, 'required_field_size': 'LARGE'},
+                {'field_id': self.fields[0].id, 'required_field_size': 'SMALL'},
+            ],
+        )
+        self.host.name = 'Imported Johnsburg Stadium Alias'
+        self.db.commit()
+        after = evaluate_host_timeslot_capacity(
+            self.db, self.host.id, date(2026, 9, 20), time(9), [
+                {'field_id': self.large.id, 'required_field_size': 'LARGE'},
+                {'field_id': self.fields[0].id, 'required_field_size': 'SMALL'},
+            ],
+        )
+
+        self.assertEqual(before['valid'], after['valid'])
+        self.assertEqual(before['compatible_configuration'], after['compatible_configuration'])
+
+    def test_same_fields_are_valid_at_sequential_kickoffs(self):
+        for kickoff in (time(9), time(10), time(11)):
+            result = evaluate_host_timeslot_capacity(
+                self.db, self.host.id, date(2026, 9, 20), kickoff, [
+                    {'field_id': self.large.id, 'required_field_size': 'LARGE'},
+                    {'field_id': self.fields[0].id, 'required_field_size': 'SMALL'},
+                ],
+            )
+            self.assertTrue(result['valid'])
+
+    def test_incorrect_physical_size_capacity_is_blocking(self):
+        result = evaluate_host_timeslot_capacity(
+            self.db, self.host.id, date(2026, 9, 20), time(9), [
+                {'field_id': self.fields[0].id, 'required_field_size': 'SMALL'},
+                {'field_id': self.fields[1].id, 'required_field_size': 'SMALL'},
+                {'field_id': self.medium.id, 'required_field_size': 'SMALL'},
+            ],
+        )
+
+        self.assertFalse(result['valid'])
+        self.assertEqual('FIELD_LAYOUT_CONFLICT', result['issue_code'])
+        self.assertIn('insufficient Small fields', result['reason'])
+
     def test_canonical_field_from_another_host_is_invalid(self):
         other = HostLocation(id=uuid.uuid4(), organization_id=self.org.id, name='Other Stadium')
         same_named = Field(id=uuid.uuid4(), host_location_id=other.id, name=self.medium.name,
