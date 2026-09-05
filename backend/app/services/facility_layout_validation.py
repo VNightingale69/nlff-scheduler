@@ -400,7 +400,11 @@ def validate_field_combination(db, host_id, field_ids):
         FieldPhysicalConflict.field_a_id.in_(used),
         FieldPhysicalConflict.field_b_id.in_(used),
     ).first()
-    return bool(matching) and conflicts is None, names, used
+    # A named layout is evidence that the combination is supported, but it is
+    # not a prerequisite for ordinary, independently playable fields.  The
+    # explicit physical-conflict table is the authoritative restriction for a
+    # combination assembled from fields in different named layouts.
+    return conflicts is None, names, used
 
 
 def fields_can_operate_simultaneously(db, host_id, field_ids):
@@ -502,12 +506,33 @@ def evaluate_host_timeslot_capacity(db, host_location_id, game_date, kickoff_tim
     if games and len(field_ids) == len(games):
         valid, supported, _used = validate_field_combination(db, host_location_id, field_ids)
         physical = fields_can_operate_simultaneously(db, host_location_id, field_ids)
+        fields = db.query(Field).filter(Field.id.in_(field_ids)).all()
+        assigned_counts = Counter(
+            filter(None, (_size(field.layout_type) for field in fields))
+        )
+        shortages = {
+            size: required_counts[size] - int(assigned_counts.get(size, 0))
+            for size in SIZES
+            if int(assigned_counts.get(size, 0)) < required_counts[size]
+        }
+        if shortages:
+            details = ', '.join(
+                f"insufficient {size.title()} fields (required {required_counts[size]}, "
+                f"assigned {int(assigned_counts.get(size, 0))})"
+                for size in SIZES if size in shortages
+            )
+            physical = {**physical, 'valid': False, 'reason': details}
+            valid = False
         if len(field_ids) != len(set(field_ids)):
             physical = {**physical, 'valid': False,
                         'reason': 'A physical field is assigned more than once at this date and kickoff.'}
             valid = False
         issue_code = None if valid else 'FIELD_LAYOUT_CONFLICT'
+        # The blocker and diagnostics deliberately project this one reason;
+        # never label the absence of physical conflicts as an invalid reason.
         conflict_reason = physical['reason']
+        if not valid and conflict_reason == 'No physical field conflicts.':
+            conflict_reason = 'Assigned fields do not form a valid active physical layout.'
         if physical['conflicting_pairs']:
             conflict_reason = '; '.join(
                 f"{pair['field_a']} and {pair['field_b']} cannot operate simultaneously: {pair['reason']}"
