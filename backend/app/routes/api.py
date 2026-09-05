@@ -16909,7 +16909,13 @@ def get_week_publication_state(db: Session, season: Season, week: Week) -> dict[
 
 
 def _publication_weeks(db: Session, season_id: uuid.UUID, week_ids: list[object] | None) -> list[Week]:
-    configured = db.query(Week).filter(Week.season_id == season_id).order_by(Week.week_number).all()
+    # Publication is scoped to the configured, playable Week records.  In
+    # particular, a BLACKOUT row is useful to the planning tools but is not a
+    # schedule slate and must never affect whole-season publication state.
+    configured = [
+        week for week in db.query(Week).filter(Week.season_id == season_id).order_by(Week.primary_game_date, Week.week_number).all()
+        if _is_publishable_schedule_week(week)
+    ]
     if week_ids is None:
         return configured
     if not week_ids:
@@ -16922,6 +16928,33 @@ def _publication_weeks(db: Session, season_id: uuid.UUID, week_ids: list[object]
     if len(selected) != len(requested):
         raise HTTPException(400, 'Every selected week must belong to the requested season')
     return selected
+
+
+def _is_publishable_schedule_week(week: Week | None) -> bool:
+    """Whether an authoritative season-date row represents a publishable slate."""
+    if not week or not _week_game_date(week):
+        return False
+    if str(getattr(week, 'status', '') or '').strip().lower() == 'cancelled':
+        return False
+    return _week_date_type(week) in {REGULAR_SEASON_DATE_TYPE, PLAYOFF_DATE_TYPE}
+
+
+def _publication_week_payload(db: Session, season: Season, week: Week) -> dict[str, object]:
+    """Serialize the season-week identity/date without calendar arithmetic."""
+    state = get_week_publication_state(db, season, week)
+    date_type = _week_date_type(week)
+    return {
+        'id': str(week.id),
+        'season_week_id': str(week.id),
+        'week_number': week.week_number,
+        'label': week.label or f'Week {week.week_number}',
+        'game_date': _date_only_iso(_week_game_date(week)),
+        'date_type': date_type,
+        'week_type': 'regular_season' if date_type == REGULAR_SEASON_DATE_TYPE else 'postseason',
+        'is_playable': True,
+        **state,
+        'needs_republish': state['has_pending_changes'],
+    }
 
 
 def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> dict:
@@ -17163,10 +17196,11 @@ def _season_publication_rollup(weeks: list[Week]) -> str:
 
 
 def _published_week_ids(db: Session, season: Season) -> set[uuid.UUID]:
-    ids = {row.id for row in db.query(Week.id).filter(Week.season_id == season.id, func.upper(Week.publication_status) == 'PUBLISHED').all()}
+    publishable = _publication_weeks(db, season.id, None)
+    ids = {row.id for row in publishable if str(row.publication_status or '').upper() == 'PUBLISHED'}
     # Rows created by pre-migration fixtures retain the old season-level contract.
     if not ids and str(season.schedule_status or '').lower() in {'published', 'saved'}:
-        ids = {row.id for row in db.query(Week.id).filter(Week.season_id == season.id).all()}
+        ids = {row.id for row in publishable}
     return ids
 
 
@@ -17322,7 +17356,7 @@ def publish_schedule(season_id: uuid.UUID, payload: dict | None = None, db: Sess
         week.last_published_schedule_payload = schedule_payload
         week.publication_hash_version = 2
         total_games += game_count
-    all_weeks = db.query(Week).filter(Week.season_id == season_id).all()
+    all_weeks = _publication_weeks(db, season_id, None)
     season.schedule_status = _season_publication_rollup(all_weeks)
     db.add(SchedulePublicationEvent(season_id=season.id, week_ids=json.dumps([str(w.id) for w in weeks]), action=action,
                                     performed_by_user_id=current_user.id, performed_at=now, game_count=total_games))
@@ -17389,7 +17423,7 @@ def unpublish_schedule(season_id: uuid.UUID, payload: dict | None = None, db: Se
     for week in weeks:
         week.publication_status = 'UNPUBLISHED'; week.unpublished_at = now
         game_count += _week_schedule_hash(db, season_id, week.id)[1]
-    all_weeks = db.query(Week).filter(Week.season_id == season_id).all()
+    all_weeks = _publication_weeks(db, season_id, None)
     season.schedule_status = _season_publication_rollup(all_weeks)
     db.add(SchedulePublicationEvent(season_id=season.id, week_ids=json.dumps([str(w.id) for w in weeks]), action='UNPUBLISH',
                                     performed_by_user_id=current_user.id, performed_at=now, game_count=game_count))
@@ -30402,13 +30436,10 @@ def schedule_publish_diagnostics(season_id: uuid.UUID | None = None, week_ids: l
         'scope_week_ids': [str(week.id) for week in weeks],
         'scope_game_count': readiness['games'],
         'scope_status': readiness['status'],
-        'weeks': [dict(
-            id=str(week.id), week_number=week.week_number, label=week.label,
-            date=str(week.primary_game_date or week.start_date),
-            **state,
-            needs_republish=state['has_pending_changes'],
-        ) for week in db.query(Week).filter(Week.season_id == season.id).order_by(Week.week_number).all()
-          for state in [get_week_publication_state(db, season, week)]],
+        'weeks': [
+            _publication_week_payload(db, season, week)
+            for week in _publication_weeks(db, season.id, None)
+        ],
     }
 
 

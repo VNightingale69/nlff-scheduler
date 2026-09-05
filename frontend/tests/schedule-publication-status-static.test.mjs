@@ -6,3 +6,7 @@ assert.match(source, /bg-amber-100 text-amber-800/);
 assert.match(source, /working schedule contains changes that have not yet been republished/);
 assert.match(source, /working schedule matches the currently published schedule/);
 assert.match(source, /week\.publication_status === 'PUBLISHED_CHANGES_PENDING'/);
+assert.match(source, /formatDisplayDate\(week\.game_date\)/);
+assert.match(source, /week\.season_week_id/);
+assert.match(source, /week\.week_type === 'postseason'/);
+assert.doesNotMatch(source, /formatDisplayDate\(week\.date\)/);
