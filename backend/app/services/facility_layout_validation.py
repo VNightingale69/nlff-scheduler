@@ -555,7 +555,12 @@ def validate_field_configuration(db, host_location_id, game_date, kickoff_time, 
             valid = True
             physical = {**physical, 'valid': True, 'reason': 'No physical field conflicts.',
                         'conflicting_pairs': []}
-        issue_code = None if valid else 'FIELD_LAYOUT_CONFLICT'
+        # Configuration validity and simultaneous physical occupancy are
+        # separate diagnostics.  Both are blocking, but an explicit overlap
+        # must not masquerade as a failure to match a named layout.
+        overlap_conflict = bool(physical['conflicting_pairs']) or len(field_ids) != len(set(field_ids))
+        issue_code = None if valid else ('FIELD_OVERLAP_CONFLICT' if overlap_conflict
+                                         else 'FIELD_LAYOUT_CONFLICT')
         # The blocker and diagnostics deliberately project this one reason;
         # never label the absence of physical conflicts as an invalid reason.
         conflict_reason = physical['reason']

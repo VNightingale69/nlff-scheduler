@@ -17056,7 +17056,10 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
             key = (team_id, game.game_date, game.kickoff_time)
             if key in team_times: error('SIMULTANEOUS_TEAM_CONFLICT', 'A team has simultaneous games.')
             team_times[key] = game.id
-        field_identity = game.field_id or game.field_instance_id
+        # Use the same canonical physical identity produced before import
+        # validation.  A saved game may still carry a generated FieldInstance
+        # while resolution has authoritatively mapped it to its physical Field.
+        field_identity = (assignment.physical_field_id if assignment else None) or game.field_instance_id
         key = (field_identity, game.game_date, game.kickoff_time)
         if field_identity and key in field_times: error('FIELD_DOUBLE_BOOKING', 'A field has simultaneous games.')
         field_times[key] = game.id
@@ -17091,7 +17094,7 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
             })
         if host and game.host_location_id and game.game_date and game.kickoff_time:
             host_timeslot_groups.setdefault((game.host_location_id, game.game_date, game.kickoff_time), []).append(
-                (game, required_type, host, home, away, _slot, field_instance)
+                (game, required_type, host, home, away, _slot, field_instance, assignment)
             )
         if canonical_type and required_type and canonical_type != required_type:
             layout_groups.setdefault((game.host_location_id, game.game_date, game.kickoff_time), []).append((game, required_type, canonical_type, host))
@@ -17104,8 +17107,10 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
             for item in wave if getattr(item[0], 'field_id', None)
         ]
         capacity_assessment = facility_layout_validation.validate_field_configuration(db, host_id, game_date, kickoff, [{
-            'field_id': item[0].field_id,
-            'field_name': getattr(getattr(item[0], 'field', None), 'name', None),
+            # Publish must validate the resolved authoritative ID, rather than
+            # re-reading the possibly legacy/generated relationship on Game.
+            'field_id': item[7].physical_field_id if item[7] else None,
+            'field_name': item[7].display_name if item[7] else None,
             'required_field_size': item[1],
         } for item in wave])
         valid = capacity_assessment['valid']
