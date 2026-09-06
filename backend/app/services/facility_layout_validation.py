@@ -13,6 +13,9 @@ from app.turf_configurations import APPROVED_TURF_CONFIGURATIONS, turf_configura
 
 
 SIZES = ('SMALL', 'MEDIUM', 'LARGE')
+WESTOSHA_NAMES = {'WESTOSHA HIGH SCHOOL STADIUM', 'WESTOSHA STADIUM'}
+WESTOSHA_DISABLED_LAYOUTS = {'TWO_LARGE'}
+WESTOSHA_REQUIRED_LAYOUTS = {'ONE_LARGE'}
 logger = logging.getLogger(__name__)
 
 
@@ -210,15 +213,25 @@ def get_active_supported_layouts(db, host_location_id):
         # decision for that layout yet.  A persisted inactive row is an
         # explicit retirement, however, and must never be resurrected merely
         # because its code is in the approved catalog.
+        persisted_rows = db.query(HostLocationConfiguration).options(
+            selectinload(HostLocationConfiguration.members)
+            .selectinload(FieldConfigurationMember.field)
+        ).filter(
+            HostLocationConfiguration.host_location_id == host_location_id,
+        ).all()
         existing = {
             configuration_code(row.configuration_name): row
-            for row in db.query(HostLocationConfiguration).filter(
-                HostLocationConfiguration.host_location_id == host_location_id,
-            ).all()
+            for row in persisted_rows
         }
+        is_westosha = str(host.name or '').strip().upper() in WESTOSHA_NAMES
         layouts = []
         for sort_order, metadata in enumerate(APPROVED_TURF_CONFIGURATIONS):
             code = configuration_code(metadata['code'])
+            # Westosha has only one large-field footprint.  This facility
+            # policy is deliberately host-scoped; the league-wide turf catalog
+            # remains unchanged for every other stadium.
+            if is_westosha and code in WESTOSHA_DISABLED_LAYOUTS:
+                continue
             persisted = existing.get(code)
             if persisted is not None and not persisted.is_active:
                 continue
@@ -233,6 +246,15 @@ def get_active_supported_layouts(db, host_location_id):
             configuration.large_field_count = counts['LARGE']
             configuration.sort_order = sort_order
             layouts.append(configuration)
+        if is_westosha:
+            # ONE_LARGE is a Westosha-specific persisted capability rather
+            # than a league-wide synthetic turf layout.  The repair migration
+            # creates it; requiring an active row prevents accidental capacity
+            # fabrication when a database has not yet been repaired.
+            layouts.extend(
+                row for code, row in existing.items()
+                if code in WESTOSHA_REQUIRED_LAYOUTS and row.is_active
+            )
         return layouts
     return (
         active_supported_layouts_query(db, host_location_id)
@@ -801,18 +823,24 @@ def validate_field_configuration(db, host_location_id, game_date, kickoff_time, 
             'reason': conflict_reason,
             'conflicting_fields': assigned_fields,
         }]
-        matched_configuration = (
-            membership['compatible_configuration']
-            or (saved_configuration.configuration_name if saved_configuration_valid else None)
-            or (demand_configuration.configuration_name if turf_configuration_valid else None)
-        )
-        matched_configuration_id = (
-            next((row['id'] for row in membership['configurations']
-                  if row['name'] == membership['compatible_configuration']), None)
-            if membership['compatible_configuration']
-            else str(saved_configuration.id) if saved_configuration_valid
-            else str(demand_configuration.id) if turf_configuration_valid and demand_configuration.id else None
-        )
+        # Turf layout names describe the complete simultaneous size demand.
+        # Prefer the resolver's exact-capacity choice over the first broader
+        # membership subset (for example ONE_LARGE_ONE_SMALL for one Large).
+        # This also makes preview, execution, readiness, publication, and the
+        # hosting view report the same wave-level configuration.
+        if turf_configuration_valid:
+            matched_configuration = demand_configuration.configuration_name
+            matched_configuration_id = (str(demand_configuration.id)
+                                        if demand_configuration.id else None)
+        elif saved_configuration_valid:
+            matched_configuration = saved_configuration.configuration_name
+            matched_configuration_id = str(saved_configuration.id)
+        else:
+            matched_configuration = membership['compatible_configuration']
+            matched_configuration_id = next((
+                row['id'] for row in membership['configurations']
+                if row['name'] == membership['compatible_configuration']
+            ), None)
         matched_definition = next((configuration for configuration in active_configurations
                                    if configuration_code(configuration.configuration_name)
                                    == configuration_code(matched_configuration)), None)
