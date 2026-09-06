@@ -513,6 +513,12 @@ def validate_field_configuration(db, host_location_id, game_date, kickoff_time, 
     required = Counter(filter(None, (_size(game.get('required_field_size')) for game in games)))
     required_counts = {size: int(required.get(size, 0)) for size in SIZES}
     capacities = active_layout_capacities(db, host_location_id)
+    host = db.query(HostLocation).filter(HostLocation.id == host_location_id).first()
+    active_configurations = get_active_supported_layouts(db, host_location_id)
+    demand_configuration = choose_supported_configuration(
+        active_configurations,
+        [game.get('required_field_size') for game in games],
+    )
     membership = field_combination_diagnostics(
         db, host_location_id, field_ids,
         [game.get('required_field_size') for game in games],
@@ -535,10 +541,24 @@ def validate_field_configuration(db, host_location_id, game_date, kickoff_time, 
             if int(assigned_counts.get(size, 0)) < required_counts[size]
         }
         named_configuration_valid = bool(membership['compatible_configuration'])
+        # A Turf Stadium's persisted Fields are stable physical positions, not
+        # permanently sized playing fields.  Import has always resolved those
+        # positions by ID and then selected one of the league-approved logical
+        # configurations for the complete wave.  Requiring the saved Field's
+        # default ``layout_type`` to equal the game's required size here made
+        # publication reinterpret that same assignment (for example Hiller's
+        # Medium positions used as ONE_LARGE or ONE_LARGE_ONE_SMALL).
+        #
+        # Keep IDs authoritative for ownership/activity/overlap, and use the
+        # same active configuration capacity used by import for logical sizes.
+        is_turf_stadium = bool(
+            host and (host.surface_type or '').upper() == 'TURF_STADIUM'
+        )
+        turf_configuration_valid = bool(is_turf_stadium and demand_configuration)
         # Raw field types are defaults for a physical position.  They must not
         # veto an active named reconfiguration whose member IDs and logical
         # capacity both match this complete wave.
-        if shortages and not named_configuration_valid:
+        if shortages and not named_configuration_valid and not turf_configuration_valid:
             details = ', '.join(
                 f"insufficient {size.title()} fields (required {required_counts[size]}, "
                 f"assigned {int(assigned_counts.get(size, 0))})"
@@ -546,6 +566,12 @@ def validate_field_configuration(db, host_location_id, game_date, kickoff_time, 
             )
             physical = {**physical, 'valid': False, 'reason': details}
             valid = False
+        if is_turf_stadium:
+            # ``fields_can_operate_simultaneously`` has already verified that
+            # every authoritative ID belongs to this host, is active, is not
+            # duplicated, and has no explicit physical conflict.  The chosen
+            # configuration must validate the aggregate logical demand.
+            valid = physical['valid'] and turf_configuration_valid
         if len(field_ids) != len(set(field_ids)):
             physical = {**physical, 'valid': False,
                         'reason': 'A physical field is assigned more than once at this date and kickoff.'}
@@ -575,6 +601,16 @@ def validate_field_configuration(db, host_location_id, game_date, kickoff_time, 
             'reason': conflict_reason,
             'conflicting_fields': assigned_fields,
         }]
+        matched_configuration = (
+            membership['compatible_configuration']
+            or (demand_configuration.configuration_name if turf_configuration_valid else None)
+        )
+        matched_configuration_id = (
+            next((row['id'] for row in membership['configurations']
+                  if row['name'] == membership['compatible_configuration']), None)
+            if membership['compatible_configuration']
+            else str(demand_configuration.id) if turf_configuration_valid and demand_configuration.id else None
+        )
         result = {
             'valid': valid,
             'issue_code': issue_code,
@@ -582,15 +618,15 @@ def validate_field_configuration(db, host_location_id, game_date, kickoff_time, 
             'assigned_field_ids': [str(value) for value in field_ids],
             'assigned_fields': assigned_fields,
             'required_field_sizes': required_counts,
-            'compatible_configuration': membership['compatible_configuration'],
+            'compatible_configuration': matched_configuration,
             'is_valid': valid,
             'is_blocking': not valid,
             'validation_method': ('named_configuration' if named_configuration_valid
+                                  else 'active_turf_configuration' if turf_configuration_valid
                                   else 'physical_field_compatibility'),
             'host_location_id': str(host_location_id),
-            'configuration_id': next((row['id'] for row in membership['configurations']
-                                      if row['name'] == membership['compatible_configuration']), None),
-            'configuration_name': membership['compatible_configuration'],
+            'configuration_id': matched_configuration_id,
+            'configuration_name': matched_configuration,
             'conflicts': physical['conflicting_pairs'],
             'warnings': [],
             'active_configurations': membership['configurations'],
@@ -598,9 +634,12 @@ def validate_field_configuration(db, host_location_id, game_date, kickoff_time, 
             'conflicting_fields': sorted({name for pair in physical['conflicting_pairs'] for name in (pair['field_a'], pair['field_b'])}),
             'conflicting_pairs': physical['conflicting_pairs'],
             'reason': (('Assigned physical fields coexist in the persisted configuration.'
-                        if membership['compatible_configuration'] else 'No physical field conflicts.') if valid else conflict_reason),
+                        if membership['compatible_configuration'] else
+                        'Authoritative field IDs satisfy an active turf configuration.'
+                        if turf_configuration_valid else 'No physical field conflicts.') if valid else conflict_reason),
             'configuration_basis': ('Named configuration membership (field IDs)' if membership['compatible_configuration']
-                                    else 'Physical field compatibility (field IDs)'),
+                                    else 'Active turf configuration (authoritative field IDs)'
+                                    if turf_configuration_valid else 'Physical field compatibility (field IDs)'),
             'supported_layouts': supported,
         }
         assert not result['valid'] or not result['blocking_issues']
