@@ -503,11 +503,16 @@ def validate_field_configuration(db, host_location_id, game_date, kickoff_time, 
     and publication pass this same normalized shape; neither validator is
     permitted to infer validity from generated-slot display strings.
 
-    Configuration quantity columns are only a fallback for assignments which
-    have no canonical physical field.  This keeps generated slots and their
-    historical configuration selection out of the core layout decision.
+    When a generated/logical slot has no canonical physical field on the game,
+    its exact saved kickoff configuration is resolved to canonical members.
+    Merely finding some unrelated active layout with enough capacity is never
+    treated as proof that the saved assignment is valid.
     """
     games = list(assignments)
+    saved_configuration_ids = {
+        game.get('configuration_id') for game in games
+        if game.get('configuration_id')
+    }
     field_ids = [game.get('field_id') for game in games if game.get('field_id')]
     assigned_fields = [game.get('field_name') for game in games if game.get('field_name')]
     required = Counter(filter(None, (_size(game.get('required_field_size')) for game in games)))
@@ -525,6 +530,101 @@ def validate_field_configuration(db, host_location_id, game_date, kickoff_time, 
     ) if field_ids else {
         'configurations': [], 'compatible_configuration': None,
     }
+
+    # Imported/generated games can retain the wave's configuration relationship
+    # without retaining a direct Field ID on every Game.  That relationship is
+    # authoritative, but only when every row names the same active, host-scoped
+    # configuration.  Do not silently substitute some other active layout: that
+    # would turn an unresolvable assignment into fabricated capacity.
+    if len(field_ids) != len(games):
+        saved_configuration = None
+        if len(saved_configuration_ids) == 1:
+            saved_configuration = db.query(HostLocationConfiguration).filter(
+                HostLocationConfiguration.id == next(iter(saved_configuration_ids)),
+            ).first()
+        configuration_valid = bool(
+            saved_configuration
+            and saved_configuration.host_location_id == host_location_id
+            and saved_configuration.is_active
+        )
+        resolved = (resolve_facility_configuration(saved_configuration, host)
+                    if configuration_valid and host else None)
+        resolved_fields = list(resolved.logical_fields) if resolved else []
+        resolved_member_ids = [field.field_id for field in resolved_fields if field.field_id]
+        member_physical = fields_can_operate_simultaneously(
+            db, host_location_id, resolved_member_ids,
+        )
+        members_valid = (
+            bool(resolved_fields)
+            and len(resolved_member_ids) == len(resolved_fields)
+            and member_physical['valid']
+        )
+        demand_valid = bool(
+            configuration_valid
+            and configuration_supports_field_types(
+                saved_configuration,
+                [game.get('required_field_size') for game in games],
+            )
+        )
+        supplied_ids_valid = True
+        physical = fields_can_operate_simultaneously(db, host_location_id, field_ids)
+        if field_ids:
+            member_ids = {field.field_id for field in resolved_fields}
+            supplied_ids_valid = (
+                len(field_ids) == len(set(field_ids))
+                and set(field_ids).issubset(member_ids)
+                and physical['valid']
+            )
+        valid = configuration_valid and members_valid and demand_valid and supplied_ids_valid
+        if not saved_configuration_ids:
+            reason = ('The saved field or generated slot cannot be resolved to a canonical '
+                      'physical field or saved kickoff configuration.')
+        elif len(saved_configuration_ids) != 1:
+            reason = 'Games in this kickoff group reference different saved field configurations.'
+        elif not configuration_valid:
+            reason = 'The saved kickoff field configuration belongs to another host or is inactive.'
+        elif not members_valid:
+            reason = ('The saved kickoff field configuration has no valid active canonical '
+                      f"physical layout. {member_physical['reason']}")
+        elif not demand_valid:
+            reason = 'The saved kickoff field configuration does not satisfy the aggregate required field sizes.'
+        elif not supplied_ids_valid:
+            reason = physical['reason'] if not physical['valid'] else (
+                'A resolved physical field is not a member of the saved kickoff configuration.')
+        else:
+            reason = 'Saved logical assignments resolve through the active kickoff configuration.'
+        issue_code = None if valid else 'FIELD_ASSIGNMENT_RESOLUTION_ERROR'
+        blocking_issues = [] if valid else [{
+            'issue_code': issue_code,
+            'reason': reason,
+            'conflicting_fields': assigned_fields,
+        }]
+        return {
+            'valid': valid, 'is_valid': valid, 'is_blocking': not valid,
+            'issue_code': issue_code, 'blocking_issues': blocking_issues,
+            'assigned_field_ids': [str(value) for value in field_ids],
+            'assigned_fields': assigned_fields,
+            'resolved_field_ids': [str(item.field_id) for item in resolved_fields],
+            'resolved_fields': [item.name for item in resolved_fields],
+            'required_field_sizes': required_counts,
+            'compatible_configuration': (saved_configuration.configuration_name
+                                         if valid else None),
+            'validation_method': 'saved_timeslot_configuration',
+            'host_location_id': str(host_location_id),
+            'configuration_id': (str(saved_configuration.id)
+                                 if saved_configuration else None),
+            'configuration_name': (saved_configuration.configuration_name
+                                   if saved_configuration else None),
+            'conflicts': physical['conflicting_pairs'], 'warnings': [],
+            'active_configurations': membership['configurations'],
+            'available_layouts': capacities,
+            'conflicting_fields': physical['assigned_fields'],
+            'conflicting_pairs': physical['conflicting_pairs'],
+            'reason': reason,
+            'configuration_basis': 'Saved kickoff configuration (canonical members)',
+            'supported_layouts': ([saved_configuration.configuration_name]
+                                  if valid else []),
+        }
 
     # If every saved game resolves to a physical field, compatibility is a
     # resource-membership question, not a comparison of size-count labels.
@@ -644,46 +744,6 @@ def validate_field_configuration(db, host_location_id, game_date, kickoff_time, 
         }
         assert not result['valid'] or not result['blocking_issues']
         return result
-
-    result = validate_timeslot_demands(
-        {(game_date, host_location_id, kickoff_time): required_counts},
-        {(game_date, host_location_id, kickoff_time): [row['capacity'] for row in capacities]},
-    )
-    valid = result['valid']
-    issue_code = None if valid else ('HOST_TIMESLOT_CAPACITY_SHORTAGE' if capacities else
-                                     'HOST_TIMESLOT_CONFIGURATION_UNCONFIRMED')
-    blocking_issues = [] if valid or not capacities else [{
-        'issue_code': issue_code,
-        'reason': 'Canonical physical field assignments are missing and no active layout has sufficient capacity.',
-        'conflicting_fields': [],
-    }]
-    result = {
-        'valid': valid,
-        'is_valid': valid,
-        'is_blocking': not valid,
-        'issue_code': issue_code,
-        'blocking_issues': blocking_issues,
-        'assigned_field_ids': [str(value) for value in field_ids],
-        'assigned_fields': assigned_fields,
-        'required_field_sizes': required_counts,
-        'compatible_configuration': None,
-        'validation_method': 'active_configuration_capacity_fallback',
-        'host_location_id': str(host_location_id),
-        'configuration_id': None,
-        'configuration_name': None,
-        'conflicts': [],
-        'warnings': [],
-        'active_configurations': membership['configurations'],
-        'available_layouts': capacities,
-        'conflicting_fields': [],
-        'reason': ('Legacy assignments fit an active host configuration.' if valid else
-                   'Canonical physical field assignments are missing and no active layout has sufficient capacity.'),
-        'configuration_basis': 'Active configuration capacity fallback (missing physical field IDs)',
-        'supported_layouts': [row['code'] for row in capacities],
-    }
-    assert not result['valid'] or not result['blocking_issues']
-    return result
-
 
 # Compatibility for callers outside the import/publication paths.  New field
 # layout validation must call ``validate_field_configuration`` directly so the

@@ -17099,7 +17099,7 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
             })
         if host and game.host_location_id and game.game_date and game.kickoff_time:
             host_timeslot_groups.setdefault((game.host_location_id, game.game_date, game.kickoff_time), []).append(
-                (game, required_type, host, home, away, _slot, field_instance, assignment)
+                (game, required_type, host, home, away, _slot, field_instance, assignment, division)
             )
     for (host_id, game_date, kickoff), wave in host_timeslot_groups.items():
         # This is the sole host/timeslot physical-capacity decision. Both the
@@ -17112,6 +17112,12 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
             'field_id': item[7].physical_field_id if item[7] else None,
             'field_name': item[7].display_name if item[7] else None,
             'required_field_size': item[1],
+            'configuration_id': (
+                getattr(item[0], 'timeslot_configuration_id', None)
+                or getattr(getattr(item[0], 'timeslot_configuration', None), 'configuration_id', None)
+                or getattr(getattr(getattr(item[0], 'timeslot_configuration', None),
+                                   'configuration', None), 'id', None)
+            ),
         } for item in wave])
         valid = capacity_assessment['is_valid']
         evaluated_layouts = capacity_assessment['available_layouts']
@@ -17144,6 +17150,9 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
                 str(getattr(item[0], 'timeslot_configuration_id', None))
                 for item in wave if getattr(item[0], 'timeslot_configuration_id', None)
             ],
+            'raw_stored_locations': [getattr(item[0], 'location', None) for item in wave],
+            'saved_field_ids': [str(getattr(item[0], 'field_id', None) or '') or None for item in wave],
+            'saved_field_instance_ids': [str(getattr(item[0], 'field_instance_id', None) or '') or None for item in wave],
             'required_small': demand['SMALL'], 'required_medium': demand['MEDIUM'],
             'required_large': demand['LARGE'],
             'physical_field_ids': [str(item[7].physical_field_id) for item in wave
@@ -17159,6 +17168,10 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
             'configuration_evaluations': capacity_assessment['active_configurations'],
             'retired_slots_excluded': retired_slots_excluded,
             'configuration_selected': capacity_assessment['compatible_configuration'],
+            'configuration_selected_id': capacity_assessment.get('configuration_id'),
+            'resolved_field_ids': capacity_assessment.get('resolved_field_ids', capacity_assessment['assigned_field_ids']),
+            'resolved_field_names': capacity_assessment.get(
+                'resolved_fields', capacity_assessment.get('assigned_fields', assigned_fields)),
             'physical_layout_validation_passes': not bool(capacity_assessment['conflicting_pairs']),
             'named_configuration_validation_passes': bool(capacity_assessment['compatible_configuration']),
             'overlap_validation_passes': len(capacity_assessment['assigned_field_ids']) == len(set(capacity_assessment['assigned_field_ids'])),
@@ -17186,7 +17199,7 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
         # ``resolve_game_field_assignment``.  Keep the tuple shape in sync on
         # the invalid-result path; otherwise a validation blocker raises while
         # being converted into readiness data instead of being reported.
-        game, _required_type, host, home, away, _slot, _field_instance, _assignment = wave[0]
+        game, _required_type, host, home, away, _slot, _field_instance, _assignment, _division = wave[0]
         shared_issue = capacity_assessment['blocking_issues'][0]
         issue = {
             'issue_code': shared_issue['issue_code'],
@@ -17201,6 +17214,16 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
             'selected_layout': capacity_assessment['compatible_configuration'],
             'configuration_basis': capacity_assessment['configuration_basis'],
             'assigned_fields': sorted(filter(None, assigned_fields)),
+            'field': ', '.join(sorted(filter(None, assigned_fields))) or 'Unresolved assignment',
+            'division': ', '.join(sorted(filter(None, {
+                f'{getattr(item[8], "division_group", "") or ""} {getattr(item[8], "name", "") or ""}'.strip()
+                for item in wave
+            }))),
+            'required_field_type': ' + '.join(
+                f'{count} {size.title()}' for size, count in demand.items() if count),
+            'current_layout': (capacity_assessment.get('configuration_name')
+                               or ', '.join(capacity_assessment.get('resolved_fields', []))
+                               or 'Unresolved assignment'),
             'recommended_action': 'Reduce overlapping games or select an allowed field layout for this kickoff.',
             'summary': shared_issue['reason'],
         }
