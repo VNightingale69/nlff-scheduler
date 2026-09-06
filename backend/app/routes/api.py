@@ -17119,8 +17119,16 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
                 # UUID crossed ID domains and made the shared resolver query
                 # for a HostLocationConfiguration that could never exist.
                 getattr(getattr(item[0], 'timeslot_configuration', None), 'configuration_id', None)
-                or getattr(getattr(getattr(item[0], 'timeslot_configuration', None),
-                                   'configuration', None), 'id', None)
+                if bool(
+                    getattr(getattr(getattr(item[0], 'timeslot_configuration', None),
+                                    'configuration', None), 'is_active', False)
+                    and getattr(getattr(item[0], 'timeslot_configuration', None),
+                                'host_location_id', None) == host_id
+                    and getattr(getattr(item[0], 'timeslot_configuration', None),
+                                'configuration_date', None) == game_date
+                    and getattr(getattr(item[0], 'timeslot_configuration', None),
+                                'kickoff_time', None) == kickoff
+                ) else None
             ),
         } for item in wave])
         valid = capacity_assessment['is_valid']

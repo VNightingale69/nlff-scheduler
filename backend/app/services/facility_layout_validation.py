@@ -547,6 +547,52 @@ def validate_field_configuration(db, host_location_id, game_date, kickoff_time, 
             HostLocationConfiguration.id == next(iter(saved_configuration_ids)),
         ).first()
 
+    def resolution_error(reason, physical=None):
+        """Project an identity lookup failure without calling it a layout conflict."""
+        physical = physical or {
+            'assigned_fields': assigned_fields, 'conflicting_pairs': [],
+        }
+        issue = {
+            'issue_code': 'FIELD_ASSIGNMENT_RESOLUTION_ERROR',
+            'reason': reason,
+            'conflicting_fields': assigned_fields,
+        }
+        return {
+            'resolved': False, 'valid': False, 'is_valid': False, 'is_blocking': True,
+            'issue_code': issue['issue_code'], 'blocking_issues': [issue],
+            'errors': [issue],
+            'assigned_field_ids': [str(value) for value in field_ids],
+            'assigned_fields': assigned_fields,
+            'resolved_field_ids': [], 'resolved_fields': [],
+            'required': {size.lower(): required_counts[size] for size in SIZES},
+            'required_field_sizes': required_counts,
+            'compatible_configuration': None,
+            'validation_method': 'canonical_assignment_resolution',
+            'host_location_id': str(host_location_id),
+            'configuration_id': (str(saved_configuration.id)
+                                 if saved_configuration else None),
+            'configuration_name': None,
+            'conflicts': physical.get('conflicting_pairs', []), 'warnings': [],
+            'active_configurations': membership['configurations'],
+            'available_layouts': capacities,
+            'conflicting_fields': physical.get('assigned_fields', assigned_fields),
+            'conflicting_pairs': physical.get('conflicting_pairs', []),
+            'reason': reason,
+            'configuration_basis': 'Canonical physical field IDs',
+            'supported_layouts': [],
+        }
+
+    # A supplied ID is an assertion about the saved physical layout, not an
+    # optional hint.  Looking it up in the HostLocationConfiguration domain is
+    # what distinguishes a stale/inactive configuration from a valid field set.
+    if saved_configuration_ids and (
+            len(saved_configuration_ids) != 1
+            or saved_configuration is None
+            or saved_configuration.host_location_id != host_location_id
+            or not saved_configuration.is_active):
+        return resolution_error(
+            'The saved kickoff field configuration belongs to another host or is inactive.')
+
     # Imported/generated games can retain the wave's configuration relationship
     # without retaining a direct Field ID on every Game.  That relationship is
     # authoritative, but only when every row names the same active, host-scoped
@@ -586,7 +632,8 @@ def validate_field_configuration(db, host_location_id, game_date, kickoff_time, 
                 and set(field_ids).issubset(member_ids)
                 and physical['valid']
             )
-        valid = configuration_valid and members_valid and demand_valid and supplied_ids_valid
+        identity_resolved = configuration_valid and members_valid and supplied_ids_valid
+        valid = identity_resolved and demand_valid
         if not saved_configuration_ids:
             reason = ('The saved field or generated slot cannot be resolved to a canonical '
                       'physical field or saved kickoff configuration.')
@@ -604,34 +651,38 @@ def validate_field_configuration(db, host_location_id, game_date, kickoff_time, 
                 'A resolved physical field is not a member of the saved kickoff configuration.')
         else:
             reason = 'Saved logical assignments resolve through the active kickoff configuration.'
-        issue_code = None if valid else 'FIELD_ASSIGNMENT_RESOLUTION_ERROR'
+        issue_code = (None if valid else 'FIELD_LAYOUT_CONFLICT' if identity_resolved
+                      else 'FIELD_ASSIGNMENT_RESOLUTION_ERROR')
         blocking_issues = [] if valid else [{
             'issue_code': issue_code,
             'reason': reason,
             'conflicting_fields': assigned_fields,
         }]
         return {
-            'valid': valid, 'is_valid': valid, 'is_blocking': not valid,
+            'resolved': identity_resolved, 'valid': valid, 'is_valid': valid,
+            'is_blocking': not valid,
             'issue_code': issue_code, 'blocking_issues': blocking_issues,
             'assigned_field_ids': [str(value) for value in field_ids],
             'assigned_fields': assigned_fields,
             'resolved_field_ids': [str(item.field_id) for item in resolved_fields],
             'resolved_fields': [item.name for item in resolved_fields],
             'required_field_sizes': required_counts,
+            'required': {size.lower(): required_counts[size] for size in SIZES},
             'compatible_configuration': (saved_configuration.configuration_name
-                                         if valid else None),
+                                         if identity_resolved else None),
             'validation_method': 'saved_timeslot_configuration',
             'host_location_id': str(host_location_id),
             'configuration_id': (str(saved_configuration.id)
                                  if saved_configuration else None),
             'configuration_name': (saved_configuration.configuration_name
-                                   if saved_configuration else None),
+                                   if identity_resolved else None),
             'conflicts': physical['conflicting_pairs'], 'warnings': [],
             'active_configurations': membership['configurations'],
             'available_layouts': capacities,
             'conflicting_fields': physical['assigned_fields'],
             'conflicting_pairs': physical['conflicting_pairs'],
             'reason': reason,
+            'errors': blocking_issues,
             'configuration_basis': 'Saved kickoff configuration (canonical members)',
             'supported_layouts': ([saved_configuration.configuration_name]
                                   if valid else []),
@@ -642,6 +693,8 @@ def validate_field_configuration(db, host_location_id, game_date, kickoff_time, 
     if games and len(field_ids) == len(games):
         valid, supported, _used = validate_field_combination(db, host_location_id, field_ids)
         physical = fields_can_operate_simultaneously(db, host_location_id, field_ids)
+        if physical['invalid_field_ids']:
+            return resolution_error(physical['reason'], physical)
         fields = db.query(Field).filter(Field.id.in_(field_ids)).all()
         assigned_counts = Counter(
             filter(None, (_size(field.layout_type) for field in fields))
@@ -746,12 +799,17 @@ def validate_field_configuration(db, host_location_id, game_date, kickoff_time, 
             else str(demand_configuration.id) if turf_configuration_valid and demand_configuration.id else None
         )
         result = {
+            # At this point every supplied identifier was resolved in the
+            # canonical physical-field domain.  A size/capacity mismatch is a
+            # resolved-but-invalid layout, not an assignment lookup failure.
+            'resolved': True,
             'valid': valid,
             'issue_code': issue_code,
             'blocking_issues': blocking_issues,
             'assigned_field_ids': [str(value) for value in field_ids],
             'assigned_fields': assigned_fields,
             'required_field_sizes': required_counts,
+            'required': {size.lower(): required_counts[size] for size in SIZES},
             'compatible_configuration': matched_configuration,
             'is_valid': valid,
             'is_blocking': not valid,
@@ -763,6 +821,7 @@ def validate_field_configuration(db, host_location_id, game_date, kickoff_time, 
             'configuration_name': matched_configuration,
             'conflicts': physical['conflicting_pairs'],
             'warnings': [],
+            'errors': blocking_issues,
             'active_configurations': membership['configurations'],
             'available_layouts': capacities,
             'conflicting_fields': sorted({name for pair in physical['conflicting_pairs'] for name in (pair['field_a'], pair['field_b'])}),

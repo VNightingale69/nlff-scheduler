@@ -451,7 +451,8 @@ class SupportedFieldLayoutActivationTest(unittest.TestCase):
         ])
 
         self.assertFalse(result['valid'])
-        self.assertEqual('FIELD_LAYOUT_CONFLICT', result['issue_code'])
+        self.assertEqual('FIELD_ASSIGNMENT_RESOLUTION_ERROR', result['issue_code'])
+        self.assertFalse(result['resolved'])
         self.assertIn(str(same_named.id), result['reason'])
 
     def test_authoritative_evaluator_fallback_reports_capacity_shortage(self):
@@ -492,8 +493,37 @@ class SupportedFieldLayoutActivationTest(unittest.TestCase):
         )
 
         self.assertFalse(result['is_valid'])
+        self.assertFalse(result['resolved'])
         self.assertEqual('FIELD_ASSIGNMENT_RESOLUTION_ERROR', result['issue_code'])
         self.assertIn('inactive', result['reason'])
+
+    def test_inactive_saved_configuration_with_physical_field_is_a_resolution_error(self):
+        self.alternatives[2].is_active = False
+        self.db.commit()
+
+        result = validate_field_configuration(
+            self.db, self.host.id, date(2026, 9, 20), time(11), [{
+                'field_id': self.large.id, 'required_field_size': 'LARGE',
+                'configuration_id': self.alternatives[2].id,
+            }],
+        )
+
+        self.assertFalse(result['resolved'])
+        self.assertFalse(result['is_valid'])
+        self.assertEqual('FIELD_ASSIGNMENT_RESOLUTION_ERROR', result['issue_code'])
+        self.assertEqual(result['blocking_issues'], result['errors'])
+
+    def test_resolved_wrong_size_is_a_layout_conflict_not_resolution_error(self):
+        result = validate_field_configuration(
+            self.db, self.host.id, date(2026, 9, 20), time(11), [
+                {'field_id': self.fields[1].id, 'required_field_size': 'LARGE'},
+            ],
+        )
+
+        self.assertTrue(result['resolved'])
+        self.assertFalse(result['is_valid'])
+        self.assertEqual('FIELD_LAYOUT_CONFLICT', result['issue_code'])
+        self.assertEqual({'small': 0, 'medium': 0, 'large': 1}, result['required'])
 
     def test_inactive_configuration_is_excluded(self):
         valid, layouts, _used = validate_field_combination(
