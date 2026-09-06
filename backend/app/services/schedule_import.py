@@ -18,6 +18,7 @@ from app.facility_layouts import (JOHNSBURG_APPROVED_LAYOUT_CODES_BY_LOCATION,
                                   johnsburg_location_name)
 from app.services.field_resolution import resolve_legacy_import_field
 from app.services.facility_layout_validation import (choose_supported_configuration,
+                                                      configuration_code,
                                                       get_active_supported_layouts,
                                                       configuration_supports_field_types,
                                                       layout_label,
@@ -250,7 +251,7 @@ def _configuration_candidates(db, site, field_name, field_type):
     """
     active = get_active_supported_layouts(db, site.id)
     configured_by_code = {
-        configuration.configuration_name.strip().upper().replace('-', '_').replace(' ', '_'): configuration
+        configuration_code(configuration.configuration_name): configuration
         for configuration in active
     }
     location = johnsburg_location_name(site)
@@ -600,8 +601,7 @@ def build_preview(db, season_id, raw_rows):
                     [grouped[0][2][code] for code in common_ids],
                     [row['imported_field_type'] for row, *_ in grouped],
                 )
-                exact_ids = {str(chosen.configuration_name).strip().upper()
-                             .replace('-', '_').replace(' ', '_')} if chosen else set()
+                exact_ids = {configuration_code(chosen.configuration_name)} if chosen else set()
             if len(exact_ids) != 1:
                 slots = ' + '.join(row['field'] for row, *_ in grouped)
                 message = (f'The imported slots {slots} do not match any supported layout for '
