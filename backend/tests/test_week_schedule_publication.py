@@ -27,6 +27,18 @@ def _game(week_id, *, game_id=None, home_id=None, away_id=None, field_id=None):
     return (game, None, None, SimpleNamespace(name='Hiller Park'), home, away, division, None, None)
 
 
+def _valid_shared_layout(*field_ids):
+    return {
+        'valid': True, 'is_valid': True, 'blocking_issues': [], 'issue_code': None,
+        'available_layouts': [], 'compatible_configuration': 'ONE_LARGE_ONE_SMALL',
+        'supported_layouts': ['ONE_LARGE_ONE_SMALL'],
+        'configuration_basis': 'Named configuration membership (field IDs)',
+        'assigned_field_ids': [str(value) for value in field_ids],
+        'conflicting_pairs': [], 'active_configurations': [],
+        'reason': 'Assigned physical fields coexist in the persisted configuration.',
+    }
+
+
 def test_readiness_validates_only_selected_week_and_ignores_future_week_error():
     selected_id, future_id = uuid.uuid4(), uuid.uuid4()
     selected = _game(selected_id)
@@ -107,6 +119,68 @@ def test_hiller_sequential_publish_waves_use_resolved_authoritative_field_ids():
             'field_name': 'Hiller Stadium Small Field',
             'required_field_size': 'SMALL',
         }]
+
+
+def test_publish_validates_complete_kickoff_wave_once_through_shared_validator():
+    """A Large + Small wave cannot be reinterpreted game by game."""
+    week_id, host_id = uuid.uuid4(), uuid.uuid4()
+    rows = [_game(week_id), _game(week_id)]
+    assignments = []
+    for index, (row, required) in enumerate(zip(rows, ('LARGE', 'SMALL'))):
+        row[0].host_location_id = host_id
+        row[0].game_date = date(2026, 9, 20)
+        row[0].kickoff_time = time(9)
+        row[6].required_field_layout_type = required
+        field_id = row[0].field_id
+        assignment = SimpleNamespace(
+            physical_field_id=field_id, physical_field=row[0].field,
+            field_instance_id=None, display_name=f'Position {index + 1}', issue_code=None,
+        )
+        assignments.append(assignment)
+
+    with (patch('app.routes.api.get_scheduled_games_for_season', return_value=rows),
+          patch('app.routes.api.resolve_game_field_assignment', side_effect=assignments),
+          patch('app.routes.api.facility_layout_validation.validate_field_configuration',
+                return_value=_valid_shared_layout(*(row[0].field_id for row in rows))) as validator,
+          patch('app.routes.api.select_supported_layout') as duplicate_validator):
+        result = _week_publish_readiness(
+            SimpleNamespace(), SimpleNamespace(id=uuid.uuid4()), [SimpleNamespace(id=week_id)],
+        )
+
+    assert result['blocking_errors'] == []
+    assert result['status'] == 'Ready to Publish'
+    assert validator.call_count == 1
+    assert [item['required_field_size'] for item in validator.call_args.args[4]] == ['LARGE', 'SMALL']
+    duplicate_validator.assert_not_called()
+
+
+def test_group_configuration_allows_game_without_direct_field_id():
+    """The saved kickoff layout, rather than a fabricated field, owns the wave."""
+    week_id = uuid.uuid4()
+    row = _game(week_id)
+    row[0].field_id = None
+    row[0].field = None
+    row[0].game_date = date(2026, 9, 20)
+    row[0].kickoff_time = time(10)
+    configuration = SimpleNamespace(is_active=True, configuration_name='ONE_LARGE')
+    row[0].timeslot_configuration = SimpleNamespace(
+        host_location_id=row[0].host_location_id,
+        configuration_date=row[0].game_date,
+        kickoff_time=row[0].kickoff_time,
+        configuration=configuration,
+    )
+
+    with (patch('app.routes.api.get_scheduled_games_for_season', return_value=[row]),
+          patch('app.routes.api.resolve_game_field_assignment', return_value=None),
+          patch('app.routes.api.facility_layout_validation.validate_field_configuration',
+                return_value=_valid_shared_layout()) as validator):
+        result = _week_publish_readiness(
+            SimpleNamespace(), SimpleNamespace(id=uuid.uuid4()), [SimpleNamespace(id=week_id)],
+        )
+
+    assert result['blocking_errors'] == []
+    assert result['status'] == 'Ready to Publish'
+    assert validator.call_args.args[4][0]['field_id'] is None
 
 
 def test_invalid_shared_field_configuration_is_returned_as_readiness_data():
@@ -401,35 +475,23 @@ def test_hiller_saved_large_override_is_descriptive_nonblocking_warning():
     row[6].name = '6-8'
     row[6].required_field_layout_type = 'LARGE'
     row[3].name = 'Hiller Stadium'
-    configuration = SimpleNamespace(configuration_name='ONE_LARGE', small_field_count=0, medium_field_count=0, large_field_count=1)
     with patch('app.routes.api.get_scheduled_games_for_season', return_value=[row]), \
-         patch('app.routes.api.select_supported_layout', return_value=(None, configuration, True)):
+         patch('app.routes.api.facility_layout_validation.validate_field_configuration',
+               return_value=_valid_shared_layout(row[0].field_id)):
         result = _week_publish_readiness(SimpleNamespace(), SimpleNamespace(id=uuid.uuid4()), [SimpleNamespace(id=week_id)])
     assert result['blocking_errors'] == []
-    assert len(result['warnings']) == 1
-    warning = result['warnings'][0]
-    assert warning['issue_code'] == 'FIELD_LAYOUT_RECONFIGURATION'
-    assert warning['scheduled_game_display_name'] == 'Antioch Girls 6-8 vs Westosha Girls 6-8 Maroon'
-    assert warning['location'] == 'Hiller Stadium'
-    assert warning['field'] == 'Medium Field 1'
-    assert warning['canonical_field_type'] == 'MEDIUM'
-    assert warning['required_field_type'] == 'LARGE'
+    assert result['status'] == 'Ready to Publish'
 
 
-def test_hiller_large_game_without_saved_override_is_descriptive_error():
+def test_shared_validator_acceptance_is_not_overridden_by_field_type_logic():
     week_id = uuid.uuid4()
     row = _game(week_id)
     row[0].field = SimpleNamespace(name='Medium Field 1', layout_type='MEDIUM')
     row[6].division_group = 'Girls'; row[6].name = '6-8'; row[6].required_field_layout_type = 'LARGE'
-    configuration = SimpleNamespace(configuration_name='ONE_LARGE', small_field_count=0, medium_field_count=0, large_field_count=1)
     with patch('app.routes.api.get_scheduled_games_for_season', return_value=[row]), \
-         patch('app.routes.api.select_supported_layout', return_value=(None, configuration, True)):
+         patch('app.routes.api.facility_layout_validation.validate_field_configuration',
+               return_value=_valid_shared_layout(row[0].field_id)), \
+         patch('app.routes.api.select_supported_layout') as duplicate_validator:
         result = _week_publish_readiness(SimpleNamespace(), SimpleNamespace(id=uuid.uuid4()), [SimpleNamespace(id=week_id)])
-    issue = result['blocking_errors'][0]
-    assert issue['issue_code'] == 'FIELD_TYPE_MISMATCH'
-    assert issue['scheduled_game_id'] == str(row[0].id)
-    assert issue['scheduled_game_display_name'] == 'Home Team vs Away Team'
-    assert issue['date'] == '2026-08-16'
-    assert issue['time'] == '10:00:00'
-    assert issue['location'] == 'Hiller Park'
-    assert issue['field'] == 'Medium Field 1'
+    assert result['blocking_errors'] == []
+    duplicate_validator.assert_not_called()
