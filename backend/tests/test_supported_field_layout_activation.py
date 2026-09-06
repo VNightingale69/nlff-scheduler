@@ -10,7 +10,10 @@ from app.database import Base
 from app.models import (Field, FieldConfigurationMember, FieldPhysicalConflict,
                         HostLocation, HostLocationConfiguration, Organization, Role, User)
 from app.routes.api import _validate_configuration_activation, list_host_location_configurations
-from app.services.facility_layout_validation import evaluate_host_timeslot_capacity, field_combination_diagnostics, validate_field_combination
+from app.services.facility_layout_validation import (evaluate_host_timeslot_capacity,
+                                                      field_combination_diagnostics,
+                                                      validate_field_combination,
+                                                      validate_field_configuration)
 from app.services.host_configuration_integrity import audit_host_configurations, repair_host_configuration_memberships
 
 
@@ -263,6 +266,99 @@ class SupportedFieldLayoutActivationTest(unittest.TestCase):
             self.assertEqual('ONE_LARGE_ONE_SMALL', result['configuration_name'])
             self.assertEqual([], result['conflicts'])
             self.assertEqual([], result['blocking_issues'])
+
+    def test_hiller_imported_physical_positions_use_active_turf_layout_at_all_affected_kickoffs(self):
+        """Imported turf positions retain IDs while their logical sizes change."""
+        self.host.name = 'Hiller Stadium'
+        self.host.surface_type = 'TURF_STADIUM'
+        for configuration in [self.canonical, *self.alternatives]:
+            configuration.is_active = False
+        first = Field(id=uuid.uuid4(), host_location_id=self.host.id,
+                      name='Field 1', layout_type='MEDIUM', is_active=True)
+        third = Field(id=uuid.uuid4(), host_location_id=self.host.id,
+                      name='Field 3', layout_type='MEDIUM', is_active=True)
+        # This is the legacy Hiller shape: TWO_MEDIUM is persisted, while the
+        # other approved turf configurations are supplied by the shared
+        # league catalog rather than duplicate Field/member rows.
+        medium = HostLocationConfiguration(
+            host_location_id=self.host.id, configuration_name='TWO_MEDIUM',
+            medium_field_count=2, is_active=True,
+        )
+        medium.members = [FieldConfigurationMember(field=first),
+                          FieldConfigurationMember(field=third)]
+        self.db.add_all([first, third, medium])
+        self.db.commit()
+
+        cases = (
+            (date(2026, 9, 20), time(9), first, 'LARGE'),
+            (date(2026, 9, 20), time(10), third, 'LARGE'),
+            (date(2026, 9, 20), time(11), first, 'LARGE'),
+            (date(2026, 10, 11), time(9), third, 'LARGE'),
+            (date(2026, 10, 11), time(10), first, 'SMALL'),
+            (date(2026, 10, 11), time(11), third, 'LARGE'),
+        )
+        for game_date, kickoff, physical_field, required_size in cases:
+            assignment = [{
+                'field_id': physical_field.id,
+                'field_name': physical_field.name,
+                'required_field_size': required_size,
+            }]
+            # Import preview/commit and publishing call this exact service with
+            # this normalized shape; calling it twice guards deterministic
+            # parity without introducing a second implementation in the test.
+            import_result = validate_field_configuration(
+                self.db, self.host.id, game_date, kickoff, assignment)
+            publish_result = validate_field_configuration(
+                self.db, self.host.id, game_date, kickoff, assignment)
+
+            self.assertEqual(import_result, publish_result)
+            self.assertTrue(publish_result['is_valid'])
+            self.assertEqual('active_turf_configuration',
+                             publish_result['validation_method'])
+            self.assertNotEqual('FIELD_LAYOUT_CONFLICT',
+                                publish_result['issue_code'])
+            self.assertEqual([], publish_result['blocking_issues'])
+
+    def test_turf_layout_validation_uses_complete_large_and_small_wave(self):
+        self.host.surface_type = 'TURF_STADIUM'
+        first = Field(id=uuid.uuid4(), host_location_id=self.host.id,
+                      name='Turf Position 1', layout_type='MEDIUM', is_active=True)
+        second = Field(id=uuid.uuid4(), host_location_id=self.host.id,
+                       name='Turf Position 2', layout_type='MEDIUM', is_active=True)
+        self.db.add_all([first, second])
+        self.db.commit()
+
+        result = validate_field_configuration(
+            self.db, self.host.id, date(2026, 10, 11), time(10), [
+                {'field_id': first.id, 'required_field_size': 'LARGE'},
+                {'field_id': second.id, 'required_field_size': 'SMALL'},
+            ],
+        )
+
+        self.assertTrue(result['is_valid'])
+        self.assertEqual({'SMALL': 1, 'MEDIUM': 0, 'LARGE': 1},
+                         result['required_field_sizes'])
+        self.assertEqual('ONE_LARGE_ONE_SMALL', result['configuration_name'])
+
+    def test_turf_wave_exceeding_every_active_configuration_remains_blocking(self):
+        self.host.surface_type = 'TURF_STADIUM'
+        positions = [
+            Field(id=uuid.uuid4(), host_location_id=self.host.id,
+                  name=f'Turf Position {number}', layout_type='MEDIUM', is_active=True)
+            for number in range(1, 4)
+        ]
+        self.db.add_all(positions)
+        self.db.commit()
+
+        result = validate_field_configuration(
+            self.db, self.host.id, date(2026, 10, 11), time(9), [
+                {'field_id': field.id, 'required_field_size': 'LARGE'}
+                for field in positions
+            ],
+        )
+
+        self.assertFalse(result['is_valid'])
+        self.assertEqual('FIELD_LAYOUT_CONFLICT', result['issue_code'])
 
     def test_validation_uses_host_id_not_display_name(self):
         before = evaluate_host_timeslot_capacity(
