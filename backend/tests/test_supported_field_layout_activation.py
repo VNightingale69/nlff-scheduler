@@ -229,6 +229,41 @@ class SupportedFieldLayoutActivationTest(unittest.TestCase):
         self.assertIsNone(result['issue_code'])
         self.assertEqual([], result['blocking_issues'])
 
+    def test_named_reconfiguration_uses_member_ids_not_default_physical_types(self):
+        """Hiller-style turf positions may have different logical uses by layout."""
+        first = Field(id=uuid.uuid4(), host_location_id=self.host.id,
+                      name='Physical Field 1', layout_type='MEDIUM', is_active=True)
+        third = Field(id=uuid.uuid4(), host_location_id=self.host.id,
+                      name='Physical Field 3', layout_type='MEDIUM', is_active=True)
+        layout = HostLocationConfiguration(
+            id=uuid.uuid4(), host_location_id=self.host.id,
+            configuration_name='ONE_LARGE_ONE_SMALL', large_field_count=1,
+            small_field_count=1, is_active=True,
+        )
+        # Reverse insertion order proves that membership is compared as a set.
+        layout.members = [FieldConfigurationMember(field=third),
+                          FieldConfigurationMember(field=first)]
+        self.db.add_all([first, third, layout])
+        self.db.commit()
+
+        for kickoff in (time(9), time(10), time(11)):
+            result = evaluate_host_timeslot_capacity(
+                self.db, self.host.id, date(2026, 9, 20), kickoff, [
+                    {'field_id': first.id, 'field_name': first.name,
+                     'required_field_size': 'LARGE'},
+                    {'field_id': third.id, 'field_name': third.name,
+                     'required_field_size': 'SMALL'},
+                ],
+            )
+
+            self.assertTrue(result['is_valid'])
+            self.assertFalse(result['is_blocking'])
+            self.assertEqual('named_configuration', result['validation_method'])
+            self.assertEqual(str(layout.id), result['configuration_id'])
+            self.assertEqual('ONE_LARGE_ONE_SMALL', result['configuration_name'])
+            self.assertEqual([], result['conflicts'])
+            self.assertEqual([], result['blocking_issues'])
+
     def test_validation_uses_host_id_not_display_name(self):
         before = evaluate_host_timeslot_capacity(
             self.db, self.host.id, date(2026, 9, 20), time(9), [

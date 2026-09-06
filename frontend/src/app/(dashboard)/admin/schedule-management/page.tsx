@@ -235,12 +235,13 @@ export default function ScheduleManagementPage() {
         <p className={`mt-2 rounded p-2 ${publishDiagnostics.publish_blocking_issue_count ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-800'}`}>
           {publishDiagnostics.publish_validation_message || (publishDiagnostics.publish_blocking_issue_count ? 'Schedule validation found blocking issues. Please review the listed games before publishing.' : 'Schedule is ready to publish.')}
         </p>
-        {publishDiagnostics.publish_blocking_issues?.length ? (
+        {(publishDiagnostics.publish_blocking_issues?.length || publishDiagnostics.publish_warnings?.length) ? (
           <div className='mt-2 overflow-x-auto'>
             <table className='min-w-full border text-left text-xs'>
               <thead className='bg-white'>
                 <tr>
                   <th className='border p-2'>Issue</th>
+                  <th className='border p-2'>Severity</th>
                   <th className='border p-2'>Scheduled Game</th>
                   <th className='border p-2'>Team</th>
                   <th className='border p-2'>Date</th>
@@ -254,11 +255,13 @@ export default function ScheduleManagementPage() {
                 </tr>
               </thead>
               <tbody>
-                {publishDiagnostics.publish_blocking_issues.map((issue: any, index: number) => {
+                {[...(publishDiagnostics.publish_blocking_issues || []).map((issue: any) => ({ ...issue, severity: 'Blocking' })),
+                  ...(publishDiagnostics.publish_warnings || []).map((issue: any) => ({ ...issue, severity: 'Warning' }))].map((issue: any, index: number) => {
                   const currentIssue = typeof issue === 'string' ? { issue_code: issue, summary: issue } : issue;
                   return (
                     <tr key={currentIssue.scheduled_game_id || `${currentIssue.issue_code || 'validation'}-${index}`}>
                       <td className='border p-2 font-semibold'>{currentIssue.issue_code || currentIssue.summary || 'VALIDATION_FAILURE'}</td>
+                      <td className='border p-2 font-semibold'>{currentIssue.severity || 'Blocking'}</td>
                       <td className='border p-2' title={currentIssue.scheduled_game_id ? `Scheduled game ID: ${currentIssue.scheduled_game_id}` : undefined}>
                         {getScheduledGameLabel(currentIssue)}
                       </td>
@@ -289,10 +292,6 @@ export default function ScheduleManagementPage() {
             {evaluation.active_configurations?.length ? <div className='mt-1'><strong>Active configurations evaluated:</strong><ul className='list-disc pl-5'>{evaluation.active_configurations.map((configuration: any) => <li key={configuration.id || configuration.name}><span className={configuration.status === 'ACTIVE BUT INVALID' ? 'font-semibold text-rose-700' : ''}>{configuration.name} — {configuration.status}</span>{configuration.fields?.length ? `: ${configuration.fields.join(', ')}` : ''}{configuration.reason ? ` (${configuration.reason})` : ''}</li>)}</ul></div> : null}
             <div><strong>Result:</strong> {evaluation.result}</div>
           </div>)}
-        </div> : null}
-        {publishDiagnostics.publish_warnings?.length ? <div className='mt-3 rounded border border-amber-300 bg-amber-50 p-2'>
-          <h3 className='font-semibold text-amber-900'>Warnings — do not block publication</h3>
-          <ul className='mt-1 list-disc pl-5'>{publishDiagnostics.publish_warnings.map((warning: any, index: number) => <li key={`${warning.issue_code || 'warning'}-${index}`}><strong>{warning.issue_code || 'WARNING'}:</strong> {warning.summary || warning.reason}</li>)}</ul>
         </div> : null}
       </div> : null}
 
