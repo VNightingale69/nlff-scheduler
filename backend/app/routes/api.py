@@ -54,6 +54,7 @@ from app.facility_layouts import (JOHNSBURG_APPROVED_LAYOUT_CODES_BY_LOCATION, J
 
 router = APIRouter(prefix='/api')
 logger = logging.getLogger(__name__)
+PUBLISH_VALIDATION_ENGINE_VERSION = 'publish-shared-validator-v3'
 HOST_PLAN_SELECTION_ADMIN_EMAIL = 'admin@example.com'
 HOST_PLAN_SELECTION_PERMISSION_MESSAGE = 'Only admin@example.com can modify host plan selections.'
 RULEBOOK_ALLOWED_CONTENT_TYPE = 'application/pdf'
@@ -17194,6 +17195,56 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
             'reason': capacity_assessment['reason'],
         }
         logger.debug('schedule_capacity_validation %s', json.dumps(log_detail, sort_keys=True))
+        # Keep this at INFO until production parity has been confirmed.  This
+        # is emitted at the decision boundary (rather than in a second
+        # resolver) so it records the exact normalized input and result that
+        # can create the publish blocker below.
+        candidate_configurations = capacity_assessment['active_configurations']
+        publish_layout_trace = {
+            'validation_engine_version': PUBLISH_VALIDATION_ENGINE_VERSION,
+            'date': game_date.isoformat() if game_date else None,
+            'time': kickoff.isoformat() if kickoff else None,
+            'host_location_id': str(host_id),
+            'host_location_name': getattr(wave[0][2], 'name', None),
+            'assigned_field_ids': capacity_assessment['assigned_field_ids'],
+            'assigned_field_names': capacity_assessment.get('assigned_fields', assigned_fields),
+            'assigned_field_types': [
+                getattr(item[7].physical_field, 'layout_type', None)
+                for item in wave if item[7] and item[7].physical_field
+            ],
+            'required_small': demand['SMALL'],
+            'required_medium': demand['MEDIUM'],
+            'required_large': demand['LARGE'],
+            'normalized_requirements': capacity_assessment.get('required'),
+            'candidate_configuration_ids': [row.get('id') for row in candidate_configurations],
+            'candidate_configuration_names': [row.get('name') for row in candidate_configurations],
+            'candidate_configuration_member_field_ids': {
+                str(row.get('id')): row.get('field_ids', []) for row in candidate_configurations
+            },
+            'candidate_configuration_active_flags': {
+                str(row.get('id')): row.get('is_active') for row in candidate_configurations
+            },
+            'resolved_configuration_id': capacity_assessment.get('configuration_id'),
+            'resolved_configuration_name': capacity_assessment.get('configuration_name'),
+            # Import and publish enter the same function with this canonical
+            # shape.  Naming both projections makes comparison in Railway logs
+            # explicit without executing validation twice in production.
+            'import_normalized_input': {
+                'host_location_id': str(host_id),
+                'field_ids': capacity_assessment['assigned_field_ids'],
+                'required': capacity_assessment.get('required'),
+            },
+            'publish_normalized_input': {
+                'host_location_id': str(host_id),
+                'field_ids': capacity_assessment['assigned_field_ids'],
+                'required': capacity_assessment.get('required'),
+            },
+            'shared_import_validator_result': capacity_assessment['is_valid'],
+            'publish_validator_result': capacity_assessment['is_valid'],
+            'layout_valid': valid,
+            'exact_failed_predicate': (None if valid else capacity_assessment['reason']),
+        }
+        logger.info('PUBLISH_LAYOUT_TRACE %s', json.dumps(publish_layout_trace, sort_keys=True))
         if not capacity_assessment['blocking_issues']:
             # A valid result, and the legacy no-configuration fallback, have no
             # shared-validator blocker. Publication must not invent one.
@@ -17242,7 +17293,8 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
         errors.append(issue)
     return {'games': len(rows), 'blocking_errors': errors, 'warnings': warnings,
             'layout_evaluations': layout_evaluations,
-            'status': 'Blocked' if errors else 'Ready to Publish'}
+            'status': 'Blocked' if errors else 'Ready to Publish',
+            'validation_engine_version': PUBLISH_VALIDATION_ENGINE_VERSION}
 
 
 def _season_publication_rollup(weeks: list[Week]) -> str:
@@ -30466,6 +30518,7 @@ def schedule_publish_diagnostics(season_id: uuid.UUID | None = None, week_ids: l
     source_mismatch = bool((final_validation.get('final_source_reconciliation') or {}).get('count_mismatch'))
     validation_message = 'Publish validation source does not match current saved schedule.' if source_mismatch else ('Schedule validation found blocking issues. Please review the listed games before publishing.' if blocking_count else 'Schedule is ready to publish.')
     return {
+        'validation_engine_version': PUBLISH_VALIDATION_ENGINE_VERSION,
         'season_id': str(season.id),
         'season_name': season.name,
         'schedule_status': 'saved',

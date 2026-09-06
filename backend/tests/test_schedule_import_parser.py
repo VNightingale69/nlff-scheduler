@@ -14,7 +14,8 @@ from app.models import (Base, Division, Field, FieldConfigurationMember, FieldCo
                         Organization, PhysicalFieldArea,
                         OrganizationDivisionParticipation, ScheduleImport, Season, Team,
                         TimeslotFieldConfiguration, Week)
-from app.routes.api import confirm_schedule_import, list_games
+from app.routes.api import (_week_publish_readiness, confirm_schedule_import,
+                            list_games)
 from app.services.field_resolution import resolve_active_field
 from app.services.schedule_import import build_preview, parse_schedule_file, _date, _time, _week_number
 
@@ -141,6 +142,69 @@ def _hiller_row(kickoff, field, field_type, home, away):
             'division': 'Girls 6-8',
             'hometeam': f'{home_community} Girls 6-8 {home.name}',
             'awayteam': f'{away_community} Girls 6-8 {away.name}'}
+
+
+def test_week_six_hiller_import_and_publish_readiness_use_identical_layouts():
+    """The three production-reported waves remain publishable after persistence."""
+    db, season, large_teams = _hiller_import_context()
+    week = db.query(Week).filter_by(season_id=season.id).one()
+    week.week_number = 6
+    week.start_date = week.end_date = week.primary_game_date = _date('2026-09-20')
+    site = db.query(HostLocation).filter_by(name='Hiller Stadium').one()
+    field_three = db.query(Field).filter_by(host_location_id=site.id, name='Field 2').one()
+    field_three.name = 'Field 3'
+    small_division = Division(
+        division_group='Coed', name='K-1', required_field_layout_type='SMALL',
+        is_active=True,
+    )
+    db.add(small_division); db.flush()
+    organizations = db.query(Organization).order_by(Organization.name).all()
+    small_teams = [
+        Team(organization_id=organizations[index % 2].id,
+             division_id=small_division.id, name=f'Small Team {index + 1}', is_active=True)
+        for index in range(4)
+    ]
+    db.add_all(small_teams)
+    db.commit()
+
+    def small_row(kickoff, index):
+        home, away = small_teams[index:index + 2]
+        home_community = home.organization.name
+        away_community = away.organization.name
+        return {
+            'week': 6, 'date': '2026-09-20', 'kickoff': kickoff,
+            'site': 'Hiller Stadium', 'field': 'Field 3', 'fieldtype': 'Small',
+            'division': 'Coed K-1',
+            'hometeam': f'{home_community} Coed K-1 {home.name}',
+            'awayteam': f'{away_community} Coed K-1 {away.name}',
+        }
+
+    rows = []
+    for index, kickoff in enumerate(('9:00 AM', '10:00 AM')):
+        large = _hiller_row(kickoff, 'Field 1', 'Large',
+                            large_teams[index * 2], large_teams[index * 2 + 1])
+        large.update({'week': 6, 'date': '2026-09-20'})
+        rows.extend((large, small_row(kickoff, index * 2)))
+    eleven = _hiller_row('11:00 AM', 'Field 1', 'Large',
+                         large_teams[4], large_teams[5])
+    eleven.update({'week': 6, 'date': '2026-09-20'})
+    rows.append(eleven)
+
+    preview, staged, _confirmation = _confirm_rows(
+        db, season, rows, filename='hiller-week-6-2026-09-20.xlsx')
+    readiness = _week_publish_readiness(db, season, [week])
+
+    assert preview['blocking_errors'] == 0
+    assert len(staged) == 5
+    assert readiness['blocking_errors'] == []
+    assert readiness['status'] == 'Ready to Publish'
+    assert readiness['validation_engine_version'] == 'publish-shared-validator-v3'
+    evaluations = {row['time']: row for row in readiness['layout_evaluations']}
+    assert evaluations['09:00:00']['matched_layout'] == 'ONE_LARGE_ONE_SMALL'
+    assert evaluations['10:00:00']['matched_layout'] == 'ONE_LARGE_ONE_SMALL'
+    assert evaluations['11:00:00']['matched_layout'] == 'ONE_LARGE'
+    assert all(row['matched_layout'] != 'Unresolved assignment'
+               for row in evaluations.values())
 
 
 def _physical_area_context():
