@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { API_URL, ApiError, apiFetch } from '@/lib/api';
 import { canPublishSchedule } from '@/lib/auth';
@@ -44,6 +44,7 @@ export default function ScheduleManagementPage() {
   const [publishDiagnostics, setPublishDiagnostics] = useState<any | null>(null);
   const [publicationLoading, setPublicationLoading] = useState(false);
   const [publicationWeekIds, setPublicationWeekIds] = useState<string[]>(searchParams.get('week_id') ? [searchParams.get('week_id')!] : []);
+  const loadSequence = useRef(0);
 
   const qs = useMemo(
     () =>
@@ -55,6 +56,7 @@ export default function ScheduleManagementPage() {
   );
 
   const load = async () => {
+    const sequence = ++loadSequence.current;
     setError('');
     const opts: any = await apiFetch('/manual-schedule-builder/options', {}, token);
     const orgs: any = await apiFetch('/organizations?page_size=500', {}, token);
@@ -75,6 +77,9 @@ export default function ScheduleManagementPage() {
       if (conflictResponse.status === 'rejected') throw conflictResponse.reason;
     }
 
+    // A full-season request started on mount can finish after a newly selected
+    // week's request.  Never let that stale response replace scoped readiness.
+    if (sequence !== loadSequence.current) return;
     setGames((gameResponse.value as any).items || []);
     setConflicts((conflictResponse.value as any).conflicts || []);
 
@@ -219,7 +224,7 @@ export default function ScheduleManagementPage() {
           })}</div>
           <button className='mt-2 text-xs text-blue-700 underline' onClick={() => setPublicationWeekIds((publishDiagnostics.weeks || []).map((week: any) => week.season_week_id))}>Select Entire Season</button>
         </fieldset>
-        <h2 className='mt-3 font-bold uppercase'>Publish Readiness{publicationWeekIds.length === 1 ? ` - Week ${(publishDiagnostics.weeks || []).find((w: any) => w.id === publicationWeekIds[0])?.week_number}` : ''}</h2>
+        <h2 className='mt-3 font-bold uppercase'>Publish Readiness{publicationWeekIds.length === 1 ? ` - Week ${(publishDiagnostics.weeks || []).find((w: any) => w.season_week_id === publicationWeekIds[0])?.week_number}` : publicationWeekIds.length > 1 ? ` - ${publicationWeekIds.length} Weeks` : ' - Entire Season'}</h2>
         <div className='mt-2 grid grid-cols-2 gap-2 md:grid-cols-3'>
           <div>Saved Scheduled Games: <span className='font-semibold'>{publishDiagnostics.saved_games ?? publishDiagnostics.total_scheduled_games ?? 0}</span></div>
           <div>Authoritative Source: <span className='font-semibold'>Saved scheduled games</span></div>

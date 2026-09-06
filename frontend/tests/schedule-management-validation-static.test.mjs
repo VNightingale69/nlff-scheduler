@@ -15,5 +15,9 @@ assert.match(page, /Current Layout/, 'blocking issues expose the active physical
 assert.match(page, /Severity/, 'the issue table distinguishes warnings from blockers');
 assert.match(page, /publish_warnings/, 'non-blocking warnings share the detailed issue table');
 assert.match(page, /currentIssue\.reason \|\| currentIssue\.summary/, 'blocking issues expose the exact invalidity reason');
+assert.match(page, /week_ids=\$\{id\}/, 'readiness sends selected authoritative season week IDs');
+assert.match(page, /sequence !== loadSequence\.current/, 'stale full-season readiness cannot replace a selected-week response');
+assert.match(page, /season_week_id === publicationWeekIds\[0\]/, 'single-week readiness labels use the authoritative season week ID');
+assert.match(page, /publicationWeekIds\.length > 1 \? ` - \$\{publicationWeekIds\.length\} Weeks`/, 'multi-week readiness labels show the selected scope');
 
 console.log('schedule management validation display checks passed');

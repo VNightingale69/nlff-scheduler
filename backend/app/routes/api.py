@@ -16985,7 +16985,10 @@ def _publication_week_payload(db: Session, season: Season, week: Week) -> dict[s
 def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> dict:
     """Validate hard integrity within the explicit scope; planning advice is non-blocking."""
     selected = {week.id for week in weeks}
-    rows = [row for row in get_scheduled_games_for_season(db, season.id) if row[0].week_id in selected]
+    # Apply the authoritative Week IDs in SQL.  Loading the whole season and
+    # trimming validation output afterwards allows unrelated games to affect
+    # counters and blockers when another validator is composed with this one.
+    rows = get_scheduled_games_for_season(db, season.id, {'week_ids': selected})
     errors: list[dict] = []
     warnings: list[dict] = []
     team_times: dict[tuple, uuid.UUID] = {}
@@ -28634,6 +28637,7 @@ def _schedule_management_rows(db: Session, filters: dict | None = None, organiza
     if filters.get('field_id'): q = q.filter(FieldInstance.id == filters['field_id'])
     if filters.get('team_id'): q = q.filter((home.id == filters['team_id']) | (away.id == filters['team_id']))
     if filters.get('week_id'): q = q.filter(Game.week_id == filters['week_id'])
+    if filters.get('week_ids'): q = q.filter(Game.week_id.in_(filters['week_ids']))
     if filters.get('status_code'): q = q.filter(func.lower(GameStatus.code) == str(filters['status_code']).strip().lower())
     if filters.get('season_id'): q = q.filter(Game.season_id == filters['season_id'])
     if filters.get('game_type'):
@@ -30482,7 +30486,13 @@ def schedule_publish_diagnostics(season_id: uuid.UUID | None = None, week_ids: l
     archived = int(counts.get('archived', 0))
     authoritative_rows = get_scheduled_games_for_season(db, season.id)
     total = len(authoritative_rows)
-    scoped_authoritative_rows = [row for row in authoritative_rows if row[0].week_id in {week.id for week in weeks}]
+    selected_week_ids = {week.id for week in weeks}
+    scoped_authoritative_rows = (
+        authoritative_rows if week_ids is None
+        else get_scheduled_games_for_season(db, season.id, {'week_ids': selected_week_ids})
+    )
+    scoped_validation_run_id = str(uuid.uuid4()) if week_ids is not None else None
+    scoped_validation_timestamp = datetime.utcnow().isoformat() if week_ids is not None else None
     saved_game_diagnostics = []
     for game, _slot, field_instance, host, home, away, _division, _organization, _status in scoped_authoritative_rows:
         canonical_field = getattr(game, 'field', None)
@@ -30530,11 +30540,17 @@ def schedule_publish_diagnostics(season_id: uuid.UUID | None = None, week_ids: l
         'archived_games': archived,
         **_schedule_publication_status(season),
         'publish_eligibility_source': 'CURRENT_SAVED_SCHEDULE_FINAL_VALIDATION',
-        'publish_validation_run_id': final_validation.get('final_validation_run_id'),
-        'publish_validation_timestamp': final_validation.get('final_validation_timestamp'),
-        'publish_validation_games_checked_count': final_validation.get('final_validation_games_checked_count'),
-        'export_games_count': final_validation.get('export_games_count') or total,
-        'source_reconciliation': final_validation.get('final_source_reconciliation'),
+        'publish_validation_run_id': scoped_validation_run_id or final_validation.get('final_validation_run_id'),
+        'publish_validation_timestamp': scoped_validation_timestamp or final_validation.get('final_validation_timestamp'),
+        'publish_validation_games_checked_count': readiness['games'] if week_ids is not None else final_validation.get('final_validation_games_checked_count'),
+        'export_games_count': len(scoped_authoritative_rows) if week_ids is not None else (final_validation.get('export_games_count') or total),
+        'source_reconciliation': ({
+            'season_id': str(season.id),
+            'season_week_ids': sorted(str(value) for value in selected_week_ids),
+            'final_scheduled_games_query_count': len(scoped_authoritative_rows),
+            'final_validation_games_checked_count': readiness['games'],
+            'validation_engine_version': PUBLISH_VALIDATION_ENGINE_VERSION,
+        } if week_ids is not None else final_validation.get('final_source_reconciliation')),
         'publish_validation_message': validation_message,
         'publish_blocking_issue_count': blocking_count,
         'publish_blocking_issues': (readiness['blocking_errors'] if week_ids is not None else concise_issues)[:10],
