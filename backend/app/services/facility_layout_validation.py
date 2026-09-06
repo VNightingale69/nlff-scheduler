@@ -437,12 +437,13 @@ def fields_can_operate_simultaneously(db, host_id, field_ids):
                        'Physical field conflicts found.' if pairs else 'No physical field conflicts.')}
 
 
-def field_combination_diagnostics(db, host_id, field_ids):
+def field_combination_diagnostics(db, host_id, field_ids, required_field_types=()):
     """Describe the persisted, host-ID-scoped membership decision."""
     assigned = [field_id for field_id in field_ids if field_id]
     used = set(assigned)
     matching, resolution_error = supported_configurations_for_fields(db, host_id, assigned)
     matching_codes = {item.configuration_name for item in matching}
+    required_types = list(required_field_types or ())
     evaluations = []
     matching_name = None
     configurations = active_supported_layouts_query(db, host_id).order_by(
@@ -463,7 +464,16 @@ def field_combination_diagnostics(db, host_id, field_ids):
             .all()
         )
         member_ids = {field.id for field in fields}
-        compatible = configuration.configuration_name in matching_codes
+        # A configuration member identifies a physical position.  Its base
+        # ``layout_type`` describes the position's default use, not every use
+        # supported by an alternate layout.  For example, the same two turf
+        # positions can be two Medium fields in one layout and one Large plus
+        # one Small in another.  Match stable member IDs first, then validate
+        # the wave's required logical sizes against that configuration.
+        member_match = bool(used) and used.issubset(member_ids)
+        capacity_match = (configuration_supports_field_types(configuration, required_types)
+                          if required_types else configuration.configuration_name in matching_codes)
+        compatible = member_match and capacity_match
         if compatible and matching_name is None:
             matching_name = configuration.configuration_name
         evaluations.append({
@@ -471,6 +481,9 @@ def field_combination_diagnostics(db, host_id, field_ids):
             'name': configuration.configuration_name,
             'field_ids': [str(field.id) for field in fields],
             'fields': [field.name for field in fields],
+            'is_active': bool(configuration.is_active),
+            'member_match': member_match,
+            'capacity_match': capacity_match,
             'status': 'VALID' if compatible else ('ACTIVE BUT INVALID' if not member_ids else 'INCOMPATIBLE'),
             'reason': (resolution_error if resolution_error else
                        'Configuration contains no assigned physical fields.' if not member_ids else None),
@@ -497,7 +510,10 @@ def evaluate_host_timeslot_capacity(db, host_location_id, game_date, kickoff_tim
     required = Counter(filter(None, (_size(game.get('required_field_size')) for game in games)))
     required_counts = {size: int(required.get(size, 0)) for size in SIZES}
     capacities = active_layout_capacities(db, host_location_id)
-    membership = field_combination_diagnostics(db, host_location_id, field_ids) if field_ids else {
+    membership = field_combination_diagnostics(
+        db, host_location_id, field_ids,
+        [game.get('required_field_size') for game in games],
+    ) if field_ids else {
         'configurations': [], 'compatible_configuration': None,
     }
 
@@ -515,7 +531,11 @@ def evaluate_host_timeslot_capacity(db, host_location_id, game_date, kickoff_tim
             for size in SIZES
             if int(assigned_counts.get(size, 0)) < required_counts[size]
         }
-        if shortages:
+        named_configuration_valid = bool(membership['compatible_configuration'])
+        # Raw field types are defaults for a physical position.  They must not
+        # veto an active named reconfiguration whose member IDs and logical
+        # capacity both match this complete wave.
+        if shortages and not named_configuration_valid:
             details = ', '.join(
                 f"insufficient {size.title()} fields (required {required_counts[size]}, "
                 f"assigned {int(assigned_counts.get(size, 0))})"
@@ -527,6 +547,10 @@ def evaluate_host_timeslot_capacity(db, host_location_id, game_date, kickoff_tim
             physical = {**physical, 'valid': False,
                         'reason': 'A physical field is assigned more than once at this date and kickoff.'}
             valid = False
+        if named_configuration_valid and len(field_ids) == len(set(field_ids)):
+            valid = True
+            physical = {**physical, 'valid': True, 'reason': 'No physical field conflicts.',
+                        'conflicting_pairs': []}
         issue_code = None if valid else 'FIELD_LAYOUT_CONFLICT'
         # The blocker and diagnostics deliberately project this one reason;
         # never label the absence of physical conflicts as an invalid reason.
@@ -550,6 +574,16 @@ def evaluate_host_timeslot_capacity(db, host_location_id, game_date, kickoff_tim
             'assigned_fields': assigned_fields,
             'required_field_sizes': required_counts,
             'compatible_configuration': membership['compatible_configuration'],
+            'is_valid': valid,
+            'is_blocking': not valid,
+            'validation_method': ('named_configuration' if named_configuration_valid
+                                  else 'physical_field_compatibility'),
+            'host_location_id': str(host_location_id),
+            'configuration_id': next((row['id'] for row in membership['configurations']
+                                      if row['name'] == membership['compatible_configuration']), None),
+            'configuration_name': membership['compatible_configuration'],
+            'conflicts': physical['conflicting_pairs'],
+            'warnings': [],
             'active_configurations': membership['configurations'],
             'available_layouts': capacities,
             'conflicting_fields': sorted({name for pair in physical['conflicting_pairs'] for name in (pair['field_a'], pair['field_b'])}),

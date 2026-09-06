@@ -17049,7 +17049,7 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
             # scheduling metadata.  Once a game has a valid canonical field,
             # do not let a retired relationship block publication.
             warnings.append({
-                'issue_code': 'INVALID_FIELD_FOR_ACTIVE_LAYOUT',
+                'issue_code': 'MANUAL_OVERRIDE_WARNING',
                 'severity': 'WARNING',
                 'blocking': False,
                 'scheduled_game_id': str(game.id),
@@ -17061,9 +17061,9 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
                 'field': getattr(canonical_field, 'name', None) or 'Not Assigned',
                 'required_field_type': required_type,
                 'selected_layout': layout_label(getattr(saved_timeslot, 'configuration', None)),
-                'reason': 'The saved field-layout reference does not match the current host, date, kickoff, or an active configuration.',
-                'recommended_action': 'The obsolete generated/timeslot layout relationship may be detached; the current canonical field remains authoritative.',
-                'summary': 'Ignored a stale generated/timeslot layout reference because the game has a current canonical field.',
+                'reason': 'Game uses a manually overridden inactive generated slot, but the physical field assignment is valid.',
+                'recommended_action': 'Review if desired; no action required for publication.',
+                'summary': 'Game uses a manually overridden inactive generated slot, but the physical field assignment is valid.',
             })
         if host and game.host_location_id and game.game_date and game.kickoff_time:
             host_timeslot_groups.setdefault((game.host_location_id, game.game_date, game.kickoff_time), []).append(
@@ -17114,9 +17114,21 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
             'required_small': demand['SMALL'], 'required_medium': demand['MEDIUM'],
             'required_large': demand['LARGE'],
             'physical_field_ids': [str(item[0].field_id) for item in wave if item[0].field_id],
+            'physical_fields': [{
+                'id': str(item[0].field_id),
+                'name': getattr(getattr(item[0], 'field', None), 'name', None),
+                'type': getattr(getattr(item[0], 'field', None), 'layout_type', None),
+                'is_active': getattr(getattr(item[0], 'field', None), 'is_active', None),
+                'host_location_id': str(getattr(getattr(item[0], 'field', None), 'host_location_id', '') or '') or None,
+            } for item in wave if item[0].field_id],
             'active_configuration_ids': [layout['id'] for layout in evaluated_layouts],
+            'configuration_evaluations': capacity_assessment['active_configurations'],
             'retired_slots_excluded': retired_slots_excluded,
             'configuration_selected': capacity_assessment['compatible_configuration'],
+            'physical_layout_validation_passes': not bool(capacity_assessment['conflicting_pairs']),
+            'named_configuration_validation_passes': bool(capacity_assessment['compatible_configuration']),
+            'overlap_validation_passes': len(capacity_assessment['assigned_field_ids']) == len(set(capacity_assessment['assigned_field_ids'])),
+            'field_layout_conflict_expression': 'not capacity_assessment.valid and bool(active_layouts)',
             'validation_source': 'saved_scheduled_games+current_physical_fields+active_host_configurations',
             'blocking_result': bool(not valid and evaluated_layouts),
             'reason': capacity_assessment['reason'],
