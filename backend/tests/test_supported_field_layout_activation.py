@@ -176,9 +176,9 @@ class SupportedFieldLayoutActivationTest(unittest.TestCase):
         ])
 
         self.assertFalse(result['valid'])
-        self.assertEqual('FIELD_LAYOUT_CONFLICT', result['issue_code'])
+        self.assertEqual('FIELD_OVERLAP_CONFLICT', result['issue_code'])
         self.assertEqual({'Large 1', 'Small 2'}, set(result['conflicting_fields']))
-        self.assertEqual(['FIELD_LAYOUT_CONFLICT'], [issue['issue_code'] for issue in result['blocking_issues']])
+        self.assertEqual(['FIELD_OVERLAP_CONFLICT'], [issue['issue_code'] for issue in result['blocking_issues']])
         self.assertIn('Shared turf footprint', result['reason'])
 
     def test_fields_from_different_configurations_without_overlap_are_valid(self):

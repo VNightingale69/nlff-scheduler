@@ -1,4 +1,5 @@
 import uuid
+from datetime import date, time
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -59,6 +60,53 @@ def test_twenty_one_canonical_fields_have_no_missing_field_errors():
     with patch('app.routes.api.get_scheduled_games_for_season', return_value=rows):
         result = _week_publish_readiness(SimpleNamespace(), SimpleNamespace(id=uuid.uuid4()), [SimpleNamespace(id=week_id)])
     assert not [issue for issue in result['blocking_errors'] if issue['issue_code'] == 'MISSING_FIELD']
+
+
+def test_hiller_sequential_publish_waves_use_resolved_authoritative_field_ids():
+    """Generated-slot metadata cannot change the import-approved layout input."""
+    week_id = uuid.uuid4()
+    physical_field_id = uuid.uuid4()
+    assignment = SimpleNamespace(
+        physical_field_id=physical_field_id,
+        physical_field=SimpleNamespace(
+            id=physical_field_id, name='Hiller Stadium Small Field', layout_type='SMALL',
+        ),
+        field_instance_id=uuid.uuid4(), display_name='Hiller Stadium Small Field',
+        issue_code=None,
+    )
+    validation = {
+        'valid': True, 'is_valid': True, 'blocking_issues': [], 'issue_code': None,
+        'available_layouts': [], 'compatible_configuration': '1 Large + 1 Small',
+        'supported_layouts': ['1 Large + 1 Small'],
+        'configuration_basis': 'Named configuration membership (field IDs)',
+        'assigned_field_ids': [str(physical_field_id)], 'conflicting_pairs': [],
+        'active_configurations': [], 'reason': 'Assigned physical fields coexist in the persisted configuration.',
+    }
+
+    for hour in (9, 10, 11):
+        row = _game(week_id)
+        row[0].field_id = None
+        row[0].field = None
+        row[0].field_instance_id = assignment.field_instance_id
+        row[0].game_date = date(2026, 9, 20)
+        row[0].kickoff_time = time(hour)
+        with (patch('app.routes.api.get_scheduled_games_for_season', return_value=[row]),
+              patch('app.routes.api.resolve_game_field_assignment', return_value=assignment),
+              patch('app.routes.api.facility_layout_validation.validate_field_configuration',
+                    return_value=validation) as shared_validator):
+            result = _week_publish_readiness(
+                SimpleNamespace(), SimpleNamespace(id=uuid.uuid4()), [SimpleNamespace(id=week_id)],
+            )
+
+        assert result['status'] == 'Ready to Publish'
+        assert not [issue for issue in result['blocking_errors']
+                    if issue['issue_code'] == 'FIELD_LAYOUT_CONFLICT']
+        normalized = shared_validator.call_args.args[4]
+        assert normalized == [{
+            'field_id': physical_field_id,
+            'field_name': 'Hiller Stadium Small Field',
+            'required_field_size': 'SMALL',
+        }]
 
 
 def test_one_truly_null_canonical_field_is_a_descriptive_blocking_error():
