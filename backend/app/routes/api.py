@@ -17113,8 +17113,12 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
             'field_name': item[7].display_name if item[7] else None,
             'required_field_size': item[1],
             'configuration_id': (
-                getattr(item[0], 'timeslot_configuration_id', None)
-                or getattr(getattr(item[0], 'timeslot_configuration', None), 'configuration_id', None)
+                # ``Game.timeslot_configuration_id`` identifies the dated
+                # TimeslotFieldConfiguration row, not its physical
+                # HostLocationConfiguration.  Passing that UUID as a layout
+                # UUID crossed ID domains and made the shared resolver query
+                # for a HostLocationConfiguration that could never exist.
+                getattr(getattr(item[0], 'timeslot_configuration', None), 'configuration_id', None)
                 or getattr(getattr(getattr(item[0], 'timeslot_configuration', None),
                                    'configuration', None), 'id', None)
             ),

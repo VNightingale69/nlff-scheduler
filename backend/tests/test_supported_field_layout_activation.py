@@ -267,6 +267,42 @@ class SupportedFieldLayoutActivationTest(unittest.TestCase):
             self.assertEqual([], result['conflicts'])
             self.assertEqual([], result['blocking_issues'])
 
+    def test_hiller_configuration_resolution_is_order_independent_and_accepts_subset(self):
+        """Import and publish inputs resolve the production Field 1/3 waves identically."""
+        first = Field(id=uuid.uuid4(), host_location_id=self.host.id,
+                      name='Johnsburg - Hiller Stadium Field 1', layout_type='MEDIUM', is_active=True)
+        third = Field(id=uuid.uuid4(), host_location_id=self.host.id,
+                      name='Johnsburg - Hiller Stadium Field 3', layout_type='MEDIUM', is_active=True)
+        layout = HostLocationConfiguration(
+            id=uuid.uuid4(), host_location_id=self.host.id,
+            configuration_name='1 Large + 1 Small', large_field_count=1,
+            small_field_count=1, is_active=True,
+        )
+        layout.members = [FieldConfigurationMember(field=third),
+                          FieldConfigurationMember(field=first)]
+        self.db.add_all([first, third, layout])
+        self.db.commit()
+
+        waves = (
+            [(first.id, 'LARGE'), (third.id, 'SMALL')],
+            [(third.id, 'SMALL'), (first.id, 'LARGE')],
+            [(str(first.id), 'LARGE')],
+        )
+        for hour, wave in enumerate(waves, 9):
+            normalized = [{'field_id': field_id, 'required_field_size': size}
+                          for field_id, size in wave]
+            for assignment in normalized:
+                assignment['configuration_id'] = layout.id
+            import_result = validate_field_configuration(
+                self.db, self.host.id, date(2026, 9, 20), time(hour), normalized)
+            publish_result = validate_field_configuration(
+                self.db, self.host.id, date(2026, 9, 20), time(hour), normalized)
+
+            self.assertEqual(import_result, publish_result)
+            self.assertTrue(publish_result['is_valid'])
+            self.assertEqual('1 Large + 1 Small', publish_result['configuration_name'])
+            self.assertEqual([], publish_result['blocking_issues'])
+
     def test_hiller_imported_physical_positions_use_active_turf_layout_at_all_affected_kickoffs(self):
         """Imported turf positions retain IDs while their logical sizes change."""
         self.host.name = 'Hiller Stadium'

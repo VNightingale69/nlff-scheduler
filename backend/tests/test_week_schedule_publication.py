@@ -185,6 +185,42 @@ def test_group_configuration_allows_game_without_direct_field_id():
     assert validator.call_args.args[4][0]['configuration_id'] is None
 
 
+def test_publish_passes_physical_configuration_id_not_timeslot_row_id():
+    """Layout resolution must not compare IDs from two different tables."""
+    week_id = uuid.uuid4()
+    row = _game(week_id)
+    physical_configuration_id = uuid.uuid4()
+    timeslot_row_id = uuid.uuid4()
+    row[0].game_date = date(2026, 9, 20)
+    row[0].kickoff_time = time(9)
+    row[0].timeslot_configuration_id = timeslot_row_id
+    row[0].timeslot_configuration = SimpleNamespace(
+        id=timeslot_row_id,
+        configuration_id=physical_configuration_id,
+        host_location_id=row[0].host_location_id,
+        configuration_date=row[0].game_date,
+        kickoff_time=row[0].kickoff_time,
+        configuration=SimpleNamespace(id=physical_configuration_id, is_active=True),
+    )
+    assignment = SimpleNamespace(
+        physical_field_id=row[0].field_id, physical_field=row[0].field,
+        field_instance_id=None, display_name=row[0].field.name, issue_code=None,
+    )
+
+    with (patch('app.routes.api.get_scheduled_games_for_season', return_value=[row]),
+          patch('app.routes.api.resolve_game_field_assignment', return_value=assignment),
+          patch('app.routes.api.facility_layout_validation.validate_field_configuration',
+                return_value=_valid_shared_layout(row[0].field_id)) as validator):
+        result = _week_publish_readiness(
+            SimpleNamespace(), SimpleNamespace(id=uuid.uuid4()), [SimpleNamespace(id=week_id)],
+        )
+
+    assert result['status'] == 'Ready to Publish'
+    normalized = validator.call_args.args[4][0]
+    assert normalized['configuration_id'] == physical_configuration_id
+    assert normalized['configuration_id'] != timeslot_row_id
+
+
 def test_invalid_shared_field_configuration_is_returned_as_readiness_data():
     """A validator blocker must not crash Schedule Readiness tuple projection."""
     week_id = uuid.uuid4()
