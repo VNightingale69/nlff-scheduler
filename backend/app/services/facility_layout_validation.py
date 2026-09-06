@@ -482,9 +482,18 @@ def field_combination_diagnostics(db, host_id, field_ids, required_field_types=(
         # one Small in another.  Match stable member IDs first, then validate
         # the wave's required logical sizes against that configuration.
         member_match = bool(used) and used.issubset(member_ids)
+        # ``supported_configurations_for_fields`` is the canonical import
+        # resolver: it first proves that every supplied ID is an active field
+        # at this host, then resolves the layout from the fields' physical
+        # types.  Keep that result as a valid identity path as well as the
+        # configuration-member path.  Requiring membership exclusively here
+        # made publication disagree with import when legacy configuration
+        # membership rows were incomplete even though the canonical Field IDs
+        # themselves unambiguously formed an active layout.
+        canonical_field_match = configuration.configuration_name in matching_codes
         capacity_match = (configuration_supports_field_types(configuration, required_types)
                           if required_types else configuration.configuration_name in matching_codes)
-        compatible = member_match and capacity_match
+        compatible = (member_match or canonical_field_match) and capacity_match
         if compatible and matching_name is None:
             matching_name = configuration.configuration_name
         evaluations.append({
@@ -494,6 +503,7 @@ def field_combination_diagnostics(db, host_id, field_ids, required_field_types=(
             'fields': [field.name for field in fields],
             'is_active': bool(configuration.is_active),
             'member_match': member_match,
+            'canonical_field_match': canonical_field_match,
             'capacity_match': capacity_match,
             'status': 'VALID' if compatible else ('ACTIVE BUT INVALID' if not member_ids else 'INCOMPATIBLE'),
             'reason': (resolution_error if resolution_error else
