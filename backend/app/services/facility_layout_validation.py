@@ -16,6 +16,11 @@ SIZES = ('SMALL', 'MEDIUM', 'LARGE')
 logger = logging.getLogger(__name__)
 
 
+def configuration_code(value):
+    """Return the stable identity used for human and machine layout labels."""
+    return re.sub(r'[^A-Z0-9]+', '_', str(value or '').strip().upper()).strip('_')
+
+
 def _canonical_uuid(value):
     """Normalize persisted identifiers without translating between domains."""
     if value is None or isinstance(value, uuid.UUID):
@@ -206,14 +211,14 @@ def get_active_supported_layouts(db, host_location_id):
         # explicit retirement, however, and must never be resurrected merely
         # because its code is in the approved catalog.
         existing = {
-            str(row.configuration_name or '').strip().upper(): row
+            configuration_code(row.configuration_name): row
             for row in db.query(HostLocationConfiguration).filter(
                 HostLocationConfiguration.host_location_id == host_location_id,
             ).all()
         }
         layouts = []
         for sort_order, metadata in enumerate(APPROVED_TURF_CONFIGURATIONS):
-            code = str(metadata['code'])
+            code = configuration_code(metadata['code'])
             persisted = existing.get(code)
             if persisted is not None and not persisted.is_active:
                 continue
@@ -808,6 +813,22 @@ def validate_field_configuration(db, host_location_id, game_date, kickoff_time, 
             else str(saved_configuration.id) if saved_configuration_valid
             else str(demand_configuration.id) if turf_configuration_valid and demand_configuration.id else None
         )
+        matched_definition = next((configuration for configuration in active_configurations
+                                   if configuration_code(configuration.configuration_name)
+                                   == configuration_code(matched_configuration)), None)
+        occupied_by_id = {field.id: field.name for field in fields}
+        occupied_fields = [occupied_by_id[field_id] for field_id in field_ids
+                           if field_id in occupied_by_id]
+        definition_fields = [member.field.name for member in
+                             list(getattr(matched_definition, 'members', ()) or ())
+                             if member.field and member.field.is_active
+                             and member.field.deleted_at is None]
+        occupied_ids = set(field_ids)
+        unused_fields = [member.field.name for member in
+                         list(getattr(matched_definition, 'members', ()) or ())
+                         if member.field and member.field.is_active
+                         and member.field.deleted_at is None
+                         and member.field_id not in occupied_ids]
         result = {
             # At this point every supplied identifier was resolved in the
             # canonical physical-field domain.  A size/capacity mismatch is a
@@ -829,6 +850,11 @@ def validate_field_configuration(db, host_location_id, game_date, kickoff_time, 
             'host_location_id': str(host_location_id),
             'configuration_id': matched_configuration_id,
             'configuration_name': matched_configuration,
+            # Layout members are capacity.  Occupancy is the subset scheduled
+            # in this exact date/site/kickoff group; unused capacity is valid.
+            'occupied_fields': occupied_fields,
+            'unused_fields': unused_fields,
+            'configuration_fields': definition_fields,
             'conflicts': physical['conflicting_pairs'],
             'warnings': [],
             'errors': blocking_issues,

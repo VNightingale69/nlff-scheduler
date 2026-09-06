@@ -188,6 +188,56 @@ def test_westosha_resolves_numbered_fields_by_type_capacity_and_rejects_duplicat
     assert 'more than once' in duplicate['reason']
 
 
+def test_two_large_human_label_resolves_definition_and_partial_occupancy(facility):
+    """Unused members are reported as capacity, never as missing assignments."""
+    db, host, user, fields = facility
+    two_large = _add(db, host, user, {
+        'Large Field 1': fields['Large Field 1'],
+        'Large Field 2': fields['Large Field 2'],
+    }, 'Two Large')
+    # Reproduce the historical display-form value present at Westosha.
+    two_large.configuration_name = 'Two Large'
+    db.commit()
+
+    # The approved catalog uses TWO_LARGE; its human-form persisted definition
+    # must win rather than producing an empty synthetic configuration.
+    active = get_active_supported_layouts(db, host.id)
+    resolved = next(item for item in active if item.configuration_name == 'Two Large')
+    assert resolved.id == two_large.id
+    assert _layout_integrity_error(resolved, host) is None
+
+    for kickoff, field_name in ((time(14), 'Large Field 1'),
+                                (time(15), 'Large Field 1'),
+                                (time(16), 'Large Field 2')):
+        result = evaluate_host_timeslot_capacity(db, host.id, date(2026, 9, 27), kickoff, [{
+            'field_id': fields[field_name].id,
+            'field_name': field_name,
+            'required_field_size': 'LARGE',
+        }])
+        assert result['is_valid']
+        assert result['configuration_name'] == 'Two Large'
+        assert result['occupied_fields'] == [field_name]
+        assert result['unused_fields'] == [
+            name for name in ('Large Field 1', 'Large Field 2') if name != field_name]
+
+    both = evaluate_host_timeslot_capacity(db, host.id, date(2026, 9, 27), time(17), [
+        {'field_id': fields[name].id, 'field_name': name, 'required_field_size': 'LARGE'}
+        for name in ('Large Field 1', 'Large Field 2')
+    ])
+    assert both['is_valid']
+    assert both['occupied_fields'] == ['Large Field 1', 'Large Field 2']
+    assert both['unused_fields'] == []
+
+    duplicate = evaluate_host_timeslot_capacity(db, host.id, date(2026, 9, 27), time(18), [
+        {'field_id': fields['Large Field 1'].id, 'field_name': 'Large Field 1',
+         'required_field_size': 'LARGE'},
+        {'field_id': fields['Large Field 1'].id, 'field_name': 'Large Field 1',
+         'required_field_size': 'LARGE'},
+    ])
+    assert not duplicate['is_valid']
+    assert duplicate['issue_code'] == 'FIELD_OVERLAP_CONFLICT'
+
+
 def test_validation_and_host_scoped_code_uniqueness(facility):
     db, host, user, fields = facility
     selected = {'Small Field 1': fields['Small Field 1']}
