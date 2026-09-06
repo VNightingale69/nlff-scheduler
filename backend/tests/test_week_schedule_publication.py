@@ -48,7 +48,10 @@ def test_readiness_validates_only_selected_week_and_ignores_future_week_error():
     def scoped_rows(_db, _season_id, filters):
         return [row for row in [selected, future] if row[0].week_id in filters['week_ids']]
 
-    with patch('app.routes.api.get_scheduled_games_for_season', side_effect=scoped_rows) as loader:
+    with (patch('app.routes.api.get_scheduled_games_for_season', side_effect=scoped_rows) as loader,
+          patch('app.routes.api.facility_layout_validation.validate_field_configuration',
+                side_effect=lambda _db, _host, _date, _time, assignments:
+                _valid_shared_layout(*(item['field_id'] for item in assignments)))):
         result = _week_publish_readiness(SimpleNamespace(), SimpleNamespace(id=uuid.uuid4()), [SimpleNamespace(id=selected_id)])
     assert result['games'] == 1
     assert result['blocking_errors'] == []
@@ -70,7 +73,10 @@ def test_readiness_scopes_season_game_count_to_selected_authoritative_week_ids()
     def scoped_rows(_db, _season_id, filters):
         return [row for row in rows if row[0].week_id in filters['week_ids']]
 
-    with patch('app.routes.api.get_scheduled_games_for_season', side_effect=scoped_rows) as loader:
+    with (patch('app.routes.api.get_scheduled_games_for_season', side_effect=scoped_rows) as loader,
+          patch('app.routes.api.facility_layout_validation.validate_field_configuration',
+                side_effect=lambda _db, _host, _date, _time, assignments:
+                _valid_shared_layout(*(item['field_id'] for item in assignments)))):
         result = _week_publish_readiness(
             SimpleNamespace(), SimpleNamespace(id=uuid.uuid4()),
             [SimpleNamespace(id=value) for value in selected_ids],
@@ -79,6 +85,28 @@ def test_readiness_scopes_season_game_count_to_selected_authoritative_week_ids()
     assert result['games'] == 22
     assert not [issue for issue in result['blocking_errors'] if issue.get('date') == '2026-08-16']
     assert loader.call_args.args[2] == {'week_ids': selected_ids}
+
+
+def test_readiness_checks_all_177_games_only_when_every_season_week_is_selected():
+    week_ids = [uuid.uuid4() for _ in range(8)]
+    rows = [_game(week_ids[index % len(week_ids)]) for index in range(177)]
+    for index, row in enumerate(rows):
+        # Isolate scope counting from the other readiness conflict checks.
+        row[0].game_date = date(2026, 1, 1) + __import__('datetime').timedelta(days=index)
+
+    def scoped_rows(_db, _season_id, filters):
+        return [row for row in rows if row[0].week_id in filters['week_ids']]
+
+    with (patch('app.routes.api.get_scheduled_games_for_season', side_effect=scoped_rows),
+          patch('app.routes.api.facility_layout_validation.validate_field_configuration',
+                side_effect=lambda _db, _host, _date, _time, assignments:
+                _valid_shared_layout(*(item['field_id'] for item in assignments)))):
+        result = _week_publish_readiness(
+            SimpleNamespace(), SimpleNamespace(id=uuid.uuid4()),
+            [SimpleNamespace(id=value) for value in week_ids],
+        )
+
+    assert result['games'] == 177
 
 
 def test_selected_week_hard_error_blocks_publication():

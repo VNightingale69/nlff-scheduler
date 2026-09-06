@@ -145,6 +145,67 @@ class SupportedFieldLayoutActivationTest(unittest.TestCase):
             self.assertEqual([], result['blocking_issues'])
             self.assertIsNone(result['issue_code'])
 
+    def test_canonical_field_types_resolve_layout_when_legacy_membership_is_incomplete(self):
+        """Import and publish must share the canonical-field compatibility path."""
+        for configuration in [self.canonical, *self.alternatives]:
+            configuration.is_active = False
+        field_one = Field(
+            id=uuid.uuid4(), host_location_id=self.host.id,
+            name='Johnsburg - Hiller Stadium Field 1', layout_type='LARGE', is_active=True,
+        )
+        field_three = Field(
+            id=uuid.uuid4(), host_location_id=self.host.id,
+            name='Johnsburg - Hiller Stadium Field 3', layout_type='SMALL', is_active=True,
+        )
+        large_small = HostLocationConfiguration(
+            id=uuid.uuid4(), host_location_id=self.host.id,
+            configuration_name='1 Large + 1 Small', small_field_count=1,
+            large_field_count=1, is_active=True,
+        )
+        one_large = HostLocationConfiguration(
+            id=uuid.uuid4(), host_location_id=self.host.id,
+            configuration_name='1 Large', large_field_count=1, is_active=True,
+        )
+        # These legacy rows deliberately have no configuration-membership
+        # records. Canonical Field IDs and types are nevertheless complete.
+        self.db.add_all([field_one, field_three, large_small, one_large])
+        self.db.commit()
+
+        waves = (
+            (time(9), ((field_one, 'LARGE'), (field_three, 'SMALL')),
+             '1 Large + 1 Small'),
+            # Reversed input guards set/order-independent resolution.
+            (time(10), ((field_three, 'SMALL'), (field_one, 'LARGE')),
+             '1 Large + 1 Small'),
+            # A single physical field is a compatible subset, not an exact
+            # equality check against a larger configuration's positions.
+            (time(11), ((field_one, 'LARGE'),), '1 Large'),
+        )
+        for kickoff, fields, expected_layout in waves:
+            assignments = [
+                {'field_id': field.id, 'field_name': field.name,
+                 'required_field_size': required}
+                for field, required in fields
+            ]
+            import_result = validate_field_configuration(
+                self.db, self.host.id, date(2026, 9, 20), kickoff, assignments)
+            publish_result = validate_field_configuration(
+                self.db, self.host.id, date(2026, 9, 20), kickoff, assignments)
+
+            self.assertEqual(import_result, publish_result)
+            self.assertTrue(publish_result['is_valid'])
+            self.assertEqual(expected_layout, publish_result['configuration_name'])
+            self.assertEqual([], publish_result['blocking_issues'])
+
+        invalid = validate_field_configuration(
+            self.db, self.host.id, date(2026, 9, 20), time(12), [
+                {'field_id': field_one.id, 'required_field_size': 'LARGE'},
+                {'field_id': self.large.id, 'required_field_size': 'LARGE'},
+            ],
+        )
+        self.assertFalse(invalid['is_valid'])
+        self.assertEqual('FIELD_LAYOUT_CONFLICT', invalid['issue_code'])
+
     def test_two_medium_fields_and_single_large_use_supported_physical_layouts(self):
         medium_two = Field(
             id=uuid.uuid4(), host_location_id=self.host.id, name='Medium 2', layout_type='MEDIUM', is_active=True,
