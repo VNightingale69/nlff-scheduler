@@ -17166,7 +17166,11 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
         if valid:
             assert not capacity_assessment['blocking_issues']
             continue
-        game, _required_type, host, home, away, _slot, _field_instance = wave[0]
+        # Waves also retain the canonical assignment returned by
+        # ``resolve_game_field_assignment``.  Keep the tuple shape in sync on
+        # the invalid-result path; otherwise a validation blocker raises while
+        # being converted into readiness data instead of being reported.
+        game, _required_type, host, home, away, _slot, _field_instance, _assignment = wave[0]
         demand_text = ', '.join(f'{count} {size.title()}' for size, count in demand.items() if count) or 'none'
         layout_text = '; '.join(
             f"{layout['code']}: " + ' / '.join(f"{layout['capacity'][size]} {size.title()}" for size in FIELD_SIZE_ORDER)
