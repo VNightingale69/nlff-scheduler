@@ -109,6 +109,53 @@ def test_hiller_sequential_publish_waves_use_resolved_authoritative_field_ids():
         }]
 
 
+def test_invalid_shared_field_configuration_is_returned_as_readiness_data():
+    """A validator blocker must not crash Schedule Readiness tuple projection."""
+    week_id = uuid.uuid4()
+    row = _game(week_id)
+    field_id = row[0].field_id
+    assignment = SimpleNamespace(
+        physical_field_id=field_id,
+        physical_field=row[0].field,
+        field_instance_id=None,
+        display_name=row[0].field.name,
+        issue_code=None,
+    )
+    validation = {
+        'valid': False,
+        'is_valid': False,
+        'is_blocking': True,
+        'blocking_issues': [{
+            'issue_code': 'FIELD_LAYOUT_CONFLICT',
+            'reason': 'Assigned fields do not form a valid active physical layout.',
+            'conflicting_fields': [row[0].field.name],
+        }],
+        'issue_code': 'FIELD_LAYOUT_CONFLICT',
+        'available_layouts': [{'code': 'TWO_SMALL', 'capacity': {
+            'SMALL': 2, 'MEDIUM': 0, 'LARGE': 0,
+        }}],
+        'compatible_configuration': None,
+        'supported_layouts': [],
+        'configuration_basis': 'Named configuration membership (field IDs)',
+        'assigned_field_ids': [str(field_id)],
+        'conflicting_pairs': [],
+        'active_configurations': [],
+        'reason': 'Assigned fields do not form a valid active physical layout.',
+    }
+
+    with (patch('app.routes.api.get_scheduled_games_for_season', return_value=[row]),
+          patch('app.routes.api.resolve_game_field_assignment', return_value=assignment),
+          patch('app.routes.api.facility_layout_validation.validate_field_configuration',
+                return_value=validation)):
+        result = _week_publish_readiness(
+            SimpleNamespace(), SimpleNamespace(id=uuid.uuid4()), [SimpleNamespace(id=week_id)],
+        )
+
+    assert result['status'] == 'Blocked'
+    assert result['blocking_errors'][0]['issue_code'] == 'FIELD_LAYOUT_CONFLICT'
+    assert result['blocking_errors'][0]['summary'] == validation['reason']
+
+
 def test_one_truly_null_canonical_field_is_a_descriptive_blocking_error():
     week_id = uuid.uuid4()
     row = _game(week_id)
