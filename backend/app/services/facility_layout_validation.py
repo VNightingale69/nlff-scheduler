@@ -494,17 +494,20 @@ def field_combination_diagnostics(db, host_id, field_ids, required_field_types=(
             'unreferenced_assigned_field_ids': sorted(unreferenced)}
 
 
-def evaluate_host_timeslot_capacity(db, host_location_id, game_date, kickoff_time, scheduled_games):
-    """Evaluate one saved-game wave against physical field membership.
+def validate_field_configuration(db, host_location_id, game_date, kickoff_time, assignments):
+    """Authoritatively validate one normalized host/kickoff field assignment.
 
-    ``scheduled_games`` is a sequence of mappings containing ``field_id`` and
+    ``assignments`` is a sequence of mappings containing ``field_id`` and
     ``required_field_size`` (and, optionally, display labels).  Stable saved
-    field IDs are authoritative.  Configuration quantity columns are only a
-    fallback for legacy assignments which have no canonical physical field.
-    This keeps generated slots and their historical configuration selection
-    out of publication decisions.
+    field IDs are authoritative.  Both import (after resolving display values)
+    and publication pass this same normalized shape; neither validator is
+    permitted to infer validity from generated-slot display strings.
+
+    Configuration quantity columns are only a fallback for assignments which
+    have no canonical physical field.  This keeps generated slots and their
+    historical configuration selection out of the core layout decision.
     """
-    games = list(scheduled_games)
+    games = list(assignments)
     field_ids = [game.get('field_id') for game in games if game.get('field_id')]
     assigned_fields = [game.get('field_name') for game in games if game.get('field_name')]
     required = Counter(filter(None, (_size(game.get('required_field_size')) for game in games)))
@@ -547,7 +550,8 @@ def evaluate_host_timeslot_capacity(db, host_location_id, game_date, kickoff_tim
             physical = {**physical, 'valid': False,
                         'reason': 'A physical field is assigned more than once at this date and kickoff.'}
             valid = False
-        if named_configuration_valid and len(field_ids) == len(set(field_ids)):
+        if (named_configuration_valid and len(field_ids) == len(set(field_ids))
+                and not physical['invalid_field_ids'] and not physical['conflicting_pairs']):
             valid = True
             physical = {**physical, 'valid': True, 'reason': 'No physical field conflicts.',
                         'conflicting_pairs': []}
@@ -627,3 +631,9 @@ def evaluate_host_timeslot_capacity(db, host_location_id, game_date, kickoff_tim
     }
     assert not result['valid'] or not result['blocking_issues']
     return result
+
+
+# Compatibility for callers outside the import/publication paths.  New field
+# layout validation must call ``validate_field_configuration`` directly so the
+# architectural boundary remains visible and testable.
+evaluate_host_timeslot_capacity = validate_field_configuration

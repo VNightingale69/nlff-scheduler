@@ -24,6 +24,7 @@ from app.services.facility_layout_validation import (choose_supported_configurat
                                                       log_configuration_integrity_failure,
                                                       resolve_facility_configuration,
                                                       supported_configurations_for_fields)
+from app.services import facility_layout_validation
 
 REQUIRED = ('week', 'date', 'kickoff', 'site', 'field', 'fieldtype', 'division', 'hometeam', 'awayteam')
 logger = logging.getLogger(__name__)
@@ -525,6 +526,23 @@ def build_preview(db, season_id, raw_rows):
                     f'{area.name} is not marked available for hosting on '
                     f'{game_date.strftime("%m/%d/%Y")} at {kickoff.strftime("%I:%M %p")}.'
                 )
+                for row, staged_row, _candidates in grouped:
+                    row['status'] = 'ERROR'; row['message'] = message
+                    invalid_staged_ids.add(id(staged_row))
+                continue
+        else:
+            # Display-name/alias resolution is complete at this boundary.
+            # Validate the exact canonical assignment through the same service
+            # that publication uses against saved games.
+            shared_result = facility_layout_validation.validate_field_configuration(
+                db, site.id, _date(grouped[0][0]['date']), kickoff, [{
+                    'field_id': uuid.UUID(str(staged_row['resolved_field_id'])),
+                    'field_name': row['field'],
+                    'required_field_size': row['imported_field_type'],
+                } for row, staged_row, _candidates in grouped]
+            )
+            if not shared_result['is_valid']:
+                message = shared_result['reason']
                 for row, staged_row, _candidates in grouped:
                     row['status'] = 'ERROR'; row['message'] = message
                     invalid_staged_ids.add(id(staged_row))
