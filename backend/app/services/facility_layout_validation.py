@@ -3,6 +3,7 @@ from collections import Counter
 from dataclasses import dataclass, field as dataclass_field
 import logging
 import re
+import uuid
 
 from sqlalchemy.orm import selectinload
 
@@ -13,6 +14,16 @@ from app.turf_configurations import APPROVED_TURF_CONFIGURATIONS, turf_configura
 
 SIZES = ('SMALL', 'MEDIUM', 'LARGE')
 logger = logging.getLogger(__name__)
+
+
+def _canonical_uuid(value):
+    """Normalize persisted identifiers without translating between domains."""
+    if value is None or isinstance(value, uuid.UUID):
+        return value
+    try:
+        return uuid.UUID(str(value))
+    except (TypeError, ValueError, AttributeError):
+        return value
 
 
 @dataclass(frozen=True)
@@ -510,10 +521,10 @@ def validate_field_configuration(db, host_location_id, game_date, kickoff_time, 
     """
     games = list(assignments)
     saved_configuration_ids = {
-        game.get('configuration_id') for game in games
+        _canonical_uuid(game.get('configuration_id')) for game in games
         if game.get('configuration_id')
     }
-    field_ids = [game.get('field_id') for game in games if game.get('field_id')]
+    field_ids = [_canonical_uuid(game.get('field_id')) for game in games if game.get('field_id')]
     assigned_fields = [game.get('field_name') for game in games if game.get('field_name')]
     required = Counter(filter(None, (_size(game.get('required_field_size')) for game in games)))
     required_counts = {size: int(required.get(size, 0)) for size in SIZES}
@@ -530,6 +541,11 @@ def validate_field_configuration(db, host_location_id, game_date, kickoff_time, 
     ) if field_ids else {
         'configurations': [], 'compatible_configuration': None,
     }
+    saved_configuration = None
+    if len(saved_configuration_ids) == 1:
+        saved_configuration = db.query(HostLocationConfiguration).filter(
+            HostLocationConfiguration.id == next(iter(saved_configuration_ids)),
+        ).first()
 
     # Imported/generated games can retain the wave's configuration relationship
     # without retaining a direct Field ID on every Game.  That relationship is
@@ -537,11 +553,6 @@ def validate_field_configuration(db, host_location_id, game_date, kickoff_time, 
     # configuration.  Do not silently substitute some other active layout: that
     # would turn an unresolvable assignment into fabricated capacity.
     if len(field_ids) != len(games):
-        saved_configuration = None
-        if len(saved_configuration_ids) == 1:
-            saved_configuration = db.query(HostLocationConfiguration).filter(
-                HostLocationConfiguration.id == next(iter(saved_configuration_ids)),
-            ).first()
         configuration_valid = bool(
             saved_configuration
             and saved_configuration.host_location_id == host_location_id
@@ -640,7 +651,28 @@ def validate_field_configuration(db, host_location_id, game_date, kickoff_time, 
             for size in SIZES
             if int(assigned_counts.get(size, 0)) < required_counts[size]
         }
-        named_configuration_valid = bool(membership['compatible_configuration'])
+        # Prefer the saved wave layout when it resolves in the physical-layout
+        # ID domain.  Import persists a TimeslotFieldConfiguration which points
+        # at this HostLocationConfiguration; publication receives that latter
+        # ID from its caller. Membership is intentionally a set/subset check:
+        # ordering has no meaning, and one independently playable Large member
+        # remains valid when the layout's Small member is unused.
+        saved_member_ids = {
+            member.field_id for member in list(getattr(saved_configuration, 'members', ()) or ())
+            if member.field and member.field.host_location_id == host_location_id
+            and member.field.is_active and member.field.deleted_at is None
+        }
+        saved_configuration_valid = bool(
+            saved_configuration
+            and saved_configuration.host_location_id == host_location_id
+            and saved_configuration.is_active
+            and set(field_ids).issubset(saved_member_ids)
+            and configuration_supports_field_types(
+                saved_configuration, [game.get('required_field_size') for game in games])
+        )
+        named_configuration_valid = bool(
+            membership['compatible_configuration'] or saved_configuration_valid
+        )
         # A Turf Stadium's persisted Fields are stable physical positions, not
         # permanently sized playing fields.  Import has always resolved those
         # positions by ID and then selected one of the league-approved logical
@@ -703,12 +735,14 @@ def validate_field_configuration(db, host_location_id, game_date, kickoff_time, 
         }]
         matched_configuration = (
             membership['compatible_configuration']
+            or (saved_configuration.configuration_name if saved_configuration_valid else None)
             or (demand_configuration.configuration_name if turf_configuration_valid else None)
         )
         matched_configuration_id = (
             next((row['id'] for row in membership['configurations']
                   if row['name'] == membership['compatible_configuration']), None)
             if membership['compatible_configuration']
+            else str(saved_configuration.id) if saved_configuration_valid
             else str(demand_configuration.id) if turf_configuration_valid and demand_configuration.id else None
         )
         result = {
