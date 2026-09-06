@@ -118,6 +118,7 @@ def test_hiller_sequential_publish_waves_use_resolved_authoritative_field_ids():
             'field_id': physical_field_id,
             'field_name': 'Hiller Stadium Small Field',
             'required_field_size': 'SMALL',
+            'configuration_id': None,
         }]
 
 
@@ -181,6 +182,7 @@ def test_group_configuration_allows_game_without_direct_field_id():
     assert result['blocking_errors'] == []
     assert result['status'] == 'Ready to Publish'
     assert validator.call_args.args[4][0]['field_id'] is None
+    assert validator.call_args.args[4][0]['configuration_id'] is None
 
 
 def test_invalid_shared_field_configuration_is_returned_as_readiness_data():
@@ -228,6 +230,9 @@ def test_invalid_shared_field_configuration_is_returned_as_readiness_data():
     assert result['status'] == 'Blocked'
     assert result['blocking_errors'][0]['issue_code'] == 'FIELD_LAYOUT_CONFLICT'
     assert result['blocking_errors'][0]['summary'] == validation['reason']
+    assert result['blocking_errors'][0]['field'] == 'Hiller Park SW'
+    assert result['blocking_errors'][0]['required_field_type'] == '1 Small'
+    assert result['blocking_errors'][0]['current_layout'] == 'Unresolved assignment'
 
 
 def test_one_truly_null_canonical_field_is_a_descriptive_blocking_error():
