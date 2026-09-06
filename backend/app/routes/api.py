@@ -24,7 +24,8 @@ from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_AD
 from app.database import get_db
 from app.organizations import active_organization_filter, normalize_organization_name
 from app.models import Division, Field, FieldConfigurationMember, FieldConfigurationOption, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostPlanSelection, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Rulebook, LoginAuditLog, ScheduleChangeLog, ScheduleImport, SchedulePublicationEvent, ScoreHistory, ScoreSubmission, Season, Team, TimeslotFieldConfiguration, Tournament, TournamentDivision, TournamentGame, TournamentTeam, TurfWave, User, Week
-from app.services.facility_layout_validation import active_layout_capacities, active_supported_layouts_query, evaluate_host_timeslot_capacity, field_combination_diagnostics, get_active_supported_layouts, layout_label, resolve_facility_configuration, select_supported_layout, supported_configurations_for_fields, validate_field_combination, validate_timeslot_demands
+from app.services.facility_layout_validation import active_layout_capacities, active_supported_layouts_query, field_combination_diagnostics, get_active_supported_layouts, layout_label, resolve_facility_configuration, select_supported_layout, supported_configurations_for_fields, validate_field_combination, validate_timeslot_demands
+from app.services import facility_layout_validation
 from app.services.host_configuration_integrity import repair_host_configuration_memberships
 from app.services.division_field_types import required_field_type_for_division
 from app.services.division_reference import division_reference_query
@@ -499,6 +500,29 @@ def confirm_schedule_import(
                 if not canonical_slot:
                     raise ValueError(f'Canonical game slot is no longer valid for imported row {row.get("row")}.')
             resolved_rows.append((row, resolved_field_id, resolved_instance_id, resolved_slot_id))
+
+        # Revalidate complete legacy-field waves after resolving the staged IDs
+        # and immediately before changing schedule data.  This is intentionally
+        # the same normalized service used by preview and publish readiness, so
+        # configuration edits between preview and confirmation cannot create a
+        # schedule that those paths interpret differently.
+        resolved_waves = {}
+        for row, field_id, _instance_id, _slot_id in resolved_rows:
+            if field_id:
+                key = (uuid.UUID(row['site_id']), date.fromisoformat(row['date']),
+                       time.fromisoformat(row['kickoff']))
+                resolved_waves.setdefault(key, []).append({
+                    'field_id': field_id,
+                    'field_name': row.get('field'),
+                    'required_field_size': row.get('imported_field_type'),
+                })
+        for (site_id, game_date, kickoff), assignments in resolved_waves.items():
+            validation = facility_layout_validation.validate_field_configuration(
+                db, site_id, game_date, kickoff, assignments)
+            if not validation['is_valid']:
+                raise ValueError(
+                    f'Imported field configuration is no longer valid: {validation["reason"]}'
+                )
 
         existing=db.query(Game).filter(Game.season_id==record.season_id, Game.week_id.in_(set(week_ids))).all()
         existing_ids=[g.id for g in existing]
@@ -17079,7 +17103,7 @@ def _week_publish_readiness(db: Session, season: Season, weeks: list[Week]) -> d
             getattr(getattr(item[0], 'field', None), 'name', None)
             for item in wave if getattr(item[0], 'field_id', None)
         ]
-        capacity_assessment = evaluate_host_timeslot_capacity(db, host_id, game_date, kickoff, [{
+        capacity_assessment = facility_layout_validation.validate_field_configuration(db, host_id, game_date, kickoff, [{
             'field_id': item[0].field_id,
             'field_name': getattr(getattr(item[0], 'field', None), 'name', None),
             'required_field_size': item[1],
