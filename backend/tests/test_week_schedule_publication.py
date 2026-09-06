@@ -45,11 +45,40 @@ def test_readiness_validates_only_selected_week_and_ignores_future_week_error():
     future = _game(future_id)
     future[0].away_team_id = future[0].home_team_id
     future[5].id = future[4].id
-    with patch('app.routes.api.get_scheduled_games_for_season', return_value=[selected, future]):
+    def scoped_rows(_db, _season_id, filters):
+        return [row for row in [selected, future] if row[0].week_id in filters['week_ids']]
+
+    with patch('app.routes.api.get_scheduled_games_for_season', side_effect=scoped_rows) as loader:
         result = _week_publish_readiness(SimpleNamespace(), SimpleNamespace(id=uuid.uuid4()), [SimpleNamespace(id=selected_id)])
     assert result['games'] == 1
     assert result['blocking_errors'] == []
     assert result['status'] == 'Ready to Publish'
+    assert loader.call_args.args[2] == {'week_ids': {selected_id}}
+
+
+def test_readiness_scopes_season_game_count_to_selected_authoritative_week_ids():
+    selected_ids = {uuid.uuid4(), uuid.uuid4()}
+    other_ids = [uuid.uuid4() for _ in range(6)]
+    rows = []
+    for index in range(177):
+        week_id = list(selected_ids)[index % 2] if index < 22 else other_ids[index % len(other_ids)]
+        row = _game(week_id)
+        row[0].game_date = date(2026, 9, 20) if index < 22 else date(2026, 8, 16)
+        row[0].kickoff_time = time(index % 24, index % 60, index % 60)
+        rows.append(row)
+
+    def scoped_rows(_db, _season_id, filters):
+        return [row for row in rows if row[0].week_id in filters['week_ids']]
+
+    with patch('app.routes.api.get_scheduled_games_for_season', side_effect=scoped_rows) as loader:
+        result = _week_publish_readiness(
+            SimpleNamespace(), SimpleNamespace(id=uuid.uuid4()),
+            [SimpleNamespace(id=value) for value in selected_ids],
+        )
+
+    assert result['games'] == 22
+    assert not [issue for issue in result['blocking_errors'] if issue.get('date') == '2026-08-16']
+    assert loader.call_args.args[2] == {'week_ids': selected_ids}
 
 
 def test_selected_week_hard_error_blocks_publication():
