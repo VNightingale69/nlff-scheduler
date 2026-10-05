@@ -11,7 +11,7 @@ from sqlalchemy.pool import StaticPool
 from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN
 from app.database import Base, get_db
 from app.main import app
-from app.models import Division, Field, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, Organization, Role, ScoreHistory, ScoreSubmission, Season, Team, User, Week
+from app.models import Division, Field, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, HostPlanSelection, Organization, Role, ScoreHistory, ScoreSubmission, Season, Team, User, Week
 from app.security import create_access_token, hash_password
 
 
@@ -70,6 +70,65 @@ class ScoreTrackingTest(unittest.TestCase):
 
     def _submit(self, user, game=None, home=20, away=12):
         return self.client.patch(f'/api/scores/{game or self.game.id}/submit', headers=self._token(user.id), json={'home_score': home, 'away_score': away})
+
+    def test_october_four_admin_public_parity(self):
+        from app.routes.api import admin_scores, list_public_games
+        stale_host = HostLocation(id=uuid.uuid4(), organization_id=self.home_org.id,
+                                 name='Stale host', surface_type='GRASS_FIELD', is_active=True)
+        self.db.add(stale_host)
+        self.game.game_date = date(2026, 10, 4)
+        self.slot.host_location_id = stale_host.id
+        self.db.add(HostPlanSelection(season_id=self.season.id, week_id=self.week.id,
+            game_date=self.game.game_date, community_id=self.home_org.id,
+            host_location_id=self.host.id, status='SELECTED'))
+        for day in [date(2026, 9, 27), date(2026, 10, 3), date(2026, 10, 5), date(2026, 10, 11)]:
+            self.db.add(Game(id=uuid.uuid4(), season_id=self.season.id, week_id=self.week.id,
+                home_team_id=self.home_team.id, away_team_id=self.away_team.id,
+                host_location_id=self.host.id, field_id=self.canonical_field.id,
+                game_status_id=self.status.id, game_date=day, kickoff_time=time(9)))
+        self.other_game.game_date = self.game.game_date
+        self.other_game.kickoff_time = time(23, 30)
+        self.db.commit()
+        expected = {str(g.id) for g in self.db.query(Game).all()}
+        for clock in [datetime(2026, 10, 4, 12), datetime(2026, 10, 4, 16), datetime(2026, 10, 5, 3)]:
+            with self.subTest(clock=clock), patch('app.routes.api._score_now', return_value=clock):
+                public = list_public_games(season_id=self.season.id, current_user=None, db=self.db).model_dump(mode='json')
+                self.assertEqual({g['id'] for g in public['items']}, expected)
+                admin = admin_scores(db=self.db)
+                self.assertEqual({g['game_id'] for g in admin['items']}, expected)
+                days = [g['game_date'] for g in admin['items']]
+                self.assertEqual(days, sorted(days))
+                self.assertEqual(sorted(set(days)), ['2026-09-27', '2026-10-03', '2026-10-04', '2026-10-05', '2026-10-11'])
+                item = next(g for g in admin['items'] if g['game_id'] == str(self.game.id))
+                self.assertEqual(item['host_location_id'], str(self.host.id))
+                self.assertIsNone(item['home_score'])
+                filtered = admin_scores(date=date(2026, 10, 4), db=self.db)
+                self.assertEqual({g['game_id'] for g in filtered['items']}, {str(self.game.id), str(self.other_game.id)})
+
+    def test_admin_includes_all_score_states(self):
+        from app.routes.api import admin_scores
+        self.game.game_date = date(2026, 10, 4)
+        score = GameScore(game_id=self.game.id)
+        self.db.add(score)
+        for status, home, away, published in [('MISSING', None, None, False),
+            ('SUBMITTED', 7, None, False), ('SUBMITTED', 7, 0, False),
+            ('APPROVED', 7, 0, False), ('PUBLISHED', 7, 0, True)]:
+            with self.subTest(status=status, away=away):
+                score.score_status, score.home_score, score.away_score = status, home, away
+                score.is_published = published
+                self.db.commit()
+                response = admin_scores(date=date(2026, 10, 4), db=self.db)
+                item = next(g for g in response['items'] if g['game_id'] == str(self.game.id))
+                self.assertEqual((item['home_score'], item['away_score'], item['is_published']), (home, away, published))
+
+    def test_kickoff_uses_chicago_date_and_time(self):
+        from app.routes.api import _game_has_started
+        self.game.game_date = date(2026, 10, 4)
+        self.game.kickoff_time = time(23, 30)
+        for clock, started in [(datetime(2026, 10, 5, 3), False),
+                               (datetime(2026, 10, 5, 4, 30), True), (datetime(2026, 10, 5, 5), True)]:
+            with self.subTest(clock=clock), patch('app.routes.api._score_now', return_value=clock):
+                self.assertEqual(_game_has_started(self.game), started)
 
     def test_public_schedule_uses_saved_canonical_field_not_stale_slot_field(self):
         self.game.public_notes = 'Use the south entrance.'

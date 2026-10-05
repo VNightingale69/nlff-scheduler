@@ -14,6 +14,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 import logging
 from time import perf_counter
 from datetime import date, datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import String, and_, delete, func, inspect as sa_inspect, or_, select, text
 from sqlalchemy.exc import IntegrityError, ProgrammingError, SQLAlchemyError
@@ -28660,7 +28661,7 @@ def get_scheduled_games_for_season(db: Session, season_id: uuid.UUID | None, fil
     return _schedule_management_rows(db, shared_filters, organization_filter_any_team=organization_filter_any_team)
 
 
-def get_saved_scheduled_game_rows_for_export(db: Session, season_id: uuid.UUID | None, filters: dict | None = None, organization_filter_any_team: bool = False):
+def get_saved_scheduled_game_rows_for_export(db: Session, season_id: uuid.UUID | None, filters: dict | None = None, organization_filter_any_team: bool = False, *, final_scheduled_only: bool = True):
     """Return persisted scheduled Game rows for the normal schedule export.
 
     The Manual Schedule Builder Scheduled Games table saves manual edits to the
@@ -28674,7 +28675,10 @@ def get_saved_scheduled_game_rows_for_export(db: Session, season_id: uuid.UUID |
     home = aliased(Team)
     away = aliased(Team)
     q = db.query(Game, GameSlot, FieldInstance, HostLocation, home, away, Division, Organization, GameStatus).join(Game.status).join(home, Game.home_team_id == home.id).join(away, Game.away_team_id == away.id).join(Division, home.division_id == Division.id).join(Organization, home.organization_id == Organization.id).outerjoin(GameSlot, and_(GameSlot.assigned_game_id == Game.id, GameSlot.field_instance_id == Game.field_instance_id, GameSlot.host_location_id == Game.host_location_id, GameSlot.slot_date == Game.game_date, GameSlot.start_time == Game.kickoff_time)).outerjoin(FieldInstance, FieldInstance.id == Game.field_instance_id).outerjoin(HostLocation, HostLocation.id == Game.host_location_id).outerjoin(Field, Field.id == Game.field_id)
-    q = q.filter(GameStatus.is_active.is_(True), _final_schedule_status_filter(db))
+    if final_scheduled_only:
+        q = q.filter(GameStatus.is_active.is_(True), _final_schedule_status_filter(db))
+    else:
+        q = q.filter(func.lower(GameStatus.code) != 'unscheduled')
     if filters.get('date'): q = q.filter(Game.game_date == filters['date'])
     if filters.get('division_id'): q = q.filter(Division.id == filters['division_id'])
     if filters.get('organization_id'):
@@ -28708,10 +28712,16 @@ SCORE_REVIEW_STATUSES = {SCORE_STATUS_FLAGGED, SCORE_STATUS_CONFLICT, SCORE_STAT
 
 
 def _game_has_started(game: Game) -> bool:
-    try:
-        return datetime.utcnow() >= datetime.combine(game.game_date, game.kickoff_time)
-    except TypeError:
-        return game.game_date <= date.today()
+    # Game dates and kickoff times are league-local wall times, not UTC.
+    league_timezone = ZoneInfo(os.getenv('LEAGUE_TIME_ZONE', 'America/Chicago'))
+    now = _score_now()
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    local_now = now.astimezone(league_timezone)
+    if game.kickoff_time is None:
+        return game.game_date <= local_now.date()
+    kickoff = datetime.combine(game.game_date, game.kickoff_time, tzinfo=league_timezone)
+    return local_now >= kickoff
 
 
 def _effective_score_status(game: Game, score: GameScore | None = None) -> str:
@@ -28962,7 +28972,12 @@ def _score_game_dict(row, include_history: bool = False, db: Session | None = No
 
 
 def _score_rows(db: Session, filters: dict | None = None, organization_filter_any_team: bool = False):
-    return _schedule_management_rows(db, filters or {}, organization_filter_any_team=organization_filter_any_team)
+    # Score entry manages persisted games, even when optimizer slots or host plans
+    # are stale. Keep all scheduled statuses and apply score filters only on request.
+    return get_saved_scheduled_game_rows_for_export(
+        db, None, filters, organization_filter_any_team=organization_filter_any_team,
+        final_scheduled_only=False,
+    )
 
 
 def _apply_score_filters(rows: list, status: str | None = None, published: str | None = None, missing: bool = False, flagged: bool = False, conflicts: bool = False) -> list:
