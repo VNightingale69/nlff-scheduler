@@ -4,8 +4,8 @@ import fs from 'node:fs';
 const source = fs.readFileSync(new URL('../src/app/(dashboard)/admin/manual-schedule-builder/page.tsx', import.meta.url), 'utf8');
 
 assert.match(source, />Delete Game<\/button>/, 'authorized actions include Delete Game');
-assert.match(source, /disabled=\{isPublishedGame\(g\) \|\| deleteLoading \|\| bulkSaveLoading\}/, 'published games have a disabled delete action');
-assert.match(source, /Published games cannot be deleted from the Manual Schedule Builder\./, 'published protection is explained');
+assert.match(source, /disabled=\{deleteLoading \|\| bulkSaveLoading\}/, 'delete is disabled only while a mutation is in progress');
+assert.doesNotMatch(source, /isPublishedGame|Published games cannot be deleted/, 'publication does not disable authorized deletion');
 assert.match(source, /Delete Scheduled Game\?/, 'delete requires a dedicated confirmation dialog');
 assert.match(source, /home_team_name.* vs .*away_team_name/, 'confirmation identifies the matchup');
 assert.match(source, /method: 'DELETE'/, 'confirmation invokes the individual delete endpoint');

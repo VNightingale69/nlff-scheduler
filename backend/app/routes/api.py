@@ -31774,14 +31774,10 @@ def delete_game(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Delete one working-schedule game without weakening publication/results protections."""
+    """Delete one scheduled game, including published schedules, while protecting recorded results."""
     obj = db.query(Game).filter(Game.id == game_id).with_for_update().first()
     if not obj:
         raise HTTPException(404, 'Scheduled game not found.')
-
-    season = db.get(Season, obj.season_id) if obj.season_id else None
-    if season and obj.week_id in _published_week_ids(db, season):
-        raise HTTPException(409, 'Published games cannot be deleted from the Manual Schedule Builder.')
 
     score = db.query(GameScore).filter(GameScore.game_id == game_id).first()
     has_recorded_result = bool(

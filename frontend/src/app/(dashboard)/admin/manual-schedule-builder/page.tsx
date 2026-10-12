@@ -368,7 +368,7 @@ export default function ManualScheduleBuilderPage() {
     return sharedTeam && Math.abs(selectedMinutes - candidateMinutes) === 60;
   });
   const performDelete = async (game: any) => {
-    if (!canManageGeneratedGames || scheduleMutation.current || isPublishedGame(game)) return;
+    if (!canManageGeneratedGames || scheduleMutation.current) return;
     scheduleMutation.current = true;
     setDeleteLoading(true);
     setDeleteError('');
@@ -400,7 +400,6 @@ export default function ManualScheduleBuilderPage() {
       setDeleteLoading(false);
     }
   };
-  const isPublishedGame = (game: any) => String((options.weeks || []).find((week: any) => String(week.id) === String(game.week_id))?.publication_status || '').toUpperCase() === 'PUBLISHED';
   const hasScheduledGamesFilters = Object.values(scheduledGamesFilters).some(Boolean);
 
   useEffect(() => {
@@ -952,7 +951,7 @@ export default function ManualScheduleBuilderPage() {
                     </> : <>
                       <button className='rounded border px-2 py-1 text-xs' onClick={() => { if (!confirmDiscardBulkEdits()) return; setPendingGameEdits({}); setMoveGame(g); }}>Move</button>
                     </>}
-                      <button className='rounded border border-red-300 px-2 py-1 text-xs text-red-700 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400' disabled={isPublishedGame(g) || deleteLoading || bulkSaveLoading} title={isPublishedGame(g) ? 'Published games cannot be deleted from the Manual Schedule Builder.' : 'Delete this unpublished scheduled game'} onClick={() => {
+                      <button className='rounded border border-red-300 px-2 py-1 text-xs text-red-700 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400' disabled={deleteLoading || bulkSaveLoading} title='Delete this scheduled game' onClick={() => {
                         setDeleteError('');
                         setDeleteGame(g);
                       }}>Delete Game</button>
@@ -1002,7 +1001,7 @@ export default function ManualScheduleBuilderPage() {
             <p>Field: {explicitFieldSlotLabel(deleteGame) || 'Not assigned'}</p>
           </div>
           {doubleheaderPartner(deleteGame) ? <p className='mt-3 rounded border border-amber-300 bg-amber-50 p-2 text-sm text-amber-900'><strong>Doubleheader warning:</strong> The other doubleheader game will not be deleted.</p> : null}
-          <p className='mt-3 text-sm text-slate-700'>This game has not been published. Deleting it will remove it from the working schedule.</p>
+          <p className='mt-3 text-sm text-slate-700'>Deleting this game will permanently remove it from the schedule and release its field/time reservation.</p>
           {deleteError ? <p role='alert' className='mt-3 text-sm text-red-700'>{deleteError}</p> : null}
           <div className='mt-4 flex flex-wrap justify-end gap-2'>
             <button className='rounded border px-3 py-2' disabled={deleteLoading} onClick={() => setDeleteGame(null)}>Cancel</button>

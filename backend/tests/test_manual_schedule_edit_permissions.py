@@ -363,13 +363,24 @@ class ManualScheduleEditPermissionsTest(unittest.TestCase):
         self.assertIn(anonymous.status_code, {401, 403}, anonymous.text)
         self.assertIsNotNone(self.db.get(Game, self.game.id))
 
-    def test_published_game_cannot_be_deleted(self):
+    def test_published_game_can_be_deleted_by_schedule_admin(self):
         self.week.publication_status = 'PUBLISHED'
         self.db.commit()
-        response = self.client.delete(f'/api/games/{self.game.id}', headers=self._token(self.scheduling_user.id))
-        self.assertEqual(response.status_code, 409, response.text)
-        self.assertIn('Published games cannot be deleted', response.text)
-        self.assertIsNotNone(self.db.get(Game, self.game.id))
+        game_id, slot_id = self.game.id, self.slot.id
+        public_before = self.client.get(f'/api/public/schedule?season_id={self.season.id}')
+        self.assertEqual(public_before.status_code, 200, public_before.text)
+        self.assertIn(str(game_id), [game['id'] for game in public_before.json()['items']])
+        response = self.client.delete(f'/api/games/{game_id}', headers=self._token(self.scheduling_user.id))
+        self.assertEqual(response.status_code, 200, response.text)
+        self.db.expire_all()
+        self.assertIsNone(self.db.get(Game, game_id))
+        self.assertEqual(self.db.get(GameSlot, slot_id).status, 'OPEN')
+        self.assertIsNone(self.db.get(GameSlot, slot_id).assigned_game_id)
+        self.assertEqual(self.db.get(Week, self.week.id).publication_status, 'PUBLISHED')
+
+        public_after = self.client.get(f'/api/public/schedule?season_id={self.season.id}')
+        self.assertEqual(public_after.status_code, 200, public_after.text)
+        self.assertNotIn(str(game_id), [game['id'] for game in public_after.json()['items']])
 
     def test_game_with_recorded_result_cannot_be_deleted(self):
         self._make_schedule_unpublished()
