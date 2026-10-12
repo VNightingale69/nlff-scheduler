@@ -31352,7 +31352,7 @@ def bulk_manual_edit_generated_games(payload: ManualGameBulkEditRequest, current
     seen_field_assignments: dict[tuple[uuid.UUID | None, date, time, uuid.UUID | None], str] = {}
 
     for change in payload.changes:
-        game = db.query(Game).filter(Game.id == change.game_id).first()
+        game = db.query(Game).filter(Game.id == change.game_id).with_for_update().first()
         game_key = str(change.game_id)
         if not game:
             hard_errors[game_key] = {'error': 'GAME_NOT_FOUND'}
@@ -31775,7 +31775,7 @@ def delete_game(
     current_user: User = Depends(get_current_user),
 ):
     """Delete one working-schedule game without weakening publication/results protections."""
-    obj = db.query(Game).filter(Game.id == game_id).first()
+    obj = db.query(Game).filter(Game.id == game_id).with_for_update().first()
     if not obj:
         raise HTTPException(404, 'Scheduled game not found.')
 
@@ -31811,7 +31811,7 @@ def delete_game(
     except Exception:
         db.rollback()
         logger.exception('manual_schedule_game_delete_failed game_id=%s actor_user_id=%s', game_id, current_user.id)
-        raise
+        raise HTTPException(500, 'Unable to delete scheduled game. Please try again.')
     logger.info(
         'manual_schedule_game_deleted game_id=%s season_id=%s date=%s kickoff=%s division_id=%s '
         'home_team=%s away_team=%s host_location=%s field=%s reopened_slots=%s '

@@ -299,15 +299,56 @@ class ManualScheduleEditPermissionsTest(unittest.TestCase):
     def test_scheduling_admin_deletes_one_unpublished_game_and_releases_slot(self):
         self._make_schedule_unpublished()
         other = self._add_other_community_game()
-        response = self.client.delete(f'/api/games/{self.game.id}', headers=self._token(self.scheduling_user.id))
+        game_id, other_id, slot_id = self.game.id, other.id, self.slot.id
+        self.db.add(GameScore(game_id=game_id, score_status='MISSING'))
+        self.db.add(ScheduleChangeLog(game_id=game_id, changed_by_user_id=self.scheduling_user.id,
+                                      field_changed='public_notes', old_value='', new_value='Working notes'))
+        self.db.commit()
+        response = self.client.delete(f'/api/games/{game_id}', headers=self._token(self.scheduling_user.id))
         self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(response.json()['deleted_game_id'], str(self.game.id))
+        self.assertEqual(response.json()['deleted_game_id'], str(game_id))
         self.db.expire_all()
-        self.assertIsNone(self.db.get(Game, self.game.id))
-        self.assertIsNotNone(self.db.get(Game, other.id))
-        released = self.db.get(GameSlot, self.slot.id)
+        self.assertIsNone(self.db.get(Game, game_id))
+        self.assertIsNotNone(self.db.get(Game, other_id))
+        self.assertEqual(self.db.query(GameScore).filter_by(game_id=game_id).count(), 0)
+        self.assertEqual(self.db.query(ScheduleChangeLog).filter_by(game_id=game_id).count(), 0)
+        released = self.db.get(GameSlot, slot_id)
         self.assertEqual(released.status, 'OPEN')
         self.assertIsNone(released.assigned_game_id)
+
+    def test_delete_failure_rolls_back_game_and_reservation(self):
+        self._make_schedule_unpublished()
+        headers = self._token(self.scheduling_user.id)
+        with patch('sqlalchemy.orm.Session.commit', side_effect=RuntimeError('database unavailable')):
+            response = self.client.delete(f'/api/games/{self.game.id}', headers=headers)
+        self.assertEqual(response.status_code, 500, response.text)
+        self.assertIn('Unable to delete scheduled game', response.text)
+        self.db.expire_all()
+        self.assertIsNotNone(self.db.get(Game, self.game.id))
+        self.assertEqual(self.db.get(GameSlot, self.slot.id).status, 'ASSIGNED')
+        self.assertEqual(self.db.get(GameSlot, self.slot.id).assigned_game_id, self.game.id)
+
+    def test_stale_bulk_save_cannot_restore_deleted_game(self):
+        self._make_schedule_unpublished()
+        other = self._add_other_community_game()
+        game_id = self.game.id
+        stale_change = dict(self._payload(), game_id=str(game_id))
+        headers = self._token(self.scheduling_user.id)
+        response = self.client.delete(f'/api/games/{game_id}', headers=headers)
+        self.assertEqual(response.status_code, 200, response.text)
+        response = self.client.patch('/api/schedule-management/games/manual-edit/bulk', headers=headers, json={
+            'changes': [stale_change, dict(self._payload(internal_admin_notes='unsaved'), game_id=str(other.id))],
+            'override_warnings': True,
+        })
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(response.json()['detail']['errors'][str(game_id)]['error'], 'GAME_NOT_FOUND')
+        self.db.expire_all()
+        self.assertIsNone(self.db.get(Game, game_id))
+        self.assertNotEqual(self.db.get(Game, other.id).internal_admin_notes, 'unsaved')
+        for model, identifier in [(Team, self.home_team.id), (Team, self.away_team.id),
+                                  (HostLocation, self.host.id), (FieldInstance, self.field.id),
+                                  (Field, self.canonical_field.id)]:
+            self.assertIsNotNone(self.db.get(model, identifier))
 
     def test_league_admin_can_delete_unpublished_game(self):
         self._make_schedule_unpublished()
