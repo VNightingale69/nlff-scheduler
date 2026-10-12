@@ -369,7 +369,7 @@ function svgText(x: number, y: number, text: string, options: { size?: number; w
   return `<text x="${x}" y="${y}" font-family="Inter, Arial, sans-serif" font-size="${options.size || 12}" font-weight="${options.weight || 400}" fill="${options.fill || '#0f172a'}"${options.anchor ? ` text-anchor="${options.anchor}"` : ''}>${escapeXml(text)}</text>`;
 }
 
-function buildBracketSvg(title: string, division: ExportDivision, publicView: boolean, failedLogoUrls: Set<string> = new Set()) {
+function buildBracketSvg(title: string, division: ExportDivision, publicView: boolean, embeddedLogoUrls: Map<string, string> = new Map()) {
   const rounds = division.rounds;
   const layout = buildBracketLayout(rounds);
   const header = bracketHeaderData(title, division, publicView ? 'Published bracket export' : 'Administrator bracket export');
@@ -406,8 +406,9 @@ function buildBracketSvg(title: string, division: ExportDivision, publicView: bo
         const score = slot === 1 ? game.home_score : game.away_score;
         const autoAdvanced = slot === 1 ? game.team_1_auto_advanced : game.team_2_auto_advanced;
         body += `<rect x="${gameX + 12}" y="${rowY}" width="${layout.roundWidth - 24}" height="${rowHeight}" rx="${layout.teamRowRadius}" fill="${winner ? '#ecfdf5' : '#ffffff'}" stroke="${winner ? '#10b981' : '#e2e8f0'}"/>`;
-        const logo = logoSource(teamLogoUrl(game, slot));
-        if (logo && !failedLogoUrls.has(logo)) {
+        const source = logoSource(teamLogoUrl(game, slot));
+        const logo = source ? embeddedLogoUrls.get(source) : null;
+        if (logo) {
           body += `<image href="${escapeXml(logo)}" x="${gameX + 20}" y="${rowY + 6}" width="28" height="28" preserveAspectRatio="xMidYMid meet"/>`;
         } else {
           body += `<circle cx="${gameX + 34}" cy="${rowY + 20}" r="14" fill="#f1f5f9" stroke="#cbd5e1"/>`;
@@ -520,16 +521,32 @@ function bracketLogoUrls(division: ExportDivision) {
   return Array.from(urls);
 }
 
-async function failedBracketLogoUrls(division: ExportDivision) {
-  const failed = new Set<string>();
+// An SVG loaded as an image cannot reliably load external <image> URLs.
+// Embed decoded pixels before building any SVG/PNG/PDF export. Deduplicate
+// within each export; failures are retried on the next export rather than cached.
+async function embeddedBracketLogoUrls(division: ExportDivision) {
+  const embedded = new Map<string, string>();
   await Promise.all(bracketLogoUrls(division).map(async (url) => {
     try {
-      await loadImage(url);
+      const image = await loadImage(url);
+      const canvas = document.createElement('canvas');
+      canvas.width = image.naturalWidth;
+      canvas.height = image.naturalHeight;
+      const context = canvas.getContext('2d');
+      if (!context || !canvas.width || !canvas.height) return;
+      context.drawImage(image, 0, 0);
+      // PNG keeps transparency and makes SVG/raster source assets self-contained.
+      // No asset URLs, authorization headers or storage settings enter the file.
+      embedded.set(url, canvas.toDataURL('image/png'));
     } catch {
-      failed.add(url);
+      // Missing, invalid or CORS-inaccessible assets use the normal initials.
     }
   }));
-  return failed;
+  return embedded;
+}
+
+async function buildExportSvg(title: string, division: ExportDivision, publicView: boolean) {
+  return buildBracketSvg(title, division, publicView, await embeddedBracketLogoUrls(division));
 }
 
 function downloadBlob(blob: Blob, filename: string) {
@@ -546,7 +563,14 @@ function downloadBlob(blob: Blob, filename: string) {
 function loadImage(src: string) {
   return new Promise<HTMLImageElement>((resolve, reject) => {
     const image = new Image();
-    image.onload = () => resolve(image);
+    image.onload = async () => {
+      try {
+        await image.decode();
+        resolve(image);
+      } catch (error) {
+        reject(error);
+      }
+    };
     image.onerror = reject;
     image.crossOrigin = 'anonymous';
     image.src = src;
@@ -605,8 +629,7 @@ function pdfFromJpegDataUrl(jpegDataUrl: string, width: number, height: number) 
 function DownloadControls({ title, division, publicView }: { title: string; division: ExportDivision; publicView: boolean }) {
   const divisionLabel = bracketDivisionLabel(division);
   const filenameBase = sanitizeFilename(`${title}-${divisionLabel}-bracket`);
-  const svg = (failedLogoUrls: Set<string> = new Set()) => buildBracketSvg(title, division, publicView, failedLogoUrls);
-  const exportSvg = async () => svg(await failedBracketLogoUrls(division));
+  const exportSvg = () => buildExportSvg(title, division, publicView);
   const downloadSvg = async () => downloadBlob(new Blob([await exportSvg()], { type: 'image/svg+xml;charset=utf-8' }), `${filenameBase}.svg`);
   const downloadPng = async () => {
     const canvas = await svgToCanvas(await exportSvg());

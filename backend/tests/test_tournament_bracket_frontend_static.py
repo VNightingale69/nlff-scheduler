@@ -47,7 +47,7 @@ def test_download_exports_use_same_state_and_keep_pdf_png_svg_actions():
     assert 'Download PDF' in source
     assert 'Download PNG' in source
     assert 'Download SVG' in source
-    assert 'buildBracketSvg(title, division, publicView, failedLogoUrls)' in source
+    assert 'buildExportSvg(title, division, publicView)' in source
     assert 'svgToCanvas(await exportSvg())' in source
     assert 'pdfFromJpegDataUrl' in source
     assert 'image/png' in source
