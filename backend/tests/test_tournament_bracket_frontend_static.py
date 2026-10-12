@@ -47,7 +47,7 @@ def test_download_exports_use_same_state_and_keep_pdf_png_svg_actions():
     assert 'Download PDF' in source
     assert 'Download PNG' in source
     assert 'Download SVG' in source
-    assert 'buildExportSvg(title, division, publicView)' in source
+    assert 'buildExportSvg(title, exportDivision, publicView, setWarnings)' in source
     assert 'svgToCanvas(await exportSvg())' in source
     assert 'pdfFromJpegDataUrl' in source
     assert 'image/png' in source
@@ -62,7 +62,7 @@ def test_admin_tournament_page_keeps_schedule_view_and_adds_bracket_view_with_do
     assert 'Schedule View' in source
     assert 'Bracket View' in source
     assert '<table' in source
-    assert '<TournamentBracket divisions={tournament.divisions} tournamentTitle={tournament.name} />' in source
+    assert '<TournamentBracket divisions={tournament.divisions} tournamentTitle={tournament.name} tournamentId={tournament.id} />' in source
     assert 'Publish Tournament' in source
     assert 'Unpublish' in source
 
@@ -71,5 +71,5 @@ def test_public_tournament_page_uses_read_only_published_bracket_with_downloads(
     source = PUBLIC_TOURNAMENT_PAGE.read_text()
     assert '/public/tournaments/${id}/bracket' in source
     assert 'Published Tournament Bracket' in source
-    assert 'publicView tournamentTitle={bracket.name}' in source
+    assert 'publicView tournamentId={bracket.id} tournamentTitle={bracket.name}' in source
     assert 'unpublished score workflow details are hidden' in source

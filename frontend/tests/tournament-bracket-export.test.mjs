@@ -7,6 +7,8 @@ const source = readFileSync(new URL('../src/components/TournamentBracket.tsx', i
 const code = ts.transpileModule(source + '\nexport { buildBracketSvg, buildBracketLayout, teamNameLines, teamRowHeight, bracketConnectors, pdfFromJpegDataUrl, svgToCanvas, buildExportSvg, embeddedBracketLogoUrls };', { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.React } }).outputText;
 const module = { exports: {} };
 new Function('require', 'exports', code)((name) => {
+  if (name === 'react') return {};
+  if (name === '@/lib/api') return {};
   if (name.includes('CommunityLogo')) return { logoSource: (url) => url };
   if (name.includes('displayFormat')) return { formatDisplayDate: (v) => v, formatDisplayTime: (v) => v };
   if (name.includes('publicFieldName')) return { publicFieldName: (v) => v };
@@ -110,7 +112,12 @@ try {
     game.team_2_logo_url = urls[i++ % urls.length];
   }
   const before = JSON.stringify(division);
-  const first = await api.buildExportSvg('2026 Fall Flag Tournament', division, false);
+  let warnings;
+  const first = await api.buildExportSvg('2026 Fall Flag Tournament', division, false, value => { warnings = value; });
+  assert.ok(warnings.some(value => value.stage === 'loading'));
+  assert.ok(warnings.some(value => value.stage === 'decoding'));
+  assert.ok(warnings.some(value => value.stage === 'embedding'));
+  assert.ok(warnings.every(value => !value.reason.includes('https://')));
   assert.ok(first.includes('<image href="data:image/png;base64,'));
   assert.doesNotMatch(first, /href="https?:|href="\/api|href="\/assets/);
   assert.ok(first.includes('<circle') && first.includes('>White</text>') && first.includes('>Maroon</text>'));
@@ -119,6 +126,17 @@ try {
   unavailable = false;
   const second = await api.buildExportSvg('2026 Fall Flag Tournament', division, false);
   assert.ok(second.includes(Buffer.from('https://assets.example/retry').toString('base64')), 'Retry a failed asset on the next export');
+  const uploaded = structuredClone(division);
+  const uploadedUrl = urls[0];
+  const data = 'data:image/png;base64,aW1hZ2U=';
+  uploaded.logo_assets = { [uploadedUrl]: { data_url: data, error: null, community_name: 'Westosha' } };
+  const count = loaded.get(uploadedUrl);
+  const embeddedSvg = await api.buildExportSvg('Tournament', uploaded, false);
+  assert.ok(embeddedSvg.includes(data));
+  assert.equal(loaded.get(uploadedUrl), count, 'Uploads must not make a second request to their original URL');
+  uploaded.logo_assets[uploadedUrl] = { data_url: null, error: 'ASSET_MISSING', community_name: 'Westosha' };
+  await api.buildExportSvg('Tournament', uploaded, false, value => { warnings = value; });
+  assert.ok(warnings.some(value => value.community === 'Westosha' && value.stage === 'storage'));
   assert.equal(JSON.stringify(division), before);
   assert.ok(second.includes('Consolation'));
 } finally {

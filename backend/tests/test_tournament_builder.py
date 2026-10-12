@@ -215,6 +215,43 @@ class TournamentBuilderTest(unittest.TestCase):
         after = self.client.get(f'/api/standings?season_id={self.season.id}', headers=self._token(self.scheduler)).json()
         self.assertEqual(before['divisions'][0]['standings'], after['divisions'][0]['standings'])
 
+    def test_bracket_export_bytes_match_public_uploaded_logo_for_admin_and_public(self):
+        import base64
+        import io
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        from PIL import Image
+        from app.routes import api
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            buffer = io.BytesIO()
+            Image.new('RGBA', (100, 50), (210, 0, 180, 128)).save(buffer, format='PNG')
+            content = buffer.getvalue()
+            (path / 'test-logo.png').write_bytes(content)
+            self.orgs[0].logo_filename = 'test-logo.png'
+            self.teams[0].name = 'Westosha Girls 6-8 Maroon'
+            self.db.commit()
+            created = self._create(excluded=[str(team.id) for team in self.teams[4:]])
+            self.assertEqual(created.status_code, 200, created.text)
+            tournament_id = created.json()['tournament']['id']
+            self.client.post(f'/api/tournaments/{tournament_id}/publish', headers=self._token(self.scheduler), json={})
+            with patch.object(api, '_resolved_community_logo_storage_dir', return_value=path):
+                source = api._community_logo_browser_url(self.orgs[0])
+                original = self.client.get(source)
+                self.assertEqual(original.content, content)
+                for prefix, headers in [('', self._token(self.scheduler)), ('/public', {})]:
+                    response = self.client.get(f'/api{prefix}/tournaments/{tournament_id}/bracket', headers=headers)
+                    self.assertEqual(response.status_code, 200, response.text)
+                    division = response.json()['tournament']['divisions'][0]
+                    asset = division['logo_assets'][source]
+                    self.assertEqual(base64.b64decode(asset['data_url'].split(',')[1]), original.content)
+                    self.assertIsNone(asset['error'])
+                    self.assertIn('Westosha Girls 6-8 Maroon', str(division['rounds']))
+                anonymous = self.client.get(f'/api/tournaments/{tournament_id}/bracket')
+                self.assertEqual(anonymous.status_code, 401)
+
 
 if __name__ == '__main__':
     unittest.main()

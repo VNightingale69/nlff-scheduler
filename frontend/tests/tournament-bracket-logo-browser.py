@@ -74,9 +74,27 @@ with sync_playwright() as p:
       new Function('require','exports',fixture.code)(name=>name.includes('CommunityLogo')?logoExports:name.includes('displayFormat')?{formatDisplayDate:v=>v,formatDisplayTime:v=>v}:{publicFieldName:v=>v},exports);
       window.api=exports;
     }''', fixture)
-    for iteration in range(2):
+    for iteration in range(3):
+        if iteration == 2:
+            # Backend-supplied uploads: all original asset requests now fail,
+            # yet the same logo pixels must appear via embedded API bytes.
+            division['logo_assets'] = {}
+            for source in sources:
+                if not source or source.endswith('missing.png'):
+                    continue
+                data, _ = assets[source.split('/')[-1]]
+                buffer = io.BytesIO()
+                Image.open(io.BytesIO(data)).convert('RGBA').save(buffer, format='PNG')
+                division['logo_assets'][source] = {'data_url': 'data:image/png;base64,' + base64.b64encode(buffer.getvalue()).decode(), 'error': None, 'community_name': source.split('/')[-1]}
+            vector = io.BytesIO()
+            Image.new('RGBA', (120, 60), (210, 0, 180, 255)).save(vector, format='PNG')
+            division['logo_assets']['/assets/vector.svg'] = {'data_url': 'data:image/png;base64,' + base64.b64encode(vector.getvalue()).decode(), 'error': None, 'community_name': 'Vector'}
+            division['logo_assets']['/assets/missing.png'] = {'data_url': None, 'error': 'ASSET_MISSING', 'community_name': 'Unavailable Community'}
+            request_count = dict(requests)
+
         result = page.evaluate('''async division => {
-          const svg=await api.buildExportSvg('2026 Fall Flag Tournament',division,false);
+          let warnings;
+          const svg=await api.buildExportSvg('2026 Fall Flag Tournament',division,false,value=>{warnings=value});
           document.body.innerHTML=svg;
           const images=[...document.querySelectorAll('image')];
           if(!images.length || images.some(i=>!i.getAttribute('href').startsWith('data:image/png;base64,'))) throw Error('Logo is not embedded');
@@ -94,7 +112,7 @@ with sync_playwright() as p:
           }
           const pdf=api.pdfFromJpegDataUrl(canvas.toDataURL('image/jpeg',0.92),canvas.width,canvas.height);
           const data=await new Promise(resolve=>{const r=new FileReader();r.onload=()=>resolve(r.result.split(',')[1]);r.readAsDataURL(pdf)});
-          return {svg,pixels,data,imageCount:images.length};
+          return {svg,pixels,data,warnings,imageCount:images.length};
         }''', division)
         for entry in result['pixels']:
             r, g, b, a = entry['pixel']
@@ -102,6 +120,9 @@ with sync_playwright() as p:
                 assert max(r, g, b) - min(r, g, b) > 80, entry
         assert 'Maroon</text>' in result['svg'] and 'White</text>' in result['svg']
         assert 'Gold</text>' in result['svg'] and 'Blue</text>' in result['svg']
+        if iteration == 2:
+            assert requests == request_count, 'Uploaded logos must not request their original asset URLs'
+            assert len(result['warnings']) == 1 and result['warnings'][0]['stage'] == 'storage'
         (out / f'girls-6-8-logos-{iteration + 1}.pdf').write_bytes(base64.b64decode(result['data']))
         (out / 'girls-6-8-logos.svg').write_text(result['svg'])
     assert all(1 <= requests[name] <= 2 for name in assets), requests
@@ -109,7 +130,7 @@ with sync_playwright() as p:
     browser.close()
 
 # Render the generated PDF, so visual review inspects the actual PDF artifact.
-doc = fitz.open(out / 'girls-6-8-logos-1.pdf')
+doc = fitz.open(out / 'girls-6-8-logos-3.pdf')
 pix = doc[0].get_pixmap(matrix=fitz.Matrix(1, 1))
 pix.save(out / 'girls-6-8-logos-pdf.png')
 rendered = Image.open(out / 'girls-6-8-logos-pdf.png').convert('RGB')
@@ -117,4 +138,4 @@ for color in colors:
     pixels = rendered.tobytes()
     count = sum(all(abs(pixels[index + channel] - color[channel]) < 30 for channel in range(3)) for index in range(0, len(pixels), 3))
     assert count > 30, (color, count)
-print('Browser and actual PDF regression passed: immediate/repeated exports, hosted/remote/path assets, PNG/JPEG/GIF/WebP/SVG, multiple rounds/consolation, missing fallback, full names and logo pixels.')
+print('Browser and actual PDF regression passed: immediate/repeated exports, hosted/remote/path assets, PNG/JPEG/GIF/WebP/SVG, multiple rounds/consolation, missing fallback, full names and logo pixels. Backend embedded uploads also passed without any asset requests, with explicit missing-file warnings.')

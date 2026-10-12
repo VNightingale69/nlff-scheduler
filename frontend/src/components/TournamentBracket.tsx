@@ -1,5 +1,7 @@
 'use client';
 
+import { useState } from 'react';
+import { apiFetch } from '@/lib/api';
 import CommunityLogo, { logoSource } from '@/components/CommunityLogo';
 import { formatDisplayDate, formatDisplayTime } from '@/lib/displayFormat';
 import { publicFieldName } from '@/lib/publicFieldName';
@@ -51,6 +53,7 @@ export type TournamentBracketDivision = {
   name?: string | null;
   rounds?: TournamentBracketRound[];
   games?: TournamentBracketGame[];
+  logo_assets?: Record<string, { data_url: string | null; error: string | null; community_name: string }>;
 };
 
 type Props = {
@@ -58,6 +61,7 @@ type Props = {
   publicView?: boolean;
   tournamentTitle?: string;
   enableDownloads?: boolean;
+  tournamentId?: string;
 };
 
 type ExportDivision = TournamentBracketDivision & { rounds: TournamentBracketRound[] };
@@ -524,29 +528,63 @@ function bracketLogoUrls(division: ExportDivision) {
 // An SVG loaded as an image cannot reliably load external <image> URLs.
 // Embed decoded pixels before building any SVG/PNG/PDF export. Deduplicate
 // within each export; failures are retried on the next export rather than cached.
+type LogoExportDiagnostic = { community: string; stage: string; reason: string };
+
 async function embeddedBracketLogoUrls(division: ExportDivision) {
   const embedded = new Map<string, string>();
+  const diagnostics: LogoExportDiagnostic[] = [];
+  const assets = new Map(Object.entries(division.logo_assets || {}).map(([source, asset]) => [logoSource(source), asset]));
   await Promise.all(bracketLogoUrls(division).map(async (url) => {
+    const asset = assets.get(url);
+    const affectedTeams = division.rounds.flatMap((round) => round.games).flatMap((game) => ([1, 2] as const)
+      .filter((slot) => logoSource(teamLogoUrl(game, slot)) === url).map((slot) => teamName(game, slot) || 'Unknown team'));
+    const community = asset?.community_name || Array.from(new Set(affectedTeams)).join(', ');
+    let stage = 'loading';
     try {
+      if (asset?.error) {
+        const reasons: Record<string, string> = {
+          ASSET_MISSING: 'Stored logo file is missing.',
+          ASSET_UNREADABLE: 'Stored logo file cannot be read.',
+          INVALID_IMAGE: 'Stored logo is not a valid PNG.',
+          ASSET_TOO_LARGE: 'Stored logo exceeds the supported file size.',
+        };
+        diagnostics.push({ community, stage: 'storage', reason: reasons[asset.error] || 'Stored logo could not be retrieved.' });
+        return;
+      }
+      if (asset?.data_url) {
+        if (!asset.data_url.startsWith('data:image/png;base64,')) throw new Error('Invalid embedded logo');
+        await loadImage(asset.data_url);
+        embedded.set(url, asset.data_url);
+        return;
+      }
       const image = await loadImage(url);
+      stage = 'embedding';
       const canvas = document.createElement('canvas');
       canvas.width = image.naturalWidth;
       canvas.height = image.naturalHeight;
       const context = canvas.getContext('2d');
-      if (!context || !canvas.width || !canvas.height) return;
+      if (!context || !canvas.width || !canvas.height) throw new Error('Image canvas unavailable');
       context.drawImage(image, 0, 0);
-      // PNG keeps transparency and makes SVG/raster source assets self-contained.
-      // No asset URLs, authorization headers or storage settings enter the file.
       embedded.set(url, canvas.toDataURL('image/png'));
-    } catch {
-      // Missing, invalid or CORS-inaccessible assets use the normal initials.
+    } catch (error) {
+      diagnostics.push({ community, stage: error instanceof ExportImageError ? error.stage : stage,
+        reason: stage === 'embedding' ? 'Canvas could not embed this image.' : 'Image could not be loaded or decoded; check asset availability and cross-origin access.' });
     }
   }));
-  return embedded;
+  return { embedded, diagnostics };
 }
 
-async function buildExportSvg(title: string, division: ExportDivision, publicView: boolean) {
-  return buildBracketSvg(title, division, publicView, await embeddedBracketLogoUrls(division));
+async function buildExportSvg(title: string, division: ExportDivision, publicView: boolean, onDiagnostics?: (diagnostics: LogoExportDiagnostic[]) => void) {
+  const { embedded, diagnostics } = await embeddedBracketLogoUrls(division);
+  onDiagnostics?.(diagnostics);
+  return buildBracketSvg(title, division, publicView, embedded);
+}
+
+class ExportImageError extends Error {
+  constructor(readonly stage: 'loading' | 'decoding') {
+    super(`Export image ${stage} failed`);
+    Object.setPrototypeOf(this, ExportImageError.prototype);
+  }
 }
 
 function downloadBlob(blob: Blob, filename: string) {
@@ -568,10 +606,10 @@ function loadImage(src: string) {
         await image.decode();
         resolve(image);
       } catch (error) {
-        reject(error);
+        reject(new ExportImageError('decoding'));
       }
     };
-    image.onerror = reject;
+    image.onerror = () => reject(new ExportImageError('loading'));
     image.crossOrigin = 'anonymous';
     image.src = src;
   });
@@ -626,10 +664,32 @@ function pdfFromJpegDataUrl(jpegDataUrl: string, width: number, height: number) 
   return new Blob([bytes], { type: 'application/pdf' });
 }
 
-function DownloadControls({ title, division, publicView }: { title: string; division: ExportDivision; publicView: boolean }) {
+function DownloadControls({ title, division, publicView, tournamentId }: { title: string; division: ExportDivision; publicView: boolean; tournamentId?: string }) {
+  const [warnings, setWarnings] = useState<LogoExportDiagnostic[]>([]);
+  const [exportError, setExportError] = useState('');
+  const [busy, setBusy] = useState(false);
   const divisionLabel = bracketDivisionLabel(division);
   const filenameBase = sanitizeFilename(`${title}-${divisionLabel}-bracket`);
-  const exportSvg = () => buildExportSvg(title, division, publicView);
+  const exportSvg = async () => {
+    let exportDivision = division;
+    if (tournamentId) {
+      // Fetch upload bytes through the same authorized API as bracket data.
+      // Avoid CORS/redirect/cache differences in a second browser asset request.
+      const result = await apiFetch(`${publicView ? '/public' : ''}/tournaments/${encodeURIComponent(tournamentId)}/bracket?division_id=${encodeURIComponent(division.id)}`);
+      const resolved = result.tournament?.divisions?.find((item: TournamentBracketDivision) => item.id === division.id);
+      if (!resolved?.logo_assets) throw new Error('Logo export data is unavailable. Confirm the backend is updated, then retry.');
+      exportDivision = { ...division, logo_assets: resolved.logo_assets };
+    }
+    return buildExportSvg(title, exportDivision, publicView, setWarnings);
+  };
+  const runExport = async (action: () => Promise<void>) => {
+    setWarnings([]);
+    setExportError('');
+    setBusy(true);
+    try { await action(); }
+    catch { setExportError('Export failed. Confirm the tournament API is available and updated, then retry.'); }
+    finally { setBusy(false); }
+  };
   const downloadSvg = async () => downloadBlob(new Blob([await exportSvg()], { type: 'image/svg+xml;charset=utf-8' }), `${filenameBase}.svg`);
   const downloadPng = async () => {
     const canvas = await svgToCanvas(await exportSvg());
@@ -644,14 +704,21 @@ function DownloadControls({ title, division, publicView }: { title: string; divi
   return (
     <div className='flex flex-wrap items-center gap-2 text-sm print:hidden'>
       <span className='text-xs font-medium uppercase tracking-wide text-slate-500'>Download {divisionLabel}</span>
-      <button className='rounded border px-3 py-1 hover:bg-slate-50' onClick={downloadPdf}>Download PDF</button>
-      <button className='rounded border px-3 py-1 hover:bg-slate-50' onClick={downloadPng}>Download PNG</button>
-      <button className='rounded border px-3 py-1 hover:bg-slate-50' onClick={downloadSvg}>Download SVG</button>
+      {busy && <span role='status'>Preparing export…</span>}
+      <button className='rounded border px-3 py-1 hover:bg-slate-50' disabled={busy} onClick={() => runExport(downloadPdf)}>Download PDF</button>
+      <button className='rounded border px-3 py-1 hover:bg-slate-50' disabled={busy} onClick={() => runExport(downloadPng)}>Download PNG</button>
+      <button className='rounded border px-3 py-1 hover:bg-slate-50' disabled={busy} onClick={() => runExport(downloadSvg)}>Download SVG</button>
+      {exportError && <p className='w-full text-red-700' role='alert'>{exportError}</p>}
+      {warnings.length > 0 && <div className='w-full rounded border border-amber-300 bg-amber-50 p-2 text-amber-900' role='alert'>
+        <p>Some logos could not be exported. Initials were used for:</p>
+        <ul>{warnings.map((warning, index) => <li key={index}>{warning.community}: {warning.reason} ({warning.stage})</li>)}</ul>
+        <p>Check the community logo settings and re-upload unavailable images, then retry.</p>
+      </div>}
     </div>
   );
 }
 
-export default function TournamentBracket({ divisions, publicView = false, tournamentTitle = 'Tournament Bracket', enableDownloads = true }: Props) {
+export default function TournamentBracket({ divisions, publicView = false, tournamentTitle = 'Tournament Bracket', enableDownloads = true, tournamentId }: Props) {
   const exportDivisions = divisionsForExport(divisions);
   if (!divisions.length) return <div className='rounded border p-4 text-sm text-slate-600'>No tournament bracket games are available.</div>;
 
@@ -669,7 +736,7 @@ export default function TournamentBracket({ divisions, publicView = false, tourn
               <h3 className='text-lg font-semibold'>{bracketDivisionLabel(division)}</h3>
               <p className='text-xs text-slate-500'>Bracket source: saved tournament game records and published tournament score advancement.</p>
             </div>
-            {enableDownloads && <DownloadControls title={tournamentTitle} division={division} publicView={publicView} />}
+            {enableDownloads && <DownloadControls title={tournamentTitle} division={division} publicView={publicView} tournamentId={tournamentId} />}
           </div>
           <div className='overflow-x-auto overflow-y-auto pb-3' data-testid='bracket-horizontal-scroll'>
             <SharedBracketRenderer title={tournamentTitle} division={division} publicView={publicView} outputLabel={publicView ? 'Published bracket' : 'Administrator bracket'} />

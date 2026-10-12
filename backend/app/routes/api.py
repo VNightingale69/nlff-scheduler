@@ -26,6 +26,7 @@ from app.database import get_db
 from app.organizations import active_organization_filter, normalize_organization_name
 from app.models import Division, Field, FieldConfigurationMember, FieldConfigurationOption, FieldInstance, Game, GameScore, GameSlot, GameStatus, HostLocation, HostLocationConfiguration, HostPlanSelection, HostingAvailability, Organization, OrganizationDivisionParticipation, PhysicalFieldArea, Role, Rulebook, LoginAuditLog, ScheduleChangeLog, ScheduleImport, SchedulePublicationEvent, ScoreHistory, ScoreSubmission, Season, Team, TimeslotFieldConfiguration, Tournament, TournamentDivision, TournamentGame, TournamentTeam, TurfWave, User, Week
 from app.services.facility_layout_validation import active_layout_capacities, active_supported_layouts_query, field_combination_diagnostics, get_active_supported_layouts, layout_label, resolve_facility_configuration, select_supported_layout, supported_configurations_for_fields, validate_field_combination, validate_timeslot_demands
+from app.services.community_logo_export import uploaded_logo_export_asset
 from app.services import facility_layout_validation
 from app.services.host_configuration_integrity import repair_host_configuration_memberships
 from app.services.division_field_types import required_field_type_for_division
@@ -29725,6 +29726,8 @@ def _tournament_dict(tournament: Tournament, include_unpublished: bool = True) -
 def _tournament_bracket_dict(tournament: Tournament, include_unpublished: bool = True, division_id: uuid.UUID | None = None) -> dict:
     tournament_dict = _tournament_dict(tournament, include_unpublished=include_unpublished)
     divisions = []
+    export_assets = {}
+    division_records = {str(td.id): td for td in tournament.divisions}
     for division in tournament_dict['divisions']:
         if division_id and uuid.UUID(division['id']) != division_id and uuid.UUID(division['division_id']) != division_id:
             continue
@@ -29735,7 +29738,21 @@ def _tournament_bracket_dict(tournament: Tournament, include_unpublished: bool =
         for round_number in sorted(games_by_round):
             games = sorted(games_by_round[round_number], key=lambda item: int(item['game_number']))
             rounds.append({'round_number': round_number, 'round_name': games[0]['round_name'] if games else '', 'games': games})
-        divisions.append({**division, 'rounds': rounds})
+        logo_assets = {}
+        for game in division_records[division['id']].games:
+            for team in (game.team_1, game.team_2):
+                org = getattr(team, 'organization', None) if team else None
+                source = _community_logo_browser_url(org)
+                if not source:
+                    continue
+                if source not in export_assets:
+                    filename = getattr(org, 'logo_filename', None)
+                    asset = uploaded_logo_export_asset(filename, _resolved_community_logo_storage_dir(), COMMUNITY_LOGO_MAX_SIZE_BYTES) if filename else {'data_url': None, 'error': None}
+                    export_assets[source] = {**asset, 'community_name': org.name}
+                    if asset['error']:
+                        logger.warning('community_logo_export_failed organization_id=%s stage=storage error=%s', org.id, asset['error'])
+                logo_assets[source] = export_assets[source]
+        divisions.append({**division, 'rounds': rounds, 'logo_assets': logo_assets})
     return {**tournament_dict, 'divisions': divisions}
 
 
