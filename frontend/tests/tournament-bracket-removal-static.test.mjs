@@ -1,0 +1,15 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+const page = fs.readFileSync(new URL('../src/app/(dashboard)/admin/tournaments/page.tsx', import.meta.url), 'utf8');
+assert.match(page, /Delete Tournament/);
+assert.match(page, /Remove Bracket/);
+assert.match(page, /Regenerate Bracket/);
+assert.match(page, /canManageSchedule\(currentUser\)/);
+assert.match(page, /if \(!bracketAction \|\| !canManage \|\| mutationInProgress.current\) return/);
+assert.match(page, /role='dialog' aria-modal='true'/);
+assert.match(page, /disabled=\{actionLoading\} onClick=\{\(\) => setBracketAction\(null\)\}>Cancel/);
+assert.match(page, /target.action === 'regenerate' \? 'POST' : 'DELETE'/);
+assert.match(page, /version === listVersion.current && !mutationInProgress.current/);
+assert.match(page, /setActionError\(/);
+assert.match(page, /current.filter\(\(item\) => item.id !== target.tournament.id\)/);
+console.log('tournament bracket removal controls checks passed');

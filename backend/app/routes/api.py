@@ -29959,6 +29959,85 @@ def create_tournament(payload: dict, current_user: User = Depends(get_current_us
     return {'tournament': _tournament_dict(tournament), 'warnings': warnings}
 
 
+def _remove_tournament_bracket_games(db: Session, division_ids: list[uuid.UUID]) -> int:
+    games = db.query(TournamentGame).filter(TournamentGame.tournament_division_id.in_(division_ids)).with_for_update().all()
+    if any(game.home_score is not None or game.away_score is not None or game.home_forfeit
+           or game.away_forfeit or game.winner_team_id or game.loser_team_id
+           or game.is_published or str(game.score_status or 'MISSING').upper() != 'MISSING' for game in games):
+        raise HTTPException(409, 'This bracket has recorded results and cannot be removed or regenerated.')
+    ids = [game.id for game in games]
+    if not ids:
+        return 0
+    external = db.query(TournamentGame.id).filter(
+        ~TournamentGame.tournament_division_id.in_(division_ids),
+        or_(TournamentGame.team_1_source_game_id.in_(ids), TournamentGame.team_2_source_game_id.in_(ids)),
+    ).first()
+    if external:
+        raise HTTPException(409, 'Another bracket references these games. No changes were made.')
+    # Clear self-referencing advancement links before deleting the game rows.
+    db.query(TournamentGame).filter(TournamentGame.id.in_(ids)).update(
+        {TournamentGame.team_1_source_game_id: None, TournamentGame.team_2_source_game_id: None},
+        synchronize_session='fetch',
+    )
+    db.query(TournamentGame).filter(TournamentGame.id.in_(ids)).delete(synchronize_session='fetch')
+    return len(ids)
+
+
+@router.delete('/tournaments/{tournament_id}', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
+def delete_tournament(tournament_id: uuid.UUID, db: Session = Depends(get_db)):
+    tournament = db.query(Tournament).filter(Tournament.id == tournament_id).with_for_update().first()
+    if not tournament:
+        raise HTTPException(404, 'Tournament not found.')
+    try:
+        count = _remove_tournament_bracket_games(db, [division.id for division in tournament.divisions])
+        for division in tournament.divisions:
+            db.expire(division, ['games'])
+        db.delete(tournament)
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        logger.exception('tournament_delete_failed tournament_id=%s', tournament_id)
+        raise HTTPException(500, 'Unable to delete tournament. Please try again.')
+    return {'deleted_tournament_id': str(tournament_id), 'deleted_game_count': count}
+
+
+@router.delete('/tournaments/{tournament_id}/divisions/{division_id}/bracket', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
+@router.post('/tournaments/{tournament_id}/divisions/{division_id}/bracket', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
+def replace_tournament_bracket(tournament_id: uuid.UUID, division_id: uuid.UUID, request: Request, db: Session = Depends(get_db)):
+    tournament = db.query(Tournament).filter(Tournament.id == tournament_id).with_for_update().first()
+    if not tournament:
+        raise HTTPException(404, 'Tournament not found.')
+    division = db.query(TournamentDivision).filter(
+        TournamentDivision.id == division_id, TournamentDivision.tournament_id == tournament_id,
+    ).first()
+    if not division:
+        raise HTTPException(404, 'Tournament division not found.')
+    try:
+        _remove_tournament_bracket_games(db, [division.id])
+        db.expire(division, ['games'])
+        division.status = 'SEEDED'
+        if request.method == 'POST':
+            _generate_bracket_for_division(db, division)
+        db.flush()
+        if not tournament.is_published:
+            tournament.status = 'BRACKET_GENERATED' if db.query(TournamentGame.id).join(TournamentDivision).filter(
+                TournamentDivision.tournament_id == tournament.id,
+            ).first() else 'SEEDED'
+        db.commit()
+        db.expire_all()
+        return {'tournament': _tournament_dict(tournament)}
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        logger.exception('tournament_bracket_replace_failed tournament_id=%s division_id=%s', tournament_id, division_id)
+        raise HTTPException(500, 'Unable to update tournament bracket. Please try again.')
+
+
 @router.get('/tournaments', dependencies=[Depends(require_roles(ROLE_COMMUNITY_ADMIN, ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
 def list_tournaments(season_id: uuid.UUID | None = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     q = db.query(Tournament)

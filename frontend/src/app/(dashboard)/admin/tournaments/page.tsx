@@ -1,8 +1,9 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { apiFetch } from '@/lib/api';
+import { ApiError, apiFetch } from '@/lib/api';
+import { canManageSchedule } from '@/lib/auth';
 import { useAuthSession } from '@/components/AuthGate';
 import { formatDisplayDate, formatDisplayTime } from '@/lib/displayFormat';
 import TournamentBracket, { type TournamentBracketGame } from '@/components/TournamentBracket';
@@ -16,7 +17,8 @@ type Tournament = { id: string; name: string; status: string; is_published: bool
 const divisionLabel = (division: Division) => `${division.division_group} ${division.name}`;
 
 export default function TournamentBuilderPage() {
-  const { accessToken } = useAuthSession();
+  const { accessToken, currentUser } = useAuthSession();
+  const canManage = canManageSchedule(currentUser);
   const token = accessToken || undefined;
   const searchParams = useSearchParams();
   const [seasons, setSeasons] = useState<Season[]>([]);
@@ -29,11 +31,17 @@ export default function TournamentBuilderPage() {
   const [warnings, setWarnings] = useState<Record<string, string>>({});
   const [message, setMessage] = useState('');
   const [loading, setLoading] = useState(false);
+  const mutationInProgress = useRef(false);
+  const listVersion = useRef(0);
+  const [bracketAction, setBracketAction] = useState<{ tournament: Tournament; divisionId?: string; divisionLabel?: string; action: 'delete' | 'remove' | 'regenerate' } | null>(null);
+  const [actionLoading, setActionLoading] = useState(false);
+  const [actionError, setActionError] = useState('');
   const [viewModes, setViewModes] = useState<Record<string, 'schedule' | 'bracket'>>({});
 
   const selectedDivisionObjects = useMemo(() => divisions.filter((division) => selectedDivisions.includes(division.id)), [divisions, selectedDivisions]);
 
   const loadOptions = async () => {
+    const version = listVersion.current;
     try {
       const [seasonPayload, divisionPayload, tournamentPayload] = await Promise.all([
         apiFetch('/seasons', {}, token),
@@ -44,7 +52,7 @@ export default function TournamentBuilderPage() {
       setSeasons(seasonItems);
       setSeasonId((current) => current || searchParams.get('season_id') || seasonItems.find((s: Season) => s.is_active)?.id || seasonItems[0]?.id || '');
       setDivisions(divisionPayload.items || []);
-      setTournaments(tournamentPayload.items || []);
+      if (version === listVersion.current && !mutationInProgress.current) setTournaments(tournamentPayload.items || []);
     } catch (error: any) {
       setMessage(error?.message || 'Unable to load Tournament Builder data.');
     }
@@ -121,6 +129,36 @@ export default function TournamentBuilderPage() {
     setTournaments((current) => current.map((item) => item.id === id ? result.tournament : item));
   };
 
+  const confirmBracketAction = async () => {
+    if (!bracketAction || !canManage || mutationInProgress.current) return;
+    mutationInProgress.current = true;
+    listVersion.current += 1;
+    setActionLoading(true);
+    setActionError('');
+    const target = bracketAction;
+    try {
+      const path = `/tournaments/${target.tournament.id}${target.divisionId ? `/divisions/${target.divisionId}/bracket` : ''}`;
+      const result = await apiFetch(path, { method: target.action === 'regenerate' ? 'POST' : 'DELETE' }, token);
+      listVersion.current += 1;
+      setTournaments((current) => target.action === 'delete'
+        ? current.filter((item) => item.id !== target.tournament.id)
+        : current.map((item) => item.id === target.tournament.id ? result.tournament : item));
+      setBracketAction(null);
+      setMessage(target.action === 'delete' ? 'Old tournament deleted. Load teams from Results & Standings above to generate a new tournament.' : target.action === 'remove' ? 'Bracket removed. Saved seeds and exclusions were retained; use Regenerate Bracket when ready.' : 'Bracket regenerated from saved seeds and exclusions.');
+    } catch (error: unknown) {
+      const detail = error instanceof ApiError ? (error.details as any)?.detail : null;
+      setActionError(typeof detail === 'string' ? detail : error instanceof Error ? error.message : 'Unable to update bracket. Please try again.');
+    } finally {
+      mutationInProgress.current = false;
+      setActionLoading(false);
+    }
+  };
+  const openBracketAction = (target: NonNullable<typeof bracketAction>) => {
+    setActionError('');
+    setBracketAction(target);
+  };
+  const actionLabel = bracketAction?.action === 'delete' ? 'Delete Tournament' : bracketAction?.action === 'remove' ? 'Remove Bracket' : 'Regenerate Bracket';
+
   return <div className='space-y-5'>
     <div>
       <h1 className='text-2xl font-bold'>Tournament Builder</h1>
@@ -157,13 +195,34 @@ export default function TournamentBuilderPage() {
                 <button className={`rounded px-3 py-1 ${activeView === 'bracket' ? 'bg-slate-900 text-white' : 'hover:bg-slate-50'}`} onClick={() => setViewModes((current) => ({ ...current, [tournament.id]: 'bracket' }))}>Bracket View</button>
               </div>
               <button className='rounded border px-3 py-1' onClick={() => loadOptions()}>Refresh</button>
+              {canManage && <button className='rounded border border-red-300 px-3 py-1 text-red-700 disabled:opacity-50' disabled={actionLoading || loading} onClick={() => openBracketAction({ tournament, action: 'delete' })}>Delete Tournament</button>}
               <button className='rounded border px-3 py-1' onClick={() => publishTournament(tournament.id, true)}>Publish Tournament</button>
               <button className='rounded border px-3 py-1' onClick={() => publishTournament(tournament.id, false)}>Unpublish</button>
             </div>
           </div>
+          {canManage && <div className='space-y-2'>{tournament.divisions.map((division) => <div key={division.id} className='flex flex-wrap items-center gap-2 rounded border bg-slate-50 p-2 text-sm'>
+            <span className='font-semibold'>{division.division_group} {division.division_name}</span>
+            <button className='rounded border border-red-300 px-3 py-1 text-red-700 disabled:opacity-50' disabled={actionLoading || loading || division.games.length === 0} onClick={() => openBracketAction({ tournament, divisionId: division.id, divisionLabel: `${division.division_group} ${division.division_name}`, action: 'remove' })}>Remove Bracket</button>
+            <button className='rounded border px-3 py-1 disabled:opacity-50' disabled={actionLoading || loading} onClick={() => openBracketAction({ tournament, divisionId: division.id, divisionLabel: `${division.division_group} ${division.division_name}`, action: 'regenerate' })}>Regenerate Bracket</button>
+            {division.games.length === 0 && <span className='text-slate-600'>No bracket generated</span>}
+          </div>)}</div>}
           {activeView === 'bracket' ? <TournamentBracket divisions={tournament.divisions} tournamentTitle={tournament.name} tournamentId={tournament.id} /> : tournament.divisions.map((division) => <div key={division.id} className='space-y-2'><h4 className='font-semibold'>{division.division_group} {division.division_name}</h4><div className='overflow-x-auto'><table className='min-w-full text-xs'><thead className='bg-slate-100 text-left'><tr>{['Round','Game #','Team 1 / Seed','Team 2 / Seed','Date','Time','Host Location','Field','Status','Score','Winner','Review'].map((h) => <th key={h} className='p-2'>{h}</th>)}</tr></thead><tbody>{division.games.map((game) => <tr key={game.id} className='border-t'><td className='p-2'>{game.round_name}</td><td className='p-2'>{game.game_number}</td><td className='p-2'>{game.team_1_placeholder}</td><td className='p-2'>{game.team_2_placeholder}</td><td className='p-2'>{formatDisplayDate(game.date || '')}</td><td className='p-2'>{formatDisplayTime(game.time || '')}</td><td className='p-2'>{game.host_location_name || '—'}</td><td className='p-2'>{game.field_name || '—'}</td><td className='p-2'>{game.status}</td><td className='p-2'>{game.home_score ?? '—'} - {game.away_score ?? '—'}</td><td className='p-2'>{game.winner_team_name || '—'}</td><td className='p-2'>{game.needs_review ? 'Needs review' : '—'}</td></tr>)}</tbody></table></div></div>)}
         </div>;
       })}
     </section>
+    {bracketAction && <div className='fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4'>
+      <div role='dialog' aria-modal='true' aria-labelledby='bracket-action-title' className='w-full max-w-lg space-y-3 rounded-lg bg-white p-5 shadow-xl'>
+        <h2 id='bracket-action-title' className='text-lg font-semibold'>{actionLabel}?</h2>
+        <p className='font-medium'>{bracketAction.tournament.name}</p>
+        <p>{bracketAction.divisionLabel || bracketAction.tournament.divisions.map((division) => `${division.division_group} ${division.division_name}`).join(', ')}</p>
+        <p className='text-sm'>{bracketAction.action === 'delete' ? 'Permanently delete this tournament and all its brackets and saved seeds. Other tournaments and regular-season records are preserved.' : bracketAction.action === 'remove' ? 'Remove only this division’s bracket games and their schedule assignments. Saved seeds and exclusions are retained.' : 'Replace this division’s bracket using its saved seeds and exclusions. Existing game IDs and schedule assignments will be replaced.'}</p>
+        {bracketAction.tournament.is_published && <p className='text-sm text-amber-800'>This tournament is published. This change will also affect its public view.</p>}
+        {actionError && <p role='alert' className='text-sm text-red-700'>{actionError}</p>}
+        <div className='flex justify-end gap-2'>
+          <button className='rounded border px-3 py-2' disabled={actionLoading} onClick={() => setBracketAction(null)}>Cancel</button>
+          <button className='rounded bg-red-700 px-3 py-2 text-white disabled:opacity-50' disabled={actionLoading} onClick={confirmBracketAction}>{actionLoading ? 'Working...' : actionLabel}</button>
+        </div>
+      </div>
+    </div>}
   </div>;
 }
