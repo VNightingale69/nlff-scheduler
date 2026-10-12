@@ -1,12 +1,13 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { ApiError, apiFetch } from '@/lib/api';
 import { canManageSchedule } from '@/lib/auth';
 import { useAuthSession } from '@/components/AuthGate';
 import { getDivisionLabel } from '@/lib/divisionLabel';
 import { formatDisplayDate, formatDisplayDateTime, formatDisplayTime } from '@/lib/displayFormat';
+import { deleteScheduledGame } from '@/lib/deleteScheduledGame.mjs';
 import { normalizeOptionalUuid } from '@/lib/manualSchedulePayload.mjs';
 
 
@@ -259,6 +260,10 @@ export default function ManualScheduleBuilderPage() {
   const [schedulerDiagnostics, setSchedulerDiagnostics] = useState<any | null>(null);
   const [pendingGameEdits, setPendingGameEdits] = useState<Record<string, any>>({});
   const [moveGame, setMoveGame] = useState<any | null>(null);
+  const scheduleMutation = useRef(false);
+  const deletedGameIds = useRef(new Set<string>());
+  const [deleteLoading, setDeleteLoading] = useState(false);
+  const [deleteError, setDeleteError] = useState('');
   const [deleteGame, setDeleteGame] = useState<any | null>(null);
   const [showClearScheduleModal, setShowClearScheduleModal] = useState(false);
   const [clearScheduleInput, setClearScheduleInput] = useState('');
@@ -363,17 +368,37 @@ export default function ManualScheduleBuilderPage() {
     return sharedTeam && Math.abs(selectedMinutes - candidateMinutes) === 60;
   });
   const performDelete = async (game: any) => {
+    if (!canManageGeneratedGames || scheduleMutation.current || isPublishedGame(game)) return;
+    scheduleMutation.current = true;
+    setDeleteLoading(true);
+    setDeleteError('');
     setError('');
     setSuccess('');
     try {
-      await apiFetch(`/games/${game.id}`, { method: 'DELETE' }, token);
-      setDeleteGame(null);
-      setPendingGameEdits((current) => { const next = { ...current }; delete next[game.id]; return next; });
-      await load();
-      await loadRecommendations();
-      await loadGeneratedSlots();
-      setManualScheduleBannerFromValidation('Game deleted.', await loadFinalScheduleValidation());
-    } catch (e: unknown) { setError(extractError(e)); }
+      await deleteScheduledGame({
+        remove: () => apiFetch(`/games/${game.id}`, { method: 'DELETE' }, token),
+        commit: () => {
+          deletedGameIds.current.add(String(game.id));
+          setGames((current) => current.filter((candidate) => String(candidate.id) !== String(game.id)));
+          setDeleteGame(null);
+          setPendingGameEdits((current) => { const next = { ...current }; delete next[game.id]; return next; });
+          setAutoFillSkipped([]);
+          setAutoFillPreview([]);
+          if (moveGame?.id === game.id) setMoveGame(null);
+        },
+        refresh: async () => {
+          await load();
+          await loadRecommendations();
+          await loadGeneratedSlots();
+          setManualScheduleBannerFromValidation('Game deleted.', await loadFinalScheduleValidation());
+        },
+        failed: (e: unknown) => setDeleteError(`Unable to delete game. ${extractError(e)}`),
+        refreshFailed: (e: unknown) => setError(`Game deleted, but schedule details could not be refreshed. Please refresh the page. ${extractError(e)}`),
+      });
+    } finally {
+      scheduleMutation.current = false;
+      setDeleteLoading(false);
+    }
   };
   const isPublishedGame = (game: any) => String((options.weeks || []).find((week: any) => String(week.id) === String(game.week_id))?.publication_status || '').toUpperCase() === 'PUBLISHED';
   const hasScheduledGamesFilters = Object.values(scheduledGamesFilters).some(Boolean);
@@ -460,7 +485,7 @@ export default function ManualScheduleBuilderPage() {
     if (!seasonId && activeSeason?.id) setSeasonId(activeSeason.id);
     if (!divisionId && opts.divisions?.length) setDivisionId(opts.divisions[0].id);
     const scheduled: any = await apiFetch('/games?page_size=300', {}, token);
-    setGames((scheduled.items || []).filter((game: any) => (game.status_code || game.game_status_code) !== 'UNSCHEDULED'));
+    setGames((scheduled.items || []).filter((game: any) => !deletedGameIds.current.has(String(game.id)) && (game.status_code || game.game_status_code) !== 'UNSCHEDULED'));
   };
 
   const loadGeneratedSlots = async () => {
@@ -608,9 +633,10 @@ export default function ManualScheduleBuilderPage() {
     return `Unable to save schedule changes. ${edits.length} ${edits.length === 1 ? 'game could' : 'games could'} not be updated. Game${edits.length === 1 ? '' : 's'}: ${affected}. Reason: ${reason}`;
   };
   const saveBulkInlineEdits = async (overrideWarnings = false) => {
-    if (!canBulkInlineEditScheduledGames || !hasPendingBulkEdits || bulkSaveLoading) return;
+    if (!canBulkInlineEditScheduledGames || !hasPendingBulkEdits || bulkSaveLoading || scheduleMutation.current) return;
     const editsToSave = [...dirtyPendingEdits];
     setError('');
+    scheduleMutation.current = true;
     setBulkSaveLoading(true);
     try {
       let saveWithWarningOverride = overrideWarnings;
@@ -650,6 +676,7 @@ export default function ManualScheduleBuilderPage() {
       }
       setError(bulkSaveFailureMessage(editsToSave, extractError(e)));
     } finally {
+      scheduleMutation.current = false;
       setBulkSaveLoading(false);
     }
   };
@@ -877,7 +904,7 @@ export default function ManualScheduleBuilderPage() {
             <span className='text-sm text-slate-600'>Enable global inline editing to update multiple scheduled games before saving once.</span>
           </> : <>
             <span className={`text-sm font-semibold ${hasPendingBulkEdits ? 'text-blue-900' : 'text-slate-600'}`}>{hasPendingBulkEdits ? pendingChangesLabel : '0 unsaved changes across 0 games'}</span>
-            <button type='button' className='rounded bg-blue-600 px-3 py-2 text-sm text-white disabled:cursor-not-allowed disabled:bg-slate-300' disabled={!hasPendingBulkEdits || bulkSaveLoading} onClick={() => saveBulkInlineEdits(false)}>{bulkSaveLoading ? 'Saving...' : 'Save Changes'}</button>
+            <button type='button' className='rounded bg-blue-600 px-3 py-2 text-sm text-white disabled:cursor-not-allowed disabled:bg-slate-300' disabled={!hasPendingBulkEdits || bulkSaveLoading || deleteLoading} onClick={() => saveBulkInlineEdits(false)}>{bulkSaveLoading ? 'Saving...' : 'Save Changes'}</button>
             <button className='rounded border bg-white px-3 py-2 text-sm disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400' disabled={!hasPendingBulkEdits} onClick={() => setPendingGameEdits({})}>Discard Changes</button>
             <button className='rounded border bg-white px-3 py-2 text-sm' onClick={() => { if (!confirmDiscardBulkEdits()) return; setPendingGameEdits({}); setIsBulkEditMode(false); }}>Exit Edit Mode</button>
             {hasInvalidPendingEdits ? <span className='text-sm text-amber-700'>One or more changed rows may require review; Save Changes will show the server validation result.</span> : null}
@@ -924,12 +951,11 @@ export default function ManualScheduleBuilderPage() {
                       {isDirtyRow && canBulkInlineEditScheduledGames ? <button className='rounded border px-2 py-1 text-xs' onClick={() => setPendingGameEdits((current) => { const next = { ...current }; delete next[g.id]; return next; })}>Reset Row</button> : null}
                     </> : <>
                       <button className='rounded border px-2 py-1 text-xs' onClick={() => { if (!confirmDiscardBulkEdits()) return; setPendingGameEdits({}); setMoveGame(g); }}>Move</button>
-                      <button className='rounded border border-red-300 px-2 py-1 text-xs text-red-700 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400' disabled={isPublishedGame(g)} title={isPublishedGame(g) ? 'Published games cannot be deleted from the Manual Schedule Builder.' : 'Delete this unpublished scheduled game'} onClick={() => {
-                        setAutoFillSkipped([]);
-                        setAutoFillPreview([]);
+                    </>}
+                      <button className='rounded border border-red-300 px-2 py-1 text-xs text-red-700 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400' disabled={isPublishedGame(g) || deleteLoading || bulkSaveLoading} title={isPublishedGame(g) ? 'Published games cannot be deleted from the Manual Schedule Builder.' : 'Delete this unpublished scheduled game'} onClick={() => {
+                        setDeleteError('');
                         setDeleteGame(g);
                       }}>Delete Game</button>
-                    </>}
                   </div></td> : null}
                 </tr>;
               })}
@@ -977,9 +1003,10 @@ export default function ManualScheduleBuilderPage() {
           </div>
           {doubleheaderPartner(deleteGame) ? <p className='mt-3 rounded border border-amber-300 bg-amber-50 p-2 text-sm text-amber-900'><strong>Doubleheader warning:</strong> The other doubleheader game will not be deleted.</p> : null}
           <p className='mt-3 text-sm text-slate-700'>This game has not been published. Deleting it will remove it from the working schedule.</p>
+          {deleteError ? <p role='alert' className='mt-3 text-sm text-red-700'>{deleteError}</p> : null}
           <div className='mt-4 flex flex-wrap justify-end gap-2'>
-            <button className='rounded border px-3 py-2' onClick={() => setDeleteGame(null)}>Cancel</button>
-            <button className='rounded bg-red-700 px-3 py-2 text-white' onClick={() => performDelete(deleteGame)}>Delete Game</button>
+            <button className='rounded border px-3 py-2' disabled={deleteLoading} onClick={() => setDeleteGame(null)}>Cancel</button>
+            <button className='rounded bg-red-700 px-3 py-2 text-white' disabled={deleteLoading || bulkSaveLoading} onClick={() => performDelete(deleteGame)}>{deleteLoading ? 'Deleting...' : 'Delete Game'}</button>
           </div>
         </div>
       </div> : null}

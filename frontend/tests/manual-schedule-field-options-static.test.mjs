@@ -17,7 +17,7 @@ assert.match(page, /updatePendingEditForGame\(g, \{ field_id: e\.target\.value, 
 assert.match(page, /game_id: pendingEdit\.id,[\s\S]*field_id: pendingEdit\.field_id,/, 'bulk payload sends each dirty game ID and canonical field ID');
 assert.match(page, /field_instance_id: normalizeOptionalUuid\(pendingEdit\.field_instance_id\)/, 'an empty optional field-instance UUID is normalized before serialization');
 assert.match(page, /apiFetch\('\/schedule-management\/games\/manual-edit\/bulk'/, 'Save Changes invokes the bulk API');
-assert.match(page, /type='button'[\s\S]*disabled=\{!hasPendingBulkEdits \|\| bulkSaveLoading\}/, 'Save Changes is a non-submit button and valid dirty rows are not silently blocked by advisory state');
+assert.match(page, /type='button'[\s\S]*disabled=\{!hasPendingBulkEdits \|\| bulkSaveLoading \|\| deleteLoading\}/, 'Save Changes is a non-submit button and valid dirty rows are not silently blocked by advisory state');
 assert.doesNotMatch(page, /if \(hasInvalidPendingEdits\)[^{]*\{[^}]*return/, 'client-side advisory state cannot prevent the bulk API attempt');
 assert.match(page, /buildBulkPayload\(editsToSave, saveWithWarningOverride\)/, 'the request is built from the exact dirty-row snapshot captured by the click handler');
 assert.match(page, /while \(true\)[\s\S]*saveWithWarningOverride = true/, 'warning confirmation retries the request inside the active save invocation');
