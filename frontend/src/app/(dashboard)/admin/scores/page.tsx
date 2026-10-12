@@ -1,7 +1,7 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
-import { apiFetch } from '@/lib/api';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { API_URL, apiFetch } from '@/lib/api';
 import { useAuthSession } from '@/components/AuthGate';
 import { ScoreTimestamp } from '@/components/ScoreTimestamp';
 import { formatDateTime, formatDisplayDate, formatDisplayTime } from '@/lib/displayFormat';
@@ -19,6 +19,12 @@ export default function ScoreManagementPage() {
   const [items, setItems] = useState<ScoreGame[]>([]);
   const [filters, setFilters] = useState({ date: '', division_id: '', organization_id: '', host_location_id: '', status: '', published: '', game_type: '', missing: false, flagged: false, conflicts: false });
   const [drafts, setDrafts] = useState<Record<string, { home_score: string; away_score: string; notes: string }>>({});
+  const [appliedQuery, setAppliedQuery] = useState('');
+  const [scoresLoaded, setScoresLoaded] = useState(false);
+  const [tableLoading, setTableLoading] = useState(true);
+  const [exporting, setExporting] = useState(false);
+  const exportInProgress = useRef(false);
+  const [exportError, setExportError] = useState('');
   const [message, setMessage] = useState('');
   const [references, setReferences] = useState<Record<ReferenceKey, ReferenceOption[]>>({ divisions: [], communities: [], hostLocations: [] });
   const [referenceLoading, setReferenceLoading] = useState<Record<ReferenceKey, boolean>>({ divisions: true, communities: true, hostLocations: true });
@@ -36,8 +42,14 @@ export default function ScoreManagementPage() {
     return text ? `?${text}` : '';
   };
   const load = async () => {
-    const data = await apiFetch(`/scores${query()}`, {}, token);
-    setItems(data.items || []);
+    const requestedQuery = query();
+    setTableLoading(true);
+    try {
+      const data = await apiFetch(`/scores${requestedQuery}`, {}, token);
+      setItems(data.items || []);
+      setAppliedQuery(requestedQuery);
+      setScoresLoaded(true);
+    } finally { setTableLoading(false); }
   };
   useEffect(() => { load().catch((error) => setMessage(error.message)); }, []);
 
@@ -79,6 +91,42 @@ export default function ScoreManagementPage() {
   const flag = async (g: ScoreGame) => { const reason = window.prompt('Flag reason', g.flag_reason || '') || ''; await act('Score flagged.', `/scores/${g.game_id}/flag`, { method: 'POST', body: JSON.stringify({ reason }) }); };
   const history = async (g: ScoreGame) => { const data = await apiFetch(`/scores/${g.game_id}/history`, {}, token); alert((data.items || []).map((h: any) => `${formatDateTime(h.created_at)}: ${h.action} ${h.previous_away_score ?? ''}-${h.previous_home_score ?? ''} → ${h.new_away_score ?? ''}-${h.new_home_score ?? ''} (${h.previous_status} → ${h.new_status}) by ${h.actor?.full_name || h.actor_user_id || 'system'}${h.reason ? ` — ${h.reason}` : ''}`).join('\n') || 'No score history yet.'); };
 
+  const exportScores = async () => {
+    if (exportInProgress.current || tableLoading || !scoresLoaded) return;
+    exportInProgress.current = true;
+    setExporting(true);
+    setExportError('');
+    try {
+      const response = await fetch(`${API_URL}/scores/export.csv${appliedQuery}`, {
+        headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), Accept: 'text/csv' },
+      });
+      if (!response.ok) {
+        let explanation = '';
+        try {
+          const payload = await response.json();
+          explanation = typeof payload.detail === 'string' ? payload.detail : typeof payload.message === 'string' ? payload.message : '';
+        } catch { /* Non-JSON proxy responses are not displayed. */ }
+        throw new Error(`Unable to export scores${explanation ? `: ${explanation}` : '. Please try again.'}`);
+      }
+      const url = window.URL.createObjectURL(await response.blob());
+      const link = document.createElement('a');
+      try {
+        link.href = url;
+        link.download = 'scores-export.csv';
+        document.body.appendChild(link);
+        link.click();
+      } finally {
+        link.remove();
+        window.URL.revokeObjectURL(url);
+      }
+    } catch (error: unknown) {
+      setExportError(error instanceof Error ? error.message : 'Unable to export scores. Please try again.');
+    } finally {
+      exportInProgress.current = false;
+      setExporting(false);
+    }
+  };
+
   return <div className='space-y-4'>
     <div><h1 className='text-2xl font-bold'>Score Management</h1><p className='text-sm text-slate-600'>Inline review, correction, approval, publishing, unpublishing, and audit for scores tied to scheduled games.</p><p className='text-xs text-slate-500'>Enter a number, leave blank for 0, or enter F for a forfeit.</p></div>
     {message && <div className='rounded border bg-green-50 p-3 text-sm'>{message}</div>}
@@ -97,9 +145,11 @@ export default function ScoreManagementPage() {
       <select className='rounded border p-2' value={filters.published} onChange={(e) => setFilters({ ...filters, published: e.target.value })}><option value=''>All published states</option><option value='published'>Published</option><option value='unpublished'>Unpublished</option></select>
       <select className='rounded border p-2' value={filters.game_type} onChange={(e) => setFilters({ ...filters, game_type: e.target.value })}><option value=''>Game Type: All</option><option value='REGULAR_SEASON'>Regular Season</option><option value='TOURNAMENT'>Tournament</option></select>
       {(['missing','flagged','conflicts'] as const).map((key) => <label key={key} className='flex items-center gap-2 text-sm'><input type='checkbox' checked={filters[key]} onChange={(e) => setFilters({ ...filters, [key]: e.target.checked })} /> {key === 'missing' ? 'Missing Scores' : key === 'flagged' ? 'Flagged Scores' : 'Conflicts'}</label>)}
-      <button className='rounded bg-slate-800 px-3 py-2 text-white' onClick={load}>Apply Filters</button>
+      <button className='rounded bg-slate-800 px-3 py-2 text-white' onClick={() => load().catch((error) => setMessage(error.message))}>Apply Filters</button>
       {Object.keys(referenceErrors).length > 0 && <div className='text-sm text-red-700 md:col-span-4'>Some filter options could not be loaded. <button className='underline' type='button' onClick={() => loadReferences(Object.keys(referenceErrors) as ReferenceKey[])}>Retry</button></div>}
     </div>
+    <div className='flex flex-wrap items-center gap-3'><button type='button' className='rounded bg-blue-700 px-3 py-2 text-white disabled:opacity-50' disabled={exporting || tableLoading || !scoresLoaded} onClick={exportScores}>{exporting ? 'Exporting...' : 'Export Scores (CSV)'}</button><span className='text-sm text-slate-600'>Exports saved scores using the applied filters. Unsaved corrections are excluded.</span></div>
+    {exportError && <p role='alert' className='rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700'>{exportError}</p>}
     <div className='overflow-x-auto rounded border bg-white'><table className='min-w-full text-sm'><thead className='bg-slate-100 text-left'><tr>{scoreTableHeaders.map((h) => <th key={h} className={h.endsWith('Team') ? teamColumnClass : h.endsWith('Score') ? scoreColumnClass : 'p-2'}>{h}</th>)}</tr></thead><tbody>{items.map((g) => { const d = draftFor(g); return <tr key={g.game_id} className='border-t align-top'><td className='p-2'>{formatDisplayDate(g.game_date)}</td><td className='p-2'>{formatDisplayTime(g.kickoff_time)}</td><td className='p-2'>{g.division_group} {g.division_name}</td><td className='p-2'>{g.host_location_name}</td><td className='p-2'>{g.field_name}</td><td className={teamColumnClass}>{g.home_team_name}</td><td className={scoreColumnClass}><input className='mx-auto block w-[70px] rounded border p-1 text-center' type='text' inputMode='numeric' value={d.home_score} onChange={(e) => setDraft(g, { home_score: e.target.value })} /></td><td className={teamColumnClass}>{g.away_team_name}</td><td className={scoreColumnClass}><input className='mx-auto block w-[70px] rounded border p-1 text-center' type='text' inputMode='numeric' value={d.away_score} onChange={(e) => setDraft(g, { away_score: e.target.value })} /></td><td className='p-2'>{g.submitted_by?.full_name || ''}</td><td className='p-2'><ScoreTimestamp value={g.submitted_at} /></td><td className='p-2'>{g.score_status}</td><td className='p-2'>{g.is_published ? 'Published' : 'Unpublished'}</td><td className='p-2'><ScoreTimestamp value={g.last_updated_at || g.approved_at || g.submitted_at} /></td><td className='flex flex-wrap gap-1 p-2'><button className='rounded border px-2 py-1' onClick={() => save(g)}>Save Correction</button><button className='rounded border px-2 py-1' onClick={() => approve(g)}>Approve</button><button className='rounded border px-2 py-1' onClick={() => publish(g)}>Publish</button><button className='rounded border px-2 py-1' onClick={() => approvePublish(g)}>Approve & Publish</button><button className='rounded border px-2 py-1' onClick={() => unpublish(g)}>Unpublish</button><button className='rounded border px-2 py-1' onClick={() => resolve(g)}>Resolve Conflict</button><button className='rounded border px-2 py-1' onClick={() => flag(g)}>Flag</button><button className='rounded border px-2 py-1' onClick={() => clear(g)}>Clear Score</button><button className='rounded border px-2 py-1' onClick={() => history(g)}>View History</button></td></tr>; })}</tbody></table></div>
   </div>;
 }

@@ -1,0 +1,15 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+const source = fs.readFileSync(new URL('../src/app/(dashboard)/admin/scores/page.tsx', import.meta.url), 'utf8');
+assert.match(source, /Export Scores \(CSV\)/);
+assert.match(source, /scores\/export.csv\$\{appliedQuery\}/);
+assert.match(source, /setAppliedQuery\(requestedQuery\)/);
+assert.match(source, /Authorization: `Bearer \$\{token\}`/);
+assert.match(source, /if \(exportInProgress.current \|\| tableLoading \|\| !scoresLoaded\) return/);
+assert.match(source, /disabled=\{exporting \|\| tableLoading \|\| !scoresLoaded\}/);
+assert.match(source, /if \(!response.ok\)/);
+assert.match(source, /role='alert'/);
+assert.match(source, /link.download = 'scores-export.csv'/);
+assert.match(source, /window.URL.revokeObjectURL\(url\)/);
+assert.match(source, /Unsaved corrections are excluded/);
+console.log('Score export controls checks passed.');

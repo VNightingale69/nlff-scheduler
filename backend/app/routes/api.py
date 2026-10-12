@@ -29440,6 +29440,49 @@ def admin_scores(week_id: uuid.UUID | None = None, division_id: uuid.UUID | None
     return {'items': [_score_game_dict(row, db=db) for row in rows], 'total': len(rows)}
 
 
+def _score_export_cell(value):
+    if value is None:
+        return ''
+    if isinstance(value, str) and (value.lstrip().startswith(('=', '+', '-', '@')) or value.startswith(('\t', '\r', '\n'))):
+        return "'" + value
+    return value
+
+
+def _score_export_timestamp(value: str | None) -> str:
+    if not value:
+        return ''
+    stamp = datetime.fromisoformat(value.replace('Z', '+00:00'))
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return stamp.astimezone(ZoneInfo('America/Chicago')).isoformat()
+
+
+@router.get('/scores/export.csv', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
+@router.get('/admin/scores/export.csv', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
+def export_admin_scores(week_id: uuid.UUID | None = None, division_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, host_location_id: uuid.UUID | None = None, status: str | None = None, date: date | None = None, published: str | None = None, game_type: str | None = None, missing: bool = False, flagged: bool = False, conflicts: bool = False, db: Session = Depends(get_db)):
+    # Use the same selection and ordering as Score Management, without pagination.
+    data = admin_scores(week_id=week_id, division_id=division_id, organization_id=organization_id,
+                        host_location_id=host_location_id, status=status, date=date, published=published,
+                        game_type=game_type, missing=missing, flagged=flagged, conflicts=conflicts, db=db)
+    out = io.StringIO()
+    writer = csv.writer(out)
+    writer.writerow(['Date', 'Time', 'Division', 'Host Location', 'Field', 'Home Team', 'Home Score',
+                     'Away Team', 'Away Score', 'Submitted By', 'Submitted (America/Chicago)', 'Score Status',
+                     'Published Status', 'Updated (America/Chicago)', 'Flagged', 'Conflict', 'Game ID'])
+    for row in data['items']:
+        writer.writerow([_score_export_cell(value) for value in [
+            row['game_date'], row['kickoff_time'], f"{row['division_group']} {row['division_name']}",
+            row['host_location_name'], row['field_name'], row['home_team_name'], row['home_score'],
+            row['away_team_name'], row['away_score'], (row.get('submitted_by') or {}).get('full_name'),
+            _score_export_timestamp(row.get('submitted_at')), row['score_status'], row['published_status'],
+            _score_export_timestamp(row.get('last_updated_at') or row.get('approved_at') or row.get('submitted_at')),
+            'Yes' if row['flagged'] else 'No', 'Yes' if row['score_conflict'] else 'No', row['game_id'],
+        ]])
+    return StreamingResponse(iter(['\ufeff' + out.getvalue()]), media_type='text/csv',
+                             headers={'Content-Disposition': 'attachment; filename="scores-export.csv"',
+                                      'Cache-Control': 'no-store'})
+
+
 @router.patch('/scores/{game_id}', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
 @router.put('/admin/games/{game_id}/score', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
 def admin_upsert_score(game_id: uuid.UUID, payload: ScorePayload, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
