@@ -12,7 +12,7 @@ assert.match(source, /className='relative shrink-0 overflow-visible rounded-2xl/
 // Metadata is rendered inside a compact key/value grid without truncation, so dashes and long values fit.
 assert.match(source, /data-testid='bracket-game-metadata'/);
 assert.match(source, /grid-cols-\[54px_minmax\(0,1fr\)\]/);
-assert.match(source, /<dd className='min-w-0 whitespace-normal break-words'>\{detail\.value\}<\/dd>/);
+assert.ok(source.includes('metadataLines(detail.value).map'));
 assert.doesNotMatch(source, /<dd className='truncate'>\{game\.host_location_name \|\| '—'\}<\/dd>/);
 assert.match(source, /\{ label: 'Date', value: formatDisplayDate\(game\.date \|\| ''\) \|\| '—' \}/);
 assert.match(source, /\{ label: 'Time', value: formatDisplayTime\(game\.time \|\| ''\) \|\| '—' \}/);
@@ -23,8 +23,8 @@ assert.match(source, /\{ label: 'Winner', value: game\.winner_team_name \|\| '�
 // Card height expands based on wrapped metadata, including long host/field/winner values.
 assert.match(source, /function gameCardHeight\(game: TournamentBracketGame\)/);
 assert.match(source, /gameMetadata\(game\)\.reduce\(\(height, row\) => height \+ Math\.max\(1, metadataLines\(row\.value\)\.length\) \* 12, 0\)/);
-assert.match(source, /return Math\.max\(BRACKET_CANVAS\.gameHeight, 154 \+ metadataHeight\);/);
-assert.match(source, /return splitText\(value, 32\);/);
+assert.match(source, /return Math\.max\(BRACKET_CANVAS\.gameHeight, 92 \+ teamRowHeight\(game, 1\) \+ teamRowHeight\(game, 2\) \+ metadataHeight \+ gameMetadata\(game\).length \* 2\);/);
+assert.match(source, /return splitText\(value, 21\);/);
 assert.match(source, /pushChunkedWord\(word\)/);
 
 // Bracket positioning and connector lines use per-card dynamic heights, including championship cards.
@@ -37,7 +37,7 @@ assert.match(source, /const y2 = end\.y \+ end\.height \/ 2;/);
 assert.match(source, /height="\$\{position\.height\}" rx="\$\{layout\.gameRadius\}"/);
 assert.match(source, /gameMetadata\(game\)\.forEach\(\(detail\) => \{/);
 assert.match(source, /metadataLines\(detail\.value\)\.forEach\(\(line, lineIndex\) => \{/);
-assert.match(source, /detailY \+= Math\.max\(1, metadataLines\(detail\.value\)\.length\) \* 12;/);
+assert.match(source, /detailY \+= Math\.max\(1, metadataLines\(detail\.value\)\.length\) \* 12 \+ 2;/);
 
 
 // Bracket header is a dedicated layout row above the bracket body, with gaps before round headers/cards.

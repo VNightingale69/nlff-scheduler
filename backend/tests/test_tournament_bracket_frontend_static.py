@@ -21,7 +21,7 @@ def test_visual_bracket_keeps_export_proportions_on_screen():
     assert 'roundWidth: 300' in source
     assert 'roundGap: 64' in source
     assert 'gameHeight: 220' in source
-    assert 'minHeight: layout.gameHeight' in source
+    assert 'minHeight: position.height' in source
     assert 'gameGap: 34' in source
     assert 'style={{ width: layout.width, height: layout.height, minWidth: layout.width }}' in source
     assert 'overflow-x-auto overflow-y-auto' in source
@@ -37,9 +37,9 @@ def test_round_headers_cards_connectors_and_metadata_use_shared_design():
     assert 'Winner' in source
     assert 'BYE · Auto-Advance' in source
     assert 'connectorPath(start, end, layout)' in source
-    assert 'Date:' in source
-    assert 'Host:' in source
-    assert 'Field:' in source
+    assert "label: 'Date'" in source
+    assert "label: 'Host'" in source
+    assert "label: 'Field'" in source
 
 
 def test_download_exports_use_same_state_and_keep_pdf_png_svg_actions():
@@ -47,8 +47,8 @@ def test_download_exports_use_same_state_and_keep_pdf_png_svg_actions():
     assert 'Download PDF' in source
     assert 'Download PNG' in source
     assert 'Download SVG' in source
-    assert 'const svg = () => buildBracketSvg(title, division, publicView)' in source
-    assert 'svgToCanvas(svg())' in source
+    assert 'buildBracketSvg(title, division, publicView, failedLogoUrls)' in source
+    assert 'svgToCanvas(await exportSvg())' in source
     assert 'pdfFromJpegDataUrl' in source
     assert 'image/png' in source
     assert 'application/pdf' in source

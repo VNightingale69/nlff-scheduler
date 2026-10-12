@@ -204,14 +204,14 @@ function TeamRow({ game, slot }: { game: TournamentBracketGame; slot: 1 | 2 }) {
   return (
     <div className={`min-h-[38px] rounded-lg border px-2.5 py-1.5 ${isWinner ? 'border-emerald-500 bg-emerald-50 font-semibold' : 'border-slate-200 bg-white'}`}>
       <div className='flex items-start justify-between gap-2'>
-        <div className='flex min-w-0 items-center gap-2'>
+        <div className='flex min-w-0 flex-1 items-center gap-2'>
           <CommunityLogo src={teamLogoUrl(game, slot)} name={name} size={28} />
           <div className='min-w-0'>
             <div className='text-[9px] leading-3 text-slate-500'>{seed ? `Seed ${seed}` : autoAdvanced ? 'BYE' : 'Seed TBD'}</div>
-            <div className='truncate text-xs leading-4 text-slate-900'>{name || 'TBD'}</div>
+            <div className='whitespace-normal break-words text-xs leading-4 text-slate-900'>{teamNameLines(game, slot).map((line, index) => <div key={index}>{line}</div>)}</div>
           </div>
         </div>
-        <div className='flex min-w-[56px] flex-col items-end'>
+        <div className='flex min-w-[56px] shrink-0 flex-col items-end'>
           {isWinner && <div className='text-[9px] font-bold leading-3 text-emerald-700'>Winner</div>}
           <div className='text-right text-[13px] font-bold leading-4 text-slate-900'>{score ?? '—'}</div>
         </div>
@@ -284,8 +284,7 @@ function bracketConnectors(rounds: TournamentBracketRound[], layout: BracketLayo
     return round.games.flatMap((game) => {
       const start = layout.positions.get(game.id);
       if (!start) return [];
-      const nextRound = rounds[roundIndex + 1];
-      const nextGame = nextRound.games.find((candidate) => candidate.team_1_source_game_id === game.id || candidate.team_2_source_game_id === game.id);
+      const nextGame = rounds.slice(roundIndex + 1).flatMap((candidateRound) => candidateRound.games).find((candidate) => candidate.team_1_source_game_id === game.id || candidate.team_2_source_game_id === game.id);
       if (!nextGame) return [];
       const end = layout.positions.get(nextGame.id);
       if (!end) return [];
@@ -302,7 +301,7 @@ function sanitizeFilename(value: string) {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'tournament-bracket';
 }
 
-function splitText(value: string, max = 30, maxLines = Number.POSITIVE_INFINITY) {
+function splitText(value: string, max = 30) {
   const words = value.split(/\s+/).filter(Boolean);
   const lines: string[] = [];
   let current = '';
@@ -332,7 +331,7 @@ function splitText(value: string, max = 30, maxLines = Number.POSITIVE_INFINITY)
     }
   });
   if (current) lines.push(current);
-  return lines.slice(0, maxLines);
+  return lines;
 }
 
 type GameMetadataRow = { label: string; value: string };
@@ -348,12 +347,22 @@ function gameMetadata(game: TournamentBracketGame): GameMetadataRow[] {
 }
 
 function metadataLines(value: string) {
-  return splitText(value, 32);
+  return splitText(value, 21);
+}
+
+// Reserve logo, seed, score and winner space. Conservative character widths
+// keep even wide glyphs inside the name column in both HTML and SVG.
+function teamNameLines(game: TournamentBracketGame, slot: 1 | 2) {
+  return splitText(teamName(game, slot) || 'TBD', 13);
+}
+
+function teamRowHeight(game: TournamentBracketGame, slot: 1 | 2) {
+  return Math.max(BRACKET_CANVAS.teamRowHeight, 26 + teamNameLines(game, slot).length * 16);
 }
 
 function gameCardHeight(game: TournamentBracketGame) {
   const metadataHeight = gameMetadata(game).reduce((height, row) => height + Math.max(1, metadataLines(row.value).length) * 12, 0);
-  return Math.max(BRACKET_CANVAS.gameHeight, 154 + metadataHeight);
+  return Math.max(BRACKET_CANVAS.gameHeight, 92 + teamRowHeight(game, 1) + teamRowHeight(game, 2) + metadataHeight + gameMetadata(game).length * 2);
 }
 
 function svgText(x: number, y: number, text: string, options: { size?: number; weight?: string; fill?: string; anchor?: string } = {}) {
@@ -387,15 +396,16 @@ function buildBracketSvg(title: string, division: ExportDivision, publicView: bo
       const statusColors = statusVisual(game, publicView);
       body += `<rect x="${gameX}" y="${y}" width="${layout.roundWidth}" height="${position.height}" rx="${layout.gameRadius}" fill="${statusColors.fill}" stroke="${statusColors.stroke}" stroke-width="2"/>`;
       body += svgText(gameX + 14, y + 24, `${game.round_name} · Game ${game.game_number}`, { size: 12, weight: '700', fill: '#334155' });
-      body += svgText(gameX + layout.roundWidth - 14, y + 24, status, { size: 10, weight: '700', fill: '#475569', anchor: 'end' });
-      ([1, 2] as const).forEach((slot, slotIndex) => {
-        const rowY = y + 42 + slotIndex * 44;
+      body += svgText(gameX + layout.roundWidth - 14, y + 40, status, { size: 10, weight: '700', fill: '#475569', anchor: 'end' });
+      let rowY = y + 58;
+      ([1, 2] as const).forEach((slot) => {
+        const rowHeight = teamRowHeight(game, slot);
         const winner = isWinningSlot(game, slot);
         const name = teamName(game, slot) || 'TBD';
         const seed = slot === 1 ? game.team_1_seed : game.team_2_seed;
         const score = slot === 1 ? game.home_score : game.away_score;
         const autoAdvanced = slot === 1 ? game.team_1_auto_advanced : game.team_2_auto_advanced;
-        body += `<rect x="${gameX + 12}" y="${rowY}" width="${layout.roundWidth - 24}" height="${layout.teamRowHeight}" rx="${layout.teamRowRadius}" fill="${winner ? '#ecfdf5' : '#ffffff'}" stroke="${winner ? '#10b981' : '#e2e8f0'}"/>`;
+        body += `<rect x="${gameX + 12}" y="${rowY}" width="${layout.roundWidth - 24}" height="${rowHeight}" rx="${layout.teamRowRadius}" fill="${winner ? '#ecfdf5' : '#ffffff'}" stroke="${winner ? '#10b981' : '#e2e8f0'}"/>`;
         const logo = logoSource(teamLogoUrl(game, slot));
         if (logo && !failedLogoUrls.has(logo)) {
           body += `<image href="${escapeXml(logo)}" x="${gameX + 20}" y="${rowY + 6}" width="28" height="28" preserveAspectRatio="xMidYMid meet"/>`;
@@ -404,17 +414,20 @@ function buildBracketSvg(title: string, division: ExportDivision, publicView: bo
           body += svgText(gameX + 34, rowY + 24, (name || 'C').split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]).join('').toUpperCase(), { size: 9, weight: '700', fill: '#475569', anchor: 'middle' });
         }
         body += svgText(gameX + 56, rowY + 14, seed ? `Seed ${seed}` : autoAdvanced ? 'BYE' : 'Seed TBD', { size: 9, fill: '#64748b' });
-        body += svgText(gameX + 56, rowY + 30, splitText(name, 24)[0] || 'TBD', { size: 12, weight: winner ? '700' : '500' });
+        teamNameLines(game, slot).forEach((line, index) => {
+          body += svgText(gameX + 56, rowY + 30 + index * 16, line, { size: 12, weight: winner ? '700' : '500' });
+        });
         if (winner) body += svgText(gameX + layout.roundWidth - 54, rowY + 14, 'Winner', { size: 9, weight: '700', fill: '#047857' });
         body += svgText(gameX + layout.roundWidth - 22, rowY + 30, score == null ? '—' : String(score), { size: 13, weight: '700', anchor: 'end' });
+        rowY += rowHeight + 6;
       });
-      let detailY = y + 144;
+      let detailY = rowY + 14;
       gameMetadata(game).forEach((detail) => {
         body += svgText(gameX + 14, detailY, `${detail.label}:`, { size: 10, weight: '700', fill: '#475569' });
         metadataLines(detail.value).forEach((line, lineIndex) => {
           body += svgText(gameX + 70, detailY + lineIndex * 12, line || '—', { size: 10, fill: '#475569' });
         });
-        detailY += Math.max(1, metadataLines(detail.value).length) * 12;
+        detailY += Math.max(1, metadataLines(detail.value).length) * 12 + 2;
       });
     });
   });
@@ -479,7 +492,7 @@ function SharedBracketRenderer({ title, division, publicView, outputLabel }: { t
                     {gameMetadata(game).map((detail) => (
                       <div key={detail.label} className='contents'>
                         <dt className='font-semibold'>{detail.label}:</dt>
-                        <dd className='min-w-0 whitespace-normal break-words'>{detail.value}</dd>
+                        <dd className='min-w-0 whitespace-normal break-words'>{metadataLines(detail.value).map((line, index) => <div key={index}>{line}</div>)}</dd>
                       </div>
                     ))}
                   </dl>
@@ -557,8 +570,10 @@ async function svgToCanvas(svg: string) {
 
 function pdfFromJpegDataUrl(jpegDataUrl: string, width: number, height: number) {
   const binary = atob(jpegDataUrl.split(',')[1]);
-  const pageWidth = 792;
-  const pageHeight = 612;
+  // Canvas is rendered at 2x. Keep 12px names at least 9pt on paper,
+  // expanding the landscape page rather than shrinking complex brackets.
+  const pageHeight = Math.max(612, height * 0.375 + 48);
+  const pageWidth = Math.max(792, width * 0.375 + 48, pageHeight * 792 / 612);
   const scale = Math.min((pageWidth - 48) / width, (pageHeight - 48) / height);
   const imageWidth = width * scale;
   const imageHeight = height * scale;
