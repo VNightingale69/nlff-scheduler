@@ -149,7 +149,7 @@ class TournamentBuilderTest(unittest.TestCase):
         self.assertEqual(unpublish.status_code, 200, unpublish.text)
         bracket = self.client.get(f'/api/tournaments/{tournament_id}/bracket', headers=self._token(self.scheduler)).json()['tournament']
         championship = next(game for game in bracket['divisions'][0]['games'] if game['round_name'] == 'Championship')
-        self.assertIn('Winner of Game', {championship['team_1_placeholder'], championship['team_2_placeholder']})
+        self.assertTrue(any(label.startswith('Winner of Game ') for label in [championship['team_1_placeholder'], championship['team_2_placeholder']]))
         self.assertNotIn(first_winner, {championship['team_1_id'], championship['team_2_id']})
 
         corrected = self.client.post(f"/api/tournament-games/{semifinal['id']}/approve-and-publish", headers=self._token(self.scheduler), json={'home_score': 6, 'away_score': 14})
@@ -213,7 +213,9 @@ class TournamentBuilderTest(unittest.TestCase):
         game = response.json()['tournament']['divisions'][0]['games'][0]
         self.client.post(f"/api/tournament-games/{game['id']}/approve-and-publish", headers=self._token(self.scheduler), json={'home_score': 21, 'away_score': 0})
         after = self.client.get(f'/api/standings?season_id={self.season.id}', headers=self._token(self.scheduler)).json()
-        self.assertEqual(before['divisions'][0]['standings'], after['divisions'][0]['standings'])
+        # Standings reads include a response timestamp; compare sporting results.
+        strip_timestamp = lambda rows: [{k: v for k, v in row.items() if k != 'last_updated'} for row in rows]
+        self.assertEqual(strip_timestamp(before['divisions'][0]['standings']), strip_timestamp(after['divisions'][0]['standings']))
 
     def test_bracket_export_bytes_match_public_uploaded_logo_for_admin_and_public(self):
         import base64
