@@ -30153,6 +30153,72 @@ def _public_bracket_only_payload(tournament: Tournament, division_id: uuid.UUID 
     return {key: payload[key] for key in ('id', 'season_id', 'name', 'type', 'bracket_is_published', 'divisions')}
 
 
+@router.get('/public/tournament-schedule')
+def public_tournament_schedule(season_id: uuid.UUID | None = None, host_location_id: uuid.UUID | None = None, organization_id: uuid.UUID | None = None, division_id: uuid.UUID | None = None, team_id: uuid.UUID | None = None, db: Session = Depends(get_db)):
+    """Scheduled public tournament games; bracket-only publication never grants access."""
+    season = _get_schedule_scope_season(db, season_id)
+    options = {'host_locations': [], 'organizations': [], 'divisions': [], 'weeks': [], 'teams': []}
+    if not season:
+        return {'items': [], 'options': options}
+    tournaments = db.query(Tournament).filter(Tournament.season_id == season.id, Tournament.is_published.is_(True)).all()
+    items = []
+    hosts, orgs, divisions, teams = {}, {}, {}, {}
+    for tournament in tournaments:
+        for td in tournament.divisions:
+            if not td.division or not td.division.is_active:
+                continue
+            numbers = {game.id: game.game_number for game in td.games}
+            for game in td.games:
+                if not game.game_date or not game.kickoff_time:
+                    continue
+                host = game.host_location
+                field = game.field
+                area = getattr(field, 'physical_field_area', None)
+                if host:
+                    hosts[str(host.id)] = {'id': str(host.id), 'name': host.name}
+                divisions[str(td.division_id)] = {'id': str(td.division_id), 'name': td.division.name, 'division_group': td.division.division_group}
+                item = {
+                    'id': str(game.id), 'game_date': game.game_date.isoformat(), 'kickoff_time': game.kickoff_time.isoformat(),
+                    'host_location_id': str(game.host_location_id) if game.host_location_id else None,
+                    'host_location_name': host.name if host else 'Host Location Unassigned',
+                    'field_id': str(game.field_id) if game.field_id else None,
+                    'field_name': resolve_game_field_display(game).name or 'Unassigned',
+                    'field_type': field.layout_type if field else td.division.required_field_layout_type,
+                    'physical_area_id': str(area.id) if area else None, 'physical_area_name': area.name if area else None,
+                    'division_id': str(td.division_id), 'division_name': f'{td.division.division_group} {td.division.name}',
+                    'game_type': 'TOURNAMENT', 'week_label': f'{season.start_date.year} Tournament',
+                    'date_type': 'TOURNAMENT', 'tournament_id': str(tournament.id), 'tournament_name': tournament.name,
+                    'game_number': game.game_number, 'round_name': game.round_name,
+                }
+                for prefix, side in [('home', 1), ('away', 2)]:
+                    team = getattr(game, f'team_{side}')
+                    org = getattr(team, 'organization', None) if team else None
+                    item[f'{prefix}_team_id'] = str(team.id) if team else None
+                    item[f'{prefix}_team_name'] = team.name if team else _team_label(None, None, getattr(game, f'team_{side}_source_game_id'), numbers, getattr(game, f'team_{side}_source_outcome'))
+                    item[f'{prefix}_team_community_id'] = str(org.id) if org else None
+                    item[f'{prefix}_team_community_name'] = org.name if org else None
+                    item[f'{prefix}_team_logo_url'] = _community_logo_browser_url(org)
+                    if team:
+                        teams[str(team.id)] = {'id': str(team.id), 'name': team.name}
+                    if org:
+                        orgs[str(org.id)] = {'id': str(org.id), 'name': org.name}
+                items.append(item)
+    if items:
+        dates = sorted({item['game_date'] for item in items})
+        options['weeks'] = [{'id': f'tournament:{season.id}', 'label': f'{season.start_date.year} Tournament', 'start_date': dates[0], 'end_date': dates[-1], 'is_tournament': True}]
+    for key, values in [('host_locations', hosts), ('organizations', orgs), ('divisions', divisions), ('teams', teams)]:
+        options[key] = sorted(values.values(), key=lambda x: x['name'])
+    if host_location_id:
+        items = [item for item in items if item['host_location_id'] == str(host_location_id)]
+    if division_id:
+        items = [item for item in items if item['division_id'] == str(division_id)]
+    if team_id:
+        items = [item for item in items if str(team_id) in (item['home_team_id'], item['away_team_id'])]
+    if organization_id:
+        items = [item for item in items if str(organization_id) in (item['home_team_community_id'], item['away_team_community_id'])]
+    return {'items': sorted(items, key=lambda item: (item['game_date'], item['kickoff_time'], item['host_location_name'], item['field_name'], item['id'])), 'options': options}
+
+
 @router.get('/public/tournaments')
 def public_tournaments(season_id: uuid.UUID | None = None, db: Session = Depends(get_db)):
     q = db.query(Tournament).filter(or_(Tournament.is_published.is_(True), Tournament.bracket_is_published.is_(True)))

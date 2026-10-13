@@ -10,7 +10,7 @@ from sqlalchemy.pool import StaticPool
 from app.auth import ROLE_COMMUNITY_ADMIN, ROLE_SCHEDULING_ADMIN
 from app.database import Base, get_db
 from app.main import app
-from app.models import Division, Game, GameScore, GameStatus, Organization, OrganizationDivisionParticipation, Role, Season, Team, Tournament, TournamentGame, User, Week
+from app.models import Field, HostLocation, Division, Game, GameScore, GameStatus, Organization, OrganizationDivisionParticipation, Role, Season, Team, Tournament, TournamentGame, User, Week
 from app.security import create_access_token, hash_password
 
 
@@ -326,6 +326,56 @@ class TournamentBuilderTest(unittest.TestCase):
         games = result['divisions'][0]['games']
         self.assertTrue(any(g['team_1_source_outcome'] == 'LOSER' or g['team_2_source_outcome'] == 'LOSER' for g in games))
         self.assertEqual(len(games), len(created['divisions'][0]['games']))
+
+    def test_public_tournament_schedule_requires_full_publication_and_supports_filters(self):
+        created = self._create().json()['tournament']
+        tid = created['id']
+        tournament = self.db.get(Tournament, uuid.UUID(tid))
+        site = HostLocation(organization_id=self.orgs[0].id, name='Tournament Site', is_active=True)
+        self.db.add(site); self.db.flush()
+        field = Field(host_location_id=site.id, name='Small Field', layout_type='SMALL', is_active=True)
+        self.db.add(field); self.db.flush()
+        game = tournament.divisions[0].games[0]
+        game.game_date = date(2026, 10, 17); game.kickoff_time = time(9)
+        game.host_location_id = site.id; game.field_id = field.id
+        self.db.commit()
+        route = '/api/public/tournament-schedule'
+        self.assertEqual(self.client.get(route).json()['items'], [])
+        self.client.post(f'/api/tournaments/{tid}/publish-bracket', headers=self._token(self.scheduler), json={})
+        self.assertEqual(self.client.get(route).json()['items'], [])
+        self.client.post(f'/api/tournaments/{tid}/publish', headers=self._token(self.scheduler), json={})
+        public = self.client.get(route).json()
+        self.assertEqual(len(public['items']), 1)
+        item = public['items'][0]
+        self.assertEqual(item['field_type'], 'SMALL')
+        self.assertEqual(item['field_name'], 'Small Field')
+        self.assertEqual(item['game_type'], 'TOURNAMENT')
+        self.assertEqual(item['home_team_name'], game.team_1.name)
+        self.assertEqual(public['options']['weeks'][0]['id'], f'tournament:{self.season.id}')
+        for param, value in [('host_location_id', site.id), ('division_id', self.division.id), ('team_id', game.team_1_id), ('organization_id', game.team_1.organization_id)]:
+            self.assertEqual(len(self.client.get(f'{route}?{param}={value}').json()['items']), 1)
+            self.assertEqual(len(self.client.get(f'{route}?{param}={uuid.uuid4()}').json()['items']), 0)
+        self.client.post(f'/api/tournaments/{tid}/unpublish', headers=self._token(self.scheduler), json={})
+        self.assertEqual(self.client.get(route).json()['items'], [])
+
+    def test_public_tournament_schedule_combines_formats_and_preserves_feeder_placeholders(self):
+        single = self._create().json()['tournament']
+        double = self.client.post('/api/tournaments', headers=self._token(self.scheduler), json={'season_id': str(self.season.id), 'name': 'Double', 'division_ids': [str(self.division.id)], 'bracket_type': 'DOUBLE_ELIMINATION', 'generate_bracket': True}).json()['tournament']
+        game_ids = []
+        for i, created in enumerate([single, double]):
+            tournament = self.db.get(Tournament, uuid.UUID(created['id']))
+            tournament.is_published = True
+            game = next(g for g in tournament.divisions[0].games if g.team_1_source_game_id)
+            game.game_date = date(2026, 10, 17+i); game.kickoff_time = time(10)
+            game_ids.append(str(game.id))
+        self.db.commit()
+        result = self.client.get('/api/public/tournament-schedule').json()
+        self.assertEqual({item['id'] for item in result['items']}, set(game_ids))
+        self.assertEqual(len(result['options']['weeks']), 1)
+        self.assertEqual(result['options']['weeks'][0]['end_date'], '2026-10-18')
+        self.assertTrue(all('of Game' in item['home_team_name'] for item in result['items']))
+        self.assertTrue(all('home_score' not in item for item in result['items']))
+        self.assertEqual(len(self.client.get(f'/api/public/tournament-schedule?season_id={self.season.id}').json()['items']), 2)
 
 
 if __name__ == '__main__':

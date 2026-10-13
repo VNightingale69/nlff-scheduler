@@ -1,0 +1,13 @@
+import assert from 'node:assert/strict';
+import { scheduleSelection, mergeScheduleOptions } from '../src/lib/publicTournamentSchedule.ts';
+assert.deepEqual(scheduleSelection('tournament:season-26'), {includeRegular:false, includeTournament:true, tournamentSeasonId:'season-26'});
+assert.deepEqual(scheduleSelection('week-8'), {includeRegular:true, includeTournament:false, tournamentSeasonId:undefined});
+assert.deepEqual(scheduleSelection(), {includeRegular:true, includeTournament:true, tournamentSeasonId:undefined});
+const regular = {host_locations:[{id:'a',name:'A'}],weeks:[{id:'week-8'}]};
+const tournament = {host_locations:[{id:'a',name:'A'},{id:'b',name:'B'}], weeks:[{id:'tournament:season-26'}]};
+const before = JSON.stringify([regular,tournament]);
+const merged = mergeScheduleOptions(regular,tournament);
+assert.equal(merged.host_locations.length,2);
+assert.equal(merged.weeks.length,2);
+assert.equal(JSON.stringify([regular,tournament]),before);
+console.log('Public tournament schedule: source selection, combined filter options and deduplication passed.');

@@ -1,7 +1,8 @@
 'use client';
 
-import { Suspense, useEffect, useMemo, useState } from 'react';
+import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
+import { scheduleSelection, mergeScheduleOptions } from '@/lib/publicTournamentSchedule';
 import { API_URL } from '@/lib/api';
 import { getToken } from '@/lib/auth';
 import { getDivisionLabel } from '@/lib/divisionLabel';
@@ -37,6 +38,8 @@ type Game = {
   away_team_logo_url?: string | null;
   away_team_logo_alt_text?: string | null;
   game_type: string;
+  game_number?: number;
+  round_name?: string;
   week_label?: string | null;
   date_type?: string | null;
 };
@@ -123,7 +126,7 @@ function HostingSchedule({ games }: { games: Game[] }) {
                   const game = dateGames.find((item) => item.host_location_name === location.name && item.kickoff_time === time && gameField(item).key === field.key);
                   return <td key={`${location.name}-${field.key}`} className={`${locationAccent(locationIndex)} ${locationEdge(fieldIndex, location.fields.length)} location-schedule-cell break-words border-b p-3 align-top ${game ? fieldTone(field.type) : 'bg-white text-slate-400'}`}>
                     {game ? <div className='hosting-game min-h-[105px]'>
-                      <div className='hosting-division mb-2 font-bold text-slate-700'>{game.division_name}</div>
+                      <div className='hosting-division mb-2 font-bold text-slate-700'>{game.division_name}{game.game_type === 'TOURNAMENT' && <div className='mt-1 text-xs font-medium'>Game {game.game_number} · {game.round_name}</div>}</div>
                       <div className='hosting-team flex items-center gap-2 font-medium'><CommunityLogo src={game.home_team_logo_url} name={game.home_team_community_name || game.home_team_name} altText={game.home_team_logo_alt_text} size={24} /><span>{game.home_team_name}</span></div>
                       <div className='hosting-vs my-1 pl-8 text-xs font-semibold uppercase text-slate-500'>vs</div>
                       <div className='hosting-team flex items-center gap-2 font-medium'><CommunityLogo src={game.away_team_logo_url} name={game.away_team_community_name || game.away_team_name} altText={game.away_team_logo_alt_text} size={24} /><span>{game.away_team_name}</span></div>
@@ -173,6 +176,7 @@ const emptyOptions: PublicScheduleOptions = {
 };
 
 const getWeekOptionLabel = (week: any) => {
+  if (week.is_tournament) return `${week.label} — ${formatDisplayDate(week.start_date)}${week.end_date !== week.start_date ? ` – ${formatDisplayDate(week.end_date)}` : ''}`;
   const baseLabel = week.label || `Week ${week.week_number}`;
   const dateTypeLabel = week.date_type && week.date_type !== 'REGULAR_SEASON' ? ` (${week.date_type.replace('_', ' ')})` : '';
   if (!week.start_date) return `${baseLabel}${dateTypeLabel}`;
@@ -199,25 +203,46 @@ function PublicScheduleContent() {
   const [options, setOptions] = useState<PublicScheduleOptions>(emptyOptions);
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState('');
+  const loadVersion = useRef(0);
 
   const load = async (activeFilters: PublicScheduleFilters = filters) => {
+    const version = ++loadVersion.current;
     setLoading(true);
+    setMessage('');
+    const selection = scheduleSelection(activeFilters.week_id);
     const q = buildScheduleQuery(activeFilters);
+    const tournamentQuery = buildScheduleQuery(activeFilters);
+    tournamentQuery.delete('week_id');
+    if (selection.tournamentSeasonId) tournamentQuery.set('season_id', selection.tournamentSeasonId);
     const token = getToken();
     const authHeaders = token ? { Authorization: `Bearer ${token}` } : undefined;
-    const [gamesRes, optionsRes] = await Promise.all([
-      fetch(`${API_URL}/public/schedule?${q.toString()}`, { headers: authHeaders }),
-      fetch(`${API_URL}/public/schedule/options`),
-    ]);
-    const gamesPayload = await gamesRes.json();
-    setGames(gamesPayload.items || []);
-    setMessage(gamesPayload.message || '');
-    setOptions(await optionsRes.json());
-    setLoading(false);
+    try {
+      const [gamesRes, optionsRes, tournamentRes] = await Promise.all([
+        selection.includeRegular ? fetch(`${API_URL}/public/schedule?${q.toString()}`, { headers: authHeaders }) : Promise.resolve(null),
+        fetch(`${API_URL}/public/schedule/options`),
+        fetch(`${API_URL}/public/tournament-schedule?${tournamentQuery.toString()}`),
+      ]);
+      for (const response of [gamesRes, optionsRes, tournamentRes]) {
+        if (response && !response.ok) throw new Error('Unable to load the published schedule. Please try again.');
+      }
+      const gamesPayload = gamesRes ? await gamesRes.json() : { items: [] };
+      const tournamentPayload = await tournamentRes.json();
+      const regularOptions = await optionsRes.json();
+      const combined = [...(gamesPayload.items || []), ...(selection.includeTournament ? tournamentPayload.items || [] : [])];
+      combined.sort((a: Game, b: Game) => `${a.game_date} ${a.kickoff_time}`.localeCompare(`${b.game_date} ${b.kickoff_time}`));
+      if (version !== loadVersion.current) return;
+      setGames(combined);
+      setMessage(combined.length ? '' : gamesPayload.message || 'No published games match the selected filters.');
+      setOptions(mergeScheduleOptions(regularOptions, tournamentPayload.options || {}) as PublicScheduleOptions);
+    } catch (error: any) {
+      if (version === loadVersion.current) { setGames([]); setMessage(error?.message || 'Unable to load the published schedule.'); }
+    } finally {
+      if (version === loadVersion.current) setLoading(false);
+    }
   };
 
   useEffect(() => {
-    load({});
+    load(filters);
   }, []);
 
   const empty = useMemo(() => !loading && games.length === 0, [loading, games.length]);
@@ -305,7 +330,7 @@ function PublicScheduleContent() {
                   <td className='whitespace-nowrap px-3 py-3'>{g.division_name}</td>
                   <td className='team-cell px-3 py-3'><span className='team-content flex items-center justify-center gap-2 text-center'><CommunityLogo src={g.home_team_logo_url} name={g.home_team_community_name || g.home_team_name} altText={g.home_team_logo_alt_text} size={24} />{g.home_team_name}</span></td>
                   <td className='team-cell px-3 py-3'><span className='team-content flex items-center justify-center gap-2 text-center'><CommunityLogo src={g.away_team_logo_url} name={g.away_team_community_name || g.away_team_name} altText={g.away_team_logo_alt_text} size={24} />{g.away_team_name}</span></td>
-                  <td className='whitespace-nowrap px-3 py-3'>{g.game_type === 'REGULAR_SEASON' ? 'Regular Season' : g.game_type.replaceAll('_', ' ')}</td>
+                  <td className='px-3 py-3'>{g.game_type === 'REGULAR_SEASON' ? 'Regular Season' : g.game_type === 'TOURNAMENT' ? <><span>Tournament</span><div className='mt-1 text-slate-600'>Game {g.game_number} · {g.round_name}</div></> : g.game_type.replaceAll('_', ' ')}</td>
                 </tr>
               ))}
             </tbody>

@@ -27,3 +27,18 @@ on the same page, with their existing feeder graphs, results and per-division
 exports. Existing tournament links resolve to their combined season view. Only
 published records are included; bracket-only links retain the scheduling-free
 API and rendering behavior. Different seasons remain separate.
+
+## Tournament games on the public schedule
+
+Use Publish Tournament in Tournament Builder to expose assigned game dates, times,
+locations and fields on the public Schedule page. Publishing only the bracket
+never exposes these assignments. The week selector includes a combined season
+tournament option with its date range, covering both elimination formats.
+All Weeks includes regular and fully published tournament schedules; selecting
+a regular week excludes tournament games. List View, Hosting View, filters and
+Print / PDF use the same saved assignments. Unresolved teams display Winner/Loser
+of Game references. Undated games are omitted until dates and times are assigned.
+
+GET /api/public/tournament-schedule provides schedule rows and filter options.
+It accepts season_id, host_location_id, organization_id, division_id and team_id.
+No schema migration is required for this addition.
