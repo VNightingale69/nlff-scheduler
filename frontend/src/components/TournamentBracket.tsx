@@ -288,11 +288,11 @@ function bracketConnectors(rounds: TournamentBracketRound[], layout: BracketLayo
     return round.games.flatMap((game) => {
       const start = layout.positions.get(game.id);
       if (!start) return [];
-      const nextGame = rounds.slice(roundIndex + 1).flatMap((candidateRound) => candidateRound.games).find((candidate) => candidate.team_1_source_game_id === game.id || candidate.team_2_source_game_id === game.id);
-      if (!nextGame) return [];
-      const end = layout.positions.get(nextGame.id);
-      if (!end) return [];
-      return [{ id: `${game.id}-${nextGame.id}`, d: connectorPath(start, end, layout) }];
+      const nextGame = rounds.slice(roundIndex + 1).flatMap((candidateRound) => candidateRound.games).filter((candidate) => candidate.team_1_source_game_id === game.id || candidate.team_2_source_game_id === game.id);
+      return nextGame.flatMap(candidate => {
+        const end = layout.positions.get(candidate.id);
+        return end ? [{ id: `${game.id}-${candidate.id}`, d: connectorPath(start, end, layout) }] : [];
+      });
     });
   });
 }

@@ -6,13 +6,14 @@ import { ApiError, apiFetch } from '@/lib/api';
 import { canManageSchedule } from '@/lib/auth';
 import { useAuthSession } from '@/components/AuthGate';
 import { formatDisplayDate, formatDisplayTime } from '@/lib/displayFormat';
+import TournamentScheduleImport from '@/components/TournamentScheduleImport';
 import TournamentBracket, { type TournamentBracketGame } from '@/components/TournamentBracket';
 
 type SeedTeam = { team_id: string; team_name: string; community_name: string; seed: number; included: boolean; original_standings_rank?: number | null; seed_source: string };
 type Division = { id: string; name: string; division_group: string; sort_order?: number };
 type Season = { id: string; name: string; is_active: boolean };
 type TournamentGame = TournamentBracketGame;
-type Tournament = { id: string; name: string; status: string; is_published: boolean; divisions: { id: string; division_name: string; division_group: string; teams: SeedTeam[]; games: TournamentGame[] }[] };
+type Tournament = { id: string; name: string; status: string; is_published: boolean; divisions: { id: string; division_name: string; division_group: string; bracket_type?: string; teams: SeedTeam[]; games: TournamentGame[] }[] };
 
 const divisionLabel = (division: Division) => `${division.division_group} ${division.name}`;
 
@@ -27,6 +28,8 @@ export default function TournamentBuilderPage() {
   const [seasonId, setSeasonId] = useState('');
   const [selectedDivisions, setSelectedDivisions] = useState<string[]>([]);
   const [name, setName] = useState('');
+  const [bracketType, setBracketType] = useState('SINGLE_ELIMINATION');
+  const [divisionFormats, setDivisionFormats] = useState<Record<string, string>>({});
   const [seedRows, setSeedRows] = useState<Record<string, SeedTeam[]>>({});
   const [warnings, setWarnings] = useState<Record<string, string>>({});
   const [message, setMessage] = useState('');
@@ -108,6 +111,8 @@ export default function TournamentBuilderPage() {
       const allRows = selectedDivisions.flatMap((divisionId) => seedRows[divisionId] || []);
       const payload = {
         season_id: seasonId,
+        bracket_type: bracketType,
+        division_formats: divisionFormats,
         name: name || undefined,
         division_ids: selectedDivisions,
         seed_overrides: allRows.map((row) => ({ team_id: row.team_id, seed: row.seed })),
@@ -116,7 +121,7 @@ export default function TournamentBuilderPage() {
       };
       const result = await apiFetch('/tournaments', { method: 'POST', body: JSON.stringify(payload) }, token);
       setTournaments((current) => [result.tournament, ...current]);
-      setMessage('Tournament bracket generated. Use the schedule editor below to assign dates, times, locations, and fields.');
+      setMessage('Tournament bracket generated. Use Import Tournament Schedule below to preview and apply dates, times, locations, and fields.');
     } catch (error: any) {
       setMessage(error?.message || 'Unable to create tournament.');
     } finally {
@@ -138,7 +143,7 @@ export default function TournamentBuilderPage() {
     const target = bracketAction;
     try {
       const path = `/tournaments/${target.tournament.id}${target.divisionId ? `/divisions/${target.divisionId}/bracket` : ''}`;
-      const result = await apiFetch(path, { method: target.action === 'regenerate' ? 'POST' : 'DELETE' }, token);
+      const result = await apiFetch(path, { method: target.action === 'regenerate' ? 'POST' : 'DELETE', ...(target.action === 'regenerate' ? { body: JSON.stringify({ bracket_type: divisionFormats[target.divisionId || ''] || target.tournament.divisions.find(d => d.id === target.divisionId)?.bracket_type || 'SINGLE_ELIMINATION' }) } : {}) }, token);
       listVersion.current += 1;
       setTournaments((current) => target.action === 'delete'
         ? current.filter((item) => item.id !== target.tournament.id)
@@ -162,7 +167,7 @@ export default function TournamentBuilderPage() {
   return <div className='space-y-5'>
     <div>
       <h1 className='text-2xl font-bold'>Tournament Builder</h1>
-      <p className='text-sm text-slate-600'>Create single-elimination brackets seeded from Results & Standings. Tournament publication, scores, and advancement remain separate from the regular-season schedule.</p>
+      <p className='text-sm text-slate-600'>Create single- or double-elimination brackets seeded from Results & Standings. Tournament publication, scores, and advancement remain separate from the regular-season schedule.</p>
     </div>
     {message && <div className='rounded border bg-blue-50 p-3 text-sm text-blue-900'>{message}</div>}
 
@@ -172,12 +177,14 @@ export default function TournamentBuilderPage() {
         <label className='text-sm'>Season<select className='mt-1 w-full rounded border p-2' value={seasonId} onChange={(e) => setSeasonId(e.target.value)}>{seasons.map((season) => <option key={season.id} value={season.id}>{season.name}{season.is_active ? ' (Active)' : ''}</option>)}</select></label>
         <label className='text-sm md:col-span-2'>Tournament Name<input className='mt-1 w-full rounded border p-2' value={name} onChange={(e) => setName(e.target.value)} placeholder='Fall 2026 Tournament' /></label>
       </div>
+      <label className='block text-sm'>Default Bracket Format<select className='ml-2 rounded border p-2' value={bracketType} onChange={e => setBracketType(e.target.value)}><option value='SINGLE_ELIMINATION'>Single elimination</option><option value='DOUBLE_ELIMINATION'>Double elimination — one final, no reset</option></select></label>
       <div><div className='mb-2 text-sm font-semibold'>Divisions / Levels</div><div className='grid gap-2 md:grid-cols-3'>{divisions.map((division) => <label key={division.id} className='flex items-center gap-2 rounded border p-2 text-sm'><input type='checkbox' checked={selectedDivisions.includes(division.id)} onChange={() => toggleDivision(division.id)} /> {divisionLabel(division)}</label>)}</div></div>
       <div className='flex flex-wrap gap-2'><button className='rounded bg-slate-800 px-3 py-2 text-white disabled:opacity-60' disabled={loading} onClick={loadSeeds}>Load Teams from Results & Standings</button><button className='rounded bg-green-700 px-3 py-2 text-white disabled:opacity-60' disabled={loading} onClick={createTournament}>Generate Bracket & Save Tournament</button></div>
     </section>
 
     {selectedDivisionObjects.map((division) => <section key={division.id} className='space-y-3 rounded border bg-white p-4'>
       <h2 className='text-lg font-semibold'>{divisionLabel(division)} Seeds</h2>
+      <label className='block text-sm'>Bracket Format<select className='ml-2 rounded border p-2' value={divisionFormats[division.id] || bracketType} onChange={e => setDivisionFormats(current => ({ ...current, [division.id]: e.target.value }))}><option value='SINGLE_ELIMINATION'>Single elimination</option><option value='DOUBLE_ELIMINATION'>Double elimination — one final, no reset</option></select></label>
       {warnings[division.id] && <div className='rounded border bg-amber-50 p-2 text-sm text-amber-800'>{warnings[division.id]}</div>}
       <div className='overflow-x-auto'><table className='min-w-full text-sm'><thead className='bg-slate-100 text-left'><tr>{['Included','Seed','Team','Community','Standings Rank','Source'].map((h) => <th key={h} className='p-2'>{h}</th>)}</tr></thead><tbody>{(seedRows[division.id] || []).map((row) => <tr key={row.team_id} className='border-t'><td className='p-2'><input type='checkbox' checked={row.included} onChange={() => toggleTeam(division.id, row.team_id)} /></td><td className='p-2'><input className='w-20 rounded border p-1' type='number' min={1} value={row.seed} onChange={(e) => updateSeed(division.id, row.team_id, Number(e.target.value || 1))} /></td><td className='p-2 font-medium'>{row.team_name}</td><td className='p-2'>{row.community_name}</td><td className='p-2'>{row.original_standings_rank || '—'}</td><td className='p-2'>{row.seed_source}</td></tr>)}</tbody></table></div>
     </section>)}
@@ -200,8 +207,10 @@ export default function TournamentBuilderPage() {
               <button className='rounded border px-3 py-1' onClick={() => publishTournament(tournament.id, false)}>Unpublish</button>
             </div>
           </div>
+          {canManage && <TournamentScheduleImport tournamentId={tournament.id} token={token} onApplied={(updated) => { listVersion.current += 1; setTournaments(current => current.map(item => item.id === updated.id ? updated : item)); }} />}
           {canManage && <div className='space-y-2'>{tournament.divisions.map((division) => <div key={division.id} className='flex flex-wrap items-center gap-2 rounded border bg-slate-50 p-2 text-sm'>
             <span className='font-semibold'>{division.division_group} {division.division_name}</span>
+            <label>Format for regeneration<select className='ml-2 rounded border p-1' disabled={actionLoading} value={divisionFormats[division.id] || division.bracket_type || 'SINGLE_ELIMINATION'} onChange={e => setDivisionFormats(current => ({ ...current, [division.id]: e.target.value }))}><option value='SINGLE_ELIMINATION'>Single elimination</option><option value='DOUBLE_ELIMINATION'>Double elimination — no reset</option></select></label>
             <button className='rounded border border-red-300 px-3 py-1 text-red-700 disabled:opacity-50' disabled={actionLoading || loading || division.games.length === 0} onClick={() => openBracketAction({ tournament, divisionId: division.id, divisionLabel: `${division.division_group} ${division.division_name}`, action: 'remove' })}>Remove Bracket</button>
             <button className='rounded border px-3 py-1 disabled:opacity-50' disabled={actionLoading || loading} onClick={() => openBracketAction({ tournament, divisionId: division.id, divisionLabel: `${division.division_group} ${division.division_name}`, action: 'regenerate' })}>Regenerate Bracket</button>
             {division.games.length === 0 && <span className='text-slate-600'>No bracket generated</span>}
@@ -215,7 +224,8 @@ export default function TournamentBuilderPage() {
         <h2 id='bracket-action-title' className='text-lg font-semibold'>{actionLabel}?</h2>
         <p className='font-medium'>{bracketAction.tournament.name}</p>
         <p>{bracketAction.divisionLabel || bracketAction.tournament.divisions.map((division) => `${division.division_group} ${division.division_name}`).join(', ')}</p>
-        <p className='text-sm'>{bracketAction.action === 'delete' ? 'Permanently delete this tournament and all its brackets and saved seeds. Other tournaments and regular-season records are preserved.' : bracketAction.action === 'remove' ? 'Remove only this division’s bracket games and their schedule assignments. Saved seeds and exclusions are retained.' : 'Replace this division’s bracket using its saved seeds and exclusions. Existing game IDs and schedule assignments will be replaced.'}</p>
+        <p className='text-sm'>{bracketAction.action === 'delete' ? 'Permanently delete this tournament and all its brackets and saved seeds. Other tournaments and regular-season records are preserved.' : bracketAction.action === 'remove' ? 'Remove only this division’s bracket games and their schedule assignments. Saved seeds and exclusions are retained.' : 'Replace this division’s bracket using its saved seeds, exclusions, and selected format. Existing game IDs and schedule assignments will be replaced.'}</p>
+        {bracketAction.action === 'regenerate' && <p className='text-sm font-medium'>Selected format: {(divisionFormats[bracketAction.divisionId || ''] || bracketAction.tournament.divisions.find(d => d.id === bracketAction.divisionId)?.bracket_type || 'SINGLE_ELIMINATION') === 'DOUBLE_ELIMINATION' ? 'Double elimination — one final, no reset' : 'Single elimination'}</p>}
         {bracketAction.tournament.is_published && <p className='text-sm text-amber-800'>This tournament is published. This change will also affect its public view.</p>}
         {actionError && <p role='alert' className='text-sm text-red-700'>{actionError}</p>}
         <div className='flex justify-end gap-2'>
