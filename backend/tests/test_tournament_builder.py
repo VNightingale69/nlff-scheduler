@@ -254,6 +254,79 @@ class TournamentBuilderTest(unittest.TestCase):
                 anonymous = self.client.get(f'/api/tournaments/{tournament_id}/bracket')
                 self.assertEqual(anonymous.status_code, 401)
 
+    def test_bracket_only_publication_without_schedule_and_private_api_fields(self):
+        created = self._create().json()['tournament']
+        tid = created['id']
+        auth = self._token(self.scheduler)
+        self.assertEqual(self.client.get(f'/api/public/tournaments/{tid}/bracket-only').status_code, 404)
+        response = self.client.post(f'/api/tournaments/{tid}/publish-bracket', headers=auth, json={})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertFalse(response.json()['tournament']['is_published'])
+        self.assertTrue(response.json()['tournament']['bracket_is_published'])
+        tournament = self.db.get(Tournament, uuid.UUID(tid))
+        self.assertIsNone(tournament.published_at)
+        self.assertEqual(tournament.status, created['status'])
+        # Even populated private assignment fields must not escape either public endpoint or list.
+        game = tournament.divisions[0].games[0]
+        game.game_date = date(2026, 10, 18)
+        game.kickoff_time = time(9, 0)
+        self.db.commit()
+        forbidden = {'date', 'time', 'host_location_id', 'host_location_name', 'field_id', 'field_name', 'needs_review', 'loser_team_id'}
+        for route in (f'/api/public/tournaments/{tid}/bracket-only', f'/api/public/tournaments/{tid}/bracket'):
+            public = self.client.get(route).json()['tournament']
+            games = public['divisions'][0]['games']
+            self.assertEqual(len(games), len(created['divisions'][0]['games']))
+            for item in games + [g for r in public['divisions'][0]['rounds'] for g in r['games']]:
+                self.assertFalse(forbidden & item.keys())
+                self.assertIn('team_1_source_game_id', item)
+                self.assertIn('team_1_seed', item)
+                self.assertIn('team_1_logo_url', item)
+                self.assertIsNone(item['home_score'])
+            self.assertEqual(public['divisions'][0]['games'][0]['status'], 'Ready')
+        game.home_score = 21
+        game.away_score = 7
+        game.is_published = True
+        game.winner_team_id = game.team_1_id
+        self.db.commit()
+        official = self.client.get(f'/api/public/tournaments/{tid}/bracket-only').json()['tournament']['divisions'][0]['games'][0]
+        self.assertEqual(official['home_score'], 21)
+        self.assertEqual(official['winner_team_id'], str(game.team_1_id))
+        listed = self.client.get('/api/public/tournaments').json()['items'][0]
+        self.assertFalse(forbidden & listed['divisions'][0]['games'][0].keys())
+        admin = self.client.get(f'/api/tournaments/{tid}/bracket', headers=auth).json()['tournament']
+        self.assertEqual(admin['divisions'][0]['games'][0]['date'], '2026-10-18')
+        self.assertEqual(self.client.post(f'/api/tournaments/{tid}/publish-bracket', headers=auth, json={}).status_code, 200)
+        self.assertEqual(self.client.post(f'/api/tournaments/{tid}/unpublish-bracket', headers=auth, json={}).status_code, 200)
+        self.assertEqual(self.client.get(f'/api/public/tournaments/{tid}/bracket-only').status_code, 404)
+        self.assertEqual(self.client.get('/api/public/tournaments').json()['items'], [])
+
+    def test_bracket_only_permissions_and_independent_publication(self):
+        tid = self._create().json()['tournament']['id']
+        url = f'/api/tournaments/{tid}/publish-bracket'
+        self.assertEqual(self.client.post(url, json={}).status_code, 401)
+        self.assertEqual(self.client.post(url, headers=self._token(self.community_user), json={}).status_code, 403)
+        auth = self._token(self.scheduler)
+        self.client.post(f'/api/tournaments/{tid}/publish', headers=auth, json={})
+        self.client.post(url, headers=auth, json={})
+        self.client.post(f'/api/tournaments/{tid}/unpublish-bracket', headers=auth, json={})
+        self.assertTrue(self.db.get(Tournament, uuid.UUID(tid)).is_published)
+        self.assertEqual(self.client.get(f'/api/public/tournaments/{tid}/bracket').status_code, 200)
+        self.client.post(url, headers=auth, json={})
+        self.client.post(f'/api/tournaments/{tid}/unpublish', headers=auth, json={})
+        self.assertEqual(self.client.get(f'/api/public/tournaments/{tid}/bracket-only').status_code, 200)
+
+    def test_double_elimination_bracket_only_preserves_loser_feeders_and_division_filter(self):
+        payload = {'season_id': str(self.season.id), 'name': 'Double', 'division_ids': [str(self.division.id)], 'bracket_type': 'DOUBLE_ELIMINATION', 'generate_bracket': True}
+        created = self.client.post('/api/tournaments', headers=self._token(self.scheduler), json=payload).json()['tournament']
+        tid = created['id']
+        self.client.post(f'/api/tournaments/{tid}/publish-bracket', headers=self._token(self.scheduler), json={})
+        division_id = created['divisions'][0]['id']
+        result = self.client.get(f'/api/public/tournaments/{tid}/bracket-only?division_id={division_id}').json()['tournament']
+        self.assertEqual(len(result['divisions']), 1)
+        games = result['divisions'][0]['games']
+        self.assertTrue(any(g['team_1_source_outcome'] == 'LOSER' or g['team_2_source_outcome'] == 'LOSER' for g in games))
+        self.assertEqual(len(games), len(created['divisions'][0]['games']))
+
 
 if __name__ == '__main__':
     unittest.main()

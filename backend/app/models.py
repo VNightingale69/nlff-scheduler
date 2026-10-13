@@ -559,6 +559,7 @@ class Tournament(Base, TimestampMixin):
     type: Mapped[str] = mapped_column(String(40), nullable=False, default='SINGLE_ELIMINATION')
     status: Mapped[str] = mapped_column(String(40), nullable=False, default='DRAFT')
     is_published: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    bracket_is_published: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     published_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     published_by_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('users.id'), nullable=True)
     unpublished_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)

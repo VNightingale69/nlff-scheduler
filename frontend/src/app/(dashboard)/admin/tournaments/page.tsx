@@ -13,7 +13,7 @@ type SeedTeam = { team_id: string; team_name: string; community_name: string; se
 type Division = { id: string; name: string; division_group: string; sort_order?: number };
 type Season = { id: string; name: string; is_active: boolean };
 type TournamentGame = TournamentBracketGame;
-type Tournament = { id: string; name: string; status: string; is_published: boolean; divisions: { id: string; division_name: string; division_group: string; bracket_type?: string; teams: SeedTeam[]; games: TournamentGame[] }[] };
+type Tournament = { id: string; name: string; status: string; is_published: boolean; bracket_is_published: boolean; divisions: { id: string; division_name: string; division_group: string; bracket_type?: string; teams: SeedTeam[]; games: TournamentGame[] }[] };
 
 const divisionLabel = (division: Division) => `${division.division_group} ${division.name}`;
 
@@ -134,6 +134,23 @@ export default function TournamentBuilderPage() {
     setTournaments((current) => current.map((item) => item.id === id ? result.tournament : item));
   };
 
+  const publishBracketOnly = async (id: string, publish: boolean) => {
+    if (!canManage || mutationInProgress.current) return;
+    mutationInProgress.current = true;
+    listVersion.current += 1;
+    setActionLoading(true);
+    try {
+      const result = await apiFetch(`/tournaments/${id}/${publish ? 'publish-bracket' : 'unpublish-bracket'}`, { method: 'POST', body: JSON.stringify({}) }, token);
+      setTournaments(current => current.map(item => item.id === id ? result.tournament : item));
+      setMessage(publish ? 'Bracket published. Future bracket edits and published results appear automatically.' : 'Bracket-only publication removed.');
+    } catch (error: any) {
+      setMessage(error?.message || 'Unable to update bracket publication.');
+    } finally {
+      mutationInProgress.current = false;
+      setActionLoading(false);
+    }
+  };
+
   const confirmBracketAction = async () => {
     if (!bracketAction || !canManage || mutationInProgress.current) return;
     mutationInProgress.current = true;
@@ -195,7 +212,7 @@ export default function TournamentBuilderPage() {
         const activeView = viewModes[tournament.id] || 'schedule';
         return <div key={tournament.id} className='space-y-3 rounded border p-3'>
           <div className='flex flex-wrap items-center justify-between gap-2'>
-            <div><h3 className='text-lg font-semibold'>{tournament.name}</h3><p className='text-sm text-slate-600'>{tournament.status} · {tournament.is_published ? 'Published' : 'Unpublished'}</p></div>
+            <div><h3 className='text-lg font-semibold'>{tournament.name}</h3><p className='text-sm text-slate-600'>{tournament.status} · {tournament.is_published ? 'Published' : 'Unpublished'}{tournament.bracket_is_published ? ' · Bracket published' : ''}</p></div>
             <div className='flex flex-wrap gap-2'>
               <div className='inline-flex rounded border p-1 text-sm'>
                 <button className={`rounded px-3 py-1 ${activeView === 'schedule' ? 'bg-slate-900 text-white' : 'hover:bg-slate-50'}`} onClick={() => setViewModes((current) => ({ ...current, [tournament.id]: 'schedule' }))}>Schedule View</button>
@@ -203,6 +220,13 @@ export default function TournamentBuilderPage() {
               </div>
               <button className='rounded border px-3 py-1' onClick={() => loadOptions()}>Refresh</button>
               {canManage && <button className='rounded border border-red-300 px-3 py-1 text-red-700 disabled:opacity-50' disabled={actionLoading || loading} onClick={() => openBracketAction({ tournament, action: 'delete' })}>Delete Tournament</button>}
+              {activeView === 'bracket' && canManage && <>
+                <button className='rounded border px-3 py-1 disabled:opacity-50' disabled={actionLoading || loading} onClick={() => publishBracketOnly(tournament.id, true)}>{tournament.bracket_is_published ? 'Update Published Bracket' : 'Publish Bracket Only'}</button>
+                {tournament.bracket_is_published && <>
+                  <a className='rounded border px-3 py-1' href={`/tournaments?tournament=${tournament.id}&bracketOnly=1`} target='_blank' rel='noopener noreferrer'>Open Public Bracket</a>
+                  <button className='rounded border px-3 py-1 disabled:opacity-50' disabled={actionLoading || loading} onClick={() => publishBracketOnly(tournament.id, false)}>Unpublish Bracket</button>
+                </>}
+              </>}
               <button className='rounded border px-3 py-1' onClick={() => publishTournament(tournament.id, true)}>Publish Tournament</button>
               <button className='rounded border px-3 py-1' onClick={() => publishTournament(tournament.id, false)}>Unpublish</button>
             </div>

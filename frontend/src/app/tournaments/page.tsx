@@ -10,7 +10,8 @@ type PublicTournament = {
   id: string;
   name: string;
   status: string;
-  is_published: boolean;
+  is_published?: boolean;
+  bracket_is_published?: boolean;
   published_at?: string | null;
   divisions: TournamentBracketDivision[];
 };
@@ -26,9 +27,11 @@ export default function PublicTournamentsPage() {
     setLoading(true);
     try {
       const payload = await apiFetch('/public/tournaments');
-      const items = payload.items || [];
+      const only = new URLSearchParams(window.location.search).get('bracketOnly') === '1';
+      const items = (payload.items || []).filter((item: PublicTournament) => !only || item.bracket_is_published);
       setTournaments(items);
-      const nextId = selectedTournamentId || items[0]?.id || '';
+      const requestedId = new URLSearchParams(window.location.search).get('tournament');
+      const nextId = selectedTournamentId || (items.some((item: PublicTournament) => item.id === requestedId) ? requestedId : null) || items[0]?.id || '';
       setSelectedTournamentId(nextId);
       if (nextId) await loadBracket(nextId);
       else setBracket(null);
@@ -40,7 +43,8 @@ export default function PublicTournamentsPage() {
   };
 
   const loadBracket = async (id: string) => {
-    const payload = await apiFetch(`/public/tournaments/${id}/bracket`);
+    const only = new URLSearchParams(window.location.search).get('bracketOnly') === '1';
+    const payload = await apiFetch(`/public/tournaments/${id}/${only ? 'bracket-only' : 'bracket'}`);
     setBracket(payload.tournament);
   };
 
@@ -48,6 +52,8 @@ export default function PublicTournamentsPage() {
 
   const onSelectTournament = async (id: string) => {
     setSelectedTournamentId(id);
+    setBracket(null);
+    setMessage('');
     setLoading(true);
     try {
       await loadBracket(id);

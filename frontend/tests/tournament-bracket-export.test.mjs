@@ -53,6 +53,16 @@ for (const group of ['Girls', 'Coed']) for (const size of [2, 4, 8, 16, 32]) {
   assert.ok(Math.min((pw - 48) / (layout.width * 2), (ph - 48) / (layout.height * 2)) >= 0.375 - 1e-9);
   if (group === 'Girls' && size === 8) example = { svg, division };
 }
+// Bracket-only exports preserve teams/connectors/results and omit schedule labels.
+const bracketOnly = { ...example.division, rounds: example.division.rounds.map(round => ({ ...round, games: round.games.map(game => {
+  const { date, time, host_location_name, field_name, ...publicGame } = game;
+  return publicGame;
+}) })) };
+const bracketOnlySvg = api.buildBracketSvg('Public tournament', bracketOnly, true);
+for (const label of ['Date:', 'Time:', 'Host:', 'Field:', 'Community Sports Complex', '2026-10-11']) assert.ok(!bracketOnlySvg.includes(label));
+assert.ok(bracketOnlySvg.includes('Winner:'));
+assert.ok(bracketOnlySvg.includes('Game 1'));
+assert.equal(api.bracketConnectors(bracketOnly.rounds, api.buildBracketLayout(bracketOnly.rounds)).length, 6);
 const consolation = { ...example.division.rounds.at(-1).games[0], id: 'consolation', round_name: 'Consolation', team_1_source_game_id: null, team_2_source_game_id: null };
 const withConsolation = { ...example.division, rounds: example.division.rounds.map((round, i, all) => i === all.length - 1 ? { ...round, games: [...round.games, consolation] } : round) };
 for (const publicView of [false, true]) {

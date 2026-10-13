@@ -29761,9 +29761,9 @@ def _tournament_dict(tournament: Tournament, include_unpublished: bool = True) -
         } for tt in sorted(td.teams, key=lambda x: x.seed)]
         sorted_games = sorted(td.games, key=lambda g: (g.round_number, g.game_number))
         source_game_numbers = {game.id: game.game_number for game in sorted_games}
-        games = [_tournament_game_dict(game, include_unpublished=include_unpublished, source_game_numbers=source_game_numbers) for game in sorted_games if include_unpublished or tournament.is_published]
+        games = [_tournament_game_dict(game, include_unpublished=include_unpublished, source_game_numbers=source_game_numbers) for game in sorted_games if include_unpublished or tournament.is_published or tournament.bracket_is_published]
         divisions.append({'id': str(td.id), 'division_id': str(td.division_id), 'division_name': td.division.name if td.division else '', 'division_group': td.division.division_group if td.division else '', 'bracket_type': td.bracket_type, 'status': td.status, 'teams': teams, 'games': games})
-    return {'id': str(tournament.id), 'season_id': str(tournament.season_id), 'name': tournament.name, 'type': tournament.type, 'status': tournament.status, 'is_published': tournament.is_published, 'published_at': tournament.published_at.isoformat() if tournament.published_at else None, 'divisions': divisions}
+    return {'id': str(tournament.id), 'season_id': str(tournament.season_id), 'name': tournament.name, 'type': tournament.type, 'status': tournament.status, 'is_published': tournament.is_published, 'bracket_is_published': bool(tournament.bracket_is_published), 'published_at': tournament.published_at.isoformat() if tournament.published_at else None, 'divisions': divisions}
 
 
 def _tournament_bracket_dict(tournament: Tournament, include_unpublished: bool = True, division_id: uuid.UUID | None = None) -> dict:
@@ -30126,20 +30126,77 @@ def get_tournament(tournament_id: uuid.UUID, current_user: User = Depends(get_cu
     return {'tournament': _tournament_dict(tournament)}
 
 
+def _public_bracket_only_payload(tournament: Tournament, division_id: uuid.UUID | None = None) -> dict:
+    """Explicit allowlist: scheduling and administrator fields never leave this API."""
+    payload = _tournament_bracket_dict(tournament, include_unpublished=False, division_id=division_id)
+    allowed = {
+        'id', 'round_number', 'round_name', 'game_number',
+        'team_1_id', 'team_2_id', 'team_1_name', 'team_2_name',
+        'team_1_logo_url', 'team_2_logo_url', 'team_1_seed', 'team_2_seed',
+        'team_1_placeholder', 'team_2_placeholder', 'team_1_source_game_id', 'team_2_source_game_id',
+        'team_1_source_outcome', 'team_2_source_outcome', 'team_1_auto_advanced', 'team_2_auto_advanced',
+        'home_score', 'away_score', 'winner_team_id', 'winner_team_name',
+    }
+    for division in payload['divisions']:
+        sanitized = []
+        for game in division['games']:
+            clean = {key: value for key, value in game.items() if key in allowed}
+            clean['status'] = 'Official Final' if game['is_published'] else ('Ready' if game['team_1_id'] and game['team_2_id'] else 'Waiting for Teams')
+            clean['score_status'] = game['score_status']
+            sanitized.append(clean)
+        division['games'] = sanitized
+        by_id = {game['id']: game for game in sanitized}
+        for round_ in division['rounds']:
+            round_['games'] = [by_id[game['id']] for game in round_['games']]
+        division.pop('teams', None)
+        division.pop('status', None)
+    return {key: payload[key] for key in ('id', 'name', 'type', 'bracket_is_published', 'divisions')}
+
+
 @router.get('/public/tournaments')
 def public_tournaments(season_id: uuid.UUID | None = None, db: Session = Depends(get_db)):
-    q = db.query(Tournament).filter(Tournament.is_published.is_(True))
+    q = db.query(Tournament).filter(or_(Tournament.is_published.is_(True), Tournament.bracket_is_published.is_(True)))
     if season_id:
         q = q.filter(Tournament.season_id == season_id)
-    return {'items': [_tournament_dict(t, include_unpublished=False) for t in q.order_by(Tournament.created_at.desc()).all()]}
+    return {'items': [_tournament_dict(t, include_unpublished=False) if t.is_published else _public_bracket_only_payload(t) for t in q.order_by(Tournament.created_at.desc()).all()]}
 
 
 @router.get('/public/tournaments/{tournament_id}/bracket')
 def public_tournament_bracket(tournament_id: uuid.UUID, division_id: uuid.UUID | None = None, db: Session = Depends(get_db)):
-    tournament = db.query(Tournament).filter(Tournament.id == tournament_id, Tournament.is_published.is_(True)).first()
+    tournament = db.query(Tournament).filter(Tournament.id == tournament_id, or_(Tournament.is_published.is_(True), Tournament.bracket_is_published.is_(True))).first()
     if not tournament:
         raise HTTPException(404, 'Published tournament not found.')
-    return {'tournament': _tournament_bracket_dict(tournament, include_unpublished=False, division_id=division_id)}
+    return {'tournament': _tournament_bracket_dict(tournament, include_unpublished=False, division_id=division_id) if tournament.is_published else _public_bracket_only_payload(tournament, division_id)}
+
+
+@router.get('/public/tournaments/{tournament_id}/bracket-only')
+def public_tournament_bracket_only(tournament_id: uuid.UUID, division_id: uuid.UUID | None = None, db: Session = Depends(get_db)):
+    tournament = db.query(Tournament).filter(Tournament.id == tournament_id, Tournament.bracket_is_published.is_(True)).first()
+    if not tournament:
+        raise HTTPException(404, 'Published bracket not found.')
+    return {'tournament': _public_bracket_only_payload(tournament, division_id)}
+
+
+@router.post('/tournaments/{tournament_id}/publish-bracket', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
+def publish_tournament_bracket_only(tournament_id: uuid.UUID, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    tournament = db.query(Tournament).filter(Tournament.id == tournament_id).first()
+    if not tournament:
+        raise HTTPException(404, 'Tournament not found.')
+    if not any(division.games for division in tournament.divisions):
+        raise HTTPException(400, 'Generate a bracket before publishing.')
+    tournament.bracket_is_published = True
+    db.commit(); db.refresh(tournament)
+    return {'tournament': _tournament_dict(tournament), 'public_bracket_url': f'/tournaments?tournament={tournament.id}&bracketOnly=1'}
+
+
+@router.post('/tournaments/{tournament_id}/unpublish-bracket', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])
+def unpublish_tournament_bracket_only(tournament_id: uuid.UUID, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    tournament = db.query(Tournament).filter(Tournament.id == tournament_id).first()
+    if not tournament:
+        raise HTTPException(404, 'Tournament not found.')
+    tournament.bracket_is_published = False
+    db.commit(); db.refresh(tournament)
+    return {'tournament': _tournament_dict(tournament)}
 
 
 @router.post('/tournaments/{tournament_id}/publish', dependencies=[Depends(require_roles(ROLE_LEAGUE_ADMIN, ROLE_SCHEDULING_ADMIN))])

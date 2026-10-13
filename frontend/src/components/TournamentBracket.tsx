@@ -341,6 +341,10 @@ function splitText(value: string, max = 30) {
 type GameMetadataRow = { label: string; value: string };
 
 function gameMetadata(game: TournamentBracketGame): GameMetadataRow[] {
+  // Bracket-only API omits scheduling keys; this also governs SVG/PNG/PDF exports.
+  if (!('date' in game || 'time' in game || 'host_location_name' in game || 'field_name' in game)) {
+    return [{ label: 'Winner', value: game.winner_team_name || '—' }];
+  }
   return [
     { label: 'Date', value: formatDisplayDate(game.date || '') || '—' },
     { label: 'Time', value: formatDisplayTime(game.time || '') || '—' },
@@ -725,7 +729,7 @@ export default function TournamentBracket({ divisions, publicView = false, tourn
   return (
     <div className='space-y-8'>
       <div className='flex flex-wrap gap-2 text-xs'>
-        {['Ready', 'Waiting for Teams', 'Score Submitted', 'Official Final', publicView ? 'Pending Update' : 'Needs Review'].map((label) => (
+        {(publicView ? ['Ready', 'Waiting for Teams', 'Official Final'] : ['Ready', 'Waiting for Teams', 'Score Submitted', 'Official Final', 'Needs Review']).map((label) => (
           <span key={label} className='rounded-full border bg-white px-2 py-1 text-slate-700'>{label}</span>
         ))}
       </div>
