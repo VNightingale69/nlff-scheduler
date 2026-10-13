@@ -30150,7 +30150,7 @@ def _public_bracket_only_payload(tournament: Tournament, division_id: uuid.UUID 
             round_['games'] = [by_id[game['id']] for game in round_['games']]
         division.pop('teams', None)
         division.pop('status', None)
-    return {key: payload[key] for key in ('id', 'name', 'type', 'bracket_is_published', 'divisions')}
+    return {key: payload[key] for key in ('id', 'season_id', 'name', 'type', 'bracket_is_published', 'divisions')}
 
 
 @router.get('/public/tournaments')

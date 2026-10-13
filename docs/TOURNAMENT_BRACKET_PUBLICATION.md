@@ -17,3 +17,13 @@ existing shared renderer and feeder graph.
 Deployment requires running `alembic upgrade head` from backend before starting
 the updated API. Migration 20261013_0084 adds bracket_is_published with a false
 default and preserves existing tournament and schedule publication.
+
+## Combined season view
+
+The public tournament selector groups published tournament records belonging to
+the same season. For the 2026 single- and double-elimination tournaments, the
+combined option is 2026 Tournament View. Both sets of division brackets appear
+on the same page, with their existing feeder graphs, results and per-division
+exports. Existing tournament links resolve to their combined season view. Only
+published records are included; bracket-only links retain the scheduling-free
+API and rendering behavior. Different seasons remain separate.
